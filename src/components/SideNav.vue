@@ -16,11 +16,6 @@ const navItems = [
 
 <template>
   <nav class="side-nav">
-    <!-- 应用图标 -->
-    <div class="nav-logo">
-      <img src="/app-icon.png" alt="NeriPlayer" class="app-icon" />
-    </div>
-
     <div class="nav-list">
       <div
         v-for="item in navItems"
@@ -50,25 +45,7 @@ const navItems = [
   background: var(--md-surface-container-low);
   border-right: 1px solid var(--md-surface-container-high);
   flex-shrink: 0;
-  padding: 0 0 12px;
-}
-
-.nav-logo {
-  width: 100%;
-  height: 52px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  /* 允许拖拽标题栏区域 */
-  -webkit-app-region: drag;
-}
-
-.app-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  object-fit: contain;
+  padding: 12px 0;
 }
 
 .nav-list {
@@ -76,7 +53,6 @@ const navItems = [
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding-top: 4px;
 }
 
 .nav-item {

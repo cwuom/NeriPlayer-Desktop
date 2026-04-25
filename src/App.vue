@@ -8,6 +8,7 @@ import MiniPlayer from '@/components/MiniPlayer.vue'
 import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppToast from '@/components/AppToast.vue'
+import TitleBar from '@/components/TitleBar.vue'
 
 const player = usePlayerStore()
 const isNowPlayingOpen = ref(false)
@@ -94,6 +95,9 @@ onUnmounted(() => {
       />
     </transition>
 
+    <!-- 顶栏浮于所有内容之上，背景透明融入主体 -->
+    <TitleBar :force-light="isNowPlayingOpen" />
+
     <AppToast />
   </div>
 </template>
@@ -104,6 +108,8 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  position: relative;
+  padding-top: 36px; /* 让出顶栏高度 */
 }
 
 .content {

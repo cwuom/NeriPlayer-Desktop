@@ -1057,7 +1057,7 @@ const accentBgStyle = computed(() => {
   z-index: 2;
   display: flex;
   align-items: center;
-  padding: 14px 24px;
+  padding: 44px 24px 14px; /* 顶部 44px = 36px 顶栏 + 8px 间距 */
   gap: 12px;
   flex-shrink: 0;
 }
