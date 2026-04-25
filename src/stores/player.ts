@@ -428,6 +428,41 @@ export const usePlayerStore = defineStore('player', () => {
     queueIndex.value = -1
   }
 
+  // 编辑当前曲目信息（仅前端状态，不持久化）
+  let originalTrackInfo: TrackInfo | null = null
+
+  function updateCurrentTrackInfo(patch: Partial<TrackInfo>) {
+    if (!currentTrack.value) return
+    if (!originalTrackInfo) {
+      originalTrackInfo = { ...currentTrack.value }
+    }
+    currentTrack.value = { ...currentTrack.value, ...patch }
+  }
+
+  function restoreOriginalTrackInfo() {
+    if (originalTrackInfo && currentTrack.value) {
+      currentTrack.value = { ...originalTrackInfo }
+      originalTrackInfo = null
+    }
+  }
+
+  function hasOriginalTrackInfo() {
+    return originalTrackInfo !== null
+  }
+
+  // 用指定音质重新播放当前曲目（保持进度）
+  async function replayWithQuality() {
+    const track = currentTrack.value
+    if (!track) return
+    const pos = positionMs.value
+    const wasPlaying = isPlaying.value
+    await play(track)
+    if (pos > 1000) {
+      // 等一小段让播放开始后再 seek
+      setTimeout(() => seekTo(pos), 300)
+    }
+  }
+
   return {
     isPlaying, currentTrack, positionMs, durationMs, queue, queueIndex,
     repeatMode, shuffleEnabled, volume, lyrics, playError, isLoadingAudio,
@@ -438,6 +473,7 @@ export const usePlayerStore = defineStore('player', () => {
     toggleRepeatMode, toggleShuffle, setVolume, setSpeed,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
+    updateCurrentTrackInfo, restoreOriginalTrackInfo, hasOriginalTrackInfo, replayWithQuality,
   }
 })
 

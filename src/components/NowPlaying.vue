@@ -357,6 +357,147 @@ const displayLyrics = computed(() => {
   return []
 })
 
+// 更多选项面板子视图
+const moreSheetView = ref<'main' | 'offset' | 'fontsize' | 'speed' | 'search' | 'editinfo' | 'quality'>('main')
+
+// 关闭更多选项面板时重置子视图
+watch(showMoreSheet, (v) => { if (!v) moreSheetView.value = 'main' })
+
+// --- 获取歌曲信息（搜索） ---
+const searchQuery = ref('')
+const searchResults = ref<any[]>([])
+const isSearching = ref(false)
+
+async function doSearch() {
+  const q = searchQuery.value.trim()
+  if (!q) return
+  isSearching.value = true
+  searchResults.value = []
+  try {
+    const results = await invoke<any[]>('search', { query: q, platform: 'netease' })
+    searchResults.value = results
+  } catch (e) {
+    console.error('Search failed:', e)
+  } finally {
+    isSearching.value = false
+  }
+}
+
+function applySearchResult(result: any) {
+  player.updateCurrentTrackInfo({
+    title: result.title || player.currentTrack?.title,
+    artist: result.artist || player.currentTrack?.artist,
+    coverUrl: result.cover_url || player.currentTrack?.coverUrl,
+  })
+  toast.success(t('player.info_applied'))
+  moreSheetView.value = 'main'
+}
+
+// --- 编辑歌曲信息 ---
+const editTitle = ref('')
+const editArtist = ref('')
+const editCoverUrl = ref('')
+
+function openEditInfo() {
+  editTitle.value = player.currentTrack?.title || ''
+  editArtist.value = player.currentTrack?.artist || ''
+  editCoverUrl.value = player.currentTrack?.coverUrl || ''
+  moreSheetView.value = 'editinfo'
+}
+
+function saveEditInfo() {
+  player.updateCurrentTrackInfo({
+    title: editTitle.value,
+    artist: editArtist.value,
+    coverUrl: editCoverUrl.value,
+  })
+  toast.success(t('player.info_applied'))
+  moreSheetView.value = 'main'
+}
+
+function restoreInfo() {
+  player.restoreOriginalTrackInfo()
+  toast.success(t('player.info_restored'))
+  moreSheetView.value = 'main'
+}
+
+// --- 音质切换 ---
+const currentSource = computed(() => {
+  const id = player.currentTrack?.id || ''
+  if (id.startsWith('netease:')) return 'netease'
+  if (id.startsWith('bilibili:')) return 'bilibili'
+  if (id.startsWith('youtube:')) return 'youtube'
+  return 'local'
+})
+
+const neteaseQualities = [
+  { key: 'standard', label: 'settings.q_standard' },
+  { key: 'higher', label: 'settings.q_high' },
+  { key: 'exhigh', label: 'settings.q_exhigh' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+  { key: 'hires', label: 'settings.q_hires' },
+  { key: 'jyeffect', label: 'settings.q_surround' },
+  { key: 'sky', label: 'settings.q_sky' },
+  { key: 'jymaster', label: 'settings.q_master' },
+]
+
+const youtubeQualities = [
+  { key: 'low', label: 'settings.q_low' },
+  { key: 'medium', label: 'settings.q_medium' },
+  { key: 'high', label: 'settings.q_high_yt' },
+  { key: 'very_high', label: 'settings.q_very_high' },
+]
+
+async function switchQuality(key: string) {
+  if (currentSource.value === 'netease') {
+    settings.neteaseQuality = key
+  } else if (currentSource.value === 'youtube') {
+    settings.youtubeQuality = key
+  }
+  showMoreSheet.value = false
+  await player.replayWithQuality()
+}
+
+function currentQualityKey(): string {
+  if (currentSource.value === 'netease') return settings.neteaseQuality
+  if (currentSource.value === 'youtube') return settings.youtubeQuality
+  return ''
+}
+
+// 分享歌曲
+async function shareSong() {
+  const track = player.currentTrack
+  if (!track) return
+  // 构建分享文本
+  let url = ''
+  if (track.id.startsWith('netease:')) {
+    const nid = track.id.replace('netease:', '')
+    url = `https://music.163.com/song?id=${nid}`
+  } else if (track.id.startsWith('bilibili:')) {
+    const bid = track.id.replace('bilibili:', '')
+    url = `https://www.bilibili.com/video/${bid}`
+  } else if (track.id.startsWith('youtube:')) {
+    const vid = track.id.replace('youtube:', '')
+    url = `https://music.youtube.com/watch?v=${vid}`
+  }
+  const text = url
+    ? `${track.title} - ${track.artist}\n${url}`
+    : `${track.title} - ${track.artist}`
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success(t('player.share_copied'))
+  } catch {
+    toast.error(t('player.copy_failed'))
+  }
+  showMoreSheet.value = false
+}
+
+// 专辑名
+const albumName = computed(() => {
+  const album = player.currentTrack?.album || ''
+  return displayAlbum(album)
+})
+
 // 进度条下方音质信息
 const audioInfoDisplay = computed(() => {
   const info = player.audioInfo
@@ -602,62 +743,250 @@ const accentBgStyle = computed(() => {
     <QueuePanel v-if="showQueue" @close="showQueue = false" />
     <AddToPlaylistDialog v-model:open="showAddToPlaylist" :track="player.currentTrack" />
 
-    <!-- 更多选项面板（歌词偏移 / 字号调节） -->
+    <!-- 更多选项面板（对齐 Android MoreOptionsSheet） -->
     <Teleport to="body">
       <div v-if="showMoreSheet" class="np-more-overlay" @click="showMoreSheet = false">
         <div class="np-more-sheet" @click.stop>
-          <h4 class="np-more-title">{{ t('player.more_options') }}</h4>
 
-          <!-- 歌词偏移 -->
-          <div class="np-more-item">
-            <div class="np-more-label">
-              <span class="material-symbols-rounded" style="font-size: 20px">timer</span>
-              <span>{{ t('player.lyric_offset') }}</span>
+          <!-- 主菜单（对齐 Android MoreOptionsSheet 顺序） -->
+          <template v-if="moreSheetView === 'main'">
+            <h4 class="np-more-title">{{ t('player.more_options') }}</h4>
+
+            <!-- 获取歌曲信息 -->
+            <button class="np-more-list-item" @click="searchQuery = player.currentTrack?.title || ''; searchResults = []; moreSheetView = 'search'">
+              <span class="material-symbols-rounded">info</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.get_info') }}</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <!-- 编辑歌曲信息 -->
+            <button class="np-more-list-item" @click="openEditInfo">
+              <span class="material-symbols-rounded">edit</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.edit_info') }}</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <!-- 音质切换（仅在线来源显示） -->
+            <button v-if="currentSource !== 'local'" class="np-more-list-item" @click="moreSheetView = 'quality'">
+              <span class="material-symbols-rounded">music_note</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.quality_switch') }}</span>
+                <span class="np-more-list-desc">{{ player.audioInfo?.codec }} · {{ player.audioInfo?.bitrate }}kbps</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <!-- 音频效果 -->
+            <button class="np-more-list-item" @click="moreSheetView = 'speed'">
+              <span class="material-symbols-rounded">tune</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.audio_effects') }}</span>
+                <span class="np-more-list-desc">{{ t('player.audio_effects_desc') }}</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <!-- 歌词偏移 -->
+            <button class="np-more-list-item" @click="moreSheetView = 'offset'">
+              <span class="material-symbols-rounded">timer</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.lyric_offset') }}</span>
+                <span class="np-more-list-desc">{{ settings.cloudMusicOffset > 0 ? '+' : '' }}{{ settings.cloudMusicOffset }}ms</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <!-- 歌词字号 -->
+            <button class="np-more-list-item" @click="moreSheetView = 'fontsize'">
+              <span class="material-symbols-rounded">format_size</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.font_scale') }}</span>
+                <span class="np-more-list-desc">{{ Math.round(settings.lyricFontScale * 100) }}%</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <!-- 分享 -->
+            <button class="np-more-list-item" @click="shareSong">
+              <span class="material-symbols-rounded">share</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.share') }}</span>
+              </div>
+            </button>
+          </template>
+
+          <!-- 子视图：歌词偏移 -->
+          <template v-else-if="moreSheetView === 'offset'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" @click="moreSheetView = 'main'">
+                <span class="material-symbols-rounded">arrow_back</span>
+              </button>
+              <h4 class="np-more-title">{{ t('player.lyric_offset') }}</h4>
             </div>
-            <div class="np-more-row">
+            <div class="np-more-item">
+              <div class="np-more-row">
+                <input type="range" min="-2000" max="2000" step="50"
+                  :value="settings.cloudMusicOffset"
+                  class="np-more-slider"
+                  @input="settings.cloudMusicOffset = parseInt(($event.target as HTMLInputElement).value)"
+                />
+                <span class="np-offset-value" :class="{ positive: settings.cloudMusicOffset > 0, negative: settings.cloudMusicOffset < 0 }">
+                  {{ settings.cloudMusicOffset > 0 ? '+' : '' }}{{ settings.cloudMusicOffset }}ms
+                </span>
+              </div>
+            </div>
+          </template>
+
+          <!-- 子视图：字号 -->
+          <template v-else-if="moreSheetView === 'fontsize'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" @click="moreSheetView = 'main'">
+                <span class="material-symbols-rounded">arrow_back</span>
+              </button>
+              <h4 class="np-more-title">{{ t('player.font_scale') }}</h4>
+            </div>
+            <div class="np-more-item">
+              <div class="np-more-row">
+                <input type="range" min="0.6" max="1.6" step="0.05"
+                  :value="settings.lyricFontScale"
+                  class="np-more-slider"
+                  @input="settings.lyricFontScale = parseFloat(($event.target as HTMLInputElement).value)"
+                />
+                <span class="np-offset-value">{{ Math.round(settings.lyricFontScale * 100) }}%</span>
+              </div>
+              <p class="np-more-preview" :style="{ fontSize: `${24 * settings.lyricFontScale}px` }">
+                {{ t('player.font_preview') }}
+              </p>
+            </div>
+          </template>
+
+          <!-- 子视图：播放速度 -->
+          <template v-else-if="moreSheetView === 'speed'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" @click="moreSheetView = 'main'">
+                <span class="material-symbols-rounded">arrow_back</span>
+              </button>
+              <h4 class="np-more-title">{{ t('player.playback_speed') }}</h4>
+            </div>
+            <div class="np-more-speed-grid">
+              <button
+                v-for="spd in [0.5, 0.75, 0.85, 0.9, 1, 1.1, 1.25, 1.5, 2]"
+                :key="spd"
+                class="np-more-speed-btn"
+                :class="{ active: player.playbackSpeed === spd }"
+                @click="player.setSpeed(spd)"
+              >{{ spd }}x</button>
+            </div>
+          </template>
+
+          <!-- 子视图：获取歌曲信息 -->
+          <template v-else-if="moreSheetView === 'search'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" @click="moreSheetView = 'main'">
+                <span class="material-symbols-rounded">arrow_back</span>
+              </button>
+              <h4 class="np-more-title">{{ t('player.get_info') }}</h4>
+            </div>
+            <div class="np-more-search-bar">
               <input
-                type="range"
-                min="-2000"
-                max="2000"
-                step="50"
-                :value="settings.cloudMusicOffset"
-                class="np-more-slider"
-                @input="settings.cloudMusicOffset = parseInt(($event.target as HTMLInputElement).value)"
+                v-model="searchQuery"
+                class="np-more-input"
+                :placeholder="t('player.search_song')"
+                @keydown.enter="doSearch"
               />
-              <span
-                class="np-offset-value"
-                :class="{
-                  positive: settings.cloudMusicOffset > 0,
-                  negative: settings.cloudMusicOffset < 0,
-                }"
+              <button class="np-more-search-btn" @click="doSearch" :disabled="isSearching">
+                <span class="material-symbols-rounded">search</span>
+              </button>
+            </div>
+            <div v-if="isSearching" class="np-more-status">{{ t('player.searching') }}</div>
+            <div v-else-if="searchResults.length === 0 && searchQuery" class="np-more-status">{{ t('player.no_results') }}</div>
+            <div class="np-more-search-results">
+              <button
+                v-for="(r, ri) in searchResults"
+                :key="ri"
+                class="np-more-search-item"
+                @click="applySearchResult(r)"
               >
-                {{ settings.cloudMusicOffset > 0 ? '+' : '' }}{{ settings.cloudMusicOffset }}ms
-              </span>
+                <img v-if="r.cover_url" :src="r.cover_url" class="np-more-search-cover" referrerpolicy="no-referrer" />
+                <div class="np-more-search-info">
+                  <span class="np-more-search-title">{{ r.title }}</span>
+                  <span class="np-more-search-artist">{{ r.artist }}</span>
+                </div>
+                <span class="np-more-search-source">{{ r.source }}</span>
+              </button>
             </div>
-          </div>
+          </template>
 
-          <!-- 字号缩放 -->
-          <div class="np-more-item">
-            <div class="np-more-label">
-              <span class="material-symbols-rounded" style="font-size: 20px">format_size</span>
-              <span>{{ t('player.font_scale') }}</span>
+          <!-- 子视图：编辑歌曲信息 -->
+          <template v-else-if="moreSheetView === 'editinfo'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" @click="moreSheetView = 'main'">
+                <span class="material-symbols-rounded">arrow_back</span>
+              </button>
+              <h4 class="np-more-title">{{ t('player.edit_info') }}</h4>
             </div>
-            <div class="np-more-row">
-              <input
-                type="range"
-                min="0.6"
-                max="1.6"
-                step="0.05"
-                :value="settings.lyricFontScale"
-                class="np-more-slider"
-                @input="settings.lyricFontScale = parseFloat(($event.target as HTMLInputElement).value)"
-              />
-              <span class="np-offset-value">{{ Math.round(settings.lyricFontScale * 100) }}%</span>
+            <div class="np-more-form">
+              <label class="np-more-form-label">{{ t('player.song_title') }}</label>
+              <input v-model="editTitle" class="np-more-input" />
+
+              <label class="np-more-form-label">{{ t('player.artist_name') }}</label>
+              <input v-model="editArtist" class="np-more-input" />
+
+              <label class="np-more-form-label">{{ t('player.cover_url_label') }}</label>
+              <input v-model="editCoverUrl" class="np-more-input" />
+
+              <div class="np-more-form-actions">
+                <button class="np-more-form-btn primary" @click="saveEditInfo">
+                  <span class="material-symbols-rounded">check</span>
+                  {{ t('common.save') }}
+                </button>
+                <button v-if="player.hasOriginalTrackInfo()" class="np-more-form-btn" @click="restoreInfo">
+                  <span class="material-symbols-rounded">restore</span>
+                  {{ t('player.restore_original') }}
+                </button>
+              </div>
             </div>
-            <p class="np-more-preview" :style="{ fontSize: `${24 * settings.lyricFontScale}px` }">
-              {{ t('player.font_preview') }}
-            </p>
-          </div>
+          </template>
+
+          <!-- 子视图：音质切换 -->
+          <template v-else-if="moreSheetView === 'quality'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" @click="moreSheetView = 'main'">
+                <span class="material-symbols-rounded">arrow_back</span>
+              </button>
+              <h4 class="np-more-title">{{ t('player.quality_switch') }}</h4>
+            </div>
+            <div v-if="currentSource === 'netease'" class="np-more-quality-list">
+              <button
+                v-for="q in neteaseQualities"
+                :key="q.key"
+                class="np-more-quality-item"
+                :class="{ active: currentQualityKey() === q.key }"
+                @click="switchQuality(q.key)"
+              >
+                <span>{{ t(q.label) }}</span>
+                <span v-if="currentQualityKey() === q.key" class="material-symbols-rounded" style="font-size: 18px">check</span>
+              </button>
+            </div>
+            <div v-else-if="currentSource === 'youtube'" class="np-more-quality-list">
+              <button
+                v-for="q in youtubeQualities"
+                :key="q.key"
+                class="np-more-quality-item"
+                :class="{ active: currentQualityKey() === q.key }"
+                @click="switchQuality(q.key)"
+              >
+                <span>{{ t(q.label) }}</span>
+                <span v-if="currentQualityKey() === q.key" class="material-symbols-rounded" style="font-size: 18px">check</span>
+              </button>
+            </div>
+            <div v-else class="np-more-status">{{ t('player.not_available') }}</div>
+          </template>
+
         </div>
       </div>
     </Teleport>
@@ -1234,7 +1563,101 @@ const accentBgStyle = computed(() => {
   font-size: 18px;
   font-weight: 600;
   color: rgba(255,255,255,0.9);
-  margin: 0 0 20px;
+  margin: 0 0 16px;
+}
+
+// 子视图 header（返回按钮 + 标题）
+.np-more-sub-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+
+  .np-more-title { margin: 0; }
+}
+
+.np-more-back {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.7);
+  transition: background 0.15s;
+  &:hover { background: rgba(255,255,255,0.08); }
+}
+
+// Android 风格列表项
+.np-more-list-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 14px 4px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.85);
+  cursor: pointer;
+  border-radius: 12px;
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255,255,255,0.06); }
+
+  > .material-symbols-rounded {
+    font-size: 22px;
+    color: rgba(255,255,255,0.5);
+    flex-shrink: 0;
+  }
+}
+
+.np-more-list-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+
+.np-more-list-headline {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.np-more-list-desc {
+  font-size: 12px;
+  color: rgba(255,255,255,0.4);
+}
+
+.np-more-chevron {
+  font-size: 20px !important;
+  color: rgba(255,255,255,0.25) !important;
+}
+
+// 速度选择网格
+.np-more-speed-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.np-more-speed-btn {
+  padding: 12px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.7);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+
+  &:hover { background: rgba(255,255,255,0.10); }
+  &.active {
+    background: var(--md-primary-container, #E8DEF8);
+    color: var(--md-on-primary-container, #1D192B);
+  }
 }
 
 .np-more-item {
@@ -1295,5 +1718,192 @@ const accentBgStyle = computed(() => {
   color: rgba(255,255,255,0.5);
   line-height: 1.4;
   transition: font-size 0.15s;
+}
+
+// 搜索栏
+.np-more-search-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.np-more-input {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  color: white;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+
+  &:focus { border-color: rgba(255,255,255,0.3); }
+  &::placeholder { color: rgba(255,255,255,0.3); }
+}
+
+.np-more-search-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255,255,255,0.14); }
+  &:disabled { opacity: 0.4; }
+}
+
+.np-more-status {
+  text-align: center;
+  color: rgba(255,255,255,0.35);
+  font-size: 13px;
+  padding: 16px 0;
+}
+
+// 搜索结果列表
+.np-more-search-results {
+  max-height: 300px;
+  overflow-y: auto;
+  &::-webkit-scrollbar { display: none; }
+}
+
+.np-more-search-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 4px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.85);
+  cursor: pointer;
+  border-radius: 10px;
+  transition: background 0.15s;
+  text-align: left;
+
+  &:hover { background: rgba(255,255,255,0.06); }
+}
+
+.np-more-search-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(255,255,255,0.06);
+}
+
+.np-more-search-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.np-more-search-title {
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-more-search-artist {
+  font-size: 12px;
+  color: rgba(255,255,255,0.4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-more-search-source {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+// 编辑表单
+.np-more-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.np-more-form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.45);
+  margin-top: 4px;
+}
+
+.np-more-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.np-more-form-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.7);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+
+  .material-symbols-rounded { font-size: 18px; }
+
+  &:hover { background: rgba(255,255,255,0.12); }
+
+  &.primary {
+    background: var(--md-primary-container, #E8DEF8);
+    color: var(--md-on-primary-container, #1D192B);
+    &:hover { opacity: 0.9; }
+  }
+}
+
+// 音质列表
+.np-more-quality-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.np-more-quality-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 12px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.7);
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 10px;
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255,255,255,0.06); }
+
+  &.active {
+    color: var(--md-primary-container, #E8DEF8);
+    font-weight: 600;
+  }
 }
 </style>
