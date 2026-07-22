@@ -17,6 +17,7 @@
     "test:lyric-offset": "node scripts/test-lyric-offset.mjs",
     "test:lyrics-format": "node scripts/test-lyrics-format.mjs",
     "test:listen-together-mapper": "node scripts/test-listen-together-mapper.mjs",
+    "test:now-playing-view-mode": "node scripts/test-now-playing-view-mode.mjs",
     "test:youtube-playlist-parse": "node scripts/test-youtube-playlist-parse.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },
