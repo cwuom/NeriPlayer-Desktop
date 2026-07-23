@@ -42,9 +42,20 @@ const deferred = () => {
   assert.equal(playlistCalls, 1)
   assert.equal(albumCalls, 1)
 
-  playlists.resolve()
+  playlists.resolve(true)
   albums.reject(new Error('albums unavailable'))
   assert.deepEqual(await first.promise, { current: true, playlistsOk: true, albumsOk: false })
+}
+
+{
+  const coordinator = new NeteaseLibraryRequestCoordinator()
+  const playlists = deferred()
+  const albums = deferred()
+  const request = coordinator.run(() => playlists.promise, () => albums.promise)
+
+  playlists.resolve(false)
+  albums.resolve(true)
+  assert.deepEqual(await request.promise, { current: true, playlistsOk: false, albumsOk: true })
 }
 
 {
@@ -60,16 +71,16 @@ const deferred = () => {
   const freshRequest = coordinator.run(() => freshPlaylists.promise, () => freshAlbums.promise)
   assert.equal(freshRequest.started, true)
 
-  oldPlaylists.resolve()
-  oldAlbums.resolve()
+  oldPlaylists.resolve(true)
+  oldAlbums.resolve(true)
   assert.deepEqual(await oldRequest.promise, { current: false, playlistsOk: true, albumsOk: true })
 
-  const coalescedFreshRequest = coordinator.run(() => Promise.resolve(), () => Promise.resolve())
+  const coalescedFreshRequest = coordinator.run(() => Promise.resolve(true), () => Promise.resolve(true))
   assert.equal(coalescedFreshRequest.started, false)
   assert.equal(coalescedFreshRequest.promise, freshRequest.promise)
 
-  freshPlaylists.resolve()
-  freshAlbums.resolve()
+  freshPlaylists.resolve(true)
+  freshAlbums.resolve(true)
   assert.deepEqual(await freshRequest.promise, { current: true, playlistsOk: true, albumsOk: true })
 }
 
