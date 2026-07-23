@@ -49,13 +49,8 @@ export class NeteaseLibraryRequestCoordinator {
   }
 
   private load(loader: NeteaseLibraryLoader): Promise<boolean> {
-    try {
-      return Promise.resolve(loader()).then(
-        value => value,
-        () => false,
-      )
-    } catch {
-      return Promise.resolve(false)
-    }
+    return Promise.resolve()
+      .then(loader)
+      .catch(() => false)
   }
 }
