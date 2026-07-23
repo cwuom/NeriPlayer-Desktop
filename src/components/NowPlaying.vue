@@ -3117,8 +3117,7 @@ const sliderActiveColor = computed(() => {
 
   &.np-body--cover-mode {
     .np-left {
-      flex: 1 1 46%;
-      max-width: 560px;
+      flex: 0 0 46%;
       opacity: 1;
       transform: none;
       pointer-events: auto;
@@ -3160,13 +3159,18 @@ const sliderActiveColor = computed(() => {
 .np-left {
   flex: 1;
   min-width: 0;
+  max-width: 560px;
   display: flex;
   flex-direction: column;
   align-items: center;
   /* 外层垂直居中整块 stack；stack 内部固定，切歌不重排 */
   justify-content: center;
   padding: 12px 28px 16px 40px;
-  transition: opacity 280ms ease;
+  transition:
+    flex-basis 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 280ms ease,
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .np-left-stack {
