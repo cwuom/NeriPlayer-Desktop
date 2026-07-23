@@ -37,6 +37,9 @@ export function buildLibraryQuery(location: LibraryLocation): Record<string, str
 }
 
 export function isCanonicalLibraryLocation(rawTab: unknown, rawCategory: unknown): boolean {
+  if (typeof rawTab !== 'string') return false
+  if (rawCategory !== undefined && typeof rawCategory !== 'string') return false
+
   const tab = firstQueryValue(rawTab)
   const category = firstQueryValue(rawCategory)
   const resolved = resolveLibraryLocation(rawTab, rawCategory)
