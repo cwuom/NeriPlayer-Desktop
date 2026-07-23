@@ -13,7 +13,7 @@ export interface SearchableNeteaseAlbum {
 }
 
 export function normalizeNeteaseLibrarySearch(value: unknown): string {
-  return String(value ?? '').trim().toLocaleLowerCase()
+  return String(value ?? '').trim().normalize('NFC').toLowerCase()
 }
 
 function matches(query: string, values: unknown[]): boolean {
