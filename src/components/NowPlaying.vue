@@ -3514,6 +3514,7 @@ const sliderActiveColor = computed(() => {
 
 /* 控制栏 */
 .np-control-deck {
+  position: relative;
   width: 100%;
   min-height: 108px;
   display: flex;
@@ -3523,6 +3524,13 @@ const sliderActiveColor = computed(() => {
   gap: 2px;
   padding: 7px 10px 6px;
   border-radius: 8px;
+}
+
+.np-control-deck::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
   border: 1px solid rgba(255,255,255,0.14);
   border-color: color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.64)) 28%, rgba(255,255,255,0.10));
   background: rgba(20,18,24,0.38);
@@ -3530,16 +3538,19 @@ const sliderActiveColor = computed(() => {
   box-shadow: 0 12px 30px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.18);
   backdrop-filter: blur(24px) saturate(1.14);
   -webkit-backdrop-filter: blur(24px) saturate(1.14);
-  isolation: isolate;
+  pointer-events: none;
+  z-index: 0;
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .np-control-deck {
+  .np-control-deck::before {
     background: rgba(48,44,58,0.88);
   }
 }
 
 .np-controls {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4023,6 +4034,8 @@ const sliderActiveColor = computed(() => {
 
 /* 工具栏：切歌时不上下呼吸，避免整列位移 */
 .np-toolbar {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4574,16 +4587,18 @@ const sliderActiveColor = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .np-body,
-  .np-left,
-  .np-right,
-  .cover-wrap,
-  .np-control-deck,
-  .np-controls,
-  .np-toolbar {
+  .now-playing *,
+  .now-playing *::before,
+  .now-playing *::after {
     animation: none !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
     transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .now-playing .spinning {
+    animation: np-spin 1s linear infinite !important;
   }
 
   .np-body.np-body--lyrics-mode .np-left {
