@@ -159,6 +159,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate artifact workflow contract
+        run: pnpm test:artifacts-workflow
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff
         with:
@@ -198,6 +201,7 @@ jobs:
       - name: Stage artifacts
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p artifacts
           {
             echo "build_uuid=${NERI_BUILD_UUID}"
@@ -208,13 +212,37 @@ jobs:
             echo "github_sha=${{ github.sha }}"
             echo "github_run_id=${{ github.run_id }}"
           } > artifacts/build-metadata.txt
+          portable_dir="portable"
+          portable_stage_dir="portable-stage"
+          mkdir -p "$portable_dir" "$portable_stage_dir"
           case "${{ matrix.artifact_name }}" in
             macOS-*)
               cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
+              mkdir -p "$portable_stage_dir/macos"
+              shopt -s nullglob
+              app_bundles=(src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app)
+              if [ "${#app_bundles[@]}" -eq 0 ]; then
+                echo "No macOS app bundle found" >&2
+                exit 1
+              fi
+              app_bundle="${app_bundles[0]}"
+              cp -R "$app_bundle" "$portable_stage_dir/macos/"
+              cp README.md LICENSE artifacts/build-metadata.txt "$portable_stage_dir/macos/"
+              tar -czf "$portable_dir/NeriPlayer-${{ matrix.artifact_name }}-portable.tar.gz" -C "$portable_stage_dir" macos
               ;;
             Windows-*)
               cp src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi artifacts/ 2>/dev/null || true
               cp src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe artifacts/ 2>/dev/null || true
+              mkdir -p "$portable_dir/windows"
+              release_dir="src-tauri/target/${{ matrix.target }}/release"
+              cp "$release_dir/neri-player-desktop.exe" "$portable_dir/windows/NeriPlayer.exe"
+              shopt -s nullglob
+              for dependency in "$release_dir"/*.dll "$release_dir"/*.pdb; do
+                if [ -f "$dependency" ]; then
+                  cp "$dependency" "$portable_dir/windows/"
+                fi
+              done
+              cp README.md LICENSE artifacts/build-metadata.txt "$portable_dir/windows/"
               ;;
             Linux-*)
               cp src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb artifacts/ 2>/dev/null || true
@@ -222,6 +250,24 @@ jobs:
               for f in src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage; do
                 [ -f "$f" ] && tar czf "artifacts/$(basename "$f").tar.gz" -C "$(dirname "$f")" "$(basename "$f")"
               done
+              mkdir -p "$portable_stage_dir/linux"
+              release_dir="src-tauri/target/${{ matrix.target }}/release"
+              cp "$release_dir/neri-player-desktop" "$portable_stage_dir/linux/NeriPlayer"
+              cp src-tauri/icons/icon.png "$portable_stage_dir/linux/icon.png"
+              cat > "$portable_stage_dir/linux/NeriPlayer.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=NeriPlayer
+          Comment=Desktop music player
+          Exec=./NeriPlayer
+          Path=.
+          Icon=./icon.png
+          Terminal=false
+          Categories=AudioVideo;Audio;Player;
+          EOF
+              chmod +x "$portable_stage_dir/linux/NeriPlayer" "$portable_stage_dir/linux/NeriPlayer.desktop"
+              cp README.md LICENSE artifacts/build-metadata.txt "$portable_stage_dir/linux/"
+              tar -czf "$portable_dir/NeriPlayer-${{ matrix.artifact_name }}-portable.tar.gz" -C "$portable_stage_dir" linux
               ;;
           esac
 
@@ -233,3 +279,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
           compression-level: 0
+
+      - name: Upload portable artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: NeriPlayer-${{ matrix.artifact_name }}-portable
+          path: portable
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+          include-hidden-files: true
