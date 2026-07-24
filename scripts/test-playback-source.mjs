@@ -20,10 +20,13 @@ const compiled = ts.transpileModule(source, {
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
 const {
   canonicalizePlaybackTrack,
+  PlaybackUrlResolver,
+  playbackSourceCandidates,
   playbackCacheReadCandidates,
   playbackCacheWriteOptions,
   resolvePlaybackResult,
   resolvePlaybackSource,
+  shouldAutoSwitchNeteaseSource,
 } = await import(moduleUrl)
 
 const settings = {
@@ -31,6 +34,12 @@ const settings = {
   qqMusicQuality: 'high',
   biliQuality: 'high',
   youtubeQuality: 'high',
+  neteaseAutoSourceSwitch: false,
+}
+
+const autoSourceSettings = {
+  ...settings,
+  neteaseAutoSourceSwitch: true,
 }
 
 function track(id) {
@@ -131,12 +140,46 @@ await run('candidate streams use isolated formal cache keys', async () => {
   )
 })
 
+await run('limits playback to one primary source and two backup sources', async () => {
+  const source = key => ({
+    type: 'success',
+    url: `https://audio.example/${key}`,
+    candidateUrls: [`https://audio.example/${key}-alternate`],
+    cacheKey: key,
+    source: 'bilibili',
+    qualityKey: 'high',
+  })
+  const primary = {
+    ...source('primary'),
+    fallbackSources: [source('backup-1'), source('backup-2'), source('backup-3')],
+  }
+
+  const candidates = playbackSourceCandidates(primary)
+
+  assert.deepEqual(candidates.map(candidate => candidate.cacheKey), [
+    'primary',
+    'backup-1',
+    'backup-2',
+  ])
+  assert.deepEqual(candidates[0].candidateUrls, [
+    'https://audio.example/primary-alternate',
+  ])
+})
+
 await run('cache-first keys match resolution keys and include NetEase fallbacks', async () => {
   const neteaseCandidates = playbackCacheReadCandidates(track(105), settings)
   assert.deepEqual(
     neteaseCandidates.map(candidate => candidate.qualityKey),
     ['exhigh', 'higher', 'standard'],
   )
+  assert.equal(neteaseCandidates.some(candidate => candidate.source === 'bilibili'), false)
+
+  const autoSourceCandidates = playbackCacheReadCandidates(track(105), autoSourceSettings)
+  assert.deepEqual(autoSourceCandidates.at(-1), {
+    cacheKey: 'bili-auto-105-high',
+    source: 'bilibili',
+    qualityKey: 'high',
+  })
 
   const biliTrack = {
     id: 'bilibili:BV1cache',
@@ -339,6 +382,531 @@ await run('does not retry lower qualities after an unknown response failure', as
 
   assert.equal(resolved, null)
   assert.equal(calls, 1)
+})
+
+await run('switches a no-permission NetEase track to the best Bilibili match', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      assert.equal(args.platform, 'bilibili')
+      return [
+        {
+          id: 'bilibili:BVweak',
+          title: 'unrelated live clip',
+          artist: 'someone else',
+          duration_ms: 420_000,
+          source: 'bilibili',
+        },
+        {
+          id: 'bilibili:BVbest',
+          title: 'song-106 official audio',
+          artist: 'artist',
+          duration_ms: 181_000,
+          source: 'bilibili',
+        },
+        {
+          id: 'bilibili:BVbackup',
+          title: 'song-106 lyric video',
+          artist: 'artist',
+          duration_ms: 183_000,
+          source: 'bilibili',
+        },
+      ]
+    }
+    if (command === 'get_bili_video_pages') {
+      const pages = {
+        BVweak: [
+          { cid: 1_060, title: 'unrelated live clip', duration_seconds: 420 },
+        ],
+        BVbest: [
+          { cid: 1_061, title: 'song-106 official audio', duration_seconds: 181 },
+        ],
+        BVbackup: [
+          { cid: 1_062, title: 'song-106 lyric video', duration_seconds: 183 },
+        ],
+      }
+      return pages[args.bvid] ?? []
+    }
+    if (command === 'get_bili_audio_url') {
+      if (args.bvid === 'BVbackup') {
+        assert.equal(args.cid, 1_062)
+        return {
+          url: 'https://audio.example/bili-auto-secondary',
+          bandwidth: 192_000,
+          codecs: 'mp4a.40.2',
+          candidates: [],
+        }
+      }
+      assert.equal(args.bvid, 'BVbest')
+      assert.equal(args.cid, 1_061)
+      return {
+        url: 'https://audio.example/bili-auto-primary',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [{
+          url: 'https://audio.example/bili-auto-backup',
+          bandwidth: 192_000,
+          codecs: 'mp4a.40.2',
+        }],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const originalTrack = {
+    ...track(106),
+    coverUrl: 'https://image.example/netease-106.jpg',
+    playlistKey: 'netease:playlist:42',
+    syncPayload: {
+      channelId: 'netease',
+      audioId: '106',
+      lyric: '[00:00.00]original lyric',
+      translatedLyric: '[00:00.00]translated lyric',
+    },
+  }
+  const originalSnapshot = structuredClone(originalTrack)
+  const resolved = await resolvePlaybackSource(originalTrack, autoSourceSettings)
+
+  assert.ok(resolved)
+  assert.equal(resolved.source, 'bilibili')
+  assert.equal(resolved.audioInfo?.source, 'bilibili')
+  assert.equal(resolved.url, 'https://audio.example/bili-auto-primary')
+  assert.deepEqual(resolved.candidateUrls, ['https://audio.example/bili-auto-backup'])
+  assert.match(resolved.cacheKey, /^bili-auto-106-BVbest-1061-high$/i)
+  assert.equal(resolved.cacheKeyOverride, 'bili-auto-106-high')
+  assert.deepEqual(
+    playbackSourceCandidates(resolved).map(candidate => candidate.cacheKeyOverride),
+    [
+      'bili-auto-106-high',
+      'bili-auto-106-high',
+    ],
+  )
+  assert.deepEqual(
+    calls.filter(call => call.command === 'get_netease_song_url').map(call => call.args.quality),
+    ['exhigh', 'higher', 'standard'],
+  )
+  assert.ok(calls.some(call => call.command === 'search'))
+  assert.deepEqual(originalTrack, originalSnapshot)
+})
+
+await run('selects the matching Bilibili page CID instead of defaulting to the first page', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVmulti',
+        title: 'song-109 complete collection',
+        artist: 'artist',
+        duration_ms: 0,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      assert.equal(args.bvid, 'BVmulti')
+      return [
+        { cid: 1_091, title: 'opening theme', duration_seconds: 0 },
+        { cid: 1_092, title: 'song-109', duration_seconds: 0 },
+      ]
+    }
+    if (command === 'get_bili_audio_url') {
+      assert.equal(args.bvid, 'BVmulti')
+      assert.equal(args.avid, null)
+      assert.equal(args.cid, 1_092)
+      return {
+        url: 'https://audio.example/bili-auto-multipage',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolved = await resolvePlaybackSource(track(109), autoSourceSettings)
+
+  assert.equal(resolved?.url, 'https://audio.example/bili-auto-multipage')
+  assert.equal(resolved?.cacheKey, 'bili-auto-109-BVmulti-1092-high')
+  assert.equal(resolved?.cacheKeyOverride, 'bili-auto-109-high')
+  assert.equal(
+    calls.filter(call => call.command === 'get_bili_video_pages').length,
+    1,
+  )
+})
+
+await run('rejects a matching Bilibili collection when none of its pages match the song', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVunrelatedpages',
+        title: 'song-112 complete collection',
+        artist: 'artist',
+        duration_ms: 0,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      return [
+        { cid: 1_121, title: 'unrelated opening theme', duration_seconds: 180 },
+        { cid: 1_122, title: 'unrelated ending theme', duration_seconds: 180 },
+      ]
+    }
+    if (command === 'get_bili_audio_url') {
+      throw new Error('an unrelated page must not be resolved')
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolved = await resolvePlaybackSource(track(112), autoSourceSettings)
+
+  assert.equal(resolved, null)
+  assert.equal(calls.some(call => call.command === 'get_bili_audio_url'), false)
+})
+
+await run('does not reuse an auto-switched source after auto source switching is disabled', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVcachetoggle',
+        title: 'song-110 official audio',
+        artist: 'artist',
+        duration_ms: 180_000,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      return [{ cid: 1_100, title: 'song-110 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      return {
+        url: 'https://audio.example/bili-cache-toggle',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolver = new PlaybackUrlResolver()
+  const enabled = await resolver.resolve(track(110), autoSourceSettings)
+  const disabled = await resolver.resolve(track(110), settings)
+
+  assert.equal(enabled.type, 'success')
+  assert.equal(enabled.source, 'bilibili')
+  assert.equal(disabled.type, 'failure')
+  assert.equal(
+    calls.filter(call => call.command === 'get_netease_song_url').length,
+    6,
+  )
+  assert.equal(calls.filter(call => call.command === 'search').length, 3)
+})
+
+await run('does not reuse an auto-switched source after Bilibili quality changes', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVcachequality',
+        title: 'song-111 official audio',
+        artist: 'artist',
+        duration_ms: 180_000,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      return [{ cid: 1_110, title: 'song-111 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      return {
+        url: `https://audio.example/bili-cache-${args.quality}`,
+        bandwidth: args.quality === 'low' ? 128_000 : 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolver = new PlaybackUrlResolver()
+  const high = await resolver.resolve(track(111), autoSourceSettings)
+  const low = await resolver.resolve(track(111), {
+    ...autoSourceSettings,
+    biliQuality: 'low',
+  })
+
+  assert.equal(high.type, 'success')
+  assert.equal(high.url, 'https://audio.example/bili-cache-high')
+  assert.equal(low.type, 'success')
+  assert.equal(low.url, 'https://audio.example/bili-cache-low')
+  assert.deepEqual(
+    calls
+      .filter(call => call.command === 'get_bili_audio_url')
+      .map(call => call.args.quality),
+    ['high', 'low'],
+  )
+})
+
+await run('does not reuse a synced NetEase audioId as the Bilibili fallback id', async () => {
+  globalThis.__playbackInvoke = async (command, args) => {
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVsynced',
+        title: 'song-108 official audio',
+        artist: 'artist',
+        duration_ms: 180_000,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      assert.equal(args.bvid, 'BVsynced')
+      return [{ cid: 1_080, title: 'song-108 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      assert.equal(args.bvid, 'BVsynced')
+      assert.equal(args.avid, null)
+      assert.equal(args.cid, 1_080)
+      return {
+        url: 'https://audio.example/bili-auto-synced',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const syncedTrack = {
+    ...track(108),
+    syncPayload: {
+      channelId: 'netease',
+      audioId: '108',
+    },
+  }
+  const resolved = await resolvePlaybackSource(syncedTrack, autoSourceSettings)
+
+  assert.equal(resolved?.url, 'https://audio.example/bili-auto-synced')
+  assert.equal(resolved?.cacheKeyOverride, 'bili-auto-108-high')
+})
+
+await run('does not auto switch a no-permission track when the setting is disabled', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    return {
+      url: null,
+      bitrate: 0,
+      format: 'mp3',
+      is_preview: false,
+      unavailable_reason: 'no_permission',
+    }
+  }
+
+  const resolved = await resolvePlaybackSource(track(107), settings)
+
+  assert.equal(resolved, null)
+  assert.equal(calls.some(call => call.command === 'search'), false)
+})
+
+await run('keeps the Android auto-source trigger boundary narrow', async () => {
+  assert.equal(shouldAutoSwitchNeteaseSource(true, false, 'no_permission'), true)
+  assert.equal(shouldAutoSwitchNeteaseSource(true, false, 'no_play_url'), true)
+  assert.equal(shouldAutoSwitchNeteaseSource(true, true, null), true)
+  assert.equal(shouldAutoSwitchNeteaseSource(false, true, 'no_permission'), false)
+  assert.equal(shouldAutoSwitchNeteaseSource(true, false, 'unknown'), false)
+  assert.equal(shouldAutoSwitchNeteaseSource(true, false, null), false)
+})
+
+await run('switches a no-play-url NetEase track to Bilibili and caches it under a reusable fallback key', async () => {
+  globalThis.__playbackInvoke = async (command, args) => {
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_play_url',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVnoplay',
+        title: 'song-110 official audio',
+        artist: 'artist',
+        duration_ms: 180_000,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      assert.equal(args.bvid, 'BVnoplay')
+      return [{ cid: 1_100, title: 'song-110 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      assert.equal(args.bvid, 'BVnoplay')
+      assert.equal(args.cid, 1_100)
+      return {
+        url: 'https://audio.example/bili-auto-no-play-url',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const originalTrack = track(110)
+  const resolved = await resolvePlaybackSource(originalTrack, autoSourceSettings)
+
+  assert.equal(resolved?.url, 'https://audio.example/bili-auto-no-play-url')
+  assert.equal(
+    playbackCacheWriteOptions(resolved, 0).cacheKey,
+    playbackCacheReadCandidates(originalTrack, autoSourceSettings).at(-1).cacheKey,
+  )
+})
+
+await run('enables the Android-aligned auto source switch in persisted settings', async () => {
+  const [settingsSource, rustSettingsSource, settingsViewSource] = await Promise.all([
+    readFile(new URL('../src/stores/settings.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src-tauri/src/settings/store.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(settingsSource, /neteaseAutoSourceSwitch:\s*true/)
+  assert.match(rustSettingsSource, /netease_auto_source_switch:\s*true/)
+  assert.match(settingsViewSource, /v-model="neteaseAutoSourceSwitch"/)
+})
+
+await run('the player attempts structured fallback sources instead of flattening cache identity', async () => {
+  const playerSource = await readFile(
+    new URL('../src/stores/player.ts', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(playerSource, /playbackSourceCandidates\(resolved\)/)
+  assert.match(playerSource, /played\.resolved/)
+})
+
+let playbackUiSource
+
+await run('uses the resolved Bilibili source for fallback quality UI', async () => {
+  const nowPlayingSource = await readFile(
+    new URL('../src/components/NowPlaying.vue', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(nowPlayingSource, /const currentPlaybackSource = computed/)
+  assert.match(
+    nowPlayingSource,
+    /resolvedPlaybackSourceForUi\(\s*player\.currentTrack,\s*player\.audioInfo\?\.source,?\s*\)/,
+  )
+  assert.match(nowPlayingSource, /qualityOptionsForSource\(currentPlaybackSource\)/)
+
+  const helperSource = await readFile(
+    new URL('../src/modules/playback/playbackUiSource.ts', import.meta.url),
+    'utf8',
+  )
+  const helperCompiled = ts.transpileModule(helperSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText
+  playbackUiSource = await import(
+    `data:text/javascript;base64,${Buffer.from(helperCompiled).toString('base64')}`
+  )
+
+  const fallbackTrack = track(113)
+  assert.equal(playbackUiSource.logicalPlaybackSource(fallbackTrack), 'netease')
+  assert.equal(
+    playbackUiSource.resolvedPlaybackSourceForUi(fallbackTrack, 'bilibili'),
+    'bilibili',
+  )
+})
+
+await run('replays a NetEase fallback after Bilibili quality changes', async () => {
+  const settingsViewSource = await readFile(
+    new URL('../src/views/SettingsView.vue', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(settingsViewSource, /shouldReplayForQualityChange\(source,\s*\{/)
+  assert.match(settingsViewSource, /audioInfoSource:\s*player\.audioInfo\?\.source/)
+
+  const fallbackTrack = track(114)
+  const playbackState = {
+    track: fallbackTrack,
+    audioInfoSource: 'bilibili',
+    isLoadingAudio: false,
+    isPlayingFromDownload: false,
+  }
+  assert.equal(
+    playbackUiSource.shouldReplayForQualityChange('bilibili', playbackState),
+    true,
+  )
+  assert.equal(
+    playbackUiSource.shouldReplayForQualityChange('netease', playbackState),
+    false,
+  )
 })
 
 console.log('playback source tests passed')

@@ -1,133 +1,258 @@
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::Notify;
+use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::protocol::LtSocketEnvelope;
 
-/// WebSocket 客户端：管理与一起听服务器的连接
+const CONNECTION_PENDING: u8 = 0;
+const CONNECTION_ACTIVE: u8 = 1;
+const CONNECTION_CLOSED: u8 = 2;
+
+struct ConnectionLifecycle {
+    session_id: u64,
+    state: AtomicU8,
+    ready: Notify,
+    event_gate: Mutex<()>,
+}
+
+#[derive(Clone)]
+pub struct LtWsActivation {
+    lifecycle: Arc<ConnectionLifecycle>,
+}
+
+impl LtWsActivation {
+    pub fn activate(&self, app_handle: &AppHandle) {
+        self.lifecycle.activate(app_handle);
+    }
+}
+
+impl ConnectionLifecycle {
+    fn new(session_id: u64) -> Self {
+        Self {
+            session_id,
+            state: AtomicU8::new(CONNECTION_PENDING),
+            ready: Notify::new(),
+            event_gate: Mutex::new(()),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.state.load(Ordering::Acquire) == CONNECTION_ACTIVE
+    }
+
+    async fn wait_until_ready(&self) -> bool {
+        loop {
+            let notified = self.ready.notified();
+            match self.state.load(Ordering::Acquire) {
+                CONNECTION_ACTIVE => return true,
+                CONNECTION_CLOSED => return false,
+                _ => notified.await,
+            }
+        }
+    }
+
+    fn activate(&self, app_handle: &AppHandle) {
+        let _event_guard = self.event_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .state
+            .compare_exchange(
+                CONNECTION_PENDING,
+                CONNECTION_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.ready.notify_waiters();
+            let _ = app_handle.emit(
+                "lt:connected",
+                serde_json::json!({ "sessionId": self.session_id }),
+            );
+        }
+    }
+
+    fn deactivate(&self) {
+        let _event_guard = self.event_gate.lock().unwrap_or_else(|e| e.into_inner());
+        self.state.store(CONNECTION_CLOSED, Ordering::Release);
+        self.ready.notify_waiters();
+    }
+
+    fn emit_message(&self, app_handle: &AppHandle, envelope: &LtSocketEnvelope) {
+        let _event_guard = self.event_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_active() {
+            let _ = app_handle.emit(
+                "lt:message",
+                serde_json::json!({
+                    "sessionId": self.session_id,
+                    "envelope": envelope,
+                }),
+            );
+        }
+    }
+
+    fn emit_disconnected(&self, app_handle: &AppHandle, code: u16, reason: String) {
+        let _event_guard = self.event_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_active() {
+            self.state.store(CONNECTION_CLOSED, Ordering::Release);
+            self.ready.notify_waiters();
+            let _ = app_handle.emit(
+                "lt:disconnected",
+                serde_json::json!({
+                    "sessionId": self.session_id,
+                    "code": code,
+                    "reason": reason,
+                }),
+            );
+        }
+    }
+}
+
+/// WebSocket client for a Listen Together session.
 pub struct LtWsClient {
+    session_id: u64,
     tx: mpsc::UnboundedSender<String>,
     shutdown: mpsc::Sender<()>,
+    lifecycle: Arc<ConnectionLifecycle>,
+    task_abort: AbortHandle,
 }
 
 impl LtWsClient {
-    /// 建立 WebSocket 连接并启动读写循环
-    pub async fn connect(ws_url: &str, app_handle: AppHandle) -> Result<Self, String> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
+    /// Establishes a pending socket. Activate it only after installing the
+    /// client in shared application state.
+    pub async fn connect(
+        ws_url: &str,
+        session_id: u64,
+        app_handle: AppHandle,
+    ) -> Result<Self, String> {
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
             .await
             .map_err(|e| format!("WebSocket connect failed: {e}"))?;
 
-        let (mut ws_write, mut ws_read) = ws_stream.split();
-
-        // 写通道：前端 -> WS
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-        // 关闭信号
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+        let lifecycle = Arc::new(ConnectionLifecycle::new(session_id));
+        let task_lifecycle = lifecycle.clone();
 
-        let _ = app_handle.emit("lt:connected", serde_json::json!({}));
+        let task = tokio::spawn(async move {
+            if !task_lifecycle.wait_until_ready().await {
+                let _ = ws_stream.close(None).await;
+                return;
+            }
 
-        // 写循环
-        let handle_w = app_handle.clone();
-        tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    msg = rx.recv() => {
-                        match msg {
+                    outbound = rx.recv() => {
+                        match outbound {
                             Some(text) => {
-                                if let Err(e) = ws_write.send(Message::Text(text.into())).await {
-                                    log::error!(target: "lt-ws", "write error: {e}");
+                                if let Err(error) = ws_stream.send(Message::Text(text.into())).await {
+                                    log::error!(target: "lt-ws", "write error: {error}");
+                                    task_lifecycle.emit_disconnected(
+                                        &app_handle,
+                                        1006,
+                                        format!("write error: {error}"),
+                                    );
                                     break;
                                 }
                             }
                             None => break,
                         }
                     }
-                    _ = shutdown_rx.recv() => {
-                        let _ = ws_write.close().await;
-                        break;
-                    }
-                }
-            }
-            let _ = handle_w.emit(
-                "lt:disconnected",
-                serde_json::json!({
-                    "code": 1000, "reason": "client_closed"
-                }),
-            );
-        });
-
-        // 读循环
-        let handle_r = app_handle.clone();
-        tokio::spawn(async move {
-            while let Some(result) = ws_read.next().await {
-                match result {
-                    Ok(Message::Text(text)) => {
-                        // 尝试解析为 envelope 并转发给前端
-                        match serde_json::from_str::<LtSocketEnvelope>(&text) {
-                            Ok(envelope) => {
-                                let _ = handle_r.emit("lt:message", &envelope);
+                    inbound = ws_stream.next() => {
+                        match inbound {
+                            Some(Ok(Message::Text(text))) => {
+                                match serde_json::from_str::<LtSocketEnvelope>(&text) {
+                                    Ok(envelope) => task_lifecycle.emit_message(&app_handle, &envelope),
+                                    Err(error) => {
+                                        log::warn!(
+                                            target: "lt-ws",
+                                            "parse error: {error}, raw: {text}"
+                                        );
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                log::warn!(target: "lt-ws", "parse error: {e}, raw: {text}");
+                            Some(Ok(Message::Close(frame))) => {
+                                let (code, reason) = frame
+                                    .map(|value| (value.code.into(), value.reason.to_string()))
+                                    .unwrap_or((1000, "closed".to_string()));
+                                task_lifecycle.emit_disconnected(&app_handle, code, reason);
+                                break;
+                            }
+                            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                task_lifecycle.emit_disconnected(
+                                    &app_handle,
+                                    1006,
+                                    format!("read error: {error}"),
+                                );
+                                break;
+                            }
+                            None => {
+                                task_lifecycle.emit_disconnected(
+                                    &app_handle,
+                                    1006,
+                                    "connection ended".to_string(),
+                                );
+                                break;
                             }
                         }
                     }
-                    Ok(Message::Close(frame)) => {
-                        let (code, reason) = frame
-                            .map(|f| (f.code.into(), f.reason.to_string()))
-                            .unwrap_or((1000u16, "closed".to_string()));
-                        let _ = handle_r.emit(
-                            "lt:disconnected",
-                            serde_json::json!({
-                                "code": code, "reason": reason
-                            }),
-                        );
+                    _ = shutdown_rx.recv() => {
+                        let _ = ws_stream.close(None).await;
                         break;
                     }
-                    Ok(Message::Ping(data)) => {
-                        // tungstenite 自动回 pong，忽略
-                        let _ = data;
-                    }
-                    Err(e) => {
-                        let _ = handle_r.emit(
-                            "lt:disconnected",
-                            serde_json::json!({
-                                "code": 1006, "reason": format!("read error: {e}")
-                            }),
-                        );
-                        break;
-                    }
-                    _ => {}
                 }
             }
         });
 
         Ok(Self {
+            session_id,
             tx,
             shutdown: shutdown_tx,
+            lifecycle,
+            task_abort: task.abort_handle(),
         })
     }
 
-    /// 发送事件到 WebSocket
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    pub fn activation_handle(&self) -> LtWsActivation {
+        LtWsActivation {
+            lifecycle: self.lifecycle.clone(),
+        }
+    }
+
     pub fn send(&self, json: &str) -> Result<(), String> {
+        let _event_guard = self
+            .lifecycle
+            .event_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.lifecycle.is_active() {
+            return Err("WebSocket is not connected".to_string());
+        }
         self.tx
             .send(json.to_string())
             .map_err(|e| format!("send failed: {e}"))
     }
 
-    /// 发送 ping
     pub fn send_ping(&self) -> Result<(), String> {
         self.send(r#"{"type":"ping"}"#)
     }
 
-    /// 断开连接
     pub async fn disconnect(&self) {
-        let _ = self.shutdown.send(()).await;
+        self.lifecycle.deactivate();
+        let _ = self.shutdown.try_send(());
+        self.task_abort.abort();
     }
 }
 
-/// 全局 WS 客户端引用（存在 AppState 中）
 pub type SharedWsClient = Arc<TokioMutex<Option<LtWsClient>>>;

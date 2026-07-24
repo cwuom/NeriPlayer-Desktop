@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "NeriPlayer default capabilities",
-  "windows": ["main", "netease-login", "bilibili-login", "youtube-login"],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     {
@@ -12,6 +12,8 @@
     "dialog:default",
     "core:window:default",
     "core:window:allow-show",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-focus",
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
@@ -20,6 +22,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
     "core:webview:default",
+    "core:webview:allow-create-webview-window",
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text"
   ]

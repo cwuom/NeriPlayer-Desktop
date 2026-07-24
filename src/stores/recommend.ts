@@ -11,8 +11,17 @@ export interface PlaylistInfo {
   name: string
   coverUrl: string
   trackCount: number
+  playCount?: number
   description?: string
   creator?: string
+}
+
+export interface UserAlbumInfo {
+  id: string | number
+  name: string
+  coverUrl: string
+  artist: string
+  trackCount: number
 }
 
 export interface HomeFeedShelf {
@@ -44,6 +53,32 @@ export interface HomeSongSection {
   error: string | null
 }
 
+export interface RecommendCacheValue {
+  recommendedPlaylists?: unknown[]
+  userPlaylists?: Record<string, unknown[]>
+  [key: string]: unknown
+}
+
+export function clearPlatformRecommendCache<T extends RecommendCacheValue>(
+  cache: T,
+  platform: string,
+): T {
+  const userPlaylists = { ...(cache.userPlaylists ?? {}) }
+  delete userPlaylists[platform]
+
+  return {
+    ...cache,
+    userPlaylists,
+    ...(platform === 'netease'
+      ? {
+          recommendedPlaylists: [],
+          homeHotSongs: { items: [], loading: false, error: null },
+          homeRadarSongs: { items: [], loading: false, error: null },
+        }
+      : {}),
+  }
+}
+
 type HomeSongSectionKey = 'hot' | 'radar'
 
 const HOME_SEARCH_KEYWORDS: Record<HomeSongSectionKey, string> = {
@@ -71,7 +106,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   const userPlaylists = ref<Record<string, PlaylistInfo[]>>({})
 
   // 用户收藏专辑（网易云）
-  const userAlbums = ref<any[]>([])
+  const userAlbums = ref<UserAlbumInfo[]>([])
 
   // 用户喜欢的歌曲 ID 集合
   const likedSongIds = ref<Set<number>>(new Set())
@@ -79,9 +114,38 @@ export const useRecommendStore = defineStore('recommend', () => {
   const isLoading = ref(false)
   const error = ref<string | null>(null)
 
+  // Keep loading state correct when several shelves are requested together.
+  // Requests are tracked individually so invalidating Netease work cannot
+  // accidentally finish an unrelated platform request.
+  let activeLoadingRequests = 0
+  let loadingRequestId = 0
+  const loadingRequests = new Map<number, 'netease' | undefined>()
+
+  function syncLoadingState() {
+    activeLoadingRequests = loadingRequests.size
+    isLoading.value = activeLoadingRequests > 0
+  }
+
+  function beginLoading(platform?: 'netease') {
+    const id = ++loadingRequestId
+    loadingRequests.set(id, platform)
+    syncLoadingState()
+    return id
+  }
+
+  function endLoading(id: number) {
+    loadingRequests.delete(id)
+    syncLoadingState()
+  }
+
   // stale-while-revalidate 缓存
   const CACHE_KEY = 'neri:recommend:cache'
   const CACHE_MAX_AGE_MS = 30 * 60 * 1000 // 30 分钟
+  let neteaseRequestGeneration = 0
+
+  function isCurrentNeteaseRequest(generation: number) {
+    return generation === neteaseRequestGeneration
+  }
 
   function loadCache() {
     try {
@@ -118,16 +182,49 @@ export const useRecommendStore = defineStore('recommend', () => {
     } catch { return false }
   }
 
+  function clearPlatformCache(platform: string) {
+    if (platform === 'netease') {
+      neteaseRequestGeneration++
+      for (const [id, requestPlatform] of loadingRequests) {
+        if (requestPlatform === 'netease') loadingRequests.delete(id)
+      }
+      syncLoadingState()
+    }
+    const cleared = clearPlatformRecommendCache({
+      recommendedPlaylists: recommendedPlaylists.value,
+      userPlaylists: userPlaylists.value,
+      homeHotSongs: homeHotSongs.value,
+      homeRadarSongs: homeRadarSongs.value,
+    }, platform)
+
+    userPlaylists.value = (cleared.userPlaylists ?? {}) as Record<string, PlaylistInfo[]>
+    if (platform === 'netease') {
+      recommendedPlaylists.value = []
+      recommendedSongs.value = []
+      homeHotSongs.value = emptyHomeSongSection()
+      homeRadarSongs.value = emptyHomeSongSection()
+      userAlbums.value = []
+      likedSongIds.value = new Set()
+    }
+    saveCache()
+  }
+
   // 启动时立即加载缓存
   loadCache()
 
   /** 获取网易云推荐歌单 */
   async function fetchRecommendedPlaylists(limit = 30) {
-    isLoading.value = true
+    const requestGeneration = neteaseRequestGeneration
+    const loadingRequest = beginLoading('netease')
     error.value = null
     try {
       const data = await invoke<any>('get_recommended_playlists', { limit })
-      const result = data?.result || []
+      if (!isCurrentNeteaseRequest(requestGeneration)) return
+      if (Number(data?.code) !== 200) {
+        throw new Error(`Netease recommended playlists request failed with code ${data?.code ?? 'unknown'}`)
+      }
+      const result = data?.result
+      if (!Array.isArray(result)) throw new Error('Netease recommended playlists response was invalid')
       recommendedPlaylists.value = result.map((p: any) => ({
         id: p.id,
         name: p.name,
@@ -137,38 +234,51 @@ export const useRecommendStore = defineStore('recommend', () => {
       }))
       saveCache()
     } catch (e: any) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return
       error.value = e?.toString() || 'Failed to fetch recommendations'
       log.error('fetchRecommendedPlaylists:', e)
+      throw e
     } finally {
-      isLoading.value = false
+      endLoading(loadingRequest)
     }
   }
 
   /** 获取网易云每日推荐歌曲 */
   async function fetchRecommendedSongs() {
-    isLoading.value = true
+    const requestGeneration = neteaseRequestGeneration
+    const loadingRequest = beginLoading('netease')
     try {
       const data = await invoke<any>('get_recommended_songs')
-      recommendedSongs.value = data?.data?.dailySongs || []
+      if (!isCurrentNeteaseRequest(requestGeneration)) return
+      if (Number(data?.code) !== 200) {
+        throw new Error(`Netease recommended songs request failed with code ${data?.code ?? 'unknown'}`)
+      }
+      const dailySongs = data?.data?.dailySongs
+      if (!Array.isArray(dailySongs)) throw new Error('Netease recommended songs response was invalid')
+      recommendedSongs.value = dailySongs
     } catch (e) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return
       log.error('fetchRecommendedSongs:', e)
+      throw e
     } finally {
-      isLoading.value = false
+      endLoading(loadingRequest)
     }
   }
 
   async function fetchHomeSearchSection(section: HomeSongSectionKey, force = false) {
+    const requestGeneration = neteaseRequestGeneration
     const target = section === 'hot' ? homeHotSongs : homeRadarSongs
     if (!force && (target.value.loading || target.value.items.length > 0)) return
 
     target.value = { ...target.value, loading: true, error: null }
-    isLoading.value = true
+    const loadingRequest = beginLoading('netease')
 
     try {
       const items = await invoke<HomeRecommendationSong[]>('search', {
         query: HOME_SEARCH_KEYWORDS[section],
         platform: 'netease',
       })
+      if (!isCurrentNeteaseRequest(requestGeneration)) return
       target.value = {
         items: items.slice(0, 30),
         loading: false,
@@ -176,6 +286,7 @@ export const useRecommendStore = defineStore('recommend', () => {
       }
       saveCache()
     } catch (e: any) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return
       target.value = {
         items: target.value.items,
         loading: false,
@@ -183,7 +294,7 @@ export const useRecommendStore = defineStore('recommend', () => {
       }
       log.error(`fetchHomeSearchSection(${section}):`, e)
     } finally {
-      isLoading.value = false
+      endLoading(loadingRequest)
     }
   }
 
@@ -201,19 +312,25 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   /** 获取用户歌单 */
-  async function fetchUserPlaylists(platform: string) {
-    isLoading.value = true
+  async function fetchUserPlaylists(platform: string): Promise<boolean> {
+    const requestGeneration = platform === 'netease' ? neteaseRequestGeneration : null
+    const loadingRequest = beginLoading(platform === 'netease' ? 'netease' : undefined)
     try {
       const data = await invoke<any>('get_user_playlists', { platform })
 
       let playlists: PlaylistInfo[] = []
       if (platform === 'netease') {
-        const list = data?.playlist || []
+        if (data?.code != null && Number(data.code) !== 200) {
+          throw new Error(`Netease playlist request failed (${data.code})`)
+        }
+        const list = data?.playlist
+        if (!Array.isArray(list)) throw new Error('Netease playlist response was invalid')
         playlists = list.map((p: any) => ({
           id: p.id,
           name: p.name,
           coverUrl: p.coverImgUrl || '',
           trackCount: p.trackCount || 0,
+          playCount: Number(p.playCount) || 0,
           creator: p.creator?.nickname || '',
         }))
       } else if (platform === 'bilibili') {
@@ -247,18 +364,22 @@ export const useRecommendStore = defineStore('recommend', () => {
         playlists = parseYouTubeLibraryPlaylistsShared(data)
       }
 
+      if (requestGeneration !== null && !isCurrentNeteaseRequest(requestGeneration)) return false
       userPlaylists.value[platform] = playlists
       saveCache()
+      return true
     } catch (e) {
+      if (requestGeneration !== null && !isCurrentNeteaseRequest(requestGeneration)) return false
       log.error(`fetchUserPlaylists(${platform}):`, e)
+      return false
     } finally {
-      isLoading.value = false
+      endLoading(loadingRequest)
     }
   }
 
   /** 获取 YouTube 首页信息流 */
   async function fetchHomeFeed() {
-    isLoading.value = true
+    const loadingRequest = beginLoading()
     try {
       const data = await invoke<any>('get_home_feed')
       homeFeedShelves.value = parseYouTubeHomeFeed(data)
@@ -266,16 +387,20 @@ export const useRecommendStore = defineStore('recommend', () => {
     } catch (e) {
       log.error('fetchHomeFeed:', e)
     } finally {
-      isLoading.value = false
+      endLoading(loadingRequest)
     }
   }
 
   /** 获取精品歌单 */
   async function fetchHighQualityPlaylists(cat?: string, limit = 30) {
-    isLoading.value = true
+    const loadingRequest = beginLoading('netease')
     try {
       const data = await invoke<any>('get_high_quality_playlists', { cat, limit })
-      const list = data?.playlists || []
+      if (Number(data?.code) !== 200) {
+        throw new Error(`Netease high quality playlists request failed with code ${data?.code ?? 'unknown'}`)
+      }
+      const list = data?.playlists
+      if (!Array.isArray(list)) throw new Error('Netease high quality playlists response was invalid')
       return list.map((p: any) => ({
         id: p.id,
         name: p.name,
@@ -286,9 +411,9 @@ export const useRecommendStore = defineStore('recommend', () => {
       }))
     } catch (e) {
       log.error('fetchHighQualityPlaylists:', e)
-      return []
+      throw e
     } finally {
-      isLoading.value = false
+      endLoading(loadingRequest)
     }
   }
 
@@ -305,30 +430,49 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   /** 获取用户喜欢的歌曲 ID 列表 */
-  async function fetchLikedSongIds() {
+  async function fetchLikedSongIds(): Promise<boolean> {
+    const requestGeneration = neteaseRequestGeneration
     try {
       const data = await invoke<any>('get_liked_song_ids')
-      const ids: number[] = data?.ids || []
+      if (!isCurrentNeteaseRequest(requestGeneration)) return false
+      const rawIds = data?.ids ?? data?.data?.ids
+      const responseCode = data?.code
+      if (!Array.isArray(rawIds) || (responseCode != null && Number(responseCode) !== 200)) {
+        likedSongIds.value = new Set()
+        return false
+      }
+      const ids: number[] = rawIds
+        .map((id: unknown) => typeof id === 'number' ? id : Number(id))
+        .filter((id: number) => Number.isSafeInteger(id) && id > 0)
       likedSongIds.value = new Set(ids)
+      return true
     } catch (e) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return false
       log.error('fetchLikedSongIds:', e)
+      likedSongIds.value = new Set()
+      return false
     }
   }
 
   /** 喜欢/取消喜欢歌曲 */
   async function toggleLikeSong(songId: number, like: boolean): Promise<boolean> {
+    const requestGeneration = neteaseRequestGeneration
     try {
       const data = await invoke<any>('like_song', { songId, like })
-      if (data?.code === 200) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return false
+      if (Number(data?.code) === 200) {
         if (like) {
-          likedSongIds.value.add(songId)
+          likedSongIds.value = new Set(likedSongIds.value).add(songId)
         } else {
-          likedSongIds.value.delete(songId)
+          const next = new Set(likedSongIds.value)
+          next.delete(songId)
+          likedSongIds.value = next
         }
         return true
       }
       return false
     } catch (e) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return false
       log.error('toggleLikeSong:', e)
       return false
     }
@@ -345,10 +489,16 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   /** 获取用户收藏的专辑列表（网易云） */
-  async function fetchUserAlbums() {
+  async function fetchUserAlbums(): Promise<boolean> {
+    const requestGeneration = neteaseRequestGeneration
     try {
       const data = await invoke<any>('get_user_stared_albums', {})
-      const list = data?.data || []
+      if (!isCurrentNeteaseRequest(requestGeneration)) return false
+      if (data?.code != null && Number(data.code) !== 200) {
+        throw new Error(`Netease album request failed (${data.code})`)
+      }
+      const list = data?.data
+      if (!Array.isArray(list)) throw new Error('Netease album response was invalid')
       userAlbums.value = list.map((a: any) => ({
         id: a.id,
         name: a.name,
@@ -356,8 +506,11 @@ export const useRecommendStore = defineStore('recommend', () => {
         artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
         trackCount: a.size || 0,
       }))
+      return true
     } catch (e) {
+      if (!isCurrentNeteaseRequest(requestGeneration)) return false
       log.error('fetchUserAlbums:', e)
+      return false
     }
   }
 
@@ -385,7 +538,7 @@ export const useRecommendStore = defineStore('recommend', () => {
     homeFeedShelves, userPlaylists,
     userAlbums, likedSongIds, isLoading, error, isCacheFresh,
     fetchRecommendedPlaylists, fetchRecommendedSongs, fetchUserPlaylists,
-    fetchHomeSearchRecommendations, clearHomeSearchRecommendations,
+    fetchHomeSearchRecommendations, clearHomeSearchRecommendations, clearPlatformCache,
     fetchHomeFeed, fetchHighQualityPlaylists, fetchHighQualityTags,
     fetchLikedSongIds, toggleLikeSong, fetchAlbumDetail, fetchUserAlbums,
     fetchBiliFavoriteItems, validateAuth,

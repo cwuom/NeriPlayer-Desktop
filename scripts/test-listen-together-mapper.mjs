@@ -168,4 +168,65 @@ assert.equal(
   assert.equal(resolvedIndex, 1)
 }
 
+{
+  const tracks = [
+    {
+      id: 'netease:1',
+      title: 'A',
+      artist: 'a',
+      album: '',
+      durationMs: 1,
+      coverUrl: '',
+      audioUrl: '',
+    },
+    {
+      id: 'netease:2',
+      title: 'B',
+      artist: 'b',
+      album: '',
+      durationMs: 1,
+      coverUrl: '',
+      audioUrl: '',
+    },
+  ]
+  const streamUrl = 'https://music.126.net/current.mp3'
+  const shared = toShareableQueueSnapshot(tracks, 1, true, streamUrl)
+
+  assert.equal(shared.queue[0].streamUrl, undefined)
+  assert.equal(shared.queue[1].streamUrl, streamUrl)
+
+  const privateSnapshot = toShareableQueueSnapshot(tracks, 1, false, streamUrl)
+  assert.equal(privateSnapshot.queue[0].streamUrl, undefined)
+  assert.equal(privateSnapshot.queue[1].streamUrl, undefined)
+}
+
+{
+  const duplicateTracks = [
+    {
+      id: 'netease:duplicate',
+      title: 'First copy',
+      artist: 'a',
+      album: '',
+      durationMs: 1,
+      coverUrl: '',
+      audioUrl: '',
+    },
+    {
+      id: 'netease:duplicate',
+      title: 'Second copy',
+      artist: 'b',
+      album: '',
+      durationMs: 2,
+      coverUrl: '',
+      audioUrl: '',
+    },
+  ]
+  const streamUrl = 'https://music.126.net/duplicate-current.mp3'
+  const shared = toShareableQueueSnapshot(duplicateTracks, 1, true, streamUrl)
+
+  assert.equal(shared.resolvedIndex, 1)
+  assert.equal(shared.queue[0].streamUrl, undefined)
+  assert.equal(shared.queue[1].streamUrl, streamUrl)
+}
+
 console.log('test-listen-together-mapper: ok')

@@ -19,6 +19,7 @@ import {
   playbackCacheReadCandidates,
   playbackCacheWriteOptions,
   playbackPrefetchCacheId,
+  playbackSourceCandidates,
   playbackUrlResolver,
   resolvePlaybackResult,
   type PlaybackAudioSource,
@@ -314,6 +315,7 @@ export const usePlayerStore = defineStore('player', () => {
   const settings = useSettingsStore()
   const isPlaying = ref(false)
   const currentTrack = ref<TrackInfo | null>(null)
+  const currentResolvedStreamUrl = ref<string | null>(null)
   const positionMs = ref(0)
   const durationMs = ref(0)
   const queue = ref<TrackInfo[]>([])
@@ -598,6 +600,7 @@ export const usePlayerStore = defineStore('player', () => {
       qqMusicQuality: settings.qqMusicQuality,
       biliQuality: settings.biliQuality,
       youtubeQuality: settings.youtubeQuality,
+      neteaseAutoSourceSwitch: settings.neteaseAutoSourceSwitch,
     }
   }
 
@@ -681,6 +684,26 @@ export const usePlayerStore = defineStore('player', () => {
       qualityOverride,
       requestGeneration: playbackRequestToken,
     })
+  }
+
+  async function resolveCurrentStreamUrl(): Promise<string | null> {
+    const track = currentTrack.value
+    const requestToken = playbackRequestToken
+    const existingUrl = currentResolvedStreamUrl.value?.trim()
+    if (existingUrl && /^https?:\/\//i.test(existingUrl)) return existingUrl
+    if (!track || !isRemotePlaybackTrack(track)) return null
+
+    try {
+      const resolution = await resolvePlaybackUrl(track)
+      if (requestToken !== playbackRequestToken || currentTrack.value !== track) return null
+      if (resolution.type !== 'success') return null
+      const streamUrl = resolution.url?.trim()
+      if (!streamUrl || !/^https?:\/\//i.test(streamUrl)) return null
+      currentResolvedStreamUrl.value = streamUrl
+      return streamUrl
+    } catch {
+      return null
+    }
   }
 
   function takePrefetchedPlaybackUrl(track: TrackInfo): ResolvedPlaybackSource | null {
@@ -977,6 +1000,7 @@ export const usePlayerStore = defineStore('player', () => {
     initEvents()
     markCommandSource(commandSource)
     const token = ++playbackRequestToken
+    currentResolvedStreamUrl.value = null
     const requestStarted = performance.now()
     tracePlaybackUi(
       'store_play_enter',
@@ -1270,17 +1294,20 @@ export const usePlayerStore = defineStore('player', () => {
 
           const playResolvedSource = async (resolved: ResolvedPlaybackSource) => {
             let lastError: unknown = null
-            const candidates = [resolved.url, ...resolved.candidateUrls]
-              .filter((url, index, values) => values.indexOf(url) === index)
-            for (const [candidateIndex, candidateUrl] of candidates.entries()) {
-              if (token !== playbackRequestToken) return 0
-              const candidateStarted = performance.now()
-              try {
-                const cacheWrite = playbackCacheWriteOptions(
-                  resolved,
-                  candidateIndex,
-                  candidateUrl,
-                )
+            for (const sourceCandidate of playbackSourceCandidates(resolved)) {
+              const candidates = [sourceCandidate.url, ...sourceCandidate.candidateUrls]
+                .filter((url, index, values) => values.indexOf(url) === index)
+              for (const [candidateIndex, candidateUrl] of candidates.entries()) {
+                if (token !== playbackRequestToken) {
+                  return { duration: 0, resolved: sourceCandidate, streamUrl: null }
+                }
+                const candidateStarted = performance.now()
+                try {
+                  const cacheWrite = playbackCacheWriteOptions(
+                    sourceCandidate,
+                    candidateIndex,
+                    candidateUrl,
+                  )
                   const startPlan = currentLoadStartPlan()
                   tracePlaybackUi(
                     'backend_stream_start',
@@ -1289,15 +1316,15 @@ export const usePlayerStore = defineStore('player', () => {
                     token,
                   )
                   const duration = await playRemoteUrl(
-                  candidateUrl,
-                  track.durationMs,
-                  startPlan.useCrossfade,
-                  transitionFadeOutMs,
-                  transitionFadeInMs,
-                  token,
-                  startPlan.positionMs,
-                  cacheWrite.cacheKey,
-                  cacheWrite.expectedContentLength,
+                    candidateUrl,
+                    track.durationMs,
+                    startPlan.useCrossfade,
+                    transitionFadeOutMs,
+                    transitionFadeInMs,
+                    token,
+                    startPlan.positionMs,
+                    cacheWrite.cacheKey,
+                    cacheWrite.expectedContentLength,
                   )
                   markLoadStartApplied(startPlan)
                   tracePlaybackUi(
@@ -1306,15 +1333,16 @@ export const usePlayerStore = defineStore('player', () => {
                     `candidate=${candidateIndex}, durationMs=${duration}, candidateMs=${Math.round(performance.now() - candidateStarted)}, elapsedMs=${Math.round(performance.now() - requestStarted)}`,
                     token,
                   )
-                  return duration
-              } catch (error) {
-                lastError = error
-                tracePlaybackUi(
-                  'backend_stream_failed',
-                  track,
-                  `candidate=${candidateIndex}, candidateMs=${Math.round(performance.now() - candidateStarted)}, elapsedMs=${Math.round(performance.now() - requestStarted)}, error=${summarizeLogError(error)}`,
-                  token,
-                )
+                  return { duration, resolved: sourceCandidate, streamUrl: candidateUrl }
+                } catch (error) {
+                  lastError = error
+                  tracePlaybackUi(
+                    'backend_stream_failed',
+                    track,
+                    `candidate=${candidateIndex}, candidateMs=${Math.round(performance.now() - candidateStarted)}, elapsedMs=${Math.round(performance.now() - requestStarted)}, error=${summarizeLogError(error)}`,
+                    token,
+                  )
+                }
               }
             }
             throw lastError instanceof Error
@@ -1323,7 +1351,11 @@ export const usePlayerStore = defineStore('player', () => {
           }
 
           try {
-            dur = await playResolvedSource(result)
+            const played = await playResolvedSource(result)
+            if (token !== playbackRequestToken) return
+            currentResolvedStreamUrl.value = played.streamUrl
+            dur = played.duration
+            result = played.resolved
           } catch (firstError) {
             if (token !== playbackRequestToken) return
             playbackUrlResolver.invalidate(track, playbackSourceSettings())
@@ -1333,8 +1365,11 @@ export const usePlayerStore = defineStore('player', () => {
               getPlaybackSourceKind(track) === 'youtube' ? 'high' : undefined,
             )
             if (refreshed.type !== 'success') throw firstError
-            result = refreshed
-            dur = await playResolvedSource(result)
+            const played = await playResolvedSource(refreshed)
+            if (token !== playbackRequestToken) return
+            currentResolvedStreamUrl.value = played.streamUrl
+            dur = played.duration
+            result = played.resolved
           }
           if (token !== playbackRequestToken) return
           {
@@ -1497,6 +1532,8 @@ export const usePlayerStore = defineStore('player', () => {
       if (token !== playbackRequestToken) return // 竞态过期请求，静默忽略
 
       playbackStartupWatchdog.cancel()
+      ++playbackRequestToken
+      currentResolvedStreamUrl.value = null
 
       if (deferredPlaybackSeek?.requestGeneration === token) {
         deferredPlaybackSeek = null
@@ -1780,12 +1817,16 @@ export const usePlayerStore = defineStore('player', () => {
     // 睡眠定时器
     const isLast = !shuffleEnabled.value && queueIndex.value >= queue.value.length - 1
     if (sleepTimerMode.value === 'end_of_track') {
+      ++playbackRequestToken
+      currentResolvedStreamUrl.value = null
       await pause()
       cancelSleepTimer()
       return
     }
     if (sleepTimerMode.value === 'end_of_queue') {
       if (isLast && repeatMode.value !== 'all') {
+        ++playbackRequestToken
+        currentResolvedStreamUrl.value = null
         await pause()
         cancelSleepTimer()
         return
@@ -1806,6 +1847,8 @@ export const usePlayerStore = defineStore('player', () => {
         await next(false)
       } else {
         // 停止播放但保留队列（对齐 Android stopPlaybackPreservingQueue）
+        ++playbackRequestToken
+        currentResolvedStreamUrl.value = null
         await pause()
         positionMs.value = 0
       }
@@ -2204,8 +2247,10 @@ export const usePlayerStore = defineStore('player', () => {
 
     queue.value.splice(index, 1)
     if (queue.value.length === 0) {
+      ++playbackRequestToken
       queueIndex.value = -1
       currentTrack.value = null
+      currentResolvedStreamUrl.value = null
       shuffleBag = []
       shuffleHistory = []
       shuffleFuture = []
@@ -2219,15 +2264,19 @@ export const usePlayerStore = defineStore('player', () => {
       // 被删除的是当前曲目，索引保持（指向下一首），但不超界
       queueIndex.value = Math.min(queueIndex.value, queue.value.length - 1)
       // 同步 currentTrack 到新索引指向的曲目
+      ++playbackRequestToken
       currentTrack.value = queue.value[queueIndex.value]
+      currentResolvedStreamUrl.value = null
     }
     savePlayerState()
   }
 
   // 清空队列
   function clearQueue() {
+    ++playbackRequestToken
     queue.value = []
     queueIndex.value = -1
+    currentResolvedStreamUrl.value = null
     shuffleBag = []
     shuffleHistory = []
     shuffleFuture = []
@@ -2307,7 +2356,7 @@ export const usePlayerStore = defineStore('player', () => {
   void applyPersistedSettings()
 
   return {
-    isPlaying, currentTrack, positionMs, durationMs, queue, queueIndex,
+    isPlaying, currentTrack, currentResolvedStreamUrl, positionMs, durationMs, queue, queueIndex,
     repeatMode, shuffleEnabled, volume, lyrics, playError, isLoadingAudio,
     hasPlaybackSession,
     audioLevel, beatImpulse, audioInfo, isPlayingFromDownload, isPlayingFromCache,
@@ -2317,6 +2366,7 @@ export const usePlayerStore = defineStore('player', () => {
     progress, interpolatedPositionMs, interpolatedProgress,
     currentTimeFormatted, durationFormatted,
     play, togglePlayPause, pause, resume, seekTo, next, previous,
+    resolveCurrentStreamUrl,
     flushPlayerState,
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode, playMode, setVolume, setSpeed,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,

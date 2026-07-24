@@ -232,10 +232,14 @@ export const useDownloadStore = defineStore('download', () => {
       if (track.id.startsWith('netease:')) {
         const settings = useSettingsStore()
         const songId = parseInt(track.id.replace('netease:', ''))
-        const result = await invoke<{ url: string | null }>('get_netease_song_url', {
+        const result = await invoke<{
+          url: string | null
+          is_preview?: boolean
+        }>('get_netease_song_download_url', {
           songId,
           quality: settings.neteaseQuality,
         })
+        if (result.is_preview) throw new Error('Netease download URL is preview-only')
         if (!result.url) throw new Error('No URL')
         audioUrl = result.url
       } else if (track.id.startsWith('qq:')) {

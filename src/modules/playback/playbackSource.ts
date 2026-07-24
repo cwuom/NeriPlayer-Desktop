@@ -9,6 +9,7 @@ export interface PlaybackSourceSettings {
   qqMusicQuality: string
   biliQuality: string
   youtubeQuality: string
+  neteaseAutoSourceSwitch: boolean
 }
 
 export interface PlaybackQualityOption {
@@ -43,11 +44,26 @@ export interface ResolvedPlaybackSource {
   cacheKey: string
   source: PlaybackSourceKind
   qualityKey: string
+  fallbackSources?: ResolvedPlaybackSource[]
 
   // 兼容现有播放状态和设置页展示字段
   bitrate?: number
   codec?: string
   format?: string
+}
+
+interface BilibiliFallbackSearchResult {
+  id: string
+  title: string
+  artist: string
+  duration_ms: number
+  source: string
+}
+
+interface BilibiliVideoPage {
+  cid: number
+  title: string
+  duration_seconds: number
 }
 
 export type PlaybackResolution =
@@ -214,18 +230,31 @@ export function playbackCacheReadCandidates(
   const qualities = adapter.kind === 'netease'
     ? neteaseQualityFallbacks(preferred)
     : [preferred]
-  return qualities.map(qualityKey => ({
+  const candidates = qualities.map(qualityKey => ({
     cacheKey: stablePlaybackCacheKey(track, adapter.kind, qualityKey),
     source: adapter.kind,
     qualityKey,
   }))
+  if (adapter.kind === 'netease' && settings.neteaseAutoSourceSwitch !== false) {
+    const biliQuality = settings.biliQuality.trim().toLowerCase() || 'high'
+    candidates.push({
+      cacheKey: neteaseAutoSourceCacheKey(track, biliQuality),
+      source: 'bilibili',
+      qualityKey: biliQuality,
+    })
+  }
+  return candidates
 }
 
 export function playbackPrefetchCacheId(
   track: TrackInfo,
   settings: PlaybackSourceSettings,
 ): string {
-  return playbackQualityCachePrefix(track, settings) ?? track.id
+  const sourceCacheId = playbackQualityCachePrefix(track, settings) ?? track.id
+  if (getPlaybackSourceKind(track) !== 'netease') return sourceCacheId
+  const autoSourceSwitch = settings.neteaseAutoSourceSwitch !== false ? 'on' : 'off'
+  const biliQuality = settings.biliQuality.trim().toLowerCase() || 'high'
+  return `${sourceCacheId}|auto-source:${autoSourceSwitch}|bili:${biliQuality}`
 }
 
 export class PlaybackUrlResolver {
@@ -254,13 +283,14 @@ export class PlaybackUrlResolver {
       adapter.kind,
       options.qualityOverride,
     )
-    const cacheKey = playbackPrefetchCacheId(track, resolvedSettings)
+    const resolutionCacheKey = playbackPrefetchCacheId(track, resolvedSettings)
+    const sourceCacheKey = playbackQualityCachePrefix(track, resolvedSettings) ?? track.id
 
     if (!options.forceRefresh && isDirectStreamUrl(track.audioUrl)) {
       return createSuccess(track, adapter.kind, resolvedSettings, {
         url: track.audioUrl.trim(),
         qualityKey: adapter.qualityKey(resolvedSettings),
-        cacheKey,
+        cacheKey: sourceCacheKey,
         audioInfo: createAudioInfo(
           adapter.kind,
           adapter.qualityKey(resolvedSettings),
@@ -272,12 +302,12 @@ export class PlaybackUrlResolver {
     }
 
     if (!options.forceRefresh) {
-      const cached = this.cache.get(cacheKey)
+      const cached = this.cache.get(resolutionCacheKey)
       if (cached) {
         if (cached.expiresAt > Date.now()) return cached.result
-        this.cache.delete(cacheKey)
+        this.cache.delete(resolutionCacheKey)
       }
-      const existing = this.inFlight.get(cacheKey)
+      const existing = this.inFlight.get(resolutionCacheKey)
       if (existing) return existing
     }
 
@@ -290,7 +320,7 @@ export class PlaybackUrlResolver {
       .catch(error => classifyPlaybackError(error))
       .then(result => {
         if (result.type === 'success') {
-          this.cache.set(cacheKey, {
+          this.cache.set(resolutionCacheKey, {
             result,
             expiresAt: Date.now() + RESOLUTION_TTL_MS,
           })
@@ -298,10 +328,12 @@ export class PlaybackUrlResolver {
         return result
       })
       .finally(() => {
-        if (this.inFlight.get(cacheKey) === pending) this.inFlight.delete(cacheKey)
+        if (this.inFlight.get(resolutionCacheKey) === pending) {
+          this.inFlight.delete(resolutionCacheKey)
+        }
       })
 
-    this.inFlight.set(cacheKey, pending)
+    this.inFlight.set(resolutionCacheKey, pending)
     return pending
   }
 
@@ -348,6 +380,23 @@ export function playbackCacheWriteOptions(
     cacheKey: primaryCacheKey,
     expectedContentLength: resolved.expectedContentLength,
   }
+}
+
+const MAX_PLAYBACK_SOURCE_CANDIDATES = 3
+
+export function playbackSourceCandidates(
+  resolved: ResolvedPlaybackSource,
+): ResolvedPlaybackSource[] {
+  const candidates = [resolved, ...(resolved.fallbackSources ?? [])]
+  const seen = new Set<string>()
+  return candidates
+    .filter(candidate => {
+      const key = candidate.cacheKey
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, MAX_PLAYBACK_SOURCE_CANDIDATES)
 }
 
 function settingsWithQualityOverride(
@@ -501,6 +550,214 @@ function createAudioInfo(
   }
 }
 
+const BILIBILI_AUTO_SOURCE_SCORE_THRESHOLD = 70
+const BILIBILI_AUTO_SOURCE_SEARCH_LIMIT = 6
+const BILIBILI_AUTO_SOURCE_CANDIDATE_LIMIT = MAX_PLAYBACK_SOURCE_CANDIDATES
+
+export function shouldAutoSwitchNeteaseSource(
+  enabled: boolean,
+  hasPreview: boolean,
+  unavailableReason: 'no_permission' | 'no_play_url' | 'unknown' | null,
+): boolean {
+  return enabled && (
+    hasPreview
+    || unavailableReason === 'no_permission'
+    || unavailableReason === 'no_play_url'
+  )
+}
+
+function neteaseAutoSourceCacheKey(track: TrackInfo, biliQuality: string): string {
+  const quality = biliQuality.trim().toLowerCase() || 'high'
+  return `bili-auto-${trackValue(track, 'netease')}-${quality}`
+}
+
+function normalizeAutoSourceText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+}
+
+function autoSourceTokens(value: string): string[] {
+  return normalizeAutoSourceText(value)
+    .split(/\s+/)
+    .filter(token => token.length > 0)
+}
+
+function autoSourceTitleScore(trackTitle: string, candidateTitle: string): number {
+  const title = normalizeAutoSourceText(trackTitle)
+  const normalizedCandidateTitle = normalizeAutoSourceText(candidateTitle)
+  if (title && normalizedCandidateTitle.includes(title)) return 55
+
+  const titleTokens = autoSourceTokens(trackTitle)
+  if (titleTokens.length === 0) return 0
+  const matchedTokens = titleTokens.filter(token => normalizedCandidateTitle.includes(token)).length
+  if (matchedTokens === titleTokens.length) return 35
+  return matchedTokens > 0 ? 18 : 0
+}
+
+export function scoreBilibiliAutoSource(
+  track: Pick<TrackInfo, 'title' | 'artist' | 'durationMs'>,
+  candidate: Pick<BilibiliFallbackSearchResult, 'title' | 'artist' | 'duration_ms'>,
+): number {
+  const candidateText = normalizeAutoSourceText(`${candidate.title} ${candidate.artist}`)
+  let score = autoSourceTitleScore(track.title, candidate.title)
+
+  if (score === 0) {
+    const titleTokens = autoSourceTokens(track.title)
+    const matchedTokens = titleTokens.filter(token => candidateText.includes(token)).length
+    if (matchedTokens === titleTokens.length && matchedTokens > 0) score += 35
+    else if (matchedTokens > 0) score += 18
+  }
+
+  const artistTokens = autoSourceTokens(track.artist)
+  if (artistTokens.some(token => candidateText.includes(token))) score += 25
+
+  const targetDuration = Math.max(0, track.durationMs || 0)
+  const candidateDuration = Math.max(0, candidate.duration_ms || 0)
+  if (targetDuration > 0 && candidateDuration > 0) {
+    const difference = Math.abs(targetDuration - candidateDuration)
+    if (difference <= 8_000) score += 30
+    else if (difference <= 20_000) score += 22
+    else if (difference <= 45_000) score += 12
+    if (candidateDuration > targetDuration * 2) score -= 15
+  }
+
+  return score
+}
+
+function selectBilibiliAutoSourcePage(
+  track: Pick<TrackInfo, 'title' | 'artist' | 'durationMs'>,
+  candidate: BilibiliFallbackSearchResult,
+  pages: BilibiliVideoPage[],
+): { page: BilibiliVideoPage; score: number } | null {
+  const candidateScore = scoreBilibiliAutoSource(track, candidate)
+  let best: { page: BilibiliVideoPage; score: number } | null = null
+
+  for (const page of pages) {
+    if (!Number.isSafeInteger(page.cid) || page.cid <= 0) continue
+    const durationSeconds = Number.isFinite(page.duration_seconds)
+      ? Math.max(0, page.duration_seconds)
+      : 0
+    const pageScore = scoreBilibiliAutoSource(track, {
+      title: page.title || '',
+      artist: candidate.artist,
+      duration_ms: durationSeconds * 1_000,
+    })
+    if (pages.length > 1 && autoSourceTitleScore(track.title, page.title || '') < 35) continue
+    const score = candidateScore + pageScore
+    if (!best || score > best.score) best = { page, score }
+  }
+
+  return best
+}
+
+function bilibiliAutoSourceQueries(track: TrackInfo): string[] {
+  const suffix = '\u65e0\u635f'
+  return [
+    `${track.title} ${track.artist} ${suffix}`,
+    `${track.artist} ${track.title} ${suffix}`,
+    `${track.title} ${suffix}`,
+  ]
+    .map(query => query.replace(/\s+/g, ' ').trim())
+    .filter((query, index, values) => query && values.indexOf(query) === index)
+}
+
+async function resolveNeteaseAutoBilibiliSource(
+  track: TrackInfo,
+  settings: PlaybackSourceSettings,
+  options: PlaybackResolveOptions,
+): Promise<ResolvedPlaybackSource | null> {
+  const ranked = new Map<string, {
+    candidate: BilibiliFallbackSearchResult
+    score: number
+  }>()
+
+  for (const query of bilibiliAutoSourceQueries(track)) {
+    let results: BilibiliFallbackSearchResult[]
+    try {
+      results = await invoke<BilibiliFallbackSearchResult[]>('search', {
+        query,
+        platform: 'bilibili',
+        includeLyrics: false,
+      })
+    } catch {
+      continue
+    }
+
+    for (const candidate of results.slice(0, BILIBILI_AUTO_SOURCE_SEARCH_LIMIT)) {
+      if (!candidate.id.toLowerCase().startsWith('bilibili:')) continue
+      const score = scoreBilibiliAutoSource(track, candidate)
+      const current = ranked.get(candidate.id)
+      if (!current || score > current.score) ranked.set(candidate.id, { candidate, score })
+    }
+  }
+
+  const candidates = [...ranked.values()]
+    .sort((left, right) => right.score - left.score)
+
+  const pageMatches: Array<{
+    candidate: BilibiliFallbackSearchResult
+    page: BilibiliVideoPage
+    score: number
+  }> = []
+  for (const { candidate } of candidates) {
+    const bvid = candidate.id.replace(/^bilibili:/i, '')
+    if (!bvid) continue
+    try {
+      const pages = await invoke<BilibiliVideoPage[]>('get_bili_video_pages', { bvid })
+      const match = selectBilibiliAutoSourcePage(track, candidate, pages)
+      if (!match || match.score < BILIBILI_AUTO_SOURCE_SCORE_THRESHOLD) continue
+      pageMatches.push({ candidate, ...match })
+    } catch {
+      continue
+    }
+  }
+  pageMatches.sort((left, right) => right.score - left.score)
+
+  const resolvedCandidates: ResolvedPlaybackSource[] = []
+  const neteaseId = trackValue(track, 'netease')
+  const quality = settings.biliQuality.trim().toLowerCase() || 'high'
+  for (const { candidate, page } of pageMatches) {
+    if (resolvedCandidates.length >= BILIBILI_AUTO_SOURCE_CANDIDATE_LIMIT) break
+    const bvid = candidate.id.replace(/^bilibili:/i, '')
+    const biliTrack: TrackInfo = {
+      ...track,
+      id: `bilibili:${bvid}`,
+      source: 'bilibili',
+      album: `Bilibili|${page.cid}`,
+      audioUrl: '',
+      syncPayload: undefined,
+    }
+    try {
+      const resolved = await resolveBilibili(biliTrack, settings, options)
+      if (!resolved) continue
+      const cacheKey = `bili-auto-${neteaseId}-${bvid}-${page.cid}-${quality}`
+      const autoSourceCacheKey = neteaseAutoSourceCacheKey(track, quality)
+      resolvedCandidates.push({
+        ...resolved,
+        durationMs: page.duration_seconds > 0
+          ? page.duration_seconds * 1_000
+          : resolved.durationMs,
+        cacheKey,
+        cacheKeyOverride: autoSourceCacheKey,
+        fallbackSources: undefined,
+      })
+    } catch {
+      continue
+    }
+  }
+
+  const primary = resolvedCandidates[0]
+  if (!primary) return null
+  return {
+    ...primary,
+    fallbackSources: resolvedCandidates.slice(1),
+  }
+}
+
 function resolveNetease(
   track: TrackInfo,
   settings: PlaybackSourceSettings,
@@ -511,6 +768,7 @@ function resolveNetease(
   const qualities = neteaseQualityFallbacks(preferred)
   let lastError: unknown = null
   let previewFallback: ResolvedPlaybackSource | null = null
+  let lastUnavailableReason: 'no_permission' | 'no_play_url' | 'unknown' | null = null
   const requestGeneration = options.requestGeneration
 
   return (async () => {
@@ -527,6 +785,10 @@ function resolveNetease(
           'get_netease_song_url',
           { songId, quality, requestGeneration },
         )
+        lastError = null
+        lastUnavailableReason = result.unavailable_reason === 'requires_login'
+          ? null
+          : result.unavailable_reason ?? null
         if (result.unavailable_reason === 'requires_login') {
           throw new Error('Playback requires login')
         }
@@ -563,8 +825,18 @@ function resolveNetease(
         if (/requires login/i.test(error instanceof Error ? error.message : String(error))) {
           throw error
         }
+        lastUnavailableReason = null
         lastError = error
       }
+    }
+    const shouldTryAutoSource = shouldAutoSwitchNeteaseSource(
+      settings.neteaseAutoSourceSwitch !== false,
+      previewFallback !== null,
+      lastUnavailableReason,
+    )
+    if (shouldTryAutoSource) {
+      const fallback = await resolveNeteaseAutoBilibiliSource(track, settings, options)
+      if (fallback) return fallback
     }
     if (previewFallback) return previewFallback
     if (lastError) throw lastError

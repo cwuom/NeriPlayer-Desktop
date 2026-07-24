@@ -455,12 +455,13 @@ export const useSyncStore = defineStore('sync', () => {
         localStorage.removeItem('neri:lt-uuid')
       }
       if (result.settings?.locale) setLocale(result.settings.locale, false)
-      await auth.checkStatus()
+      await auth.reconcileStatus()
       await loadConfigs()
       toast.success(t('settings.import_config_success'))
       return result
     } catch (e: any) {
       toast.error(e?.toString() || t('settings.import_config_failed'))
+      await auth.reconcileStatus()
       return { success: false }
     }
   }

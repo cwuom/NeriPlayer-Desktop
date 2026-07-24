@@ -177,6 +177,7 @@ let debounceSyncTimer: ReturnType<typeof setTimeout> | null = null
 let historyBatchedTimer: ReturnType<typeof setTimeout> | null = null
 let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
+let unlistenFavoritePlaylistsChanged: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
 
 function handleBeforeUnload() {
@@ -305,9 +306,20 @@ onMounted(async () => {
   void syncStore.syncAuto(true)
 
   // 监听后端 playlists-changed 事件，防抖触发自动同步
-  unlistenPlaylistChanged = await listen('playlists-changed', () => {
-    scheduleDebouncedSync()
-  })
+  try {
+    unlistenPlaylistChanged = await listen('playlists-changed', () => {
+      scheduleDebouncedSync()
+    })
+  } catch {
+    // Browser preview has no Tauri event bridge.
+  }
+  try {
+    unlistenFavoritePlaylistsChanged = await listen('favorite-playlists-changed', () => {
+      scheduleDebouncedSync()
+    })
+  } catch {
+    // Browser preview has no Tauri event bridge.
+  }
 
   // 监听前端播放历史变更事件，触发历史自动同步
   window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
@@ -325,6 +337,7 @@ onUnmounted(() => {
   likedSongs.stop()
   window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
+  if (unlistenFavoritePlaylistsChanged) unlistenFavoritePlaylistsChanged()
   if (unlistenCloseRequested) unlistenCloseRequested()
 })
 </script>

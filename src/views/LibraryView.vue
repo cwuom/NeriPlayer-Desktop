@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { RouterLink, useRouter, useRoute } from 'vue-router'
 
 defineOptions({ name: 'LibraryView' })
 import { useI18n } from 'vue-i18n'
@@ -23,6 +23,21 @@ import {
   type ContextMenuItem,
 } from '@/utils/contextMenu'
 import { createLogger } from '@/utils/logger'
+import {
+  buildLibraryQuery,
+  isCanonicalLibraryLocation,
+  resolveLibraryLocation,
+  type LibraryTabKey,
+  type NeteaseLibraryCategory,
+} from '@/modules/library/libraryRoute'
+import { filterNeteaseAlbums, filterNeteasePlaylists } from '@/modules/library/neteaseLibraryFilter'
+import { NeteaseLibraryRequestCoordinator } from '@/modules/library/neteaseLibraryRequest'
+import {
+  favoritePlaylistKey,
+  favoritePlaylistLocation,
+  normalizeFavoritePlaylist,
+  type FavoritePlaylist,
+} from '@/modules/library/favoritePlaylists'
 
 const log = createLogger('library-view')
 
@@ -39,26 +54,95 @@ const toast = useToastStore()
 // 喜欢的歌曲计数
 const likedCount = computed(() => recommend.likedSongIds.size)
 
-const tabs = computed(() => [
+interface LibraryTabDefinition {
+  label: string
+  icon: string
+  key: LibraryTabKey
+}
+
+interface NeteaseCategoryDefinition {
+  label: string
+  key: NeteaseLibraryCategory
+}
+
+const tabs = computed<LibraryTabDefinition[]>(() => [
   { label: t('library.tab_local'), icon: 'folder_open', key: 'local' },
   { label: t('library.tab_favorites'), icon: 'favorite', key: 'favorites' },
   { label: t('library.tab_downloads'), icon: 'download', key: 'downloads' },
-  { label: t('library.tab_netease_playlists'), icon: 'queue_music', key: 'netease_playlists' },
-  { label: t('library.bilibili_favorites'), icon: 'video_library', key: 'bilibili_favorites' },
-  { label: 'YouTube Music', icon: 'subscriptions', key: 'youtube_playlists' },
-  { label: t('library.tab_netease_albums'), icon: 'album', key: 'netease_albums' },
+  { label: t('library.tab_netease'), icon: 'cloud', key: 'netease' },
 ])
-// 根据路由 query 参数设置初始标签
-const tabKeyToIndex: Record<string, number> = { local: 0, favorites: 1, downloads: 2, netease_playlists: 3, bilibili_favorites: 4, youtube_playlists: 5, netease_albums: 6 }
-const initialTab = typeof route.query.tab === 'string' ? (tabKeyToIndex[route.query.tab] ?? 0) : 0
-const activeTab = ref(initialTab)
+
+const neteaseCategories = computed<NeteaseCategoryDefinition[]>(() => [
+  { label: t('library.netease_category_playlists'), key: 'playlists' },
+  { label: t('library.netease_category_albums'), key: 'albums' },
+])
+
+const initialLocation = resolveLibraryLocation(route.query.tab, route.query.category)
+const activeTab = ref<LibraryTabKey>(initialLocation.tab)
+const neteaseCategory = ref<NeteaseLibraryCategory>(initialLocation.category)
+
+function writeLibraryLocation(location: { tab: LibraryTabKey; category: NeteaseLibraryCategory }) {
+  activeTab.value = location.tab
+  neteaseCategory.value = location.category
+
+  const { tab: _tab, category: _category, ...unrelatedQuery } = route.query
+  void router.replace({
+    query: {
+      ...unrelatedQuery,
+      ...buildLibraryQuery(location),
+    },
+  })
+}
+
+function activateTab(tab: LibraryTabKey) {
+  writeLibraryLocation({ tab, category: neteaseCategory.value })
+}
+
+function activateNeteaseCategory(category: NeteaseLibraryCategory) {
+  writeLibraryLocation({ tab: 'netease', category })
+}
+
+function handleNeteaseCategoryKeydown(event: KeyboardEvent, current: NeteaseLibraryCategory) {
+  let nextCategory: NeteaseLibraryCategory
+
+  switch (event.key) {
+    case 'ArrowRight':
+    case 'ArrowDown':
+      nextCategory = current === 'playlists' ? 'albums' : 'playlists'
+      break
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      nextCategory = current === 'albums' ? 'playlists' : 'albums'
+      break
+    case 'Home':
+      nextCategory = 'playlists'
+      break
+    case 'End':
+      nextCategory = 'albums'
+      break
+    default:
+      return
+  }
+
+  event.preventDefault()
+  activateNeteaseCategory(nextCategory)
+  nextTick(() => document.getElementById(`netease-category-${nextCategory}`)?.focus())
+}
 
 // 监听路由 query 变化（同页面内导航）
-watch(() => route.query.tab, (tab) => {
-  if (typeof tab === 'string' && tab in tabKeyToIndex) {
-    activeTab.value = tabKeyToIndex[tab]
-  }
-})
+watch(
+  () => [route.query.tab, route.query.category] as const,
+  ([tab, category]) => {
+    const location = resolveLibraryLocation(tab, category)
+    activeTab.value = location.tab
+    if (location.tab === 'netease') {
+      neteaseCategory.value = location.category
+    }
+
+    if (!isCanonicalLibraryLocation(tab, category)) writeLibraryLocation(location)
+  },
+  { immediate: true },
+)
 
 // 真实播放列表
 interface PlaylistInfo { id: number; name: string; track_count: number; modified_at: number; cover_url: string | null }
@@ -67,6 +151,10 @@ const playlists = ref<PlaylistInfo[]>([])
 // 多选模式
 const isMultiSelectMode = ref(false)
 const selectedPlaylists = ref<Set<number>>(new Set())
+
+watch(activeTab, (tab) => {
+  if (tab !== 'local' && isMultiSelectMode.value) exitMultiSelect()
+})
 
 function enterMultiSelect() {
   isMultiSelectMode.value = true
@@ -439,41 +527,72 @@ async function confirmDeleteSelected() {
   }
 }
 
-// 网易云用户歌单
-const neteasePlaylists = computed(() => recommend.userPlaylists['netease'] || [])
-// 哔哩哔哩收藏夹
-const biliPlaylists = computed(() => recommend.userPlaylists['bilibili'] || [])
-// YouTube Music 资料库歌单
-const youtubePlaylists = computed(() => recommend.userPlaylists['youtube'] || [])
-
 // 收藏歌单（从同步数据中获取）
-interface FavoritePlaylist {
-  id: string; name: string; coverUrl: string; trackCount: number; source: string;
-  songs: any[]; addedTime: number; modifiedAt: number; isDeleted: boolean;
+// 网易云用户歌单及收藏专辑
+const neteasePlaylists = computed(() => recommend.userPlaylists['netease'] || [])
+const neteasePlaylistSearchQuery = ref('')
+const neteaseAlbumSearchQuery = ref('')
+const neteaseFilteredPlaylists = computed(() => filterNeteasePlaylists(neteasePlaylists.value, neteasePlaylistSearchQuery.value))
+const neteaseFilteredAlbums = computed(() => filterNeteaseAlbums(recommend.userAlbums, neteaseAlbumSearchQuery.value))
+const activeNeteaseSearchQuery = computed({
+  get: () => neteaseCategory.value === 'playlists' ? neteasePlaylistSearchQuery.value : neteaseAlbumSearchQuery.value,
+  set: (value: string) => {
+    if (neteaseCategory.value === 'playlists') neteasePlaylistSearchQuery.value = value
+    else neteaseAlbumSearchQuery.value = value
+  },
+})
+const neteasePlaylistLoading = ref(false)
+const neteaseAlbumLoading = ref(false)
+const neteasePlaylistError = ref<string | null>(null)
+const neteaseAlbumError = ref<string | null>(null)
+const neteaseLibraryRequestCoordinator = new NeteaseLibraryRequestCoordinator()
+
+async function loadNeteaseLibrary() {
+  if (!auth.netease.loggedIn) return
+
+  const request = neteaseLibraryRequestCoordinator.run(
+    () => recommend.fetchUserPlaylists('netease'),
+    () => recommend.fetchUserAlbums(),
+  )
+  if (!request.started) return request.promise
+
+  neteasePlaylistLoading.value = true
+  neteaseAlbumLoading.value = true
+  neteasePlaylistError.value = null
+  neteaseAlbumError.value = null
+
+  const result = await request.promise
+  if (!result.current || !auth.netease.loggedIn) return result
+
+  neteasePlaylistLoading.value = false
+  neteaseAlbumLoading.value = false
+  neteasePlaylistError.value = result.playlistsOk ? null : t('player.load_failed')
+  neteaseAlbumError.value = result.albumsOk ? null : t('player.load_failed')
+  return result
 }
+
 const favoritePlaylists = ref<FavoritePlaylist[]>([])
+const favoritePlaylistRows = computed(() => favoritePlaylists.value.map(favorite => ({
+  ...favorite,
+  key: favoritePlaylistKey(favorite),
+  location: favoritePlaylistLocation(favorite),
+})))
+let favoritePlaylistsRequestGeneration = 0
 
 async function loadFavorites() {
+  const requestGeneration = ++favoritePlaylistsRequestGeneration
   try {
     const raw = await invoke<any[]>('list_favorite_playlists')
-    favoritePlaylists.value = (raw || []).map((f: any) => ({
-      id: f.id ?? '',
-      name: f.name ?? '',
-      coverUrl: f.cover_url ?? '',
-      trackCount: f.track_count ?? f.songs?.length ?? 0,
-      source: f.source ?? '',
-      songs: f.songs ?? [],
-      addedTime: f.added_time ?? 0,
-      modifiedAt: f.modified_at ?? 0,
-      isDeleted: f.is_deleted ?? false,
-    }))
+    if (requestGeneration !== favoritePlaylistsRequestGeneration) return
+    favoritePlaylists.value = (raw || [])
+      .map(normalizeFavoritePlaylist)
+      .filter(favorite => !favorite.isDeleted)
   } catch (e) {
     log.error('Load favorites failed:', e)
   }
 }
 
 onMounted(loadPlaylists)
-onMounted(loadFavorites)
 onMounted(() => downloadStore.loadDownloads())
 
 // 下载相关
@@ -641,32 +760,47 @@ function handleDownloadMenuClick(item: ContextMenuActionItem) {
   }
 }
 
-// 拉取云端歌单
-onMounted(() => {
-  if (auth.netease.loggedIn && !neteasePlaylists.value.length) {
-    recommend.fetchUserPlaylists('netease')
+const neteaseSessionFingerprint = computed(() => `${auth.netease.loggedIn ? '1' : '0'}:${auth.neteaseSessionVersion}`)
+
+// Login restoration and account changes must invalidate stale Netease library requests together.
+watch(neteaseSessionFingerprint, () => {
+  neteaseLibraryRequestCoordinator.invalidate()
+  neteasePlaylistLoading.value = false
+  neteaseAlbumLoading.value = false
+  neteasePlaylistError.value = null
+  neteaseAlbumError.value = null
+  recommend.userPlaylists['netease'] = []
+  recommend.userAlbums = []
+
+  if (auth.netease.loggedIn) {
+    void loadNeteaseLibrary()
   }
-  if (auth.bilibili.loggedIn && !biliPlaylists.value.length) {
-    recommend.fetchUserPlaylists('bilibili')
-  }
-  if (auth.youtube.loggedIn && !youtubePlaylists.value.length) {
-    recommend.fetchUserPlaylists('youtube')
-  }
-  // 网易云收藏专辑
-  if (auth.netease.loggedIn && !recommend.userAlbums.length) {
-    recommend.fetchUserAlbums()
-  }
-})
+}, { immediate: true })
 
 // 监听同步完成后的歌单变更事件
 let unlistenPlaylistsChanged: UnlistenFn | null = null
+let unlistenFavoritePlaylistsChanged: UnlistenFn | null = null
 onMounted(async () => {
-  unlistenPlaylistsChanged = await listen('playlists-changed', () => {
-    loadPlaylists()
-  })
+  try {
+    unlistenPlaylistsChanged = await listen('playlists-changed', () => {
+      void loadPlaylists()
+    })
+  } catch {
+    // Browser preview has no Tauri event bridge.
+  }
+  try {
+    unlistenFavoritePlaylistsChanged = await listen('favorite-playlists-changed', () => {
+      void loadFavorites()
+    })
+  } catch {
+    // Browser preview has no Tauri event bridge.
+  }
+  void loadFavorites()
 })
 onUnmounted(() => {
+  favoritePlaylistsRequestGeneration++
   unlistenPlaylistsChanged?.()
+  unlistenFavoritePlaylistsChanged?.()
 })
 </script>
 
@@ -675,7 +809,7 @@ onUnmounted(() => {
     <header class="lib-header">
       <h1 class="page-title">{{ t('library.title') }}</h1>
       <div class="header-actions">
-        <button v-if="activeTab === 0 && !isMultiSelectMode" class="header-action" @click="enterMultiSelect" :title="t('common.multi_select')">
+        <button v-if="activeTab === 'local' && !isMultiSelectMode" class="header-action" @click="enterMultiSelect" :title="t('common.multi_select')">
           <span class="material-symbols-rounded">checklist</span>
         </button>
         <button v-if="isMultiSelectMode" class="header-action" @click="selectAll" :title="t('common.select_all')">
@@ -692,19 +826,20 @@ onUnmounted(() => {
 
     <div class="tab-bar">
       <button
-        v-for="(tab, i) in tabs"
-        :key="tab.label"
+        v-for="tab in tabs"
+        :key="tab.key"
         class="tab-chip"
-        :class="{ active: activeTab === i }"
-        @click="activeTab = i"
+        :class="{ active: activeTab === tab.key }"
+        :aria-pressed="activeTab === tab.key"
+        @click="activateTab(tab.key)"
       >
-        <span class="material-symbols-rounded" :class="{ filled: activeTab === i }" style="font-size: 18px">{{ tab.icon }}</span>
-        <span>{{ tab.label }}</span>
+        <span class="material-symbols-rounded tab-chip-icon" :class="{ filled: activeTab === tab.key }">{{ tab.icon }}</span>
+        <span class="tab-chip-label">{{ tab.label }}</span>
       </button>
     </div>
 
     <!-- Tab: 本地 -->
-    <div v-if="activeTab === 0" class="playlist-list">
+    <div v-if="activeTab === 'local'" class="playlist-list">
       <div class="new-playlist-row" :class="{ disabled: library.isScanning }" @click="selectAndScanLocalMusic">
         <span class="material-symbols-rounded" :class="{ spinning: library.isScanning }" style="font-size: 20px">
           {{ library.isScanning ? 'progress_activity' : 'folder_open' }}
@@ -793,30 +928,33 @@ onUnmounted(() => {
     </div>
 
     <!-- Tab: 收藏（同步的收藏歌单） -->
-    <div v-else-if="activeTab === 1" class="playlist-list">
+    <div v-else-if="activeTab === 'favorites'" class="playlist-list">
       <template v-if="favoritePlaylists.length > 0">
-        <div
-          v-for="fpl in favoritePlaylists"
-          :key="'fav-' + fpl.id"
+        <component
+          v-for="row in favoritePlaylistRows"
+          :is="row.location ? RouterLink : 'div'"
+          :key="row.key"
+          :to="row.location ?? undefined"
           class="playlist-item"
+          :class="row.location ? 'favorite-detail-link' : 'favorite-static-row'"
         >
-          <div class="pl-icon has-cover" v-if="fpl.coverUrl && !isLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)">
+          <div class="pl-icon has-cover" v-if="row.coverUrl && !isLibraryCoverFailed('favorite', row.id, row.coverUrl)">
             <img
-              :src="toDisplayableLibraryCoverUrl(fpl.coverUrl)"
+              :src="toDisplayableLibraryCoverUrl(row.coverUrl)"
               referrerpolicy="no-referrer"
               class="pl-cover-img"
-              @error="markLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)"
+              @error="markLibraryCoverFailed('favorite', row.id, row.coverUrl)"
             />
           </div>
           <div class="pl-icon" v-else>
             <span class="material-symbols-rounded filled" style="font-size: 22px">bookmark</span>
           </div>
           <div class="pl-info">
-            <div class="pl-name">{{ fpl.name }}</div>
-            <div class="pl-count">{{ t('player.track_count', { count: fpl.trackCount }) }} · {{ platformLabel(fpl.source) }}</div>
+            <div class="pl-name">{{ row.name }}</div>
+            <div class="pl-count">{{ t('player.track_count', { count: row.trackCount }) }} · {{ platformLabel(row.source) }}</div>
           </div>
-          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
-        </div>
+          <span v-if="row.location" class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
+        </component>
       </template>
       <div v-else class="empty-tab">
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">bookmark</span></div>
@@ -826,7 +964,7 @@ onUnmounted(() => {
     </div>
 
     <!-- Tab: 下载 -->
-    <div v-else-if="activeTab === 2" class="playlist-list">
+    <div v-else-if="activeTab === 'downloads'" class="playlist-list">
       <template v-if="downloadStore.activeDownloads.length > 0">
         <div class="subsection-label">
           <span class="material-symbols-rounded" style="font-size: 18px">downloading</span>
@@ -909,13 +1047,88 @@ onUnmounted(() => {
     </div>
 
     <!-- Tab: 网易云-歌单 -->
-    <div v-else-if="activeTab === 3" class="playlist-list">
-      <template v-if="neteasePlaylists.length > 0">
-        <div
-          v-for="npl in neteasePlaylists"
+    <div v-else-if="activeTab === 'netease'" class="playlist-list">
+      <div class="netease-category-bar" role="tablist" :aria-label="t('library.tab_netease')">
+        <button
+          v-for="category in neteaseCategories"
+          :key="category.key"
+          :id="`netease-category-${category.key}`"
+          class="netease-category-tab"
+          :class="{ active: neteaseCategory === category.key }"
+          type="button"
+          role="tab"
+          :aria-selected="neteaseCategory === category.key"
+          aria-controls="netease-category-panel"
+          :tabindex="neteaseCategory === category.key ? 0 : -1"
+          @click="activateNeteaseCategory(category.key)"
+          @keydown="handleNeteaseCategoryKeydown($event, category.key)"
+        >
+          {{ category.label }}
+        </button>
+      </div>
+      <div
+        id="netease-category-panel"
+        role="tabpanel"
+        :aria-labelledby="`netease-category-${neteaseCategory}`"
+        tabindex="0"
+        class="netease-content"
+      >
+      <div v-if="auth.netease.loggedIn" class="netease-tools">
+        <label class="netease-search">
+          <span class="material-symbols-rounded" style="font-size: 20px" aria-hidden="true">search</span>
+          <input
+            v-model="activeNeteaseSearchQuery"
+            type="search"
+            :aria-label="t('library.netease_search_placeholder')"
+            :placeholder="t('library.netease_search_placeholder')"
+          />
+        </label>
+        <button
+          class="netease-refresh"
+          type="button"
+          :disabled="neteasePlaylistLoading || neteaseAlbumLoading"
+          :aria-label="t('common.refresh')"
+          :title="t('common.refresh')"
+          @click="loadNeteaseLibrary"
+        >
+          <span class="material-symbols-rounded" :class="{ spinning: neteasePlaylistLoading || neteaseAlbumLoading }" aria-hidden="true">refresh</span>
+        </button>
+      </div>
+      <div v-if="!auth.netease.loggedIn" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">cloud_queue</span></div>
+        <p class="empty-title">{{ t('library.netease_login') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_recommend') }}</p>
+        <button
+          class="retry-btn netease-login-button"
+          type="button"
+          :disabled="auth.loggingIn === 'netease'"
+          @click="auth.loginNetease"
+        >
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">login</span>
+          <span>{{ t('library.netease_login') }}</span>
+        </button>
+      </div>
+      <template v-else>
+      <template v-if="neteaseCategory === 'playlists'">
+      <div v-if="neteasePlaylistLoading && neteasePlaylists.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded spinning" style="font-size: 40px" aria-hidden="true">progress_activity</span></div>
+        <p class="empty-title">{{ t('player.loading') }}</p>
+      </div>
+      <div v-else-if="neteasePlaylistError && neteasePlaylists.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">cloud_off</span></div>
+        <p class="empty-title">{{ t('player.load_failed') }}</p>
+        <p class="empty-desc">{{ neteasePlaylistError }}</p>
+        <button class="retry-btn" type="button" @click="loadNeteaseLibrary">
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">refresh</span>
+          <span>{{ t('common.retry') }}</span>
+        </button>
+      </div>
+      <template v-else-if="neteasePlaylists.length > 0 && neteaseFilteredPlaylists.length > 0">
+        <RouterLink
+          v-for="npl in neteaseFilteredPlaylists"
           :key="'ne-' + npl.id"
-          class="playlist-item"
-          @click="router.push({ name: 'netease-playlist', params: { id: npl.id } })"
+          class="playlist-item netease-result-link"
+          :to="{ name: 'netease-playlist', params: { id: npl.id } }"
         >
           <div class="pl-icon netease">
             <img
@@ -925,106 +1138,51 @@ onUnmounted(() => {
               class="pl-cover-img"
               @error="markLibraryCoverFailed('netease-playlist', npl.id, npl.coverUrl)"
             />
-            <span v-else class="material-symbols-rounded filled" style="font-size: 22px">library_music</span>
+            <span v-else class="material-symbols-rounded filled" style="font-size: 22px" aria-hidden="true">library_music</span>
           </div>
           <div class="pl-info">
             <div class="pl-name">{{ npl.name }}</div>
-            <div class="pl-count">{{ t('library.track_count', { count: npl.trackCount || 0 }) }}</div>
+            <div class="pl-count">
+              {{ t('library.netease_play_count', { count: npl.playCount || 0 }) }}
+              <span aria-hidden="true">·</span>
+              {{ t('library.track_count', { count: npl.trackCount || 0 }) }}
+            </div>
           </div>
-          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
-        </div>
+          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3" aria-hidden="true">chevron_right</span>
+        </RouterLink>
       </template>
-      <div v-else class="empty-tab">
-        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">cloud_queue</span></div>
-        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
-        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
+      <div v-else-if="neteasePlaylists.length === 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">cloud_queue</span></div>
+        <p class="empty-title">{{ t('library.netease_playlist_empty') }}</p>
       </div>
-    </div>
-
-    <!-- Tab: Bili 收藏夹 -->
-    <div v-else-if="activeTab === 4" class="playlist-list">
-      <template v-if="biliPlaylists.length > 0">
-        <div class="platform-summary bilibili">
-          <span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span>
-          <div>
-            <div class="platform-title">{{ t('library.bilibili_favorites') }}</div>
-            <div class="platform-desc">{{ t('player.video_count', { count: biliPlaylists.reduce((sum, p) => sum + (p.trackCount || 0), 0) }) }}</div>
-          </div>
-        </div>
-        <div
-          v-for="bpl in biliPlaylists"
-          :key="'bili-' + bpl.id"
-          class="playlist-item"
-          @click="router.push({ name: 'bili-playlist', params: { mediaId: bpl.id } })"
-        >
-          <div class="pl-icon bilibili" :class="{ 'has-cover': bpl.coverUrl }">
-            <BilibiliCoverImage v-if="bpl.coverUrl" :src="bpl.coverUrl" class="pl-cover-img">
-              <span class="material-symbols-rounded filled" style="font-size: 22px">video_library</span>
-            </BilibiliCoverImage>
-            <span v-else class="material-symbols-rounded filled" style="font-size: 22px">video_library</span>
-          </div>
-          <div class="pl-info">
-            <div class="pl-name">{{ bpl.name }}</div>
-            <div class="pl-count">{{ t('player.video_count', { count: bpl.trackCount || 0 }) }}</div>
-          </div>
-          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
-        </div>
+      <div v-else-if="neteasePlaylists.length > 0 && neteaseFilteredPlaylists.length === 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">search_off</span></div>
+        <p class="empty-title">{{ t('library.netease_search_empty_title') }}</p>
+        <p class="empty-desc">{{ t('library.netease_search_empty_desc') }}</p>
+      </div>
       </template>
-      <div v-else class="empty-tab">
-        <div class="empty-circle platform-empty bilibili"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span></div>
-        <p class="empty-title">{{ t('library.bilibili_favorites') }}</p>
-        <p class="empty-desc">{{ auth.bilibili.loggedIn ? t('explore.no_playlists') : t('explore.login_for_playlists') }}</p>
-      </div>
-    </div>
-
-    <!-- Tab: YouTube Music 歌单 -->
-    <div v-else-if="activeTab === 5" class="playlist-list">
-      <template v-if="youtubePlaylists.length > 0">
-        <div class="platform-summary youtube">
-          <span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span>
-          <div>
-            <div class="platform-title">YouTube Music</div>
-            <div class="platform-desc">{{ t('player.track_count', { count: youtubePlaylists.length }) }}</div>
-          </div>
-        </div>
-        <div
-          v-for="ypl in youtubePlaylists"
-          :key="'yt-' + ypl.id"
-          class="playlist-item"
-          @click="router.push({ name: 'youtube-playlist', params: { browseId: ypl.id } })"
-        >
-          <div class="pl-icon youtube" :class="{ 'has-cover': ypl.coverUrl && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl) }">
-            <img
-              v-if="ypl.coverUrl && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl)"
-              :src="toDisplayableLibraryCoverUrl(ypl.coverUrl)"
-              referrerpolicy="no-referrer"
-              class="pl-cover-img"
-              @error="markLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl)"
-            />
-            <span v-else class="material-symbols-rounded filled" style="font-size: 22px">subscriptions</span>
-          </div>
-          <div class="pl-info">
-            <div class="pl-name">{{ ypl.name }}</div>
-            <div class="pl-count">{{ ypl.description || 'YouTube Music' }}</div>
-          </div>
-          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
-        </div>
-      </template>
-      <div v-else class="empty-tab">
-        <div class="empty-circle platform-empty youtube"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span></div>
-        <p class="empty-title">YouTube Music</p>
-        <p class="empty-desc">{{ auth.youtube.loggedIn ? t('explore.no_playlists') : t('explore.login_for_playlists') }}</p>
-      </div>
-    </div>
 
     <!-- Tab: 网易云-专辑 -->
-    <div v-else-if="activeTab === 6" class="playlist-list">
-      <div v-if="recommend.userAlbums.length > 0">
-        <div
-          v-for="album in recommend.userAlbums"
+      <template v-else-if="neteaseCategory === 'albums'">
+      <div v-if="neteaseAlbumLoading && recommend.userAlbums.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded spinning" style="font-size: 40px" aria-hidden="true">progress_activity</span></div>
+        <p class="empty-title">{{ t('player.loading') }}</p>
+      </div>
+      <div v-else-if="neteaseAlbumError && recommend.userAlbums.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">cloud_off</span></div>
+        <p class="empty-title">{{ t('player.load_failed') }}</p>
+        <p class="empty-desc">{{ neteaseAlbumError }}</p>
+        <button class="retry-btn" type="button" @click="loadNeteaseLibrary">
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">refresh</span>
+          <span>{{ t('common.retry') }}</span>
+        </button>
+      </div>
+      <template v-else-if="recommend.userAlbums.length > 0 && neteaseFilteredAlbums.length > 0">
+        <RouterLink
+          v-for="album in neteaseFilteredAlbums"
           :key="album.id"
-          class="playlist-item"
-          @click="router.push({ name: 'netease-album', params: { id: album.id } })"
+          class="playlist-item netease-result-link"
+          :to="{ name: 'netease-album', params: { id: album.id } }"
         >
           <div class="pl-icon" :class="{ 'has-cover': album.coverUrl && !isLibraryCoverFailed('netease-album', album.id, album.coverUrl) }">
             <img
@@ -1035,19 +1193,31 @@ onUnmounted(() => {
               referrerpolicy="no-referrer"
               @error="markLibraryCoverFailed('netease-album', album.id, album.coverUrl)"
             />
-            <span v-else class="material-symbols-rounded filled" style="font-size: 22px">album</span>
+            <span v-else class="material-symbols-rounded filled" style="font-size: 22px" aria-hidden="true">album</span>
           </div>
           <div class="pl-info">
             <div class="pl-name">{{ album.name }}</div>
-            <div class="pl-count">{{ album.artist }} · {{ t('player.track_count', { count: album.trackCount }) }}</div>
+            <div class="pl-count">
+              <template v-if="album.artist">
+                {{ album.artist }} <span aria-hidden="true">·</span>
+              </template>
+              {{ t('player.track_count', { count: album.trackCount || 0 }) }}
+            </div>
           </div>
-          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
-        </div>
+          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3" aria-hidden="true">chevron_right</span>
+        </RouterLink>
+      </template>
+      <div v-else-if="recommend.userAlbums.length === 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">album</span></div>
+        <p class="empty-title">{{ t('library.netease_album_empty') }}</p>
       </div>
-      <div v-else class="empty-tab">
-        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">album</span></div>
-        <p class="empty-title">{{ t('library.empty_title', { type: t('library.albums') }) }}</p>
-        <p class="empty-desc">{{ t('library.empty_desc') }}</p>
+      <div v-else-if="recommend.userAlbums.length > 0 && neteaseFilteredAlbums.length === 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">search_off</span></div>
+        <p class="empty-title">{{ t('library.netease_search_empty_title') }}</p>
+        <p class="empty-desc">{{ t('library.netease_search_empty_desc') }}</p>
+      </div>
+      </template>
+      </template>
       </div>
     </div>
 
@@ -1174,17 +1344,25 @@ onUnmounted(() => {
 
 /* M3 Filter Chips */
 .tab-bar {
-  display: flex;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  min-height: 44px;
+  padding: 4px;
   margin-bottom: 20px;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container);
 }
 
 .tab-chip {
   display: flex;
   align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 36px;
   gap: 6px;
-  padding: 7px 16px;
-  border-radius: var(--radius-full);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   font-weight: 500;
   color: var(--md-on-surface-variant);
@@ -1193,13 +1371,208 @@ onUnmounted(() => {
   transition: all var(--duration-short) var(--ease-standard);
 
   &:hover:not(.active) {
-    background: var(--md-surface-container);
+    background: var(--md-surface-container-high);
   }
 
   &.active {
     background: var(--md-secondary-container);
     color: var(--md-on-secondary-container);
     font-weight: 600;
+  }
+}
+
+.tab-chip-icon {
+  flex: 0 0 auto;
+  font-size: 18px;
+}
+
+.tab-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.netease-category-bar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: 12px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container);
+}
+
+.netease-category-tab {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--md-on-surface-variant);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--duration-short) var(--ease-standard);
+
+  &:hover:not(.active) {
+    background: var(--md-surface-container-high);
+  }
+
+  &.active {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+    font-weight: 600;
+  }
+}
+
+.netease-content {
+  min-width: 0;
+}
+
+.netease-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.netease-search {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 40px;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-md);
+  color: var(--md-on-surface-variant);
+  background: var(--md-surface-container);
+  transition: border-color var(--duration-short), background var(--duration-short);
+
+  &:focus-within {
+    border-color: var(--md-primary);
+    outline: 2px solid color-mix(in srgb, var(--md-primary) 24%, transparent);
+    outline-offset: 0;
+  }
+
+  input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    color: var(--md-on-surface);
+    background: transparent;
+    font: inherit;
+
+    &::placeholder {
+      color: var(--md-on-surface-variant);
+      opacity: 0.72;
+    }
+  }
+}
+
+.netease-refresh {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  color: var(--md-on-surface-variant);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--duration-short), color var(--duration-short), opacity var(--duration-short);
+
+  &:hover:not(:disabled) {
+    background: var(--md-surface-container-high);
+    color: var(--md-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
+.netease-result-link {
+  color: inherit;
+  text-decoration: none;
+
+  &:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+    background: var(--md-surface-container);
+  }
+}
+
+.favorite-detail-link {
+  color: inherit;
+  text-decoration: none;
+
+  &:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+    background: var(--md-surface-container);
+  }
+}
+
+.playlist-item.favorite-static-row {
+  cursor: default;
+}
+
+.netease-login-button {
+  margin-top: 16px;
+}
+
+@media (max-width: 680px) {
+  .library-view {
+    padding-inline: 16px;
+  }
+
+  .tab-bar {
+    gap: 2px;
+    min-height: 62px;
+  }
+
+  .tab-chip {
+    min-height: 54px;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px 2px;
+    font-size: 11px;
+    line-height: 1.15;
+  }
+
+  .tab-chip-label {
+    display: -webkit-box;
+    overflow: hidden;
+    white-space: normal;
+    text-align: center;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .netease-category-bar {
+    gap: 2px;
+  }
+
+  .netease-category-tab {
+    min-height: 42px;
+    padding-inline: 6px;
+    font-size: 12px;
   }
 }
 
@@ -1450,68 +1823,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.pl-icon.bilibili {
-  background: #00a1d620;
-  overflow: hidden;
-}
-
-.pl-icon.youtube {
-  background: #ff003320;
-  overflow: hidden;
-}
-
-
-.platform-summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
-  margin-bottom: 8px;
-  border-radius: 20px;
-  border: 1px solid var(--md-outline-variant);
-  background:
-    radial-gradient(circle at 12% 20%, color-mix(in srgb, var(--platform-color) 22%, transparent), transparent 34%),
-    var(--md-surface-container);
-
-  &.bilibili { --platform-color: #00a1d6; }
-  &.youtube { --platform-color: #ff0033; }
-}
-
-.platform-icon-mask {
-  display: block;
-  width: 26px;
-  height: 26px;
-  background: var(--platform-color, var(--md-primary));
-  mask-size: contain;
-  mask-repeat: no-repeat;
-  mask-position: center;
-  flex-shrink: 0;
-}
-
-.platform-title {
-  font-size: 14px;
-  font-weight: 800;
-}
-
-.platform-desc {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--md-on-surface-variant);
-}
-
-.empty-circle.platform-empty {
-  opacity: 0.85;
-
-  &.bilibili { --platform-color: #00a1d6; }
-  &.youtube { --platform-color: #ff0033; }
-
-  .platform-icon-mask {
-    width: 40px;
-    height: 40px;
-  }
-}
-
-
 /* 分组分割线 */
 .section-divider {
   display: flex;
@@ -1636,6 +1947,32 @@ onUnmounted(() => {
 }
 
 /* 对话框描述文本 */
+.library-state {
+  min-height: 260px;
+  padding-block: 56px;
+}
+
+.library-state .retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  margin-top: 16px;
+  padding: 7px 14px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-sm);
+  background: var(--md-surface-container);
+  color: var(--md-primary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--duration-short) var(--ease-standard);
+}
+
+.library-state .retry-btn:hover {
+  background: var(--md-surface-container-high);
+}
+
 .dialog-msg {
   font-size: 14px;
   color: var(--md-on-surface-variant);

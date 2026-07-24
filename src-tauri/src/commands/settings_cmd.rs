@@ -1,9 +1,9 @@
-use crate::api::bilibili::client::{BiliAudioStream, BiliClient};
+use crate::api::bilibili::client::{BiliAudioStream, BiliClient, BiliVideoPage};
 use crate::api::netease::client::{NeteaseClient, NeteasePlaybackUnavailableReason};
 use crate::api::qq::client::QqMusicClient;
 use crate::error::{AppError, AppResult};
-use crate::state::AppState;
 use crate::settings::store::{self, AppSettings, SettingsLoadResult};
+use crate::state::AppState;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
@@ -51,12 +51,35 @@ pub async fn get_netease_song_url(
 ) -> AppResult<SongUrlResult> {
     // 快速切歌时，过期请求直接中止，释放连接池
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
     let client = NeteaseClient::new(&state.http());
     let result = client.get_song_url(song_id, &quality).await?;
+    Ok(SongUrlResult {
+        url: result.url,
+        bitrate: result.br,
+        format: result.r#type,
+        expected_content_length: (result.size > 0).then_some(result.size),
+        is_preview: result.is_preview,
+        unavailable_reason: result.unavailable_reason,
+    })
+}
+
+/// 获取网易云歌曲正式下载 URL（与播放试听 URL 分离）
+#[tauri::command]
+pub async fn get_netease_song_download_url(
+    song_id: u64,
+    quality: String,
+    state: State<'_, AppState>,
+) -> AppResult<SongUrlResult> {
+    let client = NeteaseClient::new(&state.http());
+    let result = client.get_song_download_url(song_id, &quality).await?;
     Ok(SongUrlResult {
         url: result.url,
         bitrate: result.br,
@@ -75,7 +98,11 @@ pub async fn get_qq_song_url(
     state: State<'_, AppState>,
 ) -> AppResult<SongUrlResult> {
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -116,6 +143,16 @@ struct LegacyBiliSongId {
 }
 
 #[tauri::command]
+pub async fn get_bili_video_pages(
+    bvid: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<BiliVideoPage>> {
+    BiliClient::new(&state.http())
+        .get_video_page_details(&bvid)
+        .await
+}
+
+#[tauri::command]
 pub async fn get_bili_audio_url(
     bvid: String,
     avid: Option<u64>,
@@ -125,7 +162,11 @@ pub async fn get_bili_audio_url(
     state: State<'_, AppState>,
 ) -> AppResult<BiliAudioResult> {
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -197,7 +238,11 @@ fn select_bili_audio_stream(
     let is_lossless = |stream: &BiliAudioStream| {
         stream.quality_id == 30251 || stream.codecs.eq_ignore_ascii_case("flac")
     };
-    let normal_streams = || streams.iter().filter(|stream| !is_dolby(stream) && !is_lossless(stream));
+    let normal_streams = || {
+        streams
+            .iter()
+            .filter(|stream| !is_dolby(stream) && !is_lossless(stream))
+    };
 
     match quality.unwrap_or("high") {
         "dolby" => streams.iter().find(|stream| is_dolby(stream)).cloned(),
@@ -244,7 +289,11 @@ pub async fn get_youtube_audio_url(
 ) -> AppResult<Vec<YtAudioResult>> {
     // 快速切歌时丢弃过期解析, 与网易云/QQ/B站一致
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -261,7 +310,11 @@ pub async fn get_youtube_audio_url(
     )
     .await?;
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -314,9 +367,7 @@ pub async fn get_build_info() -> AppResult<BuildInfo> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bili_audio_candidates,
-        select_bili_audio_stream,
-        split_legacy_bili_song_id,
+        build_bili_audio_candidates, select_bili_audio_stream, split_legacy_bili_song_id,
         LegacyBiliSongId,
     };
     use crate::api::bilibili::client::BiliAudioStream;
@@ -348,7 +399,10 @@ mod tests {
         let streams = vec![stream("https://audio/high", 320_000, "flac", 30251)];
 
         let selected = select_bili_audio_stream(streams, Some("dolby"));
-        assert_eq!(selected.map(|stream| stream.url), Some("https://audio/high".into()));
+        assert_eq!(
+            selected.map(|stream| stream.url),
+            Some("https://audio/high".into())
+        );
     }
 
     #[test]

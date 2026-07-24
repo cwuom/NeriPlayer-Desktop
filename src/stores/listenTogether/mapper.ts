@@ -236,11 +236,6 @@ export function toShareableQueueSnapshot(
 ): { queue: ListenTogetherTrack[]; resolvedIndex: number } {
   const result: ListenTogetherTrack[] = []
   let resolvedIndex = 0
-  const currentTrack = queue[currentIndex]
-  const currentStableKey = currentTrack
-    ? trackInfoToLtTrack(currentTrack).stableKey
-    : null
-
   for (let i = 0; i < queue.length; i++) {
     const track = queue[i]
     const isCurrentTrack = i === currentIndex
@@ -251,14 +246,12 @@ export function toShareableQueueSnapshot(
     if (!includeLocal && ltTrack.channelId === LtChannels.LOCAL) {
       continue
     }
+    if (i === currentIndex) {
+      resolvedIndex = result.length
+    }
     result.push(ltTrack)
   }
 
-  // 找到 currentStableKey 在结果中的位置
-  if (currentStableKey) {
-    const idx = result.findIndex(t => t.stableKey === currentStableKey)
-    if (idx >= 0) resolvedIndex = idx
-  }
-
+  // Map the raw current index as filtered tracks are appended.
   return { queue: result, resolvedIndex }
 }

@@ -42,6 +42,7 @@ export interface AppSettings {
   coverBlurAmount: number
   coverBlurDarken: number
   neteaseQuality: string
+  neteaseAutoSourceSwitch: boolean
   qqMusicQuality: string
   youtubeQuality: string
   biliQuality: string
@@ -120,6 +121,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   coverBlurAmount: 1.5,
   coverBlurDarken: 0.2,
   neteaseQuality: 'exhigh',
+  neteaseAutoSourceSwitch: true,
   qqMusicQuality: 'high',
   youtubeQuality: 'very_high',
   biliQuality: 'high',
@@ -181,6 +183,7 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   coverBlurAmount: 'cover_blur_amount',
   coverBlurDarken: 'cover_blur_darken',
   neteaseQuality: 'netease_quality',
+  neteaseAutoSourceSwitch: 'netease_auto_source_switch',
   qqMusicQuality: 'qq_quality',
   youtubeQuality: 'youtube_quality',
   biliQuality: 'bili_quality',
@@ -361,6 +364,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const coverBlurAmount = ref(initial.coverBlurAmount)
   const coverBlurDarken = ref(initial.coverBlurDarken)
   const neteaseQuality = ref(initial.neteaseQuality)
+  const neteaseAutoSourceSwitch = ref(initial.neteaseAutoSourceSwitch)
   const qqMusicQuality = ref(initial.qqMusicQuality)
   const youtubeQuality = ref(initial.youtubeQuality)
   const biliQuality = ref(initial.biliQuality)
@@ -395,7 +399,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfadeOutDuration, keepProgress, keepPlaybackMode, showTranslation,
     lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, coverStyle,
     advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
-    coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
+    coverBlurAmount, coverBlurDarken, neteaseQuality, neteaseAutoSourceSwitch, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled,
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
     logToFile, logLevel,
@@ -481,7 +485,7 @@ export const useSettingsStore = defineStore('settings', () => {
     keepProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, advancedLyrics, dynamicBackground,
     dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
-    neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
+    neteaseQuality, neteaseAutoSourceSwitch, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     internationalizationEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,

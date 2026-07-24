@@ -1,27 +1,26 @@
 // 同步管理器：协调 GitHub/WebDAV 同步流程
-use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
-use tokio::sync::{Mutex as TokioMutex, MutexGuard};
-use crate::error::{AppError, AppResult};
-use crate::state::{TrackInfo, TrackSource};
-use crate::library::playlist::{Playlist, PlaylistStore};
+use super::github_api::GitHubApiClient;
+use super::merge;
 use super::models::*;
 use super::serializer;
-use super::github_api::GitHubApiClient;
 use super::webdav_api::WebDavApiClient;
-use super::merge;
+use crate::error::{AppError, AppResult};
+use crate::library::playlist::{Playlist, PlaylistStore};
+use crate::state::{TrackInfo, TrackSource};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::sync::OnceLock;
+use tauri::AppHandle;
+use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 
 static SYNC_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
 static SYNC_CAUSAL_TOKEN_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+static FAVORITES_IO_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
 const MAX_GITHUB_UPLOAD_CONFLICT_RETRIES: usize = 3;
 
 async fn acquire_sync_lock() -> MutexGuard<'static, ()> {
-    SYNC_LOCK
-        .get_or_init(|| TokioMutex::new(()))
-        .lock()
-        .await
+    SYNC_LOCK.get_or_init(|| TokioMutex::new(())).lock().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,30 +41,28 @@ pub struct SyncHistoryDeletion {
 pub async fn sync_github(
     http: &reqwest::Client,
     config: &mut GitHubSyncConfig,
-    local_data: &SyncData,
+    app: &AppHandle,
+    history_entries: Option<&[SyncHistoryEntry]>,
+    history_deletions: Option<&[SyncHistoryDeletion]>,
 ) -> AppResult<SyncResult> {
     let _sync_guard = acquire_sync_lock().await;
+    let local_data = build_local_sync_data(app, history_entries, history_deletions);
+    let local_data = &local_data;
     let api = GitHubApiClient::new(http, &config.token);
     let data_saver = config.data_saver;
     let primary_file = serializer::get_filename(data_saver);
 
-    let remote_snapshot = fetch_remote_snapshot(
-        &api,
-        config,
-        primary_file,
-        data_saver,
-    )
-    .await?;
+    let remote_snapshot = fetch_remote_snapshot(&api, config, primary_file, data_saver).await?;
     let is_first_sync = config.last_remote_sha.is_empty();
     let initial_remote_missing = remote_snapshot.is_none();
-    let mut remote_changed_during_sync = remote_snapshot
-        .as_ref()
-        .is_some_and(|snapshot| {
-            !config.last_remote_sha.is_empty()
-                && config.last_remote_sha != snapshot.version.sha.as_deref().unwrap_or_default()
-        });
+    let mut remote_changed_during_sync = remote_snapshot.as_ref().is_some_and(|snapshot| {
+        !config.last_remote_sha.is_empty()
+            && config.last_remote_sha != snapshot.version.sha.as_deref().unwrap_or_default()
+    });
     let base_snapshot = load_base_snapshot("github");
-    let mut remote_data = remote_snapshot.as_ref().map(|snapshot| snapshot.data.clone());
+    let mut remote_data = remote_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.data.clone());
     let mut remote_version = remote_snapshot
         .map(|snapshot| snapshot.version)
         .unwrap_or_else(|| GitHubRemoteVersion {
@@ -78,12 +75,9 @@ pub async fn sync_github(
 
     for attempt in 0..=MAX_GITHUB_UPLOAD_CONFLICT_RETRIES {
         let merged = match remote_data.as_ref() {
-            Some(remote) => merge::three_way_merge(
-                local_data,
-                remote,
-                config.last_sync_time,
-                &base_snapshot,
-            ),
+            Some(remote) => {
+                merge::three_way_merge(local_data, remote, config.last_sync_time, &base_snapshot)
+            }
             None => {
                 let mut initial = local_data.normalized_for_sync();
                 initial.last_modified = chrono::Utc::now().timestamp_millis();
@@ -122,8 +116,7 @@ pub async fn sync_github(
                 break;
             }
             Err(error)
-                if error.is_content_conflict()
-                    && attempt < MAX_GITHUB_UPLOAD_CONFLICT_RETRIES =>
+                if error.is_content_conflict() && attempt < MAX_GITHUB_UPLOAD_CONFLICT_RETRIES =>
             {
                 let refreshed = fetch_remote_snapshot(
                     &api,
@@ -145,9 +138,8 @@ pub async fn sync_github(
         }
     }
 
-    let merged = final_merged.ok_or_else(|| {
-        AppError::Api("GitHub upload conflict retry budget exhausted".into())
-    })?;
+    let merged = final_merged
+        .ok_or_else(|| AppError::Api("GitHub upload conflict retry budget exhausted".into()))?;
 
     save_synced_playlists(&merged);
     save_recent_play_history(&merged);
@@ -184,16 +176,19 @@ pub async fn sync_github(
         "Sync complete"
     };
 
-    Ok(with_history(SyncResult {
-        success: true,
-        message: message.into(),
-        playlists_added: playlists_added.max(0),
-        playlists_updated: 0,
-        playlists_deleted: 0,
-        songs_added: songs_added.max(0),
-        songs_removed: 0,
-        history: None,
-    }, &merged))
+    Ok(with_history(
+        SyncResult {
+            success: true,
+            message: message.into(),
+            playlists_added: playlists_added.max(0),
+            playlists_updated: 0,
+            playlists_deleted: 0,
+            songs_added: songs_added.max(0),
+            songs_removed: 0,
+            history: None,
+        },
+        &merged,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -251,11 +246,9 @@ async fn fetch_remote_snapshot(
             if fallback_content.trim().is_empty() {
                 return Err(primary_error);
             }
-            let fallback_data = serializer::deserialize(
-                &fallback_content,
-                fallback_file.ends_with(".bin"),
-            )
-            .map_err(|_| primary_error)?;
+            let fallback_data =
+                serializer::deserialize(&fallback_content, fallback_file.ends_with(".bin"))
+                    .map_err(|_| primary_error)?;
             actual_file = fallback_file.to_string();
             actual_sha = fallback_sha;
             fallback_data
@@ -275,10 +268,20 @@ async fn fetch_remote_snapshot(
 pub async fn sync_webdav(
     http: &reqwest::Client,
     config: &mut WebDavSyncConfig,
-    local_data: &SyncData,
+    app: &AppHandle,
+    history_entries: Option<&[SyncHistoryEntry]>,
+    history_deletions: Option<&[SyncHistoryDeletion]>,
 ) -> AppResult<SyncResult> {
     let _sync_guard = acquire_sync_lock().await;
-    let api = WebDavApiClient::new(http, &config.server_url, &config.username, &config.password, &config.base_path);
+    let local_data = build_local_sync_data(app, history_entries, history_deletions);
+    let local_data = &local_data;
+    let api = WebDavApiClient::new(
+        http,
+        &config.server_url,
+        &config.username,
+        &config.password,
+        &config.base_path,
+    );
 
     // 验证连接
     api.validate_connection().await?;
@@ -293,11 +296,14 @@ pub async fn sync_webdav(
             save_recent_play_history(local_data);
             config.last_remote_fingerprint = fp;
             config.last_sync_time = chrono::Utc::now().timestamp_millis();
-            return Ok(with_history(SyncResult {
-                success: true,
-                message: "Initial upload complete".into(),
-                ..Default::default()
-            }, local_data));
+            return Ok(with_history(
+                SyncResult {
+                    success: true,
+                    message: "Initial upload complete".into(),
+                    ..Default::default()
+                },
+                local_data,
+            ));
         }
     };
 
@@ -307,7 +313,12 @@ pub async fn sync_webdav(
 
     let remote_changed = remote_fingerprint != config.last_remote_fingerprint;
     let base_snapshot = load_base_snapshot("webdav");
-    let merged = merge::three_way_merge(local_data, &remote_data, config.last_sync_time, &base_snapshot);
+    let merged = merge::three_way_merge(
+        local_data,
+        &remote_data,
+        config.last_sync_time,
+        &base_snapshot,
+    );
     save_synced_playlists(&merged);
     save_recent_play_history(&merged);
     save_base_snapshot(&merged, "webdav");
@@ -315,33 +326,47 @@ pub async fn sync_webdav(
     if !remote_changed && !merge::has_data_changed(&remote_data, &merged) {
         config.last_remote_fingerprint = remote_fingerprint;
         config.last_sync_time = chrono::Utc::now().timestamp_millis();
-        return Ok(with_history(SyncResult {
-            success: true,
-            message: "Already up to date".into(),
-            ..Default::default()
-        }, &merged));
+        return Ok(with_history(
+            SyncResult {
+                success: true,
+                message: "Already up to date".into(),
+                ..Default::default()
+            },
+            &merged,
+        ));
     }
 
     let content = serde_json::to_string_pretty(&merged)?;
     let fp = api.update_file_content(&content).await?;
 
     let playlists_added = merged.playlists.len() as i32 - remote_data.playlists.len() as i32;
-    let songs_added = merged.playlists.iter().map(|p| p.songs.len()).sum::<usize>() as i32
-        - remote_data.playlists.iter().map(|p| p.songs.len()).sum::<usize>() as i32;
+    let songs_added = merged
+        .playlists
+        .iter()
+        .map(|p| p.songs.len())
+        .sum::<usize>() as i32
+        - remote_data
+            .playlists
+            .iter()
+            .map(|p| p.songs.len())
+            .sum::<usize>() as i32;
 
     config.last_remote_fingerprint = fp;
     config.last_sync_time = chrono::Utc::now().timestamp_millis();
 
-    Ok(with_history(SyncResult {
-        success: true,
-        message: "Sync complete".into(),
-        playlists_added: playlists_added.max(0),
-        playlists_updated: 0,
-        playlists_deleted: 0,
-        songs_added: songs_added.max(0),
-        songs_removed: 0,
-        history: None,
-    }, &merged))
+    Ok(with_history(
+        SyncResult {
+            success: true,
+            message: "Sync complete".into(),
+            playlists_added: playlists_added.max(0),
+            playlists_updated: 0,
+            playlists_deleted: 0,
+            songs_added: songs_added.max(0),
+            songs_removed: 0,
+            history: None,
+        },
+        &merged,
+    ))
 }
 
 /// 构建本地同步数据（从 tauri-plugin-store 读取歌单等）
@@ -401,7 +426,9 @@ fn history_deletions_to_sync(
 ) -> Vec<SyncRecentPlayDeletion> {
     deletions
         .iter()
-        .filter(|deletion| deletion.track.source != TrackSource::Local && !deletion.track.id.is_empty())
+        .filter(|deletion| {
+            deletion.track.source != TrackSource::Local && !deletion.track.id.is_empty()
+        })
         .map(|deletion| {
             let song = track_to_sync_song(&deletion.track);
             SyncRecentPlayDeletion {
@@ -540,10 +567,7 @@ pub fn next_sync_causal_tokens_pub(
         .collect())
 }
 
-pub fn attach_sync_membership_token_pub(
-    track: &mut TrackInfo,
-    token: SyncCausalToken,
-) {
+pub fn attach_sync_membership_token_pub(track: &mut TrackInfo, token: SyncCausalToken) {
     let mut payload = track_to_sync_song(track);
     payload.added_at = track.added_at.max(0);
     payload.sync_membership_tokens = vec![token];
@@ -576,7 +600,8 @@ pub fn playlist_track_identity_key_pub(track: &TrackInfo) -> String {
 }
 
 fn tracks_to_sync_songs(tracks: &[TrackInfo]) -> Vec<SyncSong> {
-    tracks.iter()
+    tracks
+        .iter()
         .filter(|track| track.source != TrackSource::Local)
         .map(track_to_sync_song)
         .collect()
@@ -592,7 +617,11 @@ pub fn track_to_playlist_song_deletion_pub(
         playlist_id: playlist_id.to_string(),
         song_id: song.id,
         album: song.album,
-        media_uri: if song.media_uri.is_empty() { None } else { Some(song.media_uri) },
+        media_uri: if song.media_uri.is_empty() {
+            None
+        } else {
+            Some(song.media_uri)
+        },
         deleted_at: chrono::Utc::now().timestamp_millis(),
         device_id,
         removed_membership_tokens: song.sync_membership_tokens,
@@ -708,7 +737,9 @@ fn sync_platform_identity(track: &TrackInfo) -> SyncPlatformIdentity {
 
 fn stable_remote_android_id(channel: &str, audio: &str, sub_audio: &str) -> i64 {
     if channel == "netease" {
-        return audio.parse::<i64>().unwrap_or_else(|_| stable_sync_identity_id(&format!("{channel}|{audio}")));
+        return audio
+            .parse::<i64>()
+            .unwrap_or_else(|_| stable_sync_identity_id(&format!("{channel}|{audio}")));
     }
     stable_sync_identity_id(&format!("{channel}|{audio}|{sub_audio}"))
 }
@@ -733,7 +764,11 @@ fn bilibili_cid_from_album(album: &str) -> Option<String> {
 fn sync_song_to_track(song: &SyncSong) -> TrackInfo {
     use crate::state::TrackSource;
 
-    let channel = song.channel_id.as_deref().unwrap_or("").to_ascii_lowercase();
+    let channel = song
+        .channel_id
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let is_youtube = channel == "youtube_music"
         || channel == "youtubemusic"
         || channel == "youtube"
@@ -744,7 +779,9 @@ fn sync_song_to_track(song: &SyncSong) -> TrackInfo {
 
     let (full_id, source) = if is_youtube {
         // ytmusic://video/{videoId}?playlistId=... -> 提取 videoId
-        let video_id = song.audio_id.as_deref()
+        let video_id = song
+            .audio_id
+            .as_deref()
             .or_else(|| song.media_uri.strip_prefix("ytmusic://video/"))
             .unwrap_or(&song.id)
             .split('?')
@@ -752,17 +789,23 @@ fn sync_song_to_track(song: &SyncSong) -> TrackInfo {
             .unwrap_or(&song.id);
         (format!("youtube:{}", video_id), TrackSource::Youtube)
     } else if is_bilibili {
-        let bili_id = song.audio_id.as_deref()
+        let bili_id = song
+            .audio_id
+            .as_deref()
             .filter(|id| !id.is_empty())
             .unwrap_or(&song.id);
         (format!("bilibili:{}", bili_id), TrackSource::Bilibili)
     } else if is_qq {
-        let qq_id = song.audio_id.as_deref()
+        let qq_id = song
+            .audio_id
+            .as_deref()
             .filter(|id| !id.is_empty())
             .unwrap_or(&song.id);
         (format!("qq:{}", qq_id), TrackSource::Qq)
     } else if is_netease {
-        let netease_id = song.audio_id.as_deref()
+        let netease_id = song
+            .audio_id
+            .as_deref()
             .filter(|id| !id.is_empty())
             .unwrap_or(&song.id);
         (format!("netease:{}", netease_id), TrackSource::Netease)
@@ -789,8 +832,14 @@ fn sync_song_to_track(song: &SyncSong) -> TrackInfo {
     let playlist_key = song.identity().stable_key();
     TrackInfo {
         id: full_id,
-        title: song.custom_name.clone().unwrap_or_else(|| song.name.clone()),
-        artist: song.custom_artist.clone().unwrap_or_else(|| song.artist.clone()),
+        title: song
+            .custom_name
+            .clone()
+            .unwrap_or_else(|| song.name.clone()),
+        artist: song
+            .custom_artist
+            .clone()
+            .unwrap_or_else(|| song.artist.clone()),
         album: playback_album,
         duration_ms: song.duration_ms.max(0) as u64,
         source,
@@ -807,20 +856,27 @@ fn load_local_playlists(_app: &AppHandle) -> Vec<SyncPlaylist> {
     let path = playlists_path();
     let store = PlaylistStore::load(&path);
 
-    let mut playlists: Vec<SyncPlaylist> = store.playlists.iter().map(|pl| {
-        let sync_id = sync_playlist_id(pl.id, &pl.name);
-        SyncPlaylist {
-            id: sync_id,
-            name: pl.name.clone(),
-            songs: tracks_to_sync_songs(&pl.tracks),
-            created_at: pl.id,
-            modified_at: pl.modified_at as i64,
-            is_deleted: false,
-            song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
-        }
-    }).collect();
+    let mut playlists: Vec<SyncPlaylist> = store
+        .playlists
+        .iter()
+        .map(|pl| {
+            let sync_id = sync_playlist_id(pl.id, &pl.name);
+            SyncPlaylist {
+                id: sync_id,
+                name: pl.name.clone(),
+                songs: tracks_to_sync_songs(&pl.tracks),
+                created_at: pl.id,
+                modified_at: pl.modified_at as i64,
+                is_deleted: false,
+                song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
+            }
+        })
+        .collect();
 
-    let existing_ids: HashSet<String> = playlists.iter().map(|playlist| playlist.id.clone()).collect();
+    let existing_ids: HashSet<String> = playlists
+        .iter()
+        .map(|playlist| playlist.id.clone())
+        .collect();
     for deleted_id in store.deleted_playlist_ids {
         let id = deleted_id.to_string();
         if existing_ids.contains(&id) {
@@ -854,32 +910,57 @@ const SYSTEM_FAVORITES_ID: i64 = -1001;
 const SYSTEM_LOCAL_ID: i64 = -1002;
 
 /// 识别系统歌单的候选名称
-const FAVORITES_NAMES: &[&str] = &["我喜欢的音乐", "我喜歡的音樂", "お気に入りの曲", "Liked Songs", "My Favorite Music"];
+const FAVORITES_NAMES: &[&str] = &[
+    "我喜欢的音乐",
+    "我喜歡的音樂",
+    "お気に入りの曲",
+    "Liked Songs",
+    "My Favorite Music",
+];
 const LOCAL_NAMES: &[&str] = &["本地音乐", "本機音樂", "ローカル音楽", "Local Music"];
 
-fn is_favorites_name(name: &str) -> bool { FAVORITES_NAMES.iter().any(|n| *n == name) }
-fn is_local_name(name: &str) -> bool { LOCAL_NAMES.iter().any(|n| *n == name) }
+fn is_favorites_name(name: &str) -> bool {
+    FAVORITES_NAMES.iter().any(|n| *n == name)
+}
+fn is_local_name(name: &str) -> bool {
+    LOCAL_NAMES.iter().any(|n| *n == name)
+}
 
 /// 解析 SyncPlaylist ID，识别系统歌单
 fn resolve_system_id(sp_id: &str, sp_name: &str) -> i64 {
     if let Ok(id) = sp_id.parse::<i64>() {
-        if id == SYSTEM_FAVORITES_ID { return SYSTEM_FAVORITES_ID; }
-        if id == SYSTEM_LOCAL_ID { return SYSTEM_LOCAL_ID; }
-        if id > 0 { return id; }
+        if id == SYSTEM_FAVORITES_ID {
+            return SYSTEM_FAVORITES_ID;
+        }
+        if id == SYSTEM_LOCAL_ID {
+            return SYSTEM_LOCAL_ID;
+        }
+        if id > 0 {
+            return id;
+        }
     }
-    if is_favorites_name(sp_name) { return SYSTEM_FAVORITES_ID; }
-    if is_local_name(sp_name) { return SYSTEM_LOCAL_ID; }
+    if is_favorites_name(sp_name) {
+        return SYSTEM_FAVORITES_ID;
+    }
+    if is_local_name(sp_name) {
+        return SYSTEM_LOCAL_ID;
+    }
     0 // 需要分配新 ID
 }
 
-/// 将同步合并后的歌单回写到本地存储（对齐 Android applyMergedDataToLocal）
-pub fn save_synced_playlists(merged: &SyncData) {
+/// 将同步数据中的普通歌单回写到本地存储（对齐 Android applyMergedDataToLocal）
+fn save_playlists(merged: &SyncData) {
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let existing_playlists = store.playlists.clone();
 
     let mut new_playlists: Vec<Playlist> = Vec::new();
-    let mut max_id: i64 = existing_playlists.iter().map(|p| p.id).filter(|&id| id > 0).max().unwrap_or(0);
+    let mut max_id: i64 = existing_playlists
+        .iter()
+        .map(|p| p.id)
+        .filter(|&id| id > 0)
+        .max()
+        .unwrap_or(0);
     let mut active_ids = HashSet::new();
     let mut deleted_ids = HashSet::new();
     let now = chrono::Utc::now().timestamp_millis();
@@ -895,10 +976,21 @@ pub fn save_synced_playlists(merged: &SyncData) {
 
         let mut local_id = resolve_system_id(&playlist.id, &playlist.name);
         if local_id == 0 {
-            local_id = playlist.id.parse::<i64>().ok()
+            local_id = playlist
+                .id
+                .parse::<i64>()
+                .ok()
                 .filter(|&id| id > 0)
-                .or_else(|| existing_playlists.iter().find(|p| p.name == playlist.name).map(|p| p.id))
-                .unwrap_or_else(|| { max_id += 1; max_id });
+                .or_else(|| {
+                    existing_playlists
+                        .iter()
+                        .find(|p| p.name == playlist.name)
+                        .map(|p| p.id)
+                })
+                .unwrap_or_else(|| {
+                    max_id += 1;
+                    max_id
+                });
         }
 
         // 检查 ID 冲突
@@ -912,7 +1004,9 @@ pub fn save_synced_playlists(merged: &SyncData) {
             current.id == local_id || sync_playlist_id(current.id, &current.name) == playlist.id
         });
         let mut seen_song_keys = HashSet::new();
-        let mut tracks: Vec<TrackInfo> = playlist.songs.iter()
+        let mut tracks: Vec<TrackInfo> = playlist
+            .songs
+            .iter()
             .filter(|song| {
                 let keys = song.identity_keys();
                 if keys.iter().any(|key| seen_song_keys.contains(key)) {
@@ -924,7 +1018,8 @@ pub fn save_synced_playlists(merged: &SyncData) {
             .map(sync_song_to_track)
             .filter(|track| !track.id.is_empty())
             .collect();
-        let mut local_track_ids: HashSet<String> = tracks.iter().map(|track| track.id.clone()).collect();
+        let mut local_track_ids: HashSet<String> =
+            tracks.iter().map(|track| track.id.clone()).collect();
         if let Some(current) = current_playlist {
             for track in &current.tracks {
                 if track.source == TrackSource::Local && local_track_ids.insert(track.id.clone()) {
@@ -949,14 +1044,20 @@ pub fn save_synced_playlists(merged: &SyncData) {
             store.deleted_playlist_ids.push(id);
         }
     }
-    store.deleted_playlist_ids.retain(|id| !active_ids.contains(id));
+    store
+        .deleted_playlist_ids
+        .retain(|id| !active_ids.contains(id));
 
     // 排序：我喜欢的音乐始终第一，本地文件始终最后，其余保持原序
     new_playlists.sort_by(|a, b| {
         let rank = |p: &Playlist| -> i32 {
-            if p.id == SYSTEM_FAVORITES_ID { -1 }
-            else if p.id == SYSTEM_LOCAL_ID { i32::MAX }
-            else { 0 }
+            if p.id == SYSTEM_FAVORITES_ID {
+                -1
+            } else if p.id == SYSTEM_LOCAL_ID {
+                i32::MAX
+            } else {
+                0
+            }
         };
         rank(a).cmp(&rank(b))
     });
@@ -967,17 +1068,28 @@ pub fn save_synced_playlists(merged: &SyncData) {
         .iter()
         .map(|deletion| {
             let mut normalized = deletion.clone();
-            normalized.removed_membership_tokens = normalize_sync_causal_tokens(
-                &deletion.removed_membership_tokens,
-            );
+            normalized.removed_membership_tokens =
+                normalize_sync_causal_tokens(&deletion.removed_membership_tokens);
             normalized
         })
         .collect();
     store.fix_next_id();
     let _ = store.save(&path);
+}
+
+/// 导入普通歌单时不改动独立存储的收藏歌单。
+pub fn save_imported_playlists(imported: &SyncData) {
+    save_playlists(imported);
+}
+
+/// 将完整同步结果回写到本地存储。
+pub fn save_synced_playlists(merged: &SyncData) {
+    save_playlists(merged);
 
     // 保存收藏歌单到独立文件
-    save_favorite_playlists(merged);
+    if let Err(error) = save_favorite_playlists_pub(merged.favorite_playlists.clone()) {
+        log::error!(target: "sync", "failed to persist favorite playlists: {}", error);
+    }
 }
 
 /// 收藏歌单存储路径
@@ -988,24 +1100,126 @@ fn favorites_path() -> std::path::PathBuf {
     path
 }
 
-/// 保存收藏歌单（FavoritePlaylist）
-fn save_favorite_playlists(merged: &SyncData) {
-    let path = favorites_path();
-    let favorites: Vec<&SyncFavoritePlaylist> = merged.favorite_playlists.iter()
-        .filter(|f| !f.is_deleted)
-        .collect();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&favorites).unwrap_or_default());
+fn atomic_write_favorites_file(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    atomic_write_favorites_file_with_publish(path, content, |temporary, path| {
+        temporary
+            .persist(path)
+            .map(|_| ())
+            .map_err(|error| error.error)
+    })
 }
 
-/// 读取收藏歌单（供 list 命令调用）
-pub fn load_favorite_playlists() -> Vec<SyncFavoritePlaylist> {
+fn atomic_write_favorites_file_with_publish(
+    path: &std::path::Path,
+    content: &[u8],
+    publish: impl FnOnce(tempfile::NamedTempFile, &std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "favorites path has no parent directory",
+        )
+    })?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".favorites-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    temporary.write_all(content)?;
+    temporary.as_file().sync_all()?;
+
+    publish(temporary, path)?;
+    sync_favorites_parent_directory(path)
+}
+
+#[cfg(unix)]
+fn sync_favorites_parent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "favorites path has no parent directory",
+        )
+    })?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_favorites_parent_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn load_favorite_playlists_unlocked() -> AppResult<Vec<SyncFavoritePlaylist>> {
     let path = favorites_path();
-    if !path.exists() { return Vec::new(); }
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| AppError::Other(format!("Failed to read favorites: {}", error)))?;
     serde_json::from_str::<Vec<SyncFavoritePlaylist>>(&content)
-        .map(|favorites| favorites.into_iter().map(|favorite| favorite.normalized_for_sync()).collect())
-        .unwrap_or_default()
+        .map(|favorites| {
+            favorites
+                .into_iter()
+                .map(|favorite| favorite.normalized_for_sync())
+                .collect()
+        })
+        .map_err(|error| AppError::Other(format!("Failed to parse favorites: {}", error)))
+}
+
+fn save_favorite_playlists_unlocked(favorites: Vec<SyncFavoritePlaylist>) -> AppResult<()> {
+    let path = favorites_path();
+    let favorites: Vec<SyncFavoritePlaylist> = favorites
+        .into_iter()
+        .map(|favorite| favorite.normalized_for_sync())
+        .collect();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Other(format!("Failed to create favorites directory: {}", error))
+        })?;
+    }
+    let content = serde_json::to_string_pretty(&favorites)
+        .map_err(|error| AppError::Other(format!("Failed to serialize favorites: {}", error)))?;
+    atomic_write_favorites_file(&path, content.as_bytes())
+        .map_err(|error| AppError::Other(format!("Failed to persist favorites: {}", error)))
+}
+
+pub fn save_favorite_playlists_pub(favorites: Vec<SyncFavoritePlaylist>) -> AppResult<()> {
+    let _guard = FAVORITES_IO_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| AppError::Other("Favorites storage lock poisoned".into()))?;
+    save_favorite_playlists_unlocked(favorites)
+}
+
+pub async fn mutate_favorite_playlists_pub<T>(
+    mutation: impl FnOnce(&mut Vec<SyncFavoritePlaylist>) -> AppResult<T>,
+) -> AppResult<T> {
+    let _sync_guard = acquire_sync_lock().await;
+    let _guard = FAVORITES_IO_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| AppError::Other("Favorites storage lock poisoned".into()))?;
+    let mut favorites = load_favorite_playlists_unlocked()?;
+    let result = mutation(&mut favorites)?;
+    save_favorite_playlists_unlocked(favorites)?;
+    Ok(result)
+}
+
+pub fn load_favorite_playlists_strict_pub() -> AppResult<Vec<SyncFavoritePlaylist>> {
+    let _guard = FAVORITES_IO_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| AppError::Other("Favorites storage lock poisoned".into()))?;
+    load_favorite_playlists_unlocked()
+}
+
+/// 读取收藏歌单（同步快照需要保留删除墓碑）
+pub fn load_favorite_playlists() -> Vec<SyncFavoritePlaylist> {
+    match load_favorite_playlists_strict_pub() {
+        Ok(favorites) => favorites,
+        Err(error) => {
+            log::error!(target: "sync", "failed to load favorite playlists: {}", error);
+            Vec::new()
+        }
+    }
 }
 
 fn load_local_playlist_song_deletions() -> Vec<SyncPlaylistSongDeletion> {
@@ -1014,9 +1228,8 @@ fn load_local_playlist_song_deletions() -> Vec<SyncPlaylistSongDeletion> {
         .playlist_song_deletions
         .into_iter()
         .map(|mut deletion| {
-            deletion.removed_membership_tokens = normalize_sync_causal_tokens(
-                &deletion.removed_membership_tokens,
-            );
+            deletion.removed_membership_tokens =
+                normalize_sync_causal_tokens(&deletion.removed_membership_tokens);
             deletion
         })
         .collect()
@@ -1047,12 +1260,12 @@ pub fn load_base_snapshot(scope: &str) -> HashMap<String, HashSet<String>> {
 
 /// 保存当前合并结果作为下次同步的 base snapshot
 fn save_base_snapshot(merged: &SyncData, scope: &str) {
-    let snapshot: HashMap<String, Vec<String>> = merged.playlists.iter()
+    let snapshot: HashMap<String, Vec<String>> = merged
+        .playlists
+        .iter()
         .filter(|p| !p.is_deleted)
         .map(|p| {
-            let keys: Vec<String> = p.songs.iter()
-                .map(|s| s.identity().stable_key())
-                .collect();
+            let keys: Vec<String> = p.songs.iter().map(|s| s.identity().stable_key()).collect();
             (p.id.clone(), keys)
         })
         .collect();
@@ -1069,9 +1282,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    async fn mock_github_server(
-        responses: Vec<String>,
-    ) -> (String, tokio::task::JoinHandle<()>) {
+    async fn mock_github_server(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -1110,11 +1321,7 @@ mod tests {
             r#"{"message":"temporary failure"}"#,
         )])
         .await;
-        let api = GitHubApiClient::new_with_api_base(
-            &reqwest::Client::new(),
-            "token",
-            &base,
-        );
+        let api = GitHubApiClient::new_with_api_base(&reqwest::Client::new(), "token", &base);
 
         let error = fetch_remote_snapshot(&api, &github_config(), "backup.bin", true)
             .await
@@ -1131,11 +1338,7 @@ mod tests {
             github_response("404 Not Found", "{}"),
         ])
         .await;
-        let api = GitHubApiClient::new_with_api_base(
-            &reqwest::Client::new(),
-            "token",
-            &base,
-        );
+        let api = GitHubApiClient::new_with_api_base(&reqwest::Client::new(), "token", &base);
 
         let snapshot = fetch_remote_snapshot(&api, &github_config(), "backup.bin", true)
             .await
@@ -1147,12 +1350,12 @@ mod tests {
 
     #[test]
     fn sync_song_conversion_preserves_playlist_added_at() {
-        let songs = tracks_to_sync_songs_pub(&[
-            track("netease:1", 123),
-            track("netease:2", 0),
-        ]);
+        let songs = tracks_to_sync_songs_pub(&[track("netease:1", 123), track("netease:2", 0)]);
 
-        assert_eq!(songs.iter().map(|song| song.added_at).collect::<Vec<_>>(), vec![123, 0]);
+        assert_eq!(
+            songs.iter().map(|song| song.added_at).collect::<Vec<_>>(),
+            vec![123, 0]
+        );
 
         let imported = sync_song_to_track(&SyncSong {
             id: "42".into(),
@@ -1213,7 +1416,10 @@ mod tests {
         assert_eq!(roundtrip[0].custom_name, original.custom_name);
         assert_eq!(roundtrip[0].custom_cover_url, original.custom_cover_url);
         assert_eq!(roundtrip[0].original_name, original.original_name);
-        assert_eq!(roundtrip[0].playlist_context_id, original.playlist_context_id);
+        assert_eq!(
+            roundtrip[0].playlist_context_id,
+            original.playlist_context_id
+        );
         assert_eq!(
             roundtrip[0].sync_membership_tokens,
             original.sync_membership_tokens
@@ -1305,8 +1511,72 @@ mod tests {
         attach_sync_membership_token_pub(&mut existing, token.clone());
         let upgraded = track_to_sync_song(&existing);
 
-        assert_eq!(upgraded.sync_metadata_version, CURRENT_SYNC_METADATA_VERSION);
+        assert_eq!(
+            upgraded.sync_metadata_version,
+            CURRENT_SYNC_METADATA_VERSION
+        );
         assert_eq!(upgraded.sync_membership_tokens, vec![token]);
+    }
+
+    #[test]
+    fn favorite_atomic_write_stages_sibling_and_replaces_existing_file() {
+        let root = tempfile::tempdir().expect("favorites root");
+        let path = root.path().join("favorites.json");
+        let previous = br#"[{"id":"previous"}]"#;
+        let replacement = br#"[{"id":"replacement"}]"#;
+        std::fs::write(&path, previous).expect("seed favorites");
+        let mut staging_path = None;
+
+        atomic_write_favorites_file_with_publish(&path, replacement, |temporary, destination| {
+            assert_eq!(temporary.path().parent(), destination.parent());
+            assert_eq!(
+                std::fs::read(temporary.path()).expect("read staging"),
+                replacement
+            );
+            assert_eq!(std::fs::read(destination).expect("read previous"), previous);
+            staging_path = Some(temporary.path().to_path_buf());
+            temporary
+                .persist(destination)
+                .map(|_| ())
+                .map_err(|error| error.error)
+        })
+        .expect("publish favorites");
+
+        assert_eq!(std::fs::read(&path).expect("read favorites"), replacement);
+        assert!(!staging_path.expect("observed staging path").exists());
+    }
+
+    #[test]
+    fn favorite_atomic_write_preserves_existing_file_when_publish_fails() {
+        let root = tempfile::tempdir().expect("favorites root");
+        let path = root.path().join("favorites.json");
+        let previous = br#"[{"id":"previous"}]"#;
+        let replacement = br#"[{"id":"replacement"}]"#;
+        std::fs::write(&path, previous).expect("seed favorites");
+        let mut staging_path = None;
+
+        let error = atomic_write_favorites_file_with_publish(
+            &path,
+            replacement,
+            |temporary, destination| {
+                assert_eq!(temporary.path().parent(), destination.parent());
+                assert_eq!(
+                    std::fs::read(temporary.path()).expect("read staging"),
+                    replacement
+                );
+                assert_eq!(std::fs::read(destination).expect("read previous"), previous);
+                staging_path = Some(temporary.path().to_path_buf());
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected publication failure",
+                ))
+            },
+        )
+        .expect_err("publication must fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&path).expect("read favorites"), previous);
+        assert!(!staging_path.expect("observed staging path").exists());
     }
 
     fn track(id: &str, added_at: i64) -> TrackInfo {

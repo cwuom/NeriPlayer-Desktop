@@ -5,6 +5,10 @@ import ts from 'typescript'
 
 const sourceUrl = new URL('../src/modules/playback/playerState.ts', import.meta.url)
 const source = await readFile(sourceUrl, 'utf8')
+const playerStoreSource = await readFile(
+  new URL('../src/stores/player.ts', import.meta.url),
+  'utf8',
+)
 const transpiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
@@ -103,5 +107,99 @@ assert.deepEqual(restoredWithoutSession.queue, [first, last])
 assert.equal(restoredWithoutSession.queueIndex, -1)
 assert.equal(restoredWithoutSession.currentTrack, null)
 assert.equal(restoredWithoutSession.hasPlaybackSession, false)
+
+assert.match(
+  playerStoreSource,
+  /const currentResolvedStreamUrl = ref<string \| null>\(null\)/,
+  'the active resolved URL must be ephemeral player state',
+)
+const playFunctionSource = playerStoreSource.slice(
+  playerStoreSource.indexOf('async function play('),
+  playerStoreSource.indexOf('\n  async function togglePlayPause'),
+)
+const playbackFailureCatchSource = playFunctionSource.slice(
+  playFunctionSource.lastIndexOf('} catch (e) {'),
+)
+assert.match(
+  playFunctionSource,
+  /const token = \+\+playbackRequestToken\s+currentResolvedStreamUrl\.value = null/,
+  'every new playback request must invalidate the previously resolved URL synchronously',
+)
+assert.match(
+  playFunctionSource,
+  /if \(token !== playbackRequestToken\) return\s+currentResolvedStreamUrl\.value = played\.streamUrl/,
+  'only the current playback request may publish its winning remote URL',
+)
+assert.match(
+  playbackFailureCatchSource,
+  /currentResolvedStreamUrl\.value = null/,
+  'a failed current playback request must clear its resolved URL',
+)
+assert.match(
+  playbackFailureCatchSource,
+  /\+\+playbackRequestToken\s+currentResolvedStreamUrl\.value = null/,
+  'a failed current playback request must fence pending URL resolution before clearing its resolved URL',
+)
+const trackEndedSource = playerStoreSource.slice(
+  playerStoreSource.indexOf('async function handleTrackEnded'),
+  playerStoreSource.indexOf('\n  async function next'),
+)
+assert.match(
+  trackEndedSource,
+  /currentResolvedStreamUrl\.value = null\s+await pause\(\)\s+positionMs\.value = 0/,
+  'stopping at the end of the queue must clear the resolved URL before awaiting IPC',
+)
+assert.equal(
+  trackEndedSource.match(/\+\+playbackRequestToken\s+currentResolvedStreamUrl\.value = null\s+await pause\(\)/g)?.length,
+  3,
+  'sleep-timer and natural queue-end stop paths must fence pending URL resolution before clearing the resolved URL',
+)
+const clearQueueSource = playerStoreSource.slice(
+  playerStoreSource.indexOf('function clearQueue'),
+  playerStoreSource.indexOf('\n  //', playerStoreSource.indexOf('function clearQueue')),
+)
+assert.match(
+  clearQueueSource,
+  /currentResolvedStreamUrl\.value = null/,
+  'clearing the queue must clear the resolved URL',
+)
+assert.match(
+  clearQueueSource,
+  /function clearQueue\(\) \{\r?\n\s*\+\+playbackRequestToken\r?\n\s*queue\.value = \[\]/,
+  'clearing the queue must invalidate pending playback requests',
+)
+const removeFromQueueSource = playerStoreSource.slice(
+  playerStoreSource.indexOf('function removeFromQueue'),
+  playerStoreSource.indexOf('\n  //', playerStoreSource.indexOf('function removeFromQueue')),
+)
+const currentRemovalSource = removeFromQueueSource.slice(
+  removeFromQueueSource.indexOf('else if (wasCurrentTrack)'),
+)
+assert.match(
+  currentRemovalSource,
+  /\r?\n\s*\+\+playbackRequestToken\r?\n\s*currentTrack\.value/,
+  'removing the current track must invalidate pending playback requests',
+)
+assert.doesNotMatch(
+  removeFromQueueSource.slice(
+    removeFromQueueSource.indexOf('if (index < queueIndex.value)'),
+    removeFromQueueSource.indexOf('else if (wasCurrentTrack)'),
+  ),
+  /\+\+playbackRequestToken/,
+  'removing a non-current track must not invalidate current playback',
+)
+assert.doesNotMatch(
+  playerStoreSource.slice(
+    playerStoreSource.indexOf('function savePlayerState'),
+    playerStoreSource.indexOf('function loadPlayerState'),
+  ),
+  /currentResolvedStreamUrl/,
+  'resolved URLs must not be persisted',
+)
+assert.match(
+  playerStoreSource.slice(playerStoreSource.lastIndexOf('\n  return {')),
+  /currentResolvedStreamUrl/,
+  'listen together must be able to read the active resolved URL',
+)
 
 console.log('player state tests passed')

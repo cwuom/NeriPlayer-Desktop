@@ -31,6 +31,8 @@ import {
 import { switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import { createLogger } from '@/utils/logger'
+import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { shouldReplayForQualityChange } from '@/modules/playback/playbackUiSource'
 
 const log = createLogger('settings-view')
 
@@ -54,7 +56,7 @@ const {
   cloudMusicOffset, qqMusicOffset,
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
-  neteaseQuality, youtubeQuality, biliQuality,
+  neteaseQuality, neteaseAutoSourceSwitch, youtubeQuality, biliQuality,
   bypassProxy, internationalizationEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
@@ -86,6 +88,15 @@ async function openLogDir() {
   } catch (error) {
     log.error('failed to open log dir:', error)
     toast.error(t('settings.open_log_dir_failed'))
+  }
+}
+
+async function handleOpenDesktopLyrics() {
+  try {
+    await openDesktopLyricsWindow()
+  } catch (error) {
+    log.error('failed to open desktop lyrics:', error)
+    toast.error(String(error))
   }
 }
 
@@ -252,8 +263,13 @@ async function handleQualityChange(source: OnlineQualitySource, value: string) {
 
   setQualityForSource(source, value)
   const track = player.currentTrack
-  const isCurrentSource = !!track && track.id.startsWith(`${source}:`)
-  if (!track || player.isLoadingAudio || player.isPlayingFromDownload || !isCurrentSource) return
+  const shouldReplay = shouldReplayForQualityChange(source, {
+    track,
+    audioInfoSource: player.audioInfo?.source,
+    isLoadingAudio: player.isLoadingAudio,
+    isPlayingFromDownload: player.isPlayingFromDownload,
+  })
+  if (!shouldReplay) return
 
   qualitySwitching.value = true
   try {
@@ -464,7 +480,7 @@ function selectSettingsSection(id: SettingsSectionId) {
       motion: ['effects'],
       lyrics: ['lyrics'],
       network: [],
-      storage: ['storage'],
+      storage: ['storage', 'downloads'],
       backup: ['backup'],
       listen_together: ['listen_together'],
       language: [],
@@ -1051,7 +1067,7 @@ function confirmDataSaverChange() {
     </div>
         </div>
 
-        <div v-show="activeSettingsSection === 'personalization'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'personalization'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('personal') }">
 
     <!-- YouTube 国际化 -->
     <div class="setting-card">
@@ -1288,7 +1304,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 播放 -->
-        <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('playback') }">
     <div class="section-label clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
       <span>{{ t('settings.playback') }}</span>
@@ -1443,7 +1459,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 一起听 -->
-        <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('listen_together') }">
     <div class="section-label clickable" @click="toggleSection('listen_together')">
       <span class="material-symbols-rounded" style="font-size: 18px">group</span>
       <span>{{ t('listen_together.title') }}</span>
@@ -1534,12 +1550,14 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 下载管理 -->
-        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel">
-    <div class="section-label">
+        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('downloads') }">
+    <div class="section-label clickable" @click="toggleSection('downloads')">
       <span class="material-symbols-rounded" style="font-size: 18px">download</span>
       <span>{{ t('settings.download_manage') }}</span>
+      <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('downloads') }">expand_more</span>
     </div>
 
+    <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('downloads')">
     <template v-if="activeDownloadCount > 0">
       <div class="setting-card download-summary-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">downloading</span></div>
@@ -1591,15 +1609,30 @@ function confirmDataSaverChange() {
       </div>
       <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">chevron_right</span>
     </div>
+    </div></Transition>
         </div>
 
     <!-- 歌词 -->
-        <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('lyrics') }">
     <div class="section-label clickable" @click="toggleSection('lyrics')">
       <span class="material-symbols-rounded" style="font-size: 18px">lyrics</span>
       <span>{{ t('settings.lyrics') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('lyrics') }">expand_more</span>
     </div>
+
+    <button
+      type="button"
+      class="setting-card"
+      data-settings-action="desktop-lyrics"
+      @click="handleOpenDesktopLyrics"
+    >
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">subtitles</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('player.desktop_lyrics') }}</div>
+        <div class="setting-desc">{{ t('player.desktop_lyrics_desc') }}</div>
+      </div>
+      <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.45">open_in_new</span>
+    </button>
 
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">translate</span></div>
@@ -1676,7 +1709,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 动效 & 视觉 -->
-        <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('effects') }">
     <div class="section-label clickable" @click="toggleSection('effects')">
       <span class="material-symbols-rounded" style="font-size: 18px">auto_awesome</span>
       <span>{{ t('settings.effects') }}</span>
@@ -1758,7 +1791,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 音质 -->
-        <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('quality') }">
     <div class="section-label clickable" @click="toggleSection('quality')">
       <span class="material-symbols-rounded" style="font-size: 18px">headphones</span>
       <span>{{ t('settings.audio_quality') }}</span>
@@ -1774,6 +1807,18 @@ function confirmDataSaverChange() {
             <button v-for="o in neteaseQualityOptions" :key="o.value" class="m3-chip sm" :class="{ active: neteaseQuality === o.value }" :disabled="qualitySwitching" @click="handleQualityChange('netease', o.value)">{{ o.label }}</button>
           </div>
         </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">swap_horiz</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.netease_auto_source_switch') }}</div>
+          <div class="setting-desc">{{ t('settings.netease_auto_source_switch_desc') }}</div>
+        </div>
+        <label class="m3-switch">
+          <input type="checkbox" v-model="neteaseAutoSourceSwitch" />
+          <span class="track"><span class="thumb"><span v-if="neteaseAutoSourceSwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+        </label>
       </div>
 
       <div class="setting-card quality-card">
@@ -1799,7 +1844,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 存储 & 缓存 -->
-        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('storage') }">
     <div class="section-label clickable" @click="toggleSection('storage')">
       <span class="material-symbols-rounded" style="font-size: 18px">folder</span>
       <span>{{ t('settings.storage') }}</span>
@@ -1899,7 +1944,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 备份 & 恢复 -->
-        <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('backup') }">
     <div class="section-label clickable" @click="toggleSection('backup')">
       <span class="material-symbols-rounded" style="font-size: 18px">cloud_sync</span>
       <span>{{ t('settings.backup') }}</span>
@@ -2554,6 +2599,10 @@ function confirmDataSaverChange() {
 
 .settings-section-panel {
   min-width: 0;
+}
+
+.settings-section-panel.is-collapsed > .section-label.clickable ~ * {
+  display: none !important;
 }
 
 .settings-section-intro {

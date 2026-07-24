@@ -2,8 +2,12 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
+import { useRecommendStore } from './recommend'
+import { useLikedSongsStore } from './likedSongs'
 import i18n from '@/i18n'
 import { createLogger } from '@/utils/logger'
+import { AuthMutationRequestCoordinator } from '@/modules/auth/authMutationRequest'
+import { AuthStatusRequestCoordinator } from '@/modules/auth/authStatusRequest'
 
 const log = createLogger('auth')
 
@@ -11,6 +15,7 @@ export interface PlatformAuth {
   loggedIn: boolean
   nickname: string | null
   avatarUrl: string | null
+  accountId: string | null
 }
 
 export interface AuthStatusResponse {
@@ -19,7 +24,12 @@ export interface AuthStatusResponse {
   youtube: PlatformAuth & { platform: string }
 }
 
-const emptyAuth = (): PlatformAuth => ({ loggedIn: false, nickname: null, avatarUrl: null })
+const emptyAuth = (): PlatformAuth => ({
+  loggedIn: false,
+  nickname: null,
+  avatarUrl: null,
+  accountId: null,
+})
 
 /** 后端 snake_case -> 前端 camelCase */
 function mapAuth(raw: any): PlatformAuth {
@@ -27,33 +37,78 @@ function mapAuth(raw: any): PlatformAuth {
     loggedIn: raw?.logged_in ?? false,
     nickname: raw?.nickname ?? null,
     avatarUrl: raw?.avatar_url ?? null,
+    accountId: raw?.account_id ?? null,
   }
+}
+
+function hasNeteaseSessionBoundary(previous: PlatformAuth, next: PlatformAuth) {
+  return previous.loggedIn !== next.loggedIn || (
+    next.loggedIn && previous.accountId !== next.accountId
+  )
 }
 
 export const useAuthStore = defineStore('auth', () => {
   const netease = ref<PlatformAuth>(emptyAuth())
   const bilibili = ref<PlatformAuth>(emptyAuth())
   const youtube = ref<PlatformAuth>(emptyAuth())
+  // Changes even when the account keeps the same display name.
+  const neteaseSessionVersion = ref(0)
+  const authMutationRequestCoordinator = new AuthMutationRequestCoordinator()
+  const authStatusRequestCoordinator = new AuthStatusRequestCoordinator<any>()
+  const hasVerifiedNeteaseAuth = ref(false)
 
   // 正在登录的平台（用于 loading 状态）
   const loggingIn = ref<string | null>(null)
+  let nextLoginOperationId = 0
+  const activeLoginOperations = new Map<number, string>()
   const youtubeProfileRefreshAttempted = ref(false)
   const youtubeProfileRefreshing = ref(false)
 
   const isAnyLoggedIn = computed(() =>
     netease.value.loggedIn || bilibili.value.loggedIn || youtube.value.loggedIn
   )
+  const canMutateNetease = computed(() =>
+    hasVerifiedNeteaseAuth.value && netease.value.loggedIn
+  )
 
   /** 启动时检查所有平台登录状态 */
   async function checkStatus() {
     try {
-      const status = await invoke<any>('check_auth_status')
-      netease.value = mapAuth(status.netease)
+      const statusRequest = authStatusRequestCoordinator.run(
+        () => invoke<any>('check_auth_status'),
+      )
+      if (!statusRequest.started) {
+        await statusRequest.promise
+        return
+      }
+
+      const needsNeteaseVerification = !hasVerifiedNeteaseAuth.value
+      if (needsNeteaseVerification) {
+        useRecommendStore().clearPlatformCache('netease')
+        useLikedSongsStore().clearCloudLikes()
+      }
+
+      const statusResult = await statusRequest.promise
+      if (!statusResult.current) return
+
+      const status = statusResult.value
+      const nextNetease = mapAuth(status.netease)
+      const neteaseSessionChanged = hasNeteaseSessionBoundary(netease.value, nextNetease)
+      if (neteaseSessionChanged && !needsNeteaseVerification) {
+        useRecommendStore().clearPlatformCache('netease')
+        useLikedSongsStore().clearCloudLikes()
+      }
+      netease.value = nextNetease
       bilibili.value = mapAuth(status.bilibili)
       youtube.value = mapAuth(status.youtube)
+      if (nextNetease.loggedIn && (neteaseSessionChanged || needsNeteaseVerification)) {
+        neteaseSessionVersion.value++
+        void useLikedSongsStore().refreshCloudLikes()
+      }
       if (needsYoutubeProfileRefresh(youtube.value)) {
         void refreshYoutubeProfile()
       }
+      hasVerifiedNeteaseAuth.value = true
     } catch (e) {
       log.error('Failed to check auth status:', e)
     }
@@ -61,6 +116,38 @@ export const useAuthStore = defineStore('auth', () => {
 
   function needsYoutubeProfileRefresh(value: PlatformAuth) {
     return value.loggedIn && (!value.nickname || !value.avatarUrl)
+  }
+
+  function clearNeteaseCacheForAccountChange(platform: string, value: PlatformAuth) {
+    if (platform === 'netease' && value.loggedIn) {
+      useRecommendStore().clearPlatformCache('netease')
+      useLikedSongsStore().clearCloudLikes()
+    }
+  }
+
+  function invalidateAuthStatusRequests() {
+    authStatusRequestCoordinator.invalidate()
+  }
+
+  async function reconcileStatus() {
+    invalidateAuthStatusRequests()
+    await checkStatus()
+  }
+
+  function beginLoginOperation(platform: string): number {
+    const operationId = ++nextLoginOperationId
+    activeLoginOperations.set(operationId, platform)
+    loggingIn.value = platform
+    return operationId
+  }
+
+  function finishLoginOperation(operationId: number) {
+    activeLoginOperations.delete(operationId)
+    let activePlatform: string | null = null
+    for (const platform of activeLoginOperations.values()) {
+      activePlatform = platform
+    }
+    loggingIn.value = activePlatform
   }
 
   async function refreshYoutubeProfile() {
@@ -104,11 +191,23 @@ export const useAuthStore = defineStore('auth', () => {
     target: typeof netease,
   ) {
     const toast = useToastStore()
-    loggingIn.value = key
+    const loginOperationId = beginLoginOperation(key)
+    if (key === 'netease') hasVerifiedNeteaseAuth.value = false
+    invalidateAuthStatusRequests()
+    const mutation = authMutationRequestCoordinator.run(key, () => invoke<any>(command))
     try {
-      const info = await invoke<any>(command)
+      const info = await mutation.promise
+      if (!mutation.isCurrent()) return
+
       const mapped = mapAuth(info)
+      invalidateAuthStatusRequests()
+      if (key === 'netease') hasVerifiedNeteaseAuth.value = true
+      clearNeteaseCacheForAccountChange(key, mapped)
       target.value = mapped
+      if (key === 'netease' && mapped.loggedIn) {
+        neteaseSessionVersion.value++
+        void useLikedSongsStore().refreshCloudLikes()
+      }
       if (key === 'youtube') {
         youtubeProfileRefreshAttempted.value = false
         if (needsYoutubeProfileRefresh(mapped)) void refreshYoutubeProfile()
@@ -117,6 +216,8 @@ export const useAuthStore = defineStore('auth', () => {
         toast.success(t('settings.login_success', { platform: platformLabel(key) }))
       }
     } catch (e: any) {
+      if (!mutation.isCurrent()) return
+
       const msg = String(e)
       if (msg.includes('cancelled') || msg.includes('cancel')) {
         toast.show(t('settings.login_cancelled'), 'info')
@@ -124,8 +225,9 @@ export const useAuthStore = defineStore('auth', () => {
         toast.error(t('settings.login_failed', { platform: platformLabel(key) }))
       }
       log.error(`${key} login failed:`, e)
+      await checkStatus()
     } finally {
-      loggingIn.value = null
+      finishLoginOperation(loginOperationId)
     }
   }
 
@@ -147,16 +249,32 @@ export const useAuthStore = defineStore('auth', () => {
   /** 登出指定平台 */
   async function logout(platform: string) {
     const toast = useToastStore()
+    if (platform === 'netease') hasVerifiedNeteaseAuth.value = false
+    invalidateAuthStatusRequests()
+    const mutation = authMutationRequestCoordinator.run(
+      platform,
+      () => invoke('logout', { platform }),
+    )
     try {
-      await invoke('logout', { platform })
+      await mutation.promise
+      if (!mutation.isCurrent()) return
+
+      invalidateAuthStatusRequests()
       switch (platform) {
-        case 'netease': netease.value = emptyAuth(); break
+        case 'netease':
+          hasVerifiedNeteaseAuth.value = true
+          netease.value = emptyAuth()
+          useLikedSongsStore().clearCloudLikes()
+          break
         case 'bilibili': bilibili.value = emptyAuth(); break
         case 'youtube': youtube.value = emptyAuth(); break
       }
+      useRecommendStore().clearPlatformCache(platform)
       toast.success(t('settings.logout_success', { platform: platformLabel(platform) }))
     } catch (e) {
+      if (!mutation.isCurrent()) return
       log.error(`Logout ${platform} failed:`, e)
+      await checkStatus()
     }
   }
 
@@ -164,11 +282,26 @@ export const useAuthStore = defineStore('auth', () => {
   async function loginWithCookies(platform: string, rawCookies: string) {
     const toast = useToastStore()
     const target = platform === 'netease' ? netease : platform === 'bilibili' ? bilibili : youtube
-    loggingIn.value = platform
+    const loginOperationId = beginLoginOperation(platform)
+    if (platform === 'netease') hasVerifiedNeteaseAuth.value = false
+    invalidateAuthStatusRequests()
+    const mutation = authMutationRequestCoordinator.run(
+      platform,
+      () => invoke<any>('login_with_cookies', { platform, rawCookies }),
+    )
     try {
-      const info = await invoke<any>('login_with_cookies', { platform, rawCookies })
+      const info = await mutation.promise
+      if (!mutation.isCurrent()) return
+
       const mapped = mapAuth(info)
+      invalidateAuthStatusRequests()
+      if (platform === 'netease') hasVerifiedNeteaseAuth.value = true
+      clearNeteaseCacheForAccountChange(platform, mapped)
       target.value = mapped
+      if (platform === 'netease' && mapped.loggedIn) {
+        neteaseSessionVersion.value++
+        void useLikedSongsStore().refreshCloudLikes()
+      }
       if (platform === 'youtube') {
         youtubeProfileRefreshAttempted.value = false
         if (needsYoutubeProfileRefresh(mapped)) void refreshYoutubeProfile()
@@ -177,15 +310,17 @@ export const useAuthStore = defineStore('auth', () => {
         toast.success(t('settings.login_success', { platform: platformLabel(platform) }))
       }
     } catch (e: any) {
+      if (!mutation.isCurrent()) return
       toast.error(String(e))
       log.error(`${platform} cookie login failed:`, e)
+      await checkStatus()
     } finally {
-      loggingIn.value = null
+      finishLoginOperation(loginOperationId)
     }
   }
 
   return {
-    netease, bilibili, youtube, loggingIn, isAnyLoggedIn,
-    checkStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, logout,
+    netease, bilibili, youtube, neteaseSessionVersion, loggingIn, isAnyLoggedIn, canMutateNetease,
+    checkStatus, reconcileStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, logout,
   }
 })
