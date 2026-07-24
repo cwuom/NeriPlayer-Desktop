@@ -51,6 +51,48 @@ pub struct NeteaseLyrics {
     pub ytlrc: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NeteaseAccountProfile {
+    pub(crate) user_id: u64,
+    pub(crate) nickname: Option<String>,
+    pub(crate) avatar_url: Option<String>,
+}
+
+pub(crate) fn parse_netease_account_profile(body: &Value) -> AppResult<NeteaseAccountProfile> {
+    let code = body["code"]
+        .as_i64()
+        .or_else(|| body["code"].as_str().and_then(|value| value.parse().ok()))
+        .unwrap_or(-1);
+    if code != 200 {
+        return Err(AppError::Api(format!(
+            "Netease account API returned code {code}"
+        )));
+    }
+
+    let profile = body["profile"]
+        .as_object()
+        .ok_or_else(|| AppError::Api("Netease account response has no profile".into()))?;
+    let user_id = profile
+        .get("userId")
+        .map(json_u64)
+        .filter(|user_id| *user_id > 0)
+        .ok_or_else(|| {
+            AppError::Api("Netease account response has no valid profile.userId".into())
+        })?;
+
+    Ok(NeteaseAccountProfile {
+        user_id,
+        nickname: profile
+            .get("nickname")
+            .and_then(Value::as_str)
+            .map(String::from),
+        avatar_url: profile
+            .get("avatarUrl")
+            .and_then(Value::as_str)
+            .map(String::from),
+    })
+}
+
 impl NeteaseClient {
     pub fn new(http: &Client) -> Self {
         Self { http: http.clone() }
@@ -216,10 +258,12 @@ impl NeteaseClient {
     // 需要登录的 API
     /// 获取当前登录用户信息
     pub async fn get_user_account(&self) -> AppResult<Value> {
-        self.weapi_post(
+        let body = self.weapi_post(
             &format!("{}/weapi/w/nuser/account/get", BASE_URL),
             &json!({}),
-        ).await
+        ).await?;
+        parse_netease_account_profile(&body)?;
+        Ok(body)
     }
 
     /// 获取用户歌单列表
@@ -306,18 +350,7 @@ impl NeteaseClient {
             &format!("{}/weapi/song/enhance/download/url", BASE_URL),
             &params,
         ).await?;
-        let data = &body["data"];
-
-        Ok(NeteaseSongUrl {
-            url: clean_json_string(&data["url"]),
-            br: json_u64(&data["br"]),
-            size: json_u64(&data["size"]),
-            r#type: clean_json_string(&data["type"]).unwrap_or_else(|| "mp3".into()),
-            is_preview: data
-                .get("freeTrialInfo")
-                .is_some_and(|value| !value.is_null()),
-            unavailable_reason: None,
-        })
+        parse_download_url_response(&body)
     }
 
     /// 获取专辑详情
@@ -353,6 +386,70 @@ impl NeteaseClient {
             &params,
         ).await
     }
+}
+
+fn parse_download_url_response(body: &Value) -> AppResult<NeteaseSongUrl> {
+    let root_code = json_i64(&body["code"]).unwrap_or(-1);
+    if root_code != 200 {
+        let reason = if root_code == 301 {
+            NeteasePlaybackUnavailableReason::RequiresLogin
+        } else {
+            NeteasePlaybackUnavailableReason::Unknown
+        };
+        return Err(AppError::Api(format!(
+            "Netease download API returned code {root_code} ({reason:?})"
+        )));
+    }
+
+    let data = match &body["data"] {
+        Value::Array(values) => values.first(),
+        Value::Object(_) => Some(&body["data"]),
+        _ => None,
+    }
+    .ok_or_else(|| AppError::Api("Netease download response has no data".into()))?;
+
+    if let Some(data_code) = data.get("code").and_then(json_i64) {
+        if data_code != 200 {
+            let reason = if data_code == 404 {
+                NeteasePlaybackUnavailableReason::NoPermission
+            } else {
+                NeteasePlaybackUnavailableReason::Unknown
+            };
+            return Err(AppError::Api(format!(
+                "Netease download data returned code {data_code} ({reason:?})"
+            )));
+        }
+    }
+
+    let is_preview = data
+        .get("freeTrialInfo")
+        .is_some_and(|value| !value.is_null());
+    let url = clean_json_string(&data["url"]);
+    let br = json_u64(&data["br"]);
+    let size = json_u64(&data["size"]);
+    let r#type = clean_json_string(&data["type"]).unwrap_or_else(|| "mp3".into());
+
+    if is_preview {
+        return Ok(NeteaseSongUrl {
+            url: None,
+            br,
+            size,
+            r#type,
+            is_preview: true,
+            unavailable_reason: Some(NeteasePlaybackUnavailableReason::NoPermission),
+        });
+    }
+
+    Ok(NeteaseSongUrl {
+        unavailable_reason: url
+            .is_none()
+            .then_some(NeteasePlaybackUnavailableReason::NoPlayUrl),
+        url,
+        br,
+        size,
+        r#type,
+        is_preview: false,
+    })
 }
 
 fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
@@ -430,10 +527,17 @@ fn json_u64(value: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse::<i64>().ok()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_song_url_response, NeteasePlaybackUnavailableReason,
+        parse_download_url_response, parse_song_url_response,
+        NeteasePlaybackUnavailableReason,
     };
     use serde_json::json;
 
@@ -509,5 +613,47 @@ mod tests {
             result.unavailable_reason,
             Some(NeteasePlaybackUnavailableReason::NoPlayUrl)
         );
+    }
+
+    #[test]
+    fn download_response_rejects_root_business_failures() {
+        for code in [301, 500] {
+            let error = parse_download_url_response(&json!({ "code": code }))
+                .expect_err("business failures must not become download URLs");
+            assert!(error.to_string().contains(&code.to_string()));
+        }
+    }
+
+    #[test]
+    fn download_response_rejects_data_permission_failure() {
+        let error = parse_download_url_response(&json!({
+            "code": 200,
+            "data": {
+                "code": 404,
+                "url": null,
+            },
+        }))
+        .expect_err("data code 404 must not become a download URL");
+
+        assert!(error.to_string().contains("404"));
+    }
+
+    #[test]
+    fn download_response_never_exposes_free_trial_url() {
+        let result = parse_download_url_response(&json!({
+            "code": 200,
+            "data": {
+                "url": "https://m801.music.126.net/preview.mp3",
+                "br": 128000,
+                "size": "1234",
+                "type": "mp3",
+                "freeTrialInfo": { "fragmentType": 6 },
+            },
+        }))
+        .expect("preview response should be represented, not exposed");
+
+        assert_eq!(result.url, None);
+        assert!(result.is_preview);
+        assert_eq!(result.unavailable_reason, Some(NeteasePlaybackUnavailableReason::NoPermission));
     }
 }

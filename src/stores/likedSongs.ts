@@ -13,6 +13,10 @@ interface PlaylistInfo {
   name: string
 }
 
+interface ToggleTrackOptions {
+  neteaseAuthorized?: boolean
+}
+
 const DEFAULT_LIKED_PLAYLIST_NAME = '我喜欢的音乐'
 const LIKED_PLAYLIST_NAMES = [
   DEFAULT_LIKED_PLAYLIST_NAME,
@@ -28,8 +32,13 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
   const isLoading = ref(false)
   const isReady = ref(false)
 
-  let loadPromise: Promise<void> | null = null
+  let localLoadPromise: Promise<void> | null = null
+  let cloudLoadPromise: Promise<void> | null = null
   let unlistenPlaylistsChanged: UnlistenFn | null = null
+  let likedRequestGeneration = 0
+  let localLikedTrackIds = new Set<string>()
+  let cloudLikedTrackIds = new Set<string>()
+  let cloudLikedTrackIdsLoaded = false
 
   function inferTrackSource(trackId: string) {
     if (trackId.startsWith('netease:')) return 'netease'
@@ -57,47 +66,118 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
 
   function getNeteaseSongId(track: TrackInfo) {
     if (!track.id.startsWith('netease:')) return null
-    const id = Number.parseInt(track.id.replace('netease:', ''), 10)
-    return Number.isFinite(id) ? id : null
+    const id = Number(track.id.slice('netease:'.length))
+    return Number.isSafeInteger(id) && id > 0 ? id : null
   }
 
-  function setTrackLiked(trackId: string, liked: boolean) {
-    const next = new Set(likedTrackIds.value)
+  function setLocalTrackLiked(trackId: string, liked: boolean) {
+    const next = new Set(localLikedTrackIds)
     if (liked) {
       next.add(trackId)
     } else {
       next.delete(trackId)
     }
+    localLikedTrackIds = next
+    rebuildLikedTrackIds()
+  }
+
+  function setCloudTrackLiked(songId: number, liked: boolean) {
+    const trackId = `netease:${songId}`
+    const next = new Set(cloudLikedTrackIds)
+    if (liked) {
+      next.add(trackId)
+    } else {
+      next.delete(trackId)
+    }
+    cloudLikedTrackIds = next
+    rebuildLikedTrackIds()
+  }
+
+  function rebuildLikedTrackIds() {
+    const next = new Set(
+      [...localLikedTrackIds]
+        .filter(trackId => !cloudLikedTrackIdsLoaded || !trackId.startsWith('netease:')),
+    )
+    for (const trackId of cloudLikedTrackIds) next.add(trackId)
     likedTrackIds.value = next
   }
 
-  async function loadLikedPlaylist() {
-    if (loadPromise) return loadPromise
+  function clearCloudLikes() {
+    likedRequestGeneration++
+    cloudLoadPromise = null
+    cloudLikedTrackIds = new Set()
+    cloudLikedTrackIdsLoaded = true
+    rebuildLikedTrackIds()
+  }
 
-    loadPromise = (async () => {
+  async function loadLocalLikedPlaylist() {
+    if (localLoadPromise) return localLoadPromise
+
+    let currentPromise: Promise<void> | null = null
+    currentPromise = (async () => {
       isLoading.value = true
       try {
         const playlists = await invoke<PlaylistInfo[]>('list_playlists')
         const liked = playlists.find(p => LIKED_PLAYLIST_NAMES.includes(p.name))
         if (!liked) {
           likedPlaylistId.value = null
-          likedTrackIds.value = new Set()
-          return
+          localLikedTrackIds = new Set()
+        } else {
+          likedPlaylistId.value = liked.id
+          const tracks = await invoke<Array<{ id?: string }>>('get_playlist_tracks', { id: liked.id })
+          localLikedTrackIds = new Set(tracks.map(t => t.id || '').filter(Boolean))
         }
-
-        likedPlaylistId.value = liked.id
-        const tracks = await invoke<Array<{ id?: string }>>('get_playlist_tracks', { id: liked.id })
-        likedTrackIds.value = new Set(tracks.map(t => t.id || '').filter(Boolean))
       } catch (e) {
         log.error('loadLikedPlaylist:', e)
       } finally {
+        rebuildLikedTrackIds()
         isReady.value = true
         isLoading.value = false
-        loadPromise = null
+        if (localLoadPromise === currentPromise) localLoadPromise = null
       }
     })()
+    localLoadPromise = currentPromise
 
-    return loadPromise
+    return localLoadPromise
+  }
+
+  async function refreshCloudLikes() {
+    if (cloudLoadPromise) return cloudLoadPromise
+
+    const requestGeneration = likedRequestGeneration
+    let currentPromise: Promise<void> | null = null
+    currentPromise = (async () => {
+      const isCurrent = () => requestGeneration === likedRequestGeneration
+      try {
+        const recommend = useRecommendStore()
+        const refreshed = await recommend.fetchLikedSongIds()
+        if (!isCurrent()) return
+
+        cloudLikedTrackIds = refreshed
+          ? new Set(
+              [...recommend.likedSongIds]
+                .filter(id => Number.isSafeInteger(id) && id > 0)
+                .map(id => `netease:${id}`),
+            )
+          : new Set()
+        cloudLikedTrackIdsLoaded = true
+      } catch (e) {
+        if (!isCurrent()) return
+        log.error('loadLikedPlaylist cloud refresh:', e)
+        cloudLikedTrackIds = new Set()
+        cloudLikedTrackIdsLoaded = true
+      } finally {
+        if (isCurrent()) rebuildLikedTrackIds()
+        if (cloudLoadPromise === currentPromise) cloudLoadPromise = null
+      }
+    })()
+    cloudLoadPromise = currentPromise
+
+    return cloudLoadPromise
+  }
+
+  async function loadLikedPlaylist() {
+    await loadLocalLikedPlaylist()
   }
 
   async function ensureLikedPlaylist() {
@@ -106,7 +186,8 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
 
     const created = await invoke<PlaylistInfo>('create_playlist', { name: DEFAULT_LIKED_PLAYLIST_NAME })
     likedPlaylistId.value = created.id
-    likedTrackIds.value = new Set()
+    localLikedTrackIds = new Set()
+    rebuildLikedTrackIds()
     return created.id
   }
 
@@ -115,32 +196,66 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
     return likedTrackIds.value.has(track.id)
   }
 
-  async function toggleTrack(track?: TrackInfo | null) {
+  async function toggleTrack(track?: TrackInfo | null, options: ToggleTrackOptions = {}) {
     if (!track?.id) return false
+
+    const isNeteaseTrack = track.id.startsWith('netease:')
+    const neteaseSongId = getNeteaseSongId(track)
+    if (isNeteaseTrack && (!options.neteaseAuthorized || neteaseSongId === null)) return false
 
     await loadLikedPlaylist()
     const shouldLike = !isTrackLiked(track)
-    const neteaseSongId = getNeteaseSongId(track)
+    const wasLocallyLiked = localLikedTrackIds.has(track.id)
+    let localMutation: 'added' | 'removed' | null = null
+    let localMutationPlaylistId: number | null = null
 
     try {
       if (shouldLike) {
         const playlistId = await ensureLikedPlaylist()
-        await invoke('add_to_playlist', { playlistId, track: toBackendTrack(track) })
-        setTrackLiked(track.id, true)
-      } else if (likedPlaylistId.value !== null) {
+        if (!wasLocallyLiked) {
+          await invoke('add_to_playlist', { playlistId, track: toBackendTrack(track) })
+          localMutation = 'added'
+          localMutationPlaylistId = playlistId
+          setLocalTrackLiked(track.id, true)
+        }
+      } else if (wasLocallyLiked && likedPlaylistId.value !== null) {
+        const playlistId = likedPlaylistId.value
         await invoke('remove_from_playlist', {
-          playlistId: likedPlaylistId.value,
+          playlistId,
           trackId: track.id,
         })
-        setTrackLiked(track.id, false)
+        localMutation = 'removed'
+        localMutationPlaylistId = playlistId
+        setLocalTrackLiked(track.id, false)
       }
       if (neteaseSongId !== null) {
-        useRecommendStore().toggleLikeSong(neteaseSongId, shouldLike).catch(() => {})
+        const updated = await useRecommendStore().toggleLikeSong(neteaseSongId, shouldLike)
+        if (!updated) throw new Error('Netease like update rejected')
+        setCloudTrackLiked(neteaseSongId, shouldLike)
       }
       return true
     } catch (e) {
       log.error('toggleLikedTrack:', e)
-      await loadLikedPlaylist()
+      try {
+        if (localMutation === 'added' && localMutationPlaylistId !== null) {
+          await invoke('remove_from_playlist', {
+            playlistId: localMutationPlaylistId,
+            trackId: track.id,
+          })
+          setLocalTrackLiked(track.id, false)
+        } else if (localMutation === 'removed' && localMutationPlaylistId !== null) {
+          await invoke('add_to_playlist', {
+            playlistId: localMutationPlaylistId,
+            track: toBackendTrack(track),
+          })
+          setLocalTrackLiked(track.id, true)
+        } else {
+          rebuildLikedTrackIds()
+        }
+      } catch (rollbackError) {
+        log.error('toggleLikedTrack rollback:', rollbackError)
+        await loadLikedPlaylist()
+      }
       return false
     }
   }
@@ -149,13 +264,13 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
     if (!unlistenPlaylistsChanged) {
       try {
         unlistenPlaylistsChanged = await listen('playlists-changed', () => {
-          loadLikedPlaylist()
+          void loadLocalLikedPlaylist()
         })
       } catch (e) {
         log.error('listen playlists-changed for liked songs:', e)
       }
     }
-    await loadLikedPlaylist()
+    await loadLocalLikedPlaylist()
   }
 
   function stop() {
@@ -171,6 +286,8 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
     isLoading,
     isReady,
     loadLikedPlaylist,
+    refreshCloudLikes,
+    clearCloudLikes,
     isTrackLiked,
     toggleTrack,
     start,

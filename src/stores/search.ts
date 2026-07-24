@@ -21,37 +21,53 @@ export interface SearchResult {
 export const useSearchStore = defineStore('search', () => {
   const results = ref<SearchResult[]>([])
   const isSearching = ref(false)
+  const error = ref<string | null>(null)
   const query = ref('')
   const platform = ref('all') // all | netease | qq | bilibili | youtube
+  let searchGeneration = 0
 
   async function search(q: string, p?: string) {
+    const requestGeneration = ++searchGeneration
     if (!q.trim()) {
       results.value = []
+      isSearching.value = false
+      error.value = null
       return
     }
 
     query.value = q
     if (p) platform.value = p
+    const requestedPlatform = platform.value
     isSearching.value = true
+    error.value = null
 
     try {
       const r = await invoke<SearchResult[]>('search', {
         query: q,
-        platform: platform.value,
+        platform: requestedPlatform,
       })
+      if (requestGeneration !== searchGeneration) return
       results.value = r
+      error.value = null
     } catch (e) {
+      if (requestGeneration !== searchGeneration) return
       log.error('Search failed:', e)
       results.value = []
+      error.value = e instanceof Error ? e.message : String(e)
     } finally {
-      isSearching.value = false
+      if (requestGeneration === searchGeneration) {
+        isSearching.value = false
+      }
     }
   }
 
   function clear() {
+    searchGeneration++
     results.value = []
     query.value = ''
+    isSearching.value = false
+    error.value = null
   }
 
-  return { results, isSearching, query, platform, search, clear }
+  return { results, isSearching, error, query, platform, search, clear }
 })

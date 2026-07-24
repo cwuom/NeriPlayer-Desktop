@@ -300,6 +300,7 @@ fn main() {
             settings_cmd::get_app_data_dir,
             settings_cmd::get_log_dir,
             settings_cmd::get_netease_song_url,
+            settings_cmd::get_netease_song_download_url,
             settings_cmd::get_qq_song_url,
             settings_cmd::get_bili_audio_url,
             settings_cmd::get_youtube_audio_url,

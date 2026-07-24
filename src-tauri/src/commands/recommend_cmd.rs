@@ -305,12 +305,15 @@ pub async fn get_youtube_playlist_detail(
 
     // 会话保鲜: 落盘 + 注入共享 jar, 与 maybe_refresh_youtube_session 一致
     if let Some(updated) = refreshed_auth {
+        let _cookie_guard = state.auth_cookie_gate.lock().await;
         let mut auth_state = state.auth.lock();
         if let Some(saved) = auth_state.youtube.as_mut() {
-            *saved = updated;
-            let refreshed_cookies = saved.cookies.clone();
-            crate::auth::cookies::save_auth(&app, &auth_state);
-            crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
+            if crate::commands::auth_cmd::youtube_auth_matches(saved, &updated) {
+                *saved = updated;
+                let refreshed_cookies = saved.cookies.clone();
+                crate::auth::cookies::save_auth(&app, &auth_state);
+                crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
+            }
         }
     }
 

@@ -67,6 +67,25 @@ pub async fn get_netease_song_url(
     })
 }
 
+/// 获取网易云歌曲正式下载 URL（与播放试听 URL 分离）
+#[tauri::command]
+pub async fn get_netease_song_download_url(
+    song_id: u64,
+    quality: String,
+    state: State<'_, AppState>,
+) -> AppResult<SongUrlResult> {
+    let client = NeteaseClient::new(&state.http());
+    let result = client.get_song_download_url(song_id, &quality).await?;
+    Ok(SongUrlResult {
+        url: result.url,
+        bitrate: result.br,
+        format: result.r#type,
+        expected_content_length: (result.size > 0).then_some(result.size),
+        is_preview: result.is_preview,
+        unavailable_reason: result.unavailable_reason,
+    })
+}
+
 #[tauri::command]
 pub async fn get_qq_song_url(
     song_mid: String,
