@@ -835,23 +835,23 @@ pub async fn clear_debug_cookie_storage(
 #[tauri::command]
 pub async fn logout(platform: String, app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     let _cookie_guard = state.auth_cookie_gate.lock().await;
-    let mut auth = state.auth.lock();
+    {
+        let mut auth = state.auth.lock();
 
-    // 过期 reqwest Jar 中的 Cookie
-    cookies::expire_platform_cookies(&state.cookie_jar, &auth, &platform);
+        // 过期 reqwest Jar 中的 Cookie
+        cookies::expire_platform_cookies(&state.cookie_jar, &auth, &platform);
 
-    // 清除内存状态
-    match platform.as_str() {
-        "netease" => auth.netease = None,
-        "bilibili" => auth.bilibili = None,
-        "youtube" => auth.youtube = None,
-        _ => return Err(AppError::Other(format!("Unknown platform: {}", platform))),
+        // 清除内存状态
+        match platform.as_str() {
+            "netease" => auth.netease = None,
+            "bilibili" => auth.bilibili = None,
+            "youtube" => auth.youtube = None,
+            _ => return Err(AppError::Other(format!("Unknown platform: {}", platform))),
+        }
+
+        // 持久化
+        cookies::save_auth(&app, &auth);
     }
-
-    // 持久化
-    cookies::save_auth(&app, &auth);
-
-    drop(auth);
 
     clear_and_reinject_webview_cookies(&app, &state).await?;
 
