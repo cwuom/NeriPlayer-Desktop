@@ -600,6 +600,7 @@
     "import_config_success": "設定を読み込みました",
     "import_config_warning_listen_together_url": "一緒に聴くの URL が無効なため、デスクトップの既定値を維持しました",
     "import_config_warning_youtube_authorization": "スマートフォンのバックアップに YouTube Authorization はありますが、デスクトップに必要な Cookie がありません",
+    "import_config_warning_youtube_guest_cookies": "スマートフォンのバックアップには YouTube のゲスト Cookie しかないため、デスクトップの YouTube ログイン状態は変更していません",
     "import_config_warning_youtube_account": "YouTube の複数アカウント番号は移行できません。現在のアカウントを確認してください",
     "import_config_warning_netease_auth": "NetEase Cookie は読み込みましたが、アカウントを確認できませんでした。再接続後に自動で再試行します",
     "import_config_warning_unknown": "一部のスマートフォン設定を移行できませんでした",

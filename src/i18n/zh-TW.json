@@ -600,6 +600,7 @@
     "import_config_success": "設定匯入完成",
     "import_config_warning_listen_together_url": "一起聽服務位址無效，已保留桌面端預設位址",
     "import_config_warning_youtube_authorization": "手機備份只有 YouTube Authorization，缺少桌面端所需 Cookie",
+    "import_config_warning_youtube_guest_cookies": "手機備份僅包含 YouTube 訪客 Cookie，桌面端 YouTube 登入狀態未變更",
     "import_config_warning_youtube_account": "YouTube 多帳號索引暫時無法移轉，請確認目前帳號",
     "import_config_warning_netease_auth": "網易雲 Cookie 已匯入，但帳號驗證失敗；連線後會自動重試",
     "import_config_warning_unknown": "部分手機設定無法移轉",

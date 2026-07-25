@@ -471,6 +471,7 @@ export const useSyncStore = defineStore('sync', () => {
       const warningKeys: Record<string, string> = {
         listen_together_url_invalid: 'settings.import_config_warning_listen_together_url',
         youtube_authorization_unsupported: 'settings.import_config_warning_youtube_authorization',
+        youtube_guest_cookies_ignored: 'settings.import_config_warning_youtube_guest_cookies',
         youtube_multi_account_unsupported: 'settings.import_config_warning_youtube_account',
         netease_auth_verification_failed: 'settings.import_config_warning_netease_auth',
       }

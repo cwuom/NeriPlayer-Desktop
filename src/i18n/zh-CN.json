@@ -600,6 +600,7 @@
     "import_config_success": "配置导入完成",
     "import_config_warning_listen_together_url": "一起听服务地址无效，已保留桌面端默认地址",
     "import_config_warning_youtube_authorization": "手机备份只有 YouTube Authorization，缺少桌面端所需 Cookie",
+    "import_config_warning_youtube_guest_cookies": "手机备份仅包含 YouTube 访客 Cookie，桌面端 YouTube 登录状态未更改",
     "import_config_warning_youtube_account": "YouTube 多账号索引暂时无法迁移，请确认当前账号",
     "import_config_warning_netease_auth": "网易云 Cookie 已导入，但账号验证失败；联网后会自动重试",
     "import_config_warning_unknown": "部分手机配置无法迁移",

@@ -604,7 +604,11 @@ fn cookie_entries_from_map(
 fn android_auth_to_desktop(
     payload: &AndroidConfigFile,
     current: &crate::auth::state::AuthState,
-) -> (Option<crate::auth::state::AuthState>, Vec<&'static str>) {
+) -> (
+    Option<crate::auth::state::AuthState>,
+    Vec<&'static str>,
+    Vec<&'static str>,
+) {
     use crate::auth::state::{AuthState, BiliAuth, NeteaseAuth, YouTubeAuth};
 
     let mut auth = AuthState {
@@ -614,6 +618,7 @@ fn android_auth_to_desktop(
     };
     let mut changed = false;
     let mut imported_platforms = Vec::new();
+    let mut warnings = Vec::new();
     let netease_entries = cookie_entries_from_map(&payload.netease_auth.cookies, "music.163.com");
     let current_netease = current.netease.as_ref().filter(|auth| {
         let imported_music_u = netease_entries.iter().find(|entry| entry.name == "MUSIC_U");
@@ -665,16 +670,21 @@ fn android_auth_to_desktop(
     };
 
     if !youtube.is_empty() {
-        auth.youtube = Some(YouTubeAuth {
+        let imported_youtube = YouTubeAuth {
             cookies: youtube,
             nickname: None,
             avatar_url: None,
-        });
-        changed = true;
-        imported_platforms.push("youtube");
+        };
+        if imported_youtube.has_login() {
+            auth.youtube = Some(imported_youtube);
+            changed = true;
+            imported_platforms.push("youtube");
+        } else {
+            warnings.push("youtube_guest_cookies_ignored");
+        }
     }
 
-    (changed.then_some(auth), imported_platforms)
+    (changed.then_some(auth), imported_platforms, warnings)
 }
 
 fn merge_imported_auth_platforms(
@@ -749,7 +759,7 @@ fn parse_config_import(
     }
 
     let settings = android_settings_to_desktop(&payload.settings, current_settings);
-    let (auth, auth_platforms) = android_auth_to_desktop(&payload, current_auth);
+    let (auth, auth_platforms, auth_warnings) = android_auth_to_desktop(&payload, current_auth);
     let worker_base_url = payload.listen_together.worker_base_url.trim();
     let worker_base_url_input = payload.listen_together.worker_base_url_input.trim();
     let fallback_worker_url = url::Url::parse(worker_base_url_input)
@@ -780,7 +790,7 @@ fn parse_config_import(
         payload.sync_preferences.play_history_update_mode.clone()
     };
 
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = auth_warnings.into_iter().map(str::to_owned).collect();
     if worker_base_url.is_empty()
         && !worker_base_url_input.is_empty()
         && listen_together.server_url.is_empty()
@@ -2168,6 +2178,104 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning == "youtube_authorization_unsupported"));
+    }
+
+    #[test]
+    fn android_guest_youtube_cookies_do_not_replace_desktop_login() {
+        let content = serde_json::json!({
+            "kind": CONFIG_FILE_KIND,
+            "formatVersion": CONFIG_FILE_VERSION,
+            "settings": {
+                "booleans": { "netease_auto_source_switch": true }
+            },
+            "youTubeAuth": {
+                "cookies": {
+                    "VISITOR_INFO1_LIVE": "guest-visitor",
+                    "YSC": "guest-session"
+                }
+            }
+        })
+        .to_string();
+        let current_auth = AuthState {
+            youtube: Some(YouTubeAuth {
+                cookies: vec![CookieEntry {
+                    name: "SAPISID".into(),
+                    value: "desktop-session".into(),
+                    domain: ".youtube.com".into(),
+                }],
+                nickname: Some("Desktop account".into()),
+                avatar_url: None,
+            }),
+            ..Default::default()
+        };
+
+        let parsed = parse_config_import(&content, AppSettings::default(), &current_auth).unwrap();
+
+        assert!(parsed.auth.is_none());
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning == "youtube_guest_cookies_ignored"));
+    }
+
+    #[test]
+    fn android_youtube_login_cookies_are_imported() {
+        let content = serde_json::json!({
+            "kind": CONFIG_FILE_KIND,
+            "formatVersion": CONFIG_FILE_VERSION,
+            "settings": {
+                "booleans": { "netease_auto_source_switch": true }
+            },
+            "youTubeAuth": {
+                "cookies": { "SAPISID": "phone-session" }
+            }
+        })
+        .to_string();
+
+        let parsed =
+            parse_config_import(&content, AppSettings::default(), &AuthState::default()).unwrap();
+        let youtube = parsed
+            .auth
+            .expect("authenticated YouTube cookies should be imported")
+            .youtube
+            .expect("YouTube auth should be present");
+
+        assert!(youtube.has_login());
+        assert_eq!(youtube.get_sapisid(), Some("phone-session"));
+        assert!(!parsed
+            .warnings
+            .iter()
+            .any(|warning| warning == "youtube_guest_cookies_ignored"));
+    }
+
+    #[test]
+    fn android_youtube_secure_1p_login_cookie_is_imported() {
+        let content = serde_json::json!({
+            "kind": CONFIG_FILE_KIND,
+            "formatVersion": CONFIG_FILE_VERSION,
+            "settings": {
+                "booleans": { "netease_auto_source_switch": true }
+            },
+            "youTubeAuth": {
+                "cookies": { "__Secure-1PAPISID": "phone-secure-1p-session" }
+            }
+        })
+        .to_string();
+
+        let parsed =
+            parse_config_import(&content, AppSettings::default(), &AuthState::default()).unwrap();
+        let youtube = parsed
+            .auth
+            .expect("authenticated YouTube cookies should be imported")
+            .youtube
+            .expect("YouTube auth should be present");
+
+        assert!(youtube.has_login());
+        assert_eq!(youtube.get_sapisid(), Some("phone-secure-1p-session"));
+        assert!(!parsed
+            .warnings
+            .iter()
+            .any(|warning| warning == "youtube_guest_cookies_ignored"));
     }
 
     #[test]

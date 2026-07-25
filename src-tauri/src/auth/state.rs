@@ -62,18 +62,25 @@ impl BiliAuth {
 }
 
 impl YouTubeAuth {
-    /// 检查是否有 SAPISID 或 __Secure-3PAPISID
+    /// 检查是否有可用于桌面端授权头的 PAPISID Cookie
     pub fn has_login(&self) -> bool {
-        self.cookies.iter().any(|c| {
-            (c.name == "SAPISID" || c.name == "__Secure-3PAPISID") && !c.value.is_empty()
-        })
+        self.get_sapisid().is_some()
     }
 
-    /// 获取 SAPISID 值（优先 SAPISID，fallback __Secure-3PAPISID）
+    /// 获取主 PAPISID 值，顺序与 YouTube 授权头生成器保持一致
     pub fn get_sapisid(&self) -> Option<&str> {
         self.cookies.iter()
-            .find(|c| c.name == "SAPISID")
-            .or_else(|| self.cookies.iter().find(|c| c.name == "__Secure-3PAPISID"))
+            .find(|c| c.name == "SAPISID" && !c.value.is_empty())
+            .or_else(|| {
+                self.cookies
+                    .iter()
+                    .find(|c| c.name == "__Secure-3PAPISID" && !c.value.is_empty())
+            })
+            .or_else(|| {
+                self.cookies
+                    .iter()
+                    .find(|c| c.name == "__Secure-1PAPISID" && !c.value.is_empty())
+            })
             .map(|c| c.value.as_str())
     }
 }
@@ -154,7 +161,7 @@ impl AuthState {
 
 #[cfg(test)]
 mod tests {
-    use super::{CookieEntry, NeteaseAuth};
+    use super::{CookieEntry, NeteaseAuth, YouTubeAuth};
 
     fn music_cookie() -> CookieEntry {
         CookieEntry {
@@ -198,5 +205,28 @@ mod tests {
         };
 
         assert!(auth.has_login());
+    }
+
+    #[test]
+    fn youtube_auth_accepts_secure_1p_cookie_and_skips_empty_primary_cookie() {
+        let auth = YouTubeAuth {
+            cookies: vec![
+                CookieEntry {
+                    name: "SAPISID".into(),
+                    value: String::new(),
+                    domain: ".youtube.com".into(),
+                },
+                CookieEntry {
+                    name: "__Secure-1PAPISID".into(),
+                    value: "secure-1p-session".into(),
+                    domain: ".youtube.com".into(),
+                },
+            ],
+            nickname: None,
+            avatar_url: None,
+        };
+
+        assert!(auth.has_login());
+        assert_eq!(auth.get_sapisid(), Some("secure-1p-session"));
     }
 }

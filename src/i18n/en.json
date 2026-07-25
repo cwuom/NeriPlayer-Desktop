@@ -600,6 +600,7 @@
     "import_config_success": "Configuration imported",
     "import_config_warning_listen_together_url": "The Listen Together URL was invalid; the desktop default was kept",
     "import_config_warning_youtube_authorization": "The phone backup has YouTube Authorization but lacks the cookies required on desktop",
+    "import_config_warning_youtube_guest_cookies": "The phone backup only contains YouTube guest cookies; the desktop YouTube login was left unchanged",
     "import_config_warning_youtube_account": "The YouTube multi-account index could not be migrated; verify the active account",
     "import_config_warning_netease_auth": "NetEase cookies were imported, but account verification failed; the app will retry after you reconnect",
     "import_config_warning_unknown": "Some phone settings could not be migrated",

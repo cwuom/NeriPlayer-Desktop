@@ -24,6 +24,7 @@ const syncStore = await read('src/stores/sync.ts')
 const settingsCommand = await read('src-tauri/src/commands/settings_cmd.rs')
 const imageCommand = await read('src-tauri/src/commands/image_cmd.rs')
 const appState = await read('src-tauri/src/state.rs')
+const authState = await read('src-tauri/src/auth/state.rs')
 const serializer = await read('src-tauri/src/sync/serializer.rs')
 
 for (const marker of [
@@ -95,6 +96,24 @@ assert.match(
 )
 
 const configImportSection = functionSection(syncCommand, 'pub async fn import_config(')
+const androidAuthSection = functionSection(syncCommand, 'fn android_auth_to_desktop(')
+assert.match(
+  androidAuthSection,
+  /let imported_youtube = YouTubeAuth[\s\S]*?imported_youtube\.has_login\(\)[\s\S]*?auth\.youtube = Some\(imported_youtube\)/,
+  'Android YouTube cookies must replace desktop auth only when they contain login credentials',
+)
+assert.match(
+  androidAuthSection,
+  /else\s*\{[\s\S]*?youtube_guest_cookies_ignored/,
+  'guest-only Android YouTube cookies must produce a preservation warning',
+)
+const youtubeAuthSection = functionSection(authState, 'impl YouTubeAuth')
+for (const credential of ['SAPISID', '__Secure-1PAPISID', '__Secure-3PAPISID']) {
+  assert.ok(
+    youtubeAuthSection.includes(`c.name == "${credential}"`),
+    `desktop YouTube auth must accept Android login credential ${credential}`,
+  )
+}
 for (const marker of [
   'save_sync_preferences_checked',
   'save_github_config_checked',
@@ -274,6 +293,7 @@ const warningKeys = [
   'import_online_favorites_unavailable',
   'import_config_warning_listen_together_url',
   'import_config_warning_youtube_authorization',
+  'import_config_warning_youtube_guest_cookies',
   'import_config_warning_youtube_account',
   'import_config_warning_netease_auth',
   'import_config_warning_unknown',
