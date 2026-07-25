@@ -1847,7 +1847,11 @@ const sliderActiveColor = computed(() => {
     <!-- 双栏 -->
     <div v-else class="np-body" :class="[{ 'np-body--no-header': props.hideHeader }, playViewMode === 'lyrics' ? 'np-body--lyrics-mode' : 'np-body--cover-mode']">
       <!-- 左侧：stack 固定内部高度，外层居中，切歌不上下重排 -->
-      <section class="np-left">
+      <section
+        class="np-left"
+        :inert="playViewMode === 'lyrics'"
+        :aria-hidden="playViewMode === 'lyrics'"
+      >
         <div class="np-left-stack">
         <div
           class="cover-wrap"
