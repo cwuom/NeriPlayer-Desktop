@@ -1967,6 +1967,7 @@ const sliderActiveColor = computed(() => {
           </div>
         </div>
 
+        <div class="np-control-deck">
         <div
           class="np-controls"
           :class="{
@@ -2230,6 +2231,7 @@ const sliderActiveColor = computed(() => {
           <button class="tool-btn tool-btn--feedback" @click="triggerControlFeedbackPulse(); toggleToolbarPanel('add')">
             <span class="material-symbols-rounded">playlist_add</span>
           </button>
+        </div>
         </div>
         </div>
       </section>
@@ -3511,13 +3513,39 @@ const sliderActiveColor = computed(() => {
 }
 
 /* 控制栏 */
+.np-control-deck {
+  width: 100%;
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 7px 10px 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-color: color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.64)) 28%, rgba(255,255,255,0.10));
+  background: rgba(20,18,24,0.38);
+  background: color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.18)) 14%, rgba(20,18,24,0.46));
+  box-shadow: 0 12px 30px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.18);
+  backdrop-filter: blur(24px) saturate(1.14);
+  -webkit-backdrop-filter: blur(24px) saturate(1.14);
+  isolation: isolate;
+}
+
+@supports not (background: color-mix(in srgb, white, black)) {
+  .np-control-deck {
+    background: rgba(48,44,58,0.88);
+  }
+}
+
 .np-controls {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
   width: 100%;
-  margin-top: 4px;
+  margin-top: 0;
   flex-shrink: 0;
   transition: opacity 240ms ease;
 }
@@ -4000,7 +4028,7 @@ const sliderActiveColor = computed(() => {
   justify-content: center;
   gap: 6px;
   width: 100%;
-  margin-top: 4px;
+  margin-top: 0;
   flex-shrink: 0;
   transition: opacity 240ms ease;
 }
@@ -4543,6 +4571,24 @@ const sliderActiveColor = computed(() => {
 
 .np-right--beat-active {
   animation: np-lyrics-beat-sway 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .np-body,
+  .np-left,
+  .np-right,
+  .cover-wrap,
+  .np-control-deck,
+  .np-controls,
+  .np-toolbar {
+    animation: none !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  .np-body.np-body--lyrics-mode .np-left {
+    transform: none;
+  }
 }
 </style>
 
