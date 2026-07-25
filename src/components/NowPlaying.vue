@@ -3533,7 +3533,7 @@ const sliderActiveColor = computed(() => {
   isolation: isolate;
 }
 
-@supports not (background: color-mix(in srgb, white, black)) {
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .np-control-deck {
     background: rgba(48,44,58,0.88);
   }
