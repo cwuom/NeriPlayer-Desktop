@@ -6,6 +6,8 @@ import ts from 'typescript'
 import { computed, reactive, ref, watch } from 'vue'
 
 const storeUrl = new URL('../src/stores/listenTogether/index.ts', import.meta.url)
+const protocolUrl = new URL('../src/stores/listenTogether/protocol.ts', import.meta.url)
+const mapperUrl = new URL('../src/stores/listenTogether/mapper.ts', import.meta.url)
 const backendCommandSource = await readFile(
   new URL('../src-tauri/src/commands/listen_together_cmd.rs', import.meta.url),
   'utf8',
@@ -39,6 +41,27 @@ assert.match(
   /active_session_id > session_id/,
   'leaving a superseded attempt must still close an older active backend session',
 )
+
+async function loadMapperModule() {
+  const protocolSource = await readFile(protocolUrl, 'utf8')
+  const mapperSource = await readFile(mapperUrl, 'utf8')
+  const protocolConsts = protocolSource
+    .split('export interface')[0]
+    .replace(/^[\s\S]*?export const LtChannels/, 'const LtChannels')
+  const mapperBody = mapperSource
+    .replace(/import type \{ TrackInfo \} from ['"]@\/stores\/player['"]\s*/g, '')
+    .replace(/import \{ LtChannels, type ListenTogetherTrack \} from ['"]\.\/protocol['"]\s*/g, '')
+  const compiled = ts.transpileModule(`${protocolConsts}\n${mapperBody}\nexport { LtChannels }\n`, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
+  return import(moduleUrl)
+}
+
+const listenTogetherMapper = await loadMapperModule()
 
 class FakeClock {
   #nextId = 1
@@ -104,6 +127,19 @@ function makePlayerTrack(id) {
     coverUrl: 'https://example.test/cover.jpg',
     audioUrl: '',
     source: 'netease',
+  }
+}
+
+function makeLocalPlayerTrack(id) {
+  return {
+    id: `local:${id}`,
+    title: `Local ${id}`,
+    artist: 'Local artist',
+    album: 'Local album',
+    durationMs: 180_000,
+    coverUrl: '',
+    audioUrl: `C:/Music/${id}.mp3`,
+    source: 'local',
   }
 }
 
@@ -304,38 +340,13 @@ async function loadStoreModule() {
     const useSettingsStore = () => globalThis.__ltTestHarness.settings
     const useToastStore = () => ({ error() {}, success() {} })
     const i18n = { global: { t: key => key } }
+    const {
+      LtChannels,
+      trackInfoToLtTrack,
+      ltTrackToTrackInfo,
+      toShareableQueueSnapshot,
+    } = globalThis.__ltMapper
     const desktopRepeatToWire = mode => mode === 'one' ? 1 : mode === 'all' ? 2 : 0
-    const trackInfoToLtTrack = (track, streamUrl) => ({
-      stableKey: track.id,
-      channelId: 'netease',
-      audioId: track.id.replace(/^netease:/, ''),
-      ...(streamUrl ? { streamUrl } : {}),
-      name: track.title,
-      artist: track.artist,
-      durationMs: track.durationMs,
-    })
-    const ltTrackToTrackInfo = track => ({
-      id: track.channelId === 'netease' ? 'netease:' + track.audioId : track.audioId,
-      title: track.name,
-      artist: track.artist,
-      album: track.album || '',
-      durationMs: track.durationMs,
-      coverUrl: track.coverUrl || '',
-      audioUrl: track.streamUrl || '',
-      source: track.channelId,
-    })
-    const toShareableQueueSnapshot = (
-      queue,
-      currentIndex,
-      shareAudioLinks = true,
-      currentStreamUrl,
-    ) => ({
-      queue: queue.map((track, index) => trackInfoToLtTrack(
-        track,
-        shareAudioLinks && index === currentIndex ? currentStreamUrl : undefined,
-      )),
-      resolvedIndex: currentIndex >= 0 ? currentIndex : 0,
-    })
     const createLogger = () => ({ debug() {}, error() {} })
   `
 
@@ -358,6 +369,7 @@ async function flushPromises() {
 }
 
 globalThis.__ltTestDependencies = { defineStore, ref, computed, watch }
+globalThis.__ltMapper = listenTogetherMapper
 globalThis.localStorage = {
   values: new Map(),
   getItem(key) { return this.values.get(key) ?? null },
@@ -393,6 +405,37 @@ await test('listen-together frontend lifecycle', async t => {
 
   })
 
+  await t.test('controller creation omits a local current track from the shared snapshot', async t => {
+    const harness = createHarness()
+    const before = makePlayerTrack('before-local-current')
+    const localCurrent = makeLocalPlayerTrack('private-current')
+    const after = makePlayerTrack('after-local-current')
+    harness.player.queue = [before, localCurrent, after]
+    harness.player.queueIndex = 1
+    harness.player.currentTrack = localCurrent
+    harness.player.isPlaying = true
+    harness.player.positionMs = 12_345
+    globalThis.__ltTestHarness = harness
+    setActivePinia(createPinia())
+    const store = useListenTogetherStore()
+    t.after(() => store.leaveRoom())
+
+    await store.createRoom()
+
+    const snapshot = harness.commandCalls
+      .find(call => call.command === 'lt_create_room')
+      .args.initialSnapshot
+    assert.deepEqual(
+      snapshot.queue.map(track => track.stableKey),
+      ['netease:before-local-current', 'netease:after-local-current'],
+    )
+    assert.equal(snapshot.currentIndex, 0)
+    assert.equal(snapshot.track, undefined)
+    assert.equal(snapshot.isPlaying, false)
+    assert.equal(snapshot.positionMs, 0)
+    assert.doesNotMatch(JSON.stringify(snapshot), /C:\/Music/)
+  })
+
   await t.test('controller set-track events carry the current resolved stream only', async t => {
     const harness = createHarness()
     harness.joinHandler = ({ roomId }) => ({
@@ -425,6 +468,219 @@ await test('listen-together frontend lifecycle', async t => {
     assert.equal(event.queue[1].streamUrl, streamUrl)
     assert.equal(event.track.streamUrl, streamUrl)
 
+  })
+
+  await t.test('controller does not emit SET_TRACK for a local current track', async t => {
+    const harness = createHarness()
+    harness.joinHandler = ({ roomId }) => ({
+      ...joinResponse(roomId),
+      role: 'controller',
+    })
+    globalThis.__ltTestHarness = harness
+    setActivePinia(createPinia())
+    const store = useListenTogetherStore()
+    t.after(() => store.leaveRoom())
+
+    await store.joinRoom('room-local-set-track')
+    harness.emit('lt:connected')
+    const before = makePlayerTrack('before-local-set-track')
+    const localCurrent = makeLocalPlayerTrack('private-set-track')
+    harness.player.queue = [before, localCurrent]
+    harness.player.queueIndex = 1
+    harness.player.currentTrack = localCurrent
+    await flushPromises()
+
+    const setTrackEvents = harness.commandCalls
+      .filter(call => call.command === 'lt_send_event')
+      .map(call => call.args.event)
+      .filter(event => event.type === 'SET_TRACK')
+    assert.deepEqual(setTrackEvents, [])
+  })
+
+  await t.test('listener does not request a local current track', async t => {
+    const harness = createHarness()
+    globalThis.__ltTestHarness = harness
+    setActivePinia(createPinia())
+    const store = useListenTogetherStore()
+    t.after(() => store.leaveRoom())
+
+    await store.joinRoom('room-local-request-set-track')
+    harness.emit('lt:connected')
+    const before = makePlayerTrack('before-local-request-set-track')
+    const localCurrent = makeLocalPlayerTrack('private-request-set-track')
+    harness.player.queue = [before, localCurrent]
+    harness.player.queueIndex = 1
+    harness.player.currentTrack = localCurrent
+    await flushPromises()
+
+    const requestEvents = harness.commandCalls
+      .filter(call => call.command === 'lt_send_event')
+      .map(call => call.args.event)
+      .filter(event => event.type === 'REQUEST_SET_TRACK')
+    assert.deepEqual(requestEvents, [])
+  })
+
+  await t.test('controller local playback does not control the shared room', async t => {
+    const harness = createHarness()
+    harness.joinHandler = ({ roomId }) => ({
+      ...joinResponse(roomId),
+      role: 'controller',
+    })
+    globalThis.__ltTestHarness = harness
+    setActivePinia(createPinia())
+    const store = useListenTogetherStore()
+    t.after(() => store.leaveRoom())
+
+    await store.joinRoom('room-local-controller-control')
+    harness.emit('lt:connected')
+    const before = makePlayerTrack('before-local-controller-control')
+    const localCurrent = makeLocalPlayerTrack('private-controller-control')
+    harness.player.queue = [before, localCurrent]
+    harness.player.queueIndex = 1
+    harness.player.currentTrack = localCurrent
+    await flushPromises()
+    harness.player.isPlaying = true
+    await flushPromises()
+    store.reportSeekEvent(1_234)
+    await flushPromises()
+
+    const controlEvents = harness.commandCalls
+      .filter(call => call.command === 'lt_send_event')
+      .map(call => call.args.event)
+      .filter(event => ['PLAY', 'PAUSE', 'SEEK', 'PLAYBACK_MODE'].includes(event.type))
+    assert.deepEqual(controlEvents, [])
+  })
+
+  await t.test('listener local playback does not request room controls', async t => {
+    const clock = new FakeClock()
+    const originalSetTimeout = globalThis.setTimeout
+    const originalClearTimeout = globalThis.clearTimeout
+    globalThis.setTimeout = clock.setTimeout
+    globalThis.clearTimeout = clock.clearTimeout
+
+    try {
+      const harness = createHarness()
+      globalThis.__ltTestHarness = harness
+      setActivePinia(createPinia())
+      const store = useListenTogetherStore()
+      t.after(() => store.leaveRoom())
+
+      await store.joinRoom('room-local-listener-control')
+      harness.emit('lt:connected')
+      const before = makePlayerTrack('before-local-listener-control')
+      const localCurrent = makeLocalPlayerTrack('private-listener-control')
+      harness.player.queue = [before, localCurrent]
+      harness.player.queueIndex = 1
+      harness.player.currentTrack = localCurrent
+      await flushPromises()
+      harness.player.isPlaying = true
+      harness.player.lastSeekCommand = { seq: 1, source: 'local', positionMs: 2_468 }
+      await flushPromises()
+      await clock.runAll()
+
+      const requestEvents = harness.commandCalls
+        .filter(call => call.command === 'lt_send_event')
+        .map(call => call.args.event)
+        .filter(event => [
+          'REQUEST_PLAY',
+          'REQUEST_PAUSE',
+          'REQUEST_SEEK',
+          'REQUEST_PLAYBACK_MODE',
+        ].includes(event.type))
+      assert.deepEqual(requestEvents, [])
+    } finally {
+      globalThis.setTimeout = originalSetTimeout
+      globalThis.clearTimeout = originalClearTimeout
+    }
+  })
+
+  await t.test('controller heartbeat leaves local playback out of the room state', async t => {
+    const originalSetInterval = globalThis.setInterval
+    const originalClearInterval = globalThis.clearInterval
+    let heartbeat = null
+    globalThis.setInterval = callback => {
+      heartbeat = callback
+      return 1
+    }
+    globalThis.clearInterval = () => undefined
+
+    try {
+      const harness = createHarness()
+      const before = makePlayerTrack('before-local-heartbeat')
+      const localCurrent = makeLocalPlayerTrack('private-heartbeat')
+      harness.player.queue = [before, localCurrent]
+      harness.player.queueIndex = 1
+      harness.player.currentTrack = localCurrent
+      harness.player.isPlaying = true
+      harness.player.positionMs = 54_321
+      globalThis.__ltTestHarness = harness
+      setActivePinia(createPinia())
+      const store = useListenTogetherStore()
+      t.after(() => store.leaveRoom())
+
+      await store.createRoom()
+      harness.emit('lt:connected')
+      await flushPromises()
+      assert.equal(typeof heartbeat, 'function')
+      heartbeat()
+      await flushPromises()
+
+      const event = harness.commandCalls
+        .filter(call => call.command === 'lt_send_event')
+        .map(call => call.args.event)
+        .find(candidate => candidate.type === 'HEARTBEAT')
+      assert.ok(event)
+      assert.equal(event.track, undefined)
+      assert.equal(event.queue, undefined)
+      assert.equal(event.currentIndex, undefined)
+      assert.equal(event.positionMs, undefined)
+      assert.equal(event.state, undefined)
+      assert.equal(event.repeatMode, undefined)
+      assert.equal(event.shuffleEnabled, undefined)
+      assert.doesNotMatch(JSON.stringify(event), /C:\/Music/)
+    } finally {
+      globalThis.setInterval = originalSetInterval
+      globalThis.clearInterval = originalClearInterval
+    }
+  })
+
+  await t.test('controller confirms a remote member track request with the requested queue item', async t => {
+    const harness = createHarness()
+    harness.joinHandler = ({ roomId }) => ({
+      ...joinResponse(roomId),
+      role: 'controller',
+    })
+    const initial = makePlayerTrack('member-request-initial')
+    const requested = makePlayerTrack('member-request-target')
+    harness.player.queue = [initial, requested]
+    harness.player.queueIndex = 1
+    harness.player.currentTrack = initial
+    globalThis.__ltTestHarness = harness
+    setActivePinia(createPinia())
+    const store = useListenTogetherStore()
+    t.after(() => store.leaveRoom())
+
+    await store.joinRoom('room-member-track-request')
+    harness.emit('lt:connected')
+    harness.emit('lt:message', {
+      type: 'member_control_requested',
+      causedBy: { type: 'REQUEST_SET_TRACK' },
+      currentIndex: 1,
+      track: makeTrack('member-request-target'),
+    })
+    await flushPromises()
+
+    const event = harness.commandCalls
+      .filter(call => call.command === 'lt_send_event')
+      .map(call => call.args.event)
+      .find(candidate => candidate.type === 'SET_TRACK')
+    assert.ok(event)
+    assert.equal(event.track.stableKey, 'netease:member-request-target')
+    assert.equal(event.currentIndex, 1)
+    assert.deepEqual(
+      event.queue.map(track => track.stableKey),
+      ['netease:member-request-initial', 'netease:member-request-target'],
+    )
   })
 
   await t.test('link requests receive Android-compatible LINK_READY for the current session and track', async t => {
@@ -480,6 +736,34 @@ await test('listen-together frontend lifecycle', async t => {
       },
     )
 
+  })
+
+  await t.test('local current tracks never send LINK_READY', async t => {
+    const harness = createHarness()
+    const current = makeLocalPlayerTrack('private-link-current')
+    harness.player.queue = [current]
+    harness.player.queueIndex = 0
+    harness.player.currentTrack = current
+    harness.player.currentResolvedStreamUrl = 'https://music.126.net/private-link-current.mp3'
+    globalThis.__ltTestHarness = harness
+    setActivePinia(createPinia())
+    const store = useListenTogetherStore()
+    t.after(() => store.leaveRoom())
+
+    await store.createRoom()
+    harness.emit('lt:connected')
+    harness.emit('lt:message', {
+      type: 'link_requested',
+      requestTrackStableKey: current.id,
+      track: { stableKey: current.id },
+    })
+    await flushPromises()
+
+    const sentEvents = harness.commandCalls
+      .filter(call => call.command === 'lt_send_event')
+      .map(call => call.args.event)
+    assert.equal(sentEvents.some(event => event.type === 'LINK_READY'), false)
+    assert.doesNotMatch(JSON.stringify(sentEvents), /C:\/Music/)
   })
 
   await t.test('link requests without requestTrackStableKey are rejected', async t => {

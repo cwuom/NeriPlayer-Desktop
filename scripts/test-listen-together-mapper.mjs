@@ -168,6 +168,47 @@ assert.equal(
   assert.equal(resolvedIndex, 1)
 }
 
+// 本地曲目作为当前项时不能伪造为共享队列首项
+{
+  const { queue, resolvedIndex } = toShareableQueueSnapshot(
+    [
+      {
+        id: 'netease:1',
+        title: 'A',
+        artist: 'a',
+        album: '',
+        durationMs: 1,
+        coverUrl: '',
+        audioUrl: '',
+      },
+      {
+        id: 'local:current',
+        title: 'Local current',
+        artist: 'local',
+        album: '',
+        durationMs: 1,
+        coverUrl: '',
+        audioUrl: 'C:/Music/current.mp3',
+      },
+      {
+        id: 'netease:2',
+        title: 'B',
+        artist: 'b',
+        album: '',
+        durationMs: 1,
+        coverUrl: '',
+        audioUrl: '',
+      },
+    ],
+    1,
+  )
+  assert.deepEqual(
+    queue.map((track) => track.stableKey),
+    ['netease:1', 'netease:2'],
+  )
+  assert.equal(resolvedIndex, -1)
+}
+
 {
   const tracks = [
     {

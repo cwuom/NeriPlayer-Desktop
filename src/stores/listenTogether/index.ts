@@ -20,7 +20,7 @@ import type {
   ListenTogetherEvent,
   ListenTogetherInitialSnapshot,
 } from './protocol'
-import { desktopRepeatToWire } from './protocol'
+import { desktopRepeatToWire, LtChannels } from './protocol'
 import { trackInfoToLtTrack, ltTrackToTrackInfo, toShareableQueueSnapshot } from './mapper'
 import { createLogger } from '@/utils/logger'
 
@@ -133,6 +133,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const streamUrl = player.currentResolvedStreamUrl?.trim()
     if (!streamUrl || !/^https?:\/\//i.test(streamUrl)) return undefined
     return streamUrl
+  }
+
+  function hasLocalCurrentTrack(player: ReturnType<typeof usePlayerStore>): boolean {
+    return !!player.currentTrack
+      && trackInfoToLtTrack(player.currentTrack).channelId === LtChannels.LOCAL
   }
 
   function isCurrentSession(generation: number) {
@@ -259,16 +264,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         roomSettings.value.shareAudioLinks,
         currentStreamUrlForSharing(player),
       )
+      const currentTrack = resolvedIndex >= 0 ? ltQueue[resolvedIndex] : undefined
 
       const snapshot: ListenTogetherInitialSnapshot = {
         queue: ltQueue,
-        currentIndex: resolvedIndex,
-        track: player.currentTrack
-          ? trackInfoToLtTrack(player.currentTrack, currentStreamUrlForSharing(player))
-          : undefined,
+        currentIndex: currentTrack ? resolvedIndex : 0,
+        track: currentTrack,
         settings: roomSettings.value,
-        isPlaying: player.isPlaying,
-        positionMs: player.positionMs,
+        isPlaying: currentTrack ? player.isPlaying : false,
+        positionMs: currentTrack ? player.positionMs : 0,
         // Align Android ListenTogetherInitialSnapshot (ExoPlayer ints)
         repeatMode: desktopRepeatToWire(player.repeatMode),
         shuffleEnabled: !!player.shuffleEnabled,
@@ -637,7 +641,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           if (envelope.track) {
             const trackInfo = ltTrackToTrackInfo(envelope.track)
             player.play(trackInfo, 'local')
-            reportSetTrackEvent(envelope.track, envelope.currentIndex ?? 0)
+            reportSetTrackEvent()
           }
           break
         case 'REQUEST_PLAYBACK_MODE': {
@@ -811,6 +815,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       }),
       (newVal) => {
         if (_suppressPlayerWatch || player.isRemoteSyncGuardActive() || connectionState.value !== 'connected') return
+        if (hasLocalCurrentTrack(player)) return
 
         // 曲目变化
         if (newVal.trackId && newVal.trackId !== _lastReportedTrackId) {
@@ -818,7 +823,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           if (player.currentTrack) {
             const ltTrack = trackInfoToLtTrack(player.currentTrack)
             if (isController.value) {
-              reportSetTrackEvent(ltTrack, player.queueIndex)
+              reportSetTrackEvent()
             } else {
               sendRequestEvent('REQUEST_SET_TRACK', { track: ltTrack, currentIndex: player.queueIndex })
             }
@@ -866,6 +871,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         const seek = player.lastSeekCommand
         if (seek.source !== 'local') return
         if (player.isRemoteSyncGuardActive()) return
+        if (hasLocalCurrentTrack(player)) return
 
         scheduleLocalSeekReport(seek.positionMs)
       },
@@ -954,6 +960,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   function reportPlayEvent() {
     const player = usePlayerStore()
+    if (hasLocalCurrentTrack(player)) return
     if (shouldSkipControlEvent('PLAY')) return
     sendEvent({
       type: 'PLAY',
@@ -964,6 +971,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   function reportPauseEvent() {
     const player = usePlayerStore()
+    if (hasLocalCurrentTrack(player)) return
     if (shouldSkipControlEvent('PAUSE')) return
     sendEvent({
       type: 'PAUSE',
@@ -973,6 +981,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   function reportSeekEvent(positionMs: number) {
+    if (hasLocalCurrentTrack(usePlayerStore())) return
     if (shouldSkipSeekEvent(positionMs)) return
     sendEvent({
       type: 'SEEK',
@@ -982,6 +991,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   function reportPlaybackModeEvent() {
     const player = usePlayerStore()
+    if (hasLocalCurrentTrack(player)) return
     if (shouldSkipControlEvent('PLAYBACK_MODE')) return
     const repeatMode = desktopRepeatToWire(player.repeatMode)
     const shuffleEnabled = !!player.shuffleEnabled
@@ -1024,6 +1034,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
     const player = usePlayerStore()
     if (pending.trackId && player.currentTrack?.id !== pending.trackId) return
+    if (hasLocalCurrentTrack(player)) return
 
     if (isController.value) {
       reportSeekEvent(pending.positionMs)
@@ -1041,7 +1052,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _pendingSeekReport = null
   }
 
-  function reportSetTrackEvent(track: any, currentIndex: number) {
+  function reportSetTrackEvent() {
     const player = usePlayerStore()
     const streamUrl = currentStreamUrlForSharing(player)
     const { queue: ltQueue, resolvedIndex } = toShareableQueueSnapshot(
@@ -1050,11 +1061,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       roomSettings.value.shareAudioLinks,
       streamUrl,
     )
+    const currentTrack = resolvedIndex >= 0 ? ltQueue[resolvedIndex] : undefined
+    if (!currentTrack) return
+
     sendEvent({
       type: 'SET_TRACK',
-      track: ltQueue[resolvedIndex]
-        ?? (player.currentTrack ? trackInfoToLtTrack(player.currentTrack, streamUrl) : track),
-      currentIndex: ltQueue.length > 0 ? resolvedIndex : currentIndex,
+      track: currentTrack,
+      currentIndex: resolvedIndex,
       queue: ltQueue,
       positionMs: 0,
       shouldPlay: player.isPlaying,
@@ -1063,6 +1076,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   function sendRequestEvent(type: string, extra: Partial<ListenTogetherEvent> = {}) {
     const player = usePlayerStore()
+    if (hasLocalCurrentTrack(player)) return
     sendEvent({
       type,
       positionMs: player.positionMs,
@@ -1086,6 +1100,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         roomSettings.value.shareAudioLinks,
         streamUrl,
       )
+      const currentTrack = resolvedIndex >= 0 ? ltQueue[resolvedIndex] : undefined
+      if (!currentTrack) {
+        sendEvent({ type: 'HEARTBEAT' })
+        return
+      }
 
       sendEvent({
         type: 'HEARTBEAT',
@@ -1093,9 +1112,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         state: player.isPlaying ? 'playing' : 'paused',
         queue: ltQueue,
         currentIndex: resolvedIndex,
-        track: player.currentTrack
-          ? trackInfoToLtTrack(player.currentTrack, streamUrl)
-          : undefined,
+        track: currentTrack,
         repeatMode: desktopRepeatToWire(player.repeatMode),
         shuffleEnabled: !!player.shuffleEnabled,
       })

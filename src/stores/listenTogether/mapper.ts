@@ -235,7 +235,7 @@ export function toShareableQueueSnapshot(
   includeLocal: boolean = false,
 ): { queue: ListenTogetherTrack[]; resolvedIndex: number } {
   const result: ListenTogetherTrack[] = []
-  let resolvedIndex = 0
+  let resolvedIndex = -1
   for (let i = 0; i < queue.length; i++) {
     const track = queue[i]
     const isCurrentTrack = i === currentIndex
