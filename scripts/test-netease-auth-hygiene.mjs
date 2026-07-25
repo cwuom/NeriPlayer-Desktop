@@ -413,7 +413,7 @@ await run('Netease status checks invalidate cloud likes and reload only active s
   )
   assert.match(
     checkStatus,
-    /if\s*\(nextNetease\.loggedIn\s*&&\s*\(neteaseSessionChanged\s*\|\|\s*needsNeteaseVerification\)\)\s*\{\s*neteaseSessionVersion\.value\+\+\s*void\s+useLikedSongsStore\(\)\.refreshCloudLikes\(\)\s*\}/,
+    /const\s+advanceNeteaseSession\s*=\s*\([\s\S]*invalidatePlatformSessions[\s\S]*nextNetease\.loggedIn[\s\S]*\)[\s\S]*if\s*\(advanceNeteaseSession\)\s*\{\s*neteaseSessionVersion\.value\+\+\s*if\s*\(nextNetease\.loggedIn\)\s*void\s+useLikedSongsStore\(\)\.refreshCloudLikes\(\)\s*\}/,
   )
   assert.equal((checkStatus.match(/neteaseSessionVersion\.value\+\+/g) ?? []).length, 1)
   assert.equal((checkStatus.match(/refreshCloudLikes\(\)/g) ?? []).length, 1)

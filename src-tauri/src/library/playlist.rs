@@ -1,15 +1,21 @@
 // 播放列表管理（JSON 持久化）
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use crate::error::{AppError, AppResult};
 use crate::state::TrackInfo;
-use crate::error::AppResult;
-use crate::sync::models::{
-    normalize_sync_causal_tokens,
-    SyncPlaylistSongDeletion,
-    SyncSong,
-};
+use crate::sync::models::{normalize_sync_causal_tokens, SyncPlaylistSongDeletion, SyncSong};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const MAX_SAFE_PLAYLIST_ID: i64 = (1_i64 << 53) - 1;
+static PLAYLIST_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub fn acquire_playlist_io_lock() -> AppResult<MutexGuard<'static, ()>> {
+    PLAYLIST_IO_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| AppError::Other("Playlist storage lock poisoned".into()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
@@ -19,7 +25,7 @@ pub struct Playlist {
     pub modified_at: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlaylistStore {
     pub playlists: Vec<Playlist>,
     #[serde(default)]
@@ -31,18 +37,30 @@ pub struct PlaylistStore {
 
 impl PlaylistStore {
     pub fn load(path: &PathBuf) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        Self::load_strict(path).unwrap_or_default()
+    }
+
+    pub fn load_strict(path: &PathBuf) -> AppResult<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => Ok(serde_json::from_str(&content)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn save(&self, path: &PathBuf) -> AppResult<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(json.as_bytes())?;
+        temp.flush()?;
+        temp.as_file().sync_all()?;
+        temp.persist(path).map_err(|error| error.error)?;
         Ok(())
     }
 
@@ -52,7 +70,12 @@ impl PlaylistStore {
             let bytes = uuid::Uuid::new_v4().into_bytes();
             let candidate = (u64::from_be_bytes(bytes[..8].try_into().expect("UUID prefix"))
                 & MAX_SAFE_PLAYLIST_ID as u64) as i64;
-            if candidate > 0 && self.playlists.iter().all(|playlist| playlist.id != candidate) {
+            if candidate > 0
+                && self
+                    .playlists
+                    .iter()
+                    .all(|playlist| playlist.id != candidate)
+            {
                 break candidate;
             }
         };
@@ -63,7 +86,8 @@ impl PlaylistStore {
             tracks: Vec::new(),
             modified_at: chrono::Utc::now().timestamp_millis() as u64,
         });
-        self.deleted_playlist_ids.retain(|deleted_id| *deleted_id != id);
+        self.deleted_playlist_ids
+            .retain(|deleted_id| *deleted_id != id);
         self.playlists.last().unwrap()
     }
 
@@ -79,9 +103,8 @@ impl PlaylistStore {
 
     pub fn record_playlist_song_deletion(&mut self, deletion: SyncPlaylistSongDeletion) {
         let mut deletion = deletion;
-        deletion.removed_membership_tokens = normalize_sync_causal_tokens(
-            &deletion.removed_membership_tokens,
-        );
+        deletion.removed_membership_tokens =
+            normalize_sync_causal_tokens(&deletion.removed_membership_tokens);
         let identity = deletion.identity();
 
         if deletion.removed_membership_tokens.is_empty() {
@@ -101,8 +124,7 @@ impl PlaylistStore {
             .playlist_song_deletions
             .iter()
             .filter(|existing| {
-                existing.identity() == identity
-                    && !existing.removed_membership_tokens.is_empty()
+                existing.identity() == identity && !existing.removed_membership_tokens.is_empty()
             })
             .cloned()
             .collect();
@@ -133,11 +155,19 @@ impl PlaylistStore {
 
     /// 确保 next_id 大于所有正数歌单 ID
     pub fn fix_next_id(&mut self) {
-        let max = self.playlists.iter().map(|p| p.id).filter(|&id| id > 0).max().unwrap_or(0);
+        let max = self
+            .playlists
+            .iter()
+            .map(|p| p.id)
+            .filter(|&id| id > 0)
+            .max()
+            .unwrap_or(0);
         if self.next_id <= max {
             self.next_id = max + 1;
         }
-        if self.next_id < 1 { self.next_id = 1; }
+        if self.next_id < 1 {
+            self.next_id = 1;
+        }
     }
 }
 
@@ -169,18 +199,40 @@ mod tests {
     }
 
     #[test]
+    fn strict_load_distinguishes_missing_and_malformed_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("playlists.json");
+
+        assert!(PlaylistStore::load_strict(&path)
+            .unwrap()
+            .playlists
+            .is_empty());
+
+        std::fs::write(&path, "{malformed").unwrap();
+        assert!(PlaylistStore::load_strict(&path).is_err());
+        assert!(PlaylistStore::load(&path).playlists.is_empty());
+    }
+
+    #[test]
+    fn save_atomically_publishes_a_strictly_loadable_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("playlists.json");
+        let mut store = PlaylistStore::default();
+        store.create("Saved".into());
+
+        store.save(&path).unwrap();
+
+        let loaded = PlaylistStore::load_strict(&path).unwrap();
+        assert_eq!(loaded.playlists.len(), 1);
+        assert_eq!(loaded.playlists[0].name, "Saved");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn causal_deletion_snapshots_union_all_observed_tokens() {
         let mut store = PlaylistStore::default();
-        store.record_playlist_song_deletion(deletion(
-            100,
-            "a",
-            vec![token("phone", 1)],
-        ));
-        store.record_playlist_song_deletion(deletion(
-            200,
-            "b",
-            vec![token("desktop", 1)],
-        ));
+        store.record_playlist_song_deletion(deletion(100, "a", vec![token("phone", 1)]));
+        store.record_playlist_song_deletion(deletion(200, "b", vec![token("desktop", 1)]));
 
         let merged = &store.playlist_song_deletions[0];
         assert_eq!(merged.deleted_at, 200);
@@ -195,11 +247,7 @@ mod tests {
     fn readd_clears_only_legacy_deletion_snapshot() {
         let mut store = PlaylistStore::default();
         store.record_playlist_song_deletion(deletion(100, "legacy", Vec::new()));
-        store.record_playlist_song_deletion(deletion(
-            200,
-            "phone",
-            vec![token("phone", 1)],
-        ));
+        store.record_playlist_song_deletion(deletion(200, "phone", vec![token("phone", 1)]));
         let song = SyncSong {
             id: "42".into(),
             album: "netease".into(),

@@ -29,18 +29,28 @@ const importPlaylistsSection = functionSection(
 )
 assert.match(
   importPlaylistsSection,
-  /save_imported_playlists\(&sync_data\)/,
-  'playlist-only imports must use persistence that preserves favorite playlists',
+  /save_imported_playlist_backup\(&sync_data\)\.await/,
+  'full sync snapshots must import ordinary playlists and online favorites together',
 )
 assert.equal(
-  importPlaylistsSection.match(/save_imported_playlists\(&sync_data\)/g)?.length,
+  importPlaylistsSection.match(/save_imported_playlist_backup\(&sync_data\)\.await/g)?.length,
   2,
-  'wrapped and bare SyncPlaylist imports must both preserve favorite playlists',
+  'binary and wrapped JSON snapshots must use transactional backup persistence',
 )
 assert.doesNotMatch(
   importPlaylistsSection,
   /save_synced_playlists\(&sync_data\)/,
   'playlist-only imports must not invoke full-sync persistence',
+)
+assert.match(
+  importPlaylistsSection,
+  /save_imported_playlists\(&sync_data\)\.await/,
+  'bare SyncPlaylist arrays must use locked ordinary-playlist persistence',
+)
+assert.match(
+  importPlaylistsSection,
+  /favorite-playlists-changed/,
+  'favorite playlist imports must refresh the library favorite tab',
 )
 
 const managerSource = await read('src-tauri/src/sync/manager.rs')
@@ -50,14 +60,124 @@ assert.doesNotMatch(
   /favorite_playlists|save_favorite_playlists_pub/,
   'shared ordinary-playlist persistence must not read or write favorite playlists',
 )
+assert.match(
+  playlistSaveSection,
+  /acquire_playlist_io_lock\(\)/,
+  'sync publication must share the ordinary-playlist mutation lock with user actions',
+)
 const importedPlaylistSaveSection = functionSection(
   managerSource,
-  'pub fn save_imported_playlists(',
+  'pub async fn save_imported_playlists(',
 )
 assert.doesNotMatch(
   importedPlaylistSaveSection,
   /favorite_playlists|save_favorite_playlists_pub/,
   'playlist-only persistence must not read or write favorite playlists',
+)
+assert.match(
+  importedPlaylistSaveSection,
+  /acquire_sync_lock\(\)\.await[\s\S]*?acquire_playlist_io_lock\(\)[\s\S]*?merge_imported_playlists_unlocked\(imported\)/,
+  'playlist-only import must hold the sync and playlist locks in order',
+)
+
+const importedDesktopPlaylistSaveSection = functionSection(
+  managerSource,
+  'pub async fn save_imported_desktop_playlists(',
+)
+assert.match(
+  importedDesktopPlaylistSaveSection,
+  /acquire_sync_lock\(\)\.await[\s\S]*?acquire_playlist_io_lock\(\)[\s\S]*?PlaylistStore::load_strict/,
+  'legacy desktop playlist imports must use the same ordered locks',
+)
+
+const importedPlaylistPersistSection = functionSection(
+  managerSource,
+  'fn merge_imported_playlists_unlocked(',
+)
+assert.match(
+  importedPlaylistPersistSection,
+  /PlaylistStore::load_strict\(&path\)[\s\S]*?merge_imported_playlists_into_store\(&mut store, imported\)[\s\S]*?store\.save\(&path\)/,
+  'playlist import must reject a damaged local store and atomically persist the merge',
+)
+
+const importedPlaylistMergeSection = functionSection(
+  managerSource,
+  'fn merge_imported_playlists_into_store(',
+)
+assert.match(
+  importedPlaylistMergeSection,
+  /for imported_playlist in imported\s*\.playlists/,
+  'playlist import must process only playlists supplied by the selected backup',
+)
+assert.match(
+  importedPlaylistMergeSection,
+  /store\.playlists\.iter\(\)\.position[\s\S]*?store\.playlists\.push\(/,
+  'playlist import must update matches or append new playlists to the existing store',
+)
+assert.doesNotMatch(
+  importedPlaylistMergeSection,
+  /store\.playlists\s*=|std::mem::take\(&mut store\.playlists\)/,
+  'playlist import must not replace or drain desktop-only playlists',
+)
+
+const desktopOnlyFixture = [
+  { id: 10, name: 'Desktop only' },
+  { id: 20, name: 'Shared' },
+]
+const phoneFixture = [
+  { id: 20, name: 'Shared' },
+  { id: 30, name: 'Phone only' },
+]
+const mergedFixture = [...desktopOnlyFixture]
+for (const imported of phoneFixture) {
+  if (!mergedFixture.some(saved => saved.id === imported.id || saved.name === imported.name)) {
+    mergedFixture.push(imported)
+  }
+}
+assert.deepEqual(
+  mergedFixture.map(playlist => playlist.name),
+  ['Desktop only', 'Shared', 'Phone only'],
+  'the import merge contract must retain playlists that exist only on desktop',
+)
+
+const importedFavoriteMergeSection = functionSection(
+  managerSource,
+  'fn merge_imported_favorite_playlists(',
+)
+assert.match(
+  importedFavoriteMergeSection,
+  /filter\(\|favorite\| !favorite\.is_deleted\)/,
+  'manual favorite import must ignore phone tombstones',
+)
+assert.match(
+  importedFavoriteMergeSection,
+  /deleted_local[\s\S]*?saturating_add\(1\)[\s\S]*?favorite\.is_deleted = false/,
+  'an active imported favorite must be able to restore a local tombstone',
+)
+assert.match(
+  importedFavoriteMergeSection,
+  /three_way_merge/,
+  'favorite imports must merge with existing favorites instead of replacing them',
+)
+
+const importedBackupSection = functionSection(
+  managerSource,
+  'pub async fn save_imported_playlist_backup(',
+)
+assert.match(
+  importedBackupSection,
+  /acquire_sync_lock\(\)\.await[\s\S]*?acquire_playlist_io_lock\(\)[\s\S]*?FAVORITES_IO_LOCK/,
+  'full backup import must hold sync, playlist, and favorites locks in order',
+)
+assert.match(
+  importedBackupSection,
+  /let original_store = PlaylistStore::load_strict\(&path\)[\s\S]*?merged_store\.save\(&path\)[\s\S]*?original_store\.save\(&path\)/,
+  'full backup import must roll ordinary playlists back if favorite persistence fails',
+)
+assert.match(
+  importedBackupSection,
+  /let original_favorites = load_favorite_playlists_unlocked\(\)\?[\s\S]*?original_favorites\.clone\(\)[\s\S]*?save_favorite_playlists_unlocked\(original_favorites\)/,
+  'full backup import must retain and restore the original favorites snapshot on publication failure',
 )
 
 const syncedPlaylistSaveSection = functionSection(
@@ -121,6 +241,53 @@ assert.doesNotMatch(
 )
 
 const favoriteModuleSource = await read('src/modules/library/favoritePlaylists.ts')
+const playlistStoreSource = await read('src-tauri/src/library/playlist.rs')
+const libraryCommandSource = await read('src-tauri/src/commands/library_cmd.rs')
+assert.match(
+  playlistStoreSource,
+  /static PLAYLIST_IO_LOCK:\s*OnceLock<Mutex<\(\)>>/,
+  'ordinary playlist mutations must share one process-wide storage lock',
+)
+const playlistLockSection = functionSection(
+  playlistStoreSource,
+  'pub fn acquire_playlist_io_lock(',
+)
+assert.match(
+  playlistLockSection,
+  /PLAYLIST_IO_LOCK[\s\S]*?\.lock\(\)[\s\S]*?Playlist storage lock poisoned/,
+  'ordinary playlist storage lock poisoning must be returned as an application error',
+)
+for (const signature of [
+  'fn list_playlists_blocking(',
+  'pub async fn create_playlist(',
+  'pub async fn delete_playlist(',
+  'pub async fn rename_playlist(',
+  'pub async fn add_to_playlist(',
+  'pub async fn add_tracks_to_playlist(',
+  'pub async fn update_playlist_track(',
+  'pub async fn remove_from_playlist(',
+  'pub async fn remove_tracks_from_playlist(',
+  'pub async fn reorder_playlist_tracks(',
+]) {
+  const mutationSection = functionSection(libraryCommandSource, signature)
+  assert.match(
+    mutationSection,
+    /acquire_playlist_io_lock\(\)\?[\s\S]*?PlaylistStore::load\(&path\)[\s\S]*?store\.save\(&path\)/,
+    `${signature} must hold the ordinary playlist lock across load and save`,
+  )
+}
+const strictPlaylistLoad = functionSection(playlistStoreSource, 'pub fn load_strict(')
+assert.match(
+  strictPlaylistLoad,
+  /ErrorKind::NotFound[\s\S]*?Self::default\(\)/,
+  'strict playlist loading may default only when the file does not exist',
+)
+const atomicPlaylistSave = functionSection(playlistStoreSource, 'pub fn save(')
+assert.match(
+  atomicPlaylistSave,
+  /tempfile::NamedTempFile::new_in\(parent\)[\s\S]*?sync_all\(\)[\s\S]*?persist\(path\)/,
+  'ordinary playlist persistence must publish a synced sibling temporary file atomically',
+)
 const compiledFavoriteModule = ts.transpileModule(favoriteModuleSource, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
@@ -218,6 +385,7 @@ for (const route of [
 }
 
 const librarySource = await read('src/views/LibraryView.vue')
+const likedSongsSource = await read('src/stores/likedSongs.ts')
 assert.match(
   librarySource,
   /v-for="row in favoritePlaylistRows"[\s\S]*?:key="row\.key"/,
@@ -227,6 +395,31 @@ assert.match(
   librarySource,
   /:is="row\.location \? RouterLink : 'div'"[\s\S]*?:to="row\.location \?\? undefined"/,
   'known favorite sources must render as links while unknown sources remain plain rows',
+)
+assert.match(
+  librarySource,
+  /SYSTEM_LIKED_PLAYLIST_ID\s*=\s*-1001[\s\S]*?SYSTEM_LOCAL_PLAYLIST_ID\s*=\s*-1002/,
+  'the desktop library must recognize Android system playlist IDs',
+)
+assert.match(
+  librarySource,
+  /function isProtectedPlaylist\([\s\S]*?isLikedPlaylist\(pl\)\s*\|\|\s*isLocalFilesPlaylist\(pl\)/,
+  'Android system playlists must remain protected from desktop playlist actions',
+)
+assert.match(
+  librarySource,
+  /const localPlaylist = raw\.find\(isLocalFilesPlaylist\)/,
+  'local scanning must reuse an imported Android local-files playlist',
+)
+assert.match(
+  likedSongsSource,
+  /p\.id === SYSTEM_LIKED_PLAYLIST_ID \|\| LIKED_PLAYLIST_NAMES\.includes\(p\.name\)/,
+  'liked songs must hydrate from an imported Android favorites playlist by stable ID',
+)
+assert.match(
+  libraryCommandSource,
+  /fn is_system_playlist_id\([\s\S]*?SYSTEM_FAVORITES_PLAYLIST_ID \| SYSTEM_LOCAL_FILES_PLAYLIST_ID/,
+  'the backend must identify Android system playlists before rename or deletion',
 )
 
 console.log('favorite playlist tests passed')

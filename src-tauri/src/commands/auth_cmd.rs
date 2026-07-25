@@ -7,10 +7,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 // 三平台登录/登出命令
+use crate::api::netease::client::NeteaseAccountProfile;
 use crate::api::youtube::client::YouTubeAccountProfile;
 use crate::auth::cookies;
+use crate::auth::netease_hydration;
 use crate::auth::state::{
-    AuthInfo, AuthStatusResponse, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth,
+    AuthInfo, AuthState, AuthStatusResponse, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth,
 };
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -182,7 +184,7 @@ pub(crate) fn youtube_auth_matches(left: &YouTubeAuth, right: &YouTubeAuth) -> b
 async fn validate_netease_account(
     state: &AppState,
     entries: &[CookieEntry],
-) -> AppResult<crate::api::netease::client::NeteaseAccountProfile> {
+) -> AppResult<NeteaseAccountProfile> {
     let candidate_jar = Arc::new(reqwest::cookie::Jar::default());
     cookies::inject_cookies(&candidate_jar, entries);
     let http = state.http_with_cookie_jar(candidate_jar)?;
@@ -191,11 +193,49 @@ async fn validate_netease_account(
     crate::api::netease::client::parse_netease_account_profile(&account)
 }
 
+fn netease_music_u(auth: &NeteaseAuth) -> Option<&str> {
+    auth.cookies
+        .iter()
+        .find(|cookie| cookie.name == "MUSIC_U" && !cookie.value.is_empty())
+        .map(|cookie| cookie.value.as_str())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NeteaseHydrationApplyResult {
+    Applied,
+    AlreadyHydrated,
+    SessionChanged,
+}
+
+fn apply_hydrated_netease_profile(
+    auth_state: &mut AuthState,
+    expected_music_u: &str,
+    profile: NeteaseAccountProfile,
+) -> NeteaseHydrationApplyResult {
+    let Some(auth) = auth_state.netease.as_mut() else {
+        return NeteaseHydrationApplyResult::SessionChanged;
+    };
+    if netease_music_u(auth) != Some(expected_music_u) {
+        return NeteaseHydrationApplyResult::SessionChanged;
+    }
+    if auth.user_id.is_some() {
+        return NeteaseHydrationApplyResult::AlreadyHydrated;
+    }
+
+    auth.user_id = Some(profile.user_id);
+    auth.nickname = profile.nickname;
+    auth.avatar_url = profile.avatar_url;
+    NeteaseHydrationApplyResult::Applied
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cookie_domain_matches_urls, has_completed_login};
-    use crate::api::netease::client::parse_netease_account_profile;
-    use crate::auth::state::CookieEntry;
+    use super::{
+        apply_hydrated_netease_profile, cookie_domain_matches_urls, has_completed_login,
+        NeteaseHydrationApplyResult,
+    };
+    use crate::api::netease::client::{parse_netease_account_profile, NeteaseAccountProfile};
+    use crate::auth::state::{AuthState, CookieEntry, NeteaseAuth};
     use serde_json::json;
 
     const BILIBILI_URLS: &[&str] = &[
@@ -289,6 +329,70 @@ mod tests {
         assert_eq!(profile.nickname.as_deref(), Some("Neri"));
     }
 
+    #[test]
+    fn hydration_applies_profile_to_the_same_pending_session() {
+        let mut auth_state = AuthState {
+            netease: Some(NeteaseAuth {
+                cookies: vec![CookieEntry {
+                    name: "MUSIC_U".into(),
+                    value: "session-a".into(),
+                    domain: "music.163.com".into(),
+                }],
+                user_id: None,
+                nickname: None,
+                avatar_url: None,
+            }),
+            ..Default::default()
+        };
+
+        let result = apply_hydrated_netease_profile(
+            &mut auth_state,
+            "session-a",
+            NeteaseAccountProfile {
+                user_id: 42,
+                nickname: Some("Neri".into()),
+                avatar_url: Some("https://img.example/avatar.png".into()),
+            },
+        );
+
+        assert_eq!(result, NeteaseHydrationApplyResult::Applied);
+        let auth = auth_state.netease.unwrap();
+        assert_eq!(auth.user_id, Some(42));
+        assert_eq!(auth.nickname.as_deref(), Some("Neri"));
+    }
+
+    #[test]
+    fn hydration_does_not_overwrite_a_changed_cookie_session() {
+        let mut auth_state = AuthState {
+            netease: Some(NeteaseAuth {
+                cookies: vec![CookieEntry {
+                    name: "MUSIC_U".into(),
+                    value: "session-b".into(),
+                    domain: "music.163.com".into(),
+                }],
+                user_id: None,
+                nickname: Some("Current".into()),
+                avatar_url: None,
+            }),
+            ..Default::default()
+        };
+
+        let result = apply_hydrated_netease_profile(
+            &mut auth_state,
+            "session-a",
+            NeteaseAccountProfile {
+                user_id: 42,
+                nickname: Some("Stale".into()),
+                avatar_url: None,
+            },
+        );
+
+        assert_eq!(result, NeteaseHydrationApplyResult::SessionChanged);
+        let auth = auth_state.netease.unwrap();
+        assert_eq!(auth.user_id, None);
+        assert_eq!(auth.nickname.as_deref(), Some("Current"));
+        assert_eq!(auth.cookies[0].value, "session-b");
+    }
 }
 
 /// 从 WebView 窗口轮询提取 Cookie（使用 Tauri 内置 API 读取 HttpOnly）
@@ -774,7 +878,76 @@ pub async fn maybe_refresh_youtube_session(app: &AppHandle, state: &AppState, fo
 
 /// 查询所有平台登录状态
 #[tauri::command]
-pub async fn check_auth_status(state: State<'_, AppState>) -> AppResult<AuthStatusResponse> {
+pub async fn check_auth_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<AuthStatusResponse> {
+    let hydration_candidate = {
+        let mut hydration_gate = state.netease_hydration.lock();
+        let auth_state = state.auth.lock();
+        auth_state.netease.as_ref().and_then(|auth| {
+            if auth.user_id.is_some() {
+                return None;
+            }
+            let music_u = netease_music_u(auth)?.to_string();
+            hydration_gate
+                .try_begin(&music_u, netease_hydration::now_ms())
+                .then(|| (music_u, auth.cookies.clone()))
+        })
+    };
+
+    if let Some((music_u, entries)) = hydration_candidate {
+        let result = tokio::time::timeout(
+            netease_hydration::REQUEST_TIMEOUT,
+            validate_netease_account(&state, &entries),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(profile)) => {
+                let apply_result = {
+                    let _cookie_guard = state.auth_cookie_gate.lock().await;
+                    let mut auth_state = state.auth.lock();
+                    let apply_result =
+                        apply_hydrated_netease_profile(&mut auth_state, &music_u, profile);
+                    if apply_result == NeteaseHydrationApplyResult::Applied {
+                        cookies::save_auth(&app, &auth_state);
+                    }
+                    apply_result
+                };
+
+                match apply_result {
+                    NeteaseHydrationApplyResult::Applied
+                    | NeteaseHydrationApplyResult::AlreadyHydrated => {
+                        state.netease_hydration.lock().record_success(&music_u);
+                        log::info!(target: "auth", "NetEase imported session profile restored");
+                    }
+                    NeteaseHydrationApplyResult::SessionChanged => {
+                        state.netease_hydration.lock().record_abandoned(&music_u);
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                state
+                    .netease_hydration
+                    .lock()
+                    .record_failure(&music_u, netease_hydration::now_ms());
+                log::warn!(target: "auth", "NetEase imported session recovery failed: {error}");
+            }
+            Err(_) => {
+                state
+                    .netease_hydration
+                    .lock()
+                    .record_failure(&music_u, netease_hydration::now_ms());
+                log::warn!(
+                    target: "auth",
+                    "NetEase imported session recovery timed out after {} seconds",
+                    netease_hydration::REQUEST_TIMEOUT.as_secs()
+                );
+            }
+        }
+    }
+
     let auth = state.auth.lock();
     Ok(auth.to_status_response())
 }

@@ -593,7 +593,12 @@
     "import_config_desc": "設定、ログイン状態、同期設定を復元",
     "export_config_success": "PC 設定を書き出しました",
     "export_config_failed": "PC 設定の書き出しに失敗しました",
-    "import_config_success": "PC 設定を読み込みました",
+    "import_config_success": "設定を読み込みました",
+    "import_config_warning_listen_together_url": "一緒に聴くの URL が無効なため、デスクトップの既定値を維持しました",
+    "import_config_warning_youtube_authorization": "スマートフォンのバックアップに YouTube Authorization はありますが、デスクトップに必要な Cookie がありません",
+    "import_config_warning_youtube_account": "YouTube の複数アカウント番号は移行できません。現在のアカウントを確認してください",
+    "import_config_warning_netease_auth": "NetEase Cookie は読み込みましたが、アカウントを確認できませんでした。再接続後に自動で再試行します",
+    "import_config_warning_unknown": "一部のスマートフォン設定を移行できませんでした",
     "import_config_failed": "PC 設定の読み込みに失敗しました",
     "export_config_warning_title": "このファイルには機密情報が含まれます",
     "export_config_warning_desc": "書き出す PC 設定にはログイン情報、認証 Cookie、同期 Token、パスワードが含まれます。信頼できる場所に保存し、他人と共有しないでください。",
@@ -695,6 +700,8 @@
     "export_success": "{count}個のプレイリストをエクスポートしました",
     "export_failed": "エクスポートに失敗",
     "import_success": "{count}個のプレイリストをインポートしました",
+    "import_success_with_favorites": "{count}個のプレイリストと{favorites}件のオンラインお気に入りを読み込みました",
+    "import_online_favorites_unavailable": "通常のスマートフォンバックアップにはオンラインお気に入りが含まれません。同期フォルダの backup.json または backup.bin を選択してください",
     "import_failed": "インポートに失敗"
   },
   "listen_together": {

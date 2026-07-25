@@ -62,35 +62,35 @@ await run('auth-bearing config import clears WebView cookies before injecting im
     read('src-tauri/src/commands/auth_cmd.rs'),
   ])
   const source = sliceBetween(sync, 'pub async fn import_config', '/// 断开 WebDAV 同步')
-  const importedAuth = sliceBetween(source, 'if let Some(imported_auth) = payload.auth', 'let legacy_history_mode')
 
-  const gate = importedAuth.indexOf('state.auth_cookie_gate.lock().await')
-  const authLock = importedAuth.indexOf('state.auth.lock()')
-  const expire = importedAuth.indexOf('expire_platform_cookies')
-  const replace = importedAuth.indexOf('*auth = imported_auth')
-  const persist = importedAuth.indexOf('save_auth')
-  const cleanup = importedAuth.indexOf('clear_and_reinject_webview_cookies')
+  const gate = source.indexOf('state.auth_cookie_gate.lock().await')
+  const authLock = source.indexOf('let previous_auth = state.auth.lock().clone()', gate)
+  const merge = source.indexOf('merge_imported_auth_platforms', authLock)
+  const persist = source.indexOf('save_auth_strict(&app, auth)', merge)
+  const expire = source.indexOf('expire_platform_cookies', persist)
+  const replace = source.indexOf('*state.auth.lock() = imported_auth.clone()', expire)
+  const cleanup = source.indexOf('clear_and_reinject_webview_cookies(&app, &state).await', replace)
+  const restore = source.indexOf('*state.auth.lock() = previous_auth.clone()', cleanup)
+  const rollback = source.indexOf('rollback_config_import_persistence', restore)
   assert.ok(gate >= 0, 'config import must acquire the shared cookie gate')
   assert.ok(authLock > gate, 'config import must lock auth after acquiring the cookie gate')
-  assert.ok(expire > authLock, 'config import must expire old cookies under the auth lock')
-  assert.ok(replace > expire, 'config import must replace auth after expiring old cookies')
-  assert.ok(persist > replace, 'config import must persist the imported auth under the auth lock')
-  assert.ok(cleanup > persist, 'config import must synchronously clear shared WebView cookies')
-  assert.doesNotMatch(importedAuth, /drop\(auth\)/)
-  assert.match(
-    importedAuth,
-    /let _cookie_guard = state\.auth_cookie_gate\.lock\(\)\.await;\s*\{\s*let mut auth = state\.auth\.lock\(\);[\s\S]*?save_auth\(&app,\s*&auth\);\s*\}\s*crate::commands::auth_cmd::clear_and_reinject_webview_cookies/,
-    'config import must end the non-Send auth guard scope before awaiting WebView cleanup',
-  )
-  assert.equal(
-    importedAuth.indexOf('inject_all'),
-    -1,
-    'config import must leave imported auth injection to the post-cleanup cleaner',
+  assert.ok(merge > authLock, 'config import must merge phone auth with the latest guarded desktop state')
+  assert.ok(persist > merge, 'config import must strictly persist auth before publishing it in memory')
+  assert.ok(expire > persist, 'config import must expire replaced platform cookies after persistence succeeds')
+  assert.ok(replace > expire, 'config import must publish imported auth after expiring old cookies')
+  assert.ok(cleanup > replace, 'config import must synchronously clear shared WebView cookies')
+  assert.ok(restore > cleanup, 'a WebView cleanup failure must restore the previous in-memory auth')
+  assert.ok(rollback > restore, 'a WebView cleanup failure must roll persisted config back')
+  assert.doesNotMatch(source, /drop\(auth\)/)
+  assert.doesNotMatch(
+    source,
+    /let mut auth = state\.auth\.lock\(\)[\s\S]*?clear_and_reinject_webview_cookies/,
+    'config import must not hold a non-Send auth guard across WebView cleanup',
   )
   assert.match(
-    importedAuth,
-    /clear_and_reinject_webview_cookies\(&app,\s*&state\)\.await\?;/,
-    'config import must propagate WebView cleanup errors while still holding the cookie gate',
+    source,
+    /if let Err\(error\) =[\s\S]*?clear_and_reinject_webview_cookies\(&app,\s*&state\)\.await[\s\S]*?return Err\(error\)/,
+    'config import must roll back and propagate WebView cleanup errors while holding the cookie gate',
   )
 
   const cleaner = sliceBetween(auth, 'async fn clear_and_reinject_webview_cookies', null)

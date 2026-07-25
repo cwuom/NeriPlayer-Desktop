@@ -416,7 +416,17 @@ export const useSyncStore = defineStore('sync', () => {
     try {
       const result = await invoke<any>('import_playlists')
       if (result.success) {
-        toast.success(t('settings.import_success', { count: result.imported }))
+        if (result.importedFavorites > 0) {
+          toast.success(t('settings.import_success_with_favorites', {
+            count: result.imported,
+            favorites: result.importedFavorites,
+          }))
+        } else {
+          toast.success(t('settings.import_success', { count: result.imported }))
+        }
+        if (result.onlineFavoritesAvailable === false) {
+          toast.show(t('settings.import_online_favorites_unavailable'), 'info', 6000)
+        }
       }
     } catch (e: any) {
       toast.error(e?.toString() || t('settings.import_failed'))
@@ -455,9 +465,18 @@ export const useSyncStore = defineStore('sync', () => {
         localStorage.removeItem('neri:lt-uuid')
       }
       if (result.settings?.locale) setLocale(result.settings.locale, false)
-      await auth.reconcileStatus()
+      await auth.reconcileStatus(true)
       await loadConfigs()
       toast.success(t('settings.import_config_success'))
+      const warningKeys: Record<string, string> = {
+        listen_together_url_invalid: 'settings.import_config_warning_listen_together_url',
+        youtube_authorization_unsupported: 'settings.import_config_warning_youtube_authorization',
+        youtube_multi_account_unsupported: 'settings.import_config_warning_youtube_account',
+        netease_auth_verification_failed: 'settings.import_config_warning_netease_auth',
+      }
+      for (const warning of result.warnings || []) {
+        toast.show(t(warningKeys[warning] || 'settings.import_config_warning_unknown'), 'info', 6000)
+      }
       return result
     } catch (e: any) {
       toast.error(e?.toString() || t('settings.import_config_failed'))

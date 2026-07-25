@@ -593,7 +593,12 @@
     "import_config_desc": "从文件恢复设置、登录状态和同步配置",
     "export_config_success": "PC 配置导出成功",
     "export_config_failed": "PC 配置导出失败",
-    "import_config_success": "PC 配置导入完成",
+    "import_config_success": "配置导入完成",
+    "import_config_warning_listen_together_url": "一起听服务地址无效，已保留桌面端默认地址",
+    "import_config_warning_youtube_authorization": "手机备份只有 YouTube Authorization，缺少桌面端所需 Cookie",
+    "import_config_warning_youtube_account": "YouTube 多账号索引暂时无法迁移，请确认当前账号",
+    "import_config_warning_netease_auth": "网易云 Cookie 已导入，但账号验证失败；联网后会自动重试",
+    "import_config_warning_unknown": "部分手机配置无法迁移",
     "import_config_failed": "PC 配置导入失败",
     "export_config_warning_title": "配置文件包含敏感信息",
     "export_config_warning_desc": "导出的 PC 配置会包含登录凭据、授权 Cookie、同步 Token 和密码，只能保存到可信位置，不能分享给他人。",
@@ -695,6 +700,8 @@
     "export_success": "已导出 {count} 个播放列表",
     "export_failed": "导出失败",
     "import_success": "已导入 {count} 个播放列表",
+    "import_success_with_favorites": "已导入 {count} 个播放列表和 {favorites} 个在线收藏",
+    "import_online_favorites_unavailable": "该手机普通备份不含在线收藏；请选择同步目录中的 backup.json 或 backup.bin",
     "import_failed": "导入失败"
   },
   "listen_together": {

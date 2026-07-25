@@ -1,5 +1,8 @@
 use crate::error::{AppError, AppResult};
-use crate::library::{playlist::PlaylistStore, scanner};
+use crate::library::{
+    playlist::{acquire_playlist_io_lock, PlaylistStore},
+    scanner,
+};
 use crate::state::TrackInfo;
 use crate::sync::manager;
 use crate::sync::models::SyncCausalToken;
@@ -24,6 +27,16 @@ fn playlists_path() -> std::path::PathBuf {
     path.push("NeriPlayer");
     path.push("playlists.json");
     path
+}
+
+const SYSTEM_FAVORITES_PLAYLIST_ID: i64 = -1001;
+const SYSTEM_LOCAL_FILES_PLAYLIST_ID: i64 = -1002;
+
+fn is_system_playlist_id(id: i64) -> bool {
+    matches!(
+        id,
+        SYSTEM_FAVORITES_PLAYLIST_ID | SYSTEM_LOCAL_FILES_PLAYLIST_ID
+    )
 }
 
 #[derive(Serialize)]
@@ -68,6 +81,7 @@ pub async fn list_playlists() -> AppResult<Vec<PlaylistInfo>> {
 }
 
 fn list_playlists_blocking(path: std::path::PathBuf) -> AppResult<Vec<PlaylistInfo>> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let mut store = PlaylistStore::load(&path);
 
     // 自动清理重复歌单（同名只保留歌曲最多的）
@@ -127,6 +141,7 @@ fn list_playlists_blocking(path: std::path::PathBuf) -> AppResult<Vec<PlaylistIn
 
 #[tauri::command]
 pub async fn create_playlist(app: AppHandle, name: String) -> AppResult<PlaylistInfo> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let pl = store.create(name);
@@ -144,6 +159,10 @@ pub async fn create_playlist(app: AppHandle, name: String) -> AppResult<Playlist
 
 #[tauri::command]
 pub async fn delete_playlist(app: AppHandle, id: i64) -> AppResult<bool> {
+    if is_system_playlist_id(id) {
+        return Ok(false);
+    }
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let deleted = store.delete(id);
@@ -156,6 +175,10 @@ pub async fn delete_playlist(app: AppHandle, id: i64) -> AppResult<bool> {
 
 #[tauri::command]
 pub async fn rename_playlist(app: AppHandle, id: i64, name: String) -> AppResult<bool> {
+    if is_system_playlist_id(id) {
+        return Ok(false);
+    }
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     if let Some(pl) = store.playlists.iter_mut().find(|p| p.id == id) {
@@ -223,6 +246,7 @@ pub async fn get_playlist_tracks(id: i64) -> AppResult<Vec<TrackInfo>> {
 
 #[tauri::command]
 pub async fn add_to_playlist(app: AppHandle, playlist_id: i64, track: TrackInfo) -> AppResult<()> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let added_at = {
@@ -269,6 +293,7 @@ pub async fn add_tracks_to_playlist(
     playlist_id: i64,
     tracks: Vec<TrackInfo>,
 ) -> AppResult<usize> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
 
@@ -364,6 +389,7 @@ pub async fn update_playlist_track(
     playlist_id: Option<i64>,
     track: TrackInfo,
 ) -> AppResult<usize> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let target_key = playlist_track_key(&track);
@@ -424,6 +450,7 @@ pub async fn remove_from_playlist(
     playlist_id: i64,
     track_id: String,
 ) -> AppResult<()> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let removed_track = {
@@ -469,6 +496,7 @@ pub async fn remove_tracks_from_playlist(
     playlist_id: i64,
     track_ids: Vec<String>,
 ) -> AppResult<usize> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     if !store
@@ -531,6 +559,7 @@ pub async fn reorder_playlist_tracks(
     playlist_id: i64,
     ordered_keys: Vec<String>,
 ) -> AppResult<usize> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
 

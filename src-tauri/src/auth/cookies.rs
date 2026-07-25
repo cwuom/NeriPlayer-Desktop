@@ -1,12 +1,13 @@
 // Cookie 持久化：Release 使用系统钥匙串，Debug 使用随机路径明文文件
 // tauri-plugin-store 仅负责旧数据迁移
-use std::sync::Arc;
 use reqwest::cookie::Jar;
 use reqwest::Url;
+use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
 use super::state::{AuthState, CookieEntry};
+use crate::error::{AppError, AppResult};
 use crate::security;
 
 const STORE_FILE: &str = "auth.json";
@@ -14,25 +15,38 @@ const STORE_KEY: &str = "auth_state";
 
 /// 持久化 AuthState
 pub fn save_auth(app: &AppHandle, auth: &AuthState) {
-    if !has_any_auth(auth) {
-        if !delete_persisted_auth(app) {
-            log::error!(target: "auth", "登录凭据存储不可用，无法清除登录凭据");
-        }
-        return;
+    if let Err(error) = save_auth_strict(app, auth) {
+        log::error!(target: "auth", "Failed to persist authentication credentials: {error}");
     }
+}
 
-    let Ok(serialized) = serde_json::to_string(auth) else {
-        log::error!(target: "auth", "登录凭据序列化失败，已跳过持久化");
-        return;
+/// Persist AuthState and surface serialization and credential-storage failures.
+pub fn save_auth_strict(app: &AppHandle, auth: &AuthState) -> AppResult<()> {
+    let Some(serialized) = auth_persistence_payload(auth)? else {
+        if delete_persisted_auth(app) {
+            return Ok(());
+        }
+        return Err(AppError::Other(
+            "Failed to delete persisted authentication credentials".into(),
+        ));
     };
 
     if !security::set_secret(security::AUTH_STATE_KEY, &serialized) {
-        log::error!(target: "auth", "登录凭据存储不可用，已跳过登录凭据持久化");
         clear_legacy_auth(app);
-        return;
+        return Err(AppError::Other(
+            "Failed to write authentication credentials".into(),
+        ));
     }
 
     clear_legacy_auth(app);
+    Ok(())
+}
+
+fn auth_persistence_payload(auth: &AuthState) -> AppResult<Option<String>> {
+    if !has_any_auth(auth) {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(auth)?))
 }
 
 /// 启动时恢复 AuthState，并迁移旧版明文数据
@@ -119,7 +133,10 @@ pub fn inject_cookies(jar: &Arc<Jar>, entries: &[CookieEntry]) {
         if let Ok(url) = url.parse::<Url>() {
             // 必须设置 Domain 属性，否则 reqwest 按精确域名匹配，子域名 API 拿不到 cookie
             jar.add_cookie_str(
-                &format!("{}={}; Domain={}; Path=/", entry.name, entry.value, entry.domain),
+                &format!(
+                    "{}={}; Domain={}; Path=/",
+                    entry.name, entry.value, entry.domain
+                ),
                 &url,
             );
         }
@@ -141,7 +158,10 @@ pub fn expire_platform_cookies(jar: &Arc<Jar>, auth: &AuthState, platform: &str)
             if let Ok(url) = url.parse::<Url>() {
                 // 必须带 Domain + Path 属性，与注入时一致，才能正确覆盖并过期
                 jar.add_cookie_str(
-                    &format!("{}=deleted; Domain={}; Path=/; Max-Age=0", entry.name, entry.domain),
+                    &format!(
+                        "{}=deleted; Domain={}; Path=/; Max-Age=0",
+                        entry.name, entry.domain
+                    ),
                     &url,
                 );
             }
@@ -191,15 +211,25 @@ pub fn parse_raw_cookie_text(raw: &str, platform: &str) -> Vec<CookieEntry> {
             let name = name.trim().to_string();
             let value = value.trim().to_string();
             if !name.is_empty() {
-                entries.push(CookieEntry { name, value, domain: domain.to_string() });
+                entries.push(CookieEntry {
+                    name,
+                    value,
+                    domain: domain.to_string(),
+                });
             }
         }
     }
 
     // YouTube 需要额外为 google.com 注入部分 Cookie
     if platform == "youtube" {
-        let google_entries: Vec<CookieEntry> = entries.iter()
-            .filter(|c| matches!(c.name.as_str(), "SID" | "HSID" | "SSID" | "APISID" | "SAPISID" | "LSID" | "SIDCC"))
+        let google_entries: Vec<CookieEntry> = entries
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.name.as_str(),
+                    "SID" | "HSID" | "SSID" | "APISID" | "SAPISID" | "LSID" | "SIDCC"
+                )
+            })
             .map(|c| CookieEntry {
                 name: c.name.clone(),
                 value: c.value.clone(),
@@ -220,7 +250,8 @@ fn domain_to_url(domain: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_raw_cookie_text;
+    use super::{auth_persistence_payload, parse_raw_cookie_text};
+    use crate::auth::state::{AuthState, NeteaseAuth};
 
     #[test]
     fn raw_cookie_parser_accepts_all_supported_separators() {
@@ -228,5 +259,34 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
 
         assert_eq!(names, ["first", "second", "third", "fourth"]);
+    }
+
+    #[test]
+    fn empty_auth_state_requests_persisted_credential_deletion() {
+        assert_eq!(
+            auth_persistence_payload(&AuthState::default()).expect("build persistence payload"),
+            None
+        );
+    }
+
+    #[test]
+    fn authenticated_state_serializes_for_strict_persistence() {
+        let auth = AuthState {
+            netease: Some(NeteaseAuth {
+                cookies: vec![],
+                user_id: Some(42),
+                nickname: Some("Neri".into()),
+                avatar_url: None,
+            }),
+            ..Default::default()
+        };
+
+        let serialized = auth_persistence_payload(&auth)
+            .expect("serialize auth state")
+            .expect("non-empty auth payload");
+        let restored: AuthState =
+            serde_json::from_str(&serialized).expect("deserialize auth state");
+
+        assert_eq!(restored.netease.and_then(|state| state.user_id), Some(42));
     }
 }

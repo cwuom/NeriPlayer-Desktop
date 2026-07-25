@@ -36,6 +36,10 @@ pub struct AppState {
     pub auth: Mutex<AuthState>,
     /// Shared WebView and HTTP cookie mutations must not overlap across auth commands.
     pub auth_cookie_gate: tokio::sync::Mutex<()>,
+    /// Serializes settings, credentials, and sync configuration persistence.
+    pub config_persistence_gate: tokio::sync::Mutex<()>,
+    /// Limits background NetEase profile recovery for imported MUSIC_U sessions.
+    pub netease_hydration: Mutex<crate::auth::netease_hydration::NeteaseHydrationGate>,
     /// 一起听会话
     pub lt_session: Mutex<LtSession>,
     /// 后台下载任务
@@ -68,6 +72,10 @@ impl AppState {
             cookie_jar: jar,
             auth: Mutex::new(AuthState::default()),
             auth_cookie_gate: tokio::sync::Mutex::new(()),
+            config_persistence_gate: tokio::sync::Mutex::new(()),
+            netease_hydration: Mutex::new(
+                crate::auth::netease_hydration::NeteaseHydrationGate::default(),
+            ),
             lt_session: Mutex::new(LtSession::new()),
             download_tasks: Mutex::new(HashMap::new()),
             youtube_refresh: Mutex::new(crate::api::youtube::refresh::YouTubeRefreshGate::default()),

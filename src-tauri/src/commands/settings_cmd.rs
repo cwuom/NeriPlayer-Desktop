@@ -8,12 +8,21 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
-pub async fn get_settings(app: AppHandle) -> AppResult<SettingsLoadResult> {
+pub async fn get_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SettingsLoadResult> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     store::load_settings(&app)
 }
 
 #[tauri::command]
-pub async fn save_settings(app: AppHandle, settings: AppSettings) -> AppResult<AppSettings> {
+pub async fn save_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> AppResult<AppSettings> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     store::save_settings(&app, settings)
 }
 

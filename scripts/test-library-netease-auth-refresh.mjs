@@ -239,8 +239,13 @@ assert.ok(
 )
 assert.match(
   checkStatusSource,
-  /if\s*\(nextNetease\.loggedIn\s*&&\s*\(neteaseSessionChanged\s*\|\|\s*needsNeteaseVerification\)\)\s*\{\s*neteaseSessionVersion\.value\+\+\s*void\s+useLikedSongsStore\(\)\.refreshCloudLikes\(\)\s*\}/,
-  'an authenticated boundary or completed verification must advance the session and reload cloud likes',
+  /const\s+advanceNeteaseSession\s*=\s*\(\s*\(invalidatePlatformSessions\s*&&\s*!neteaseSessionChanged\)\s*\|\|\s*\(nextNetease\.loggedIn\s*&&\s*\(neteaseSessionChanged\s*\|\|\s*needsNeteaseVerification\)\)\s*\)/,
+  'auth changes and explicit imported-session invalidation must share one session-advance decision',
+)
+assert.match(
+  checkStatusSource,
+  /if\s*\(advanceNeteaseSession\)\s*\{\s*neteaseSessionVersion\.value\+\+\s*if\s*\(nextNetease\.loggedIn\)\s*void\s+useLikedSongsStore\(\)\.refreshCloudLikes\(\)\s*\}/,
+  'the consolidated decision must advance once and only reload cloud likes for a logged-in account',
 )
 assert.equal(
   (checkStatusSource.match(/neteaseSessionVersion\.value\+\+/g) ?? []).length,

@@ -7,6 +7,7 @@ use crate::sync::manager;
 use crate::sync::models::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 
@@ -47,6 +48,12 @@ struct ConfigListenTogether {
 struct ConfigLanguage {
     #[serde(default)]
     code: String,
+}
+
+impl ConfigLanguage {
+    fn has_value(&self) -> bool {
+        !self.code.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -203,6 +210,692 @@ struct DesktopConfigFile {
     sync_preferences: Option<ConfigSyncPreferences>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidTypedPreferenceSnapshot {
+    booleans: HashMap<String, bool>,
+    floats: HashMap<String, f32>,
+    ints: HashMap<String, i32>,
+    longs: HashMap<String, i64>,
+    strings: HashMap<String, String>,
+}
+
+impl AndroidTypedPreferenceSnapshot {
+    fn has_data(&self) -> bool {
+        !self.booleans.is_empty()
+            || !self.floats.is_empty()
+            || !self.ints.is_empty()
+            || !self.longs.is_empty()
+            || !self.strings.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidListenTogetherConfig {
+    worker_base_url: String,
+    worker_base_url_input: String,
+    user_uuid: String,
+    nickname: String,
+    allow_member_control: bool,
+    auto_pause_on_member_change: bool,
+    share_audio_links: bool,
+}
+
+impl Default for AndroidListenTogetherConfig {
+    fn default() -> Self {
+        Self {
+            allow_member_control: true,
+            auto_pause_on_member_change: true,
+            share_audio_links: true,
+            worker_base_url: String::new(),
+            worker_base_url_input: String::new(),
+            user_uuid: String::new(),
+            nickname: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidSavedCookieConfig {
+    cookies: HashMap<String, String>,
+}
+
+impl AndroidSavedCookieConfig {
+    fn has_data(&self) -> bool {
+        !self.cookies.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidYouTubeAuthConfig {
+    cookie_header: String,
+    cookies: HashMap<String, String>,
+    authorization: String,
+    x_goog_auth_user: String,
+    origin: String,
+    user_agent: String,
+}
+
+impl AndroidYouTubeAuthConfig {
+    fn has_data(&self) -> bool {
+        !self.cookie_header.trim().is_empty()
+            || !self.cookies.is_empty()
+            || !self.authorization.trim().is_empty()
+            || !self.x_goog_auth_user.trim().is_empty()
+            || !self.origin.trim().is_empty()
+            || !self.user_agent.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidGitHubSyncConfig {
+    token: String,
+    repo_owner: String,
+    repo_name: String,
+    auto_sync_enabled: bool,
+    play_history_update_mode: String,
+    data_saver_mode: bool,
+}
+
+impl Default for AndroidGitHubSyncConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            repo_owner: String::new(),
+            repo_name: String::new(),
+            auto_sync_enabled: false,
+            play_history_update_mode: String::new(),
+            data_saver_mode: true,
+        }
+    }
+}
+
+impl AndroidGitHubSyncConfig {
+    fn has_data(&self) -> bool {
+        !self.token.trim().is_empty()
+            || !self.repo_owner.trim().is_empty()
+            || !self.repo_name.trim().is_empty()
+            || self.auto_sync_enabled
+            || !self.play_history_update_mode.trim().is_empty()
+            || !self.data_saver_mode
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidWebDavSyncConfig {
+    server_url: String,
+    base_path: String,
+    username: String,
+    password: String,
+    auto_sync_enabled: bool,
+}
+
+impl AndroidWebDavSyncConfig {
+    fn has_data(&self) -> bool {
+        !self.server_url.trim().is_empty()
+            || !self.base_path.trim().is_empty()
+            || !self.username.trim().is_empty()
+            || !self.password.trim().is_empty()
+            || self.auto_sync_enabled
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidSyncPreferencesConfig {
+    play_history_update_mode: String,
+}
+
+impl AndroidSyncPreferencesConfig {
+    fn has_data(&self) -> bool {
+        !self.play_history_update_mode.trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AndroidConfigFile {
+    kind: String,
+    format_version: u32,
+    settings: AndroidTypedPreferenceSnapshot,
+    listen_together: AndroidListenTogetherConfig,
+    language: ConfigLanguage,
+    netease_auth: AndroidSavedCookieConfig,
+    bili_auth: AndroidSavedCookieConfig,
+    you_tube_auth: AndroidYouTubeAuthConfig,
+    git_hub_sync: AndroidGitHubSyncConfig,
+    web_dav_sync: AndroidWebDavSyncConfig,
+    sync_preferences: AndroidSyncPreferencesConfig,
+}
+
+impl AndroidConfigFile {
+    fn has_restorable_content(&self, has_listen_together_section: bool) -> bool {
+        self.settings.has_data()
+            || has_listen_together_section
+            || self.language.has_value()
+            || self.netease_auth.has_data()
+            || self.bili_auth.has_data()
+            || self.you_tube_auth.has_data()
+            || self.git_hub_sync.has_data()
+            || self.web_dav_sync.has_data()
+            || self.sync_preferences.has_data()
+    }
+}
+
+struct ParsedConfigImport {
+    settings: AppSettings,
+    listen_together: Option<ConfigListenTogether>,
+    language: Option<ConfigLanguage>,
+    auth: Option<crate::auth::state::AuthState>,
+    github_sync: Option<ConfigGitHubSync>,
+    webdav_sync: Option<ConfigWebDavSync>,
+    sync_preferences: Option<ConfigSyncPreferences>,
+    auth_platforms: Vec<&'static str>,
+    platform: &'static str,
+    warnings: Vec<String>,
+}
+
+fn android_settings_to_desktop(
+    snapshot: &AndroidTypedPreferenceSnapshot,
+    current_settings: AppSettings,
+) -> AppSettings {
+    let mut settings = current_settings;
+    macro_rules! apply_bool {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = snapshot.booleans.get($key) {
+                settings.$field = *value;
+            }
+        };
+    }
+    macro_rules! apply_float {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = snapshot.floats.get($key) {
+                settings.$field = *value;
+            }
+        };
+    }
+    macro_rules! apply_int {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = snapshot.ints.get($key) {
+                settings.$field = *value;
+            }
+        };
+    }
+    macro_rules! apply_string {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = snapshot.strings.get($key) {
+                settings.$field = value.clone();
+            }
+        };
+    }
+
+    if snapshot.booleans.get("follow_system_dark") == Some(&true) {
+        settings.dark_mode = "system".into();
+    } else if let Some(force_dark) = snapshot.booleans.get("force_dark") {
+        settings.dark_mode = if *force_dark { "dark" } else { "light" }.into();
+    }
+    apply_bool!("dynamic_color", dynamic_color);
+    apply_bool!("dev_mode_enabled", dev_mode_enabled);
+    apply_bool!("always_record_logs_enabled", log_to_file);
+    apply_bool!("internationalization_enabled", internationalization_enabled);
+    apply_bool!("show_cover_source_badge", show_cover_badge);
+    apply_bool!("nowplaying_show_title", show_now_playing_title);
+    apply_bool!("nowplaying_toolbar_dock_enabled", show_toolbar_dock);
+    apply_bool!(
+        "nowplaying_progress_show_quality_switch",
+        show_quality_switch
+    );
+    apply_bool!("nowplaying_progress_show_audio_codec", show_audio_codec);
+    apply_bool!("nowplaying_progress_show_audio_spec", show_audio_spec);
+    apply_bool!("show_lyric_translation", show_translation);
+    apply_bool!("advanced_lyrics_enabled", advanced_lyrics);
+    apply_bool!("nowplaying_audio_reactive_enabled", audio_reactive);
+    apply_bool!("nowplaying_dynamic_background_enabled", dynamic_background);
+    apply_bool!("nowplaying_cover_blur_background_enabled", cover_blur_bg);
+    apply_bool!("lyric_blur_enabled", lyric_blur);
+    apply_bool!("bypass_proxy", bypass_proxy);
+    apply_bool!("playback_fade_in", fade_in);
+    apply_bool!("playback_crossfade_next", crossfade_next);
+    apply_bool!("playback_volume_normalization_enabled", normalize_volume);
+    apply_bool!("keep_last_playback_progress", keep_progress);
+    apply_bool!("netease_auto_source_switch", netease_auto_source_switch);
+    apply_bool!("keep_playback_mode_state", keep_playback_mode);
+    apply_bool!("playback_equalizer_enabled", equalizer_enabled);
+
+    apply_float!("lyric_font_scale", lyric_font_scale);
+    apply_float!("background_image_blur", background_image_blur);
+    apply_float!("background_image_alpha", background_image_alpha);
+    apply_float!("nowplaying_cover_blur_amount", cover_blur_amount);
+    apply_float!("nowplaying_cover_blur_darken", cover_blur_darken);
+    apply_float!("lyric_blur_amount", lyric_blur_amount);
+    apply_float!("playback_speed", playback_speed);
+
+    apply_int!("playback_loudness_gain_mb", loudness_gain_mb);
+
+    for (key, target) in [
+        (
+            "cloud_music_lyric_default_offset_ms",
+            &mut settings.cloud_music_offset,
+        ),
+        (
+            "qq_music_lyric_default_offset_ms",
+            &mut settings.qq_music_offset,
+        ),
+    ] {
+        let value = snapshot
+            .longs
+            .get(key)
+            .copied()
+            .or_else(|| snapshot.ints.get(key).copied().map(i64::from));
+        if let Some(value) = value {
+            *target = i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX });
+        }
+    }
+
+    for (key, target) in [
+        (
+            "playback_fade_in_duration_ms",
+            &mut settings.fade_in_duration,
+        ),
+        (
+            "playback_fade_out_duration_ms",
+            &mut settings.fade_out_duration,
+        ),
+        (
+            "playback_crossfade_in_duration_ms",
+            &mut settings.crossfade_in_duration,
+        ),
+        (
+            "playback_crossfade_out_duration_ms",
+            &mut settings.crossfade_out_duration,
+        ),
+    ] {
+        if let Some(value) = snapshot.longs.get(key) {
+            *target = i32::try_from(*value).unwrap_or(if *value < 0 { i32::MIN } else { i32::MAX });
+        }
+    }
+
+    if let Some(bytes) = snapshot
+        .longs
+        .get("max_cache_size_bytes")
+        .filter(|bytes| **bytes > 0)
+    {
+        let mib = (*bytes / (1024 * 1024)).max(1);
+        settings.max_cache_size = i32::try_from(mib).unwrap_or(i32::MAX);
+    }
+
+    apply_string!("audio_quality", netease_quality);
+    apply_string!("youtube_audio_quality", youtube_quality);
+    apply_string!("bili_audio_quality", bili_quality);
+    apply_string!("download_file_name_template", download_name_template);
+    if let Some(value) = snapshot.strings.get("theme_seed_color") {
+        settings.theme_color = match value
+            .trim()
+            .trim_start_matches('#')
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "0061A4" | "2196F3" => "blue".into(),
+            "006E6D" | "009688" => "teal".into(),
+            "6750A4" | "9C27B0" => "purple".into(),
+            "B3261E" | "E91E63" => "rose".into(),
+            _ => value.clone(),
+        };
+    }
+    if let Some(value) = snapshot.strings.get("default_start_destination") {
+        settings.default_screen = match value.trim() {
+            "settings" => "home".into(),
+            value => value.into(),
+        };
+    }
+    if let Some(value) = snapshot.strings.get("playback_equalizer_preset") {
+        settings.equalizer_preset_id = match value.trim() {
+            "club" => "dance".into(),
+            "folk" => "acoustic".into(),
+            value => value.into(),
+        };
+    }
+
+    if settings.equalizer_preset_id == "bass_reducer" {
+        settings.equalizer_preset_id = "bass_reduce".into();
+    } else if settings.equalizer_preset_id == "treble_reducer" {
+        settings.equalizer_preset_id = "treble_reduce".into();
+    }
+    if let Some(levels) = snapshot
+        .strings
+        .get("playback_equalizer_custom_band_levels")
+    {
+        settings.equalizer_bands = levels
+            .split(',')
+            .filter_map(|value| value.trim().parse::<i32>().ok())
+            .collect();
+    }
+
+    settings.normalized()
+}
+
+fn cookie_entries_from_map(
+    cookies: &HashMap<String, String>,
+    domain: &str,
+) -> Vec<crate::auth::state::CookieEntry> {
+    let mut entries: Vec<_> = cookies
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.trim();
+            let value = value.trim();
+            (!name.is_empty() && !value.is_empty() && !value.contains(';')).then(|| {
+                crate::auth::state::CookieEntry {
+                    name: name.into(),
+                    value: value.into(),
+                    domain: domain.into(),
+                }
+            })
+        })
+        .collect();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn android_auth_to_desktop(
+    payload: &AndroidConfigFile,
+    current: &crate::auth::state::AuthState,
+) -> (Option<crate::auth::state::AuthState>, Vec<&'static str>) {
+    use crate::auth::state::{AuthState, BiliAuth, NeteaseAuth, YouTubeAuth};
+
+    let mut auth = AuthState {
+        netease: current.netease.clone(),
+        bilibili: current.bilibili.clone(),
+        youtube: current.youtube.clone(),
+    };
+    let mut changed = false;
+    let mut imported_platforms = Vec::new();
+    let netease_entries = cookie_entries_from_map(&payload.netease_auth.cookies, "music.163.com");
+    let current_netease = current.netease.as_ref().filter(|auth| {
+        let imported_music_u = netease_entries.iter().find(|entry| entry.name == "MUSIC_U");
+        imported_music_u.is_some_and(|imported| {
+            auth.cookies
+                .iter()
+                .any(|saved| saved.name == "MUSIC_U" && saved.value == imported.value)
+        })
+    });
+    if !netease_entries.is_empty() {
+        auth.netease = Some(NeteaseAuth {
+            cookies: netease_entries,
+            user_id: current_netease.and_then(|auth| auth.user_id),
+            nickname: current_netease.and_then(|auth| auth.nickname.clone()),
+            avatar_url: current_netease.and_then(|auth| auth.avatar_url.clone()),
+        });
+        changed = true;
+        imported_platforms.push("netease");
+    }
+
+    let bilibili_entries = cookie_entries_from_map(&payload.bili_auth.cookies, ".bilibili.com");
+    if !bilibili_entries.is_empty() {
+        let mid = bilibili_entries
+            .iter()
+            .find(|entry| entry.name == "DedeUserID")
+            .and_then(|entry| entry.value.parse().ok());
+        let current_bilibili = current.bilibili.as_ref().filter(|saved| saved.mid == mid);
+        auth.bilibili = Some(BiliAuth {
+            mid,
+            cookies: bilibili_entries,
+            nickname: current_bilibili.and_then(|saved| saved.nickname.clone()),
+            avatar_url: current_bilibili.and_then(|saved| saved.avatar_url.clone()),
+        });
+        changed = true;
+        imported_platforms.push("bilibili");
+    }
+
+    let youtube = if payload.you_tube_auth.cookies.is_empty() {
+        crate::auth::cookies::parse_raw_cookie_text(&payload.you_tube_auth.cookie_header, "youtube")
+    } else {
+        let raw = payload
+            .you_tube_auth
+            .cookies
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        crate::auth::cookies::parse_raw_cookie_text(&raw, "youtube")
+    };
+
+    if !youtube.is_empty() {
+        auth.youtube = Some(YouTubeAuth {
+            cookies: youtube,
+            nickname: None,
+            avatar_url: None,
+        });
+        changed = true;
+        imported_platforms.push("youtube");
+    }
+
+    (changed.then_some(auth), imported_platforms)
+}
+
+fn merge_imported_auth_platforms(
+    mut current: crate::auth::state::AuthState,
+    imported: crate::auth::state::AuthState,
+    platforms: &[&str],
+) -> crate::auth::state::AuthState {
+    for platform in platforms {
+        match *platform {
+            "netease" => current.netease = imported.netease.clone(),
+            "bilibili" => current.bilibili = imported.bilibili.clone(),
+            "youtube" => current.youtube = imported.youtube.clone(),
+            _ => {}
+        }
+    }
+    current
+}
+
+fn parse_config_import(
+    content: &str,
+    current_settings: AppSettings,
+    current_auth: &crate::auth::state::AuthState,
+) -> AppResult<ParsedConfigImport> {
+    let value: Value = serde_json::from_str(content)
+        .map_err(|error| AppError::Other(format!("Parse config failed: {error}")))?;
+    let platform = value
+        .get("platform")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if platform == "pc" {
+        let payload: DesktopConfigFile = serde_json::from_value(value)
+            .map_err(|error| AppError::Other(format!("Parse config failed: {error}")))?;
+        if payload.kind != CONFIG_FILE_KIND
+            || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
+            || payload.platform != "pc"
+        {
+            return Err(AppError::Other("Unsupported config file".into()));
+        }
+        let auth_platforms = if payload.auth.is_some() {
+            vec!["netease", "bilibili", "youtube"]
+        } else {
+            Vec::new()
+        };
+        return Ok(ParsedConfigImport {
+            settings: payload.settings,
+            listen_together: payload.listen_together,
+            language: payload.language,
+            auth: payload.auth,
+            github_sync: payload.github_sync,
+            webdav_sync: payload.webdav_sync,
+            sync_preferences: payload.sync_preferences,
+            auth_platforms,
+            platform: "pc",
+            warnings: Vec::new(),
+        });
+    }
+
+    let has_listen_together_section = value.get("listenTogether").is_some_and(Value::is_object);
+    let payload: AndroidConfigFile = serde_json::from_value(value)
+        .map_err(|error| AppError::Other(format!("Parse Android config failed: {error}")))?;
+    if payload.kind != CONFIG_FILE_KIND
+        || payload.format_version == 0
+        || payload.format_version > CONFIG_FILE_VERSION
+    {
+        return Err(AppError::Other("Unsupported config file".into()));
+    }
+    if !payload.has_restorable_content(has_listen_together_section) {
+        return Err(AppError::Other(
+            "Config backup has no restorable content".into(),
+        ));
+    }
+
+    let settings = android_settings_to_desktop(&payload.settings, current_settings);
+    let (auth, auth_platforms) = android_auth_to_desktop(&payload, current_auth);
+    let worker_base_url = payload.listen_together.worker_base_url.trim();
+    let worker_base_url_input = payload.listen_together.worker_base_url_input.trim();
+    let fallback_worker_url = url::Url::parse(worker_base_url_input)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    let listen_together = ConfigListenTogether {
+        user_uuid: payload.listen_together.user_uuid.clone(),
+        server_url: if worker_base_url.is_empty() {
+            fallback_worker_url
+        } else {
+            worker_base_url.to_string()
+        },
+        nickname: payload.listen_together.nickname.clone(),
+        allow_member_control: payload.listen_together.allow_member_control,
+        auto_pause_on_member_change: payload.listen_together.auto_pause_on_member_change,
+        share_audio_links: payload.listen_together.share_audio_links,
+    };
+    let history_update_mode = if payload
+        .sync_preferences
+        .play_history_update_mode
+        .trim()
+        .is_empty()
+    {
+        payload.git_hub_sync.play_history_update_mode.clone()
+    } else {
+        payload.sync_preferences.play_history_update_mode.clone()
+    };
+
+    let mut warnings = Vec::new();
+    if worker_base_url.is_empty()
+        && !worker_base_url_input.is_empty()
+        && listen_together.server_url.is_empty()
+    {
+        warnings.push("listen_together_url_invalid".into());
+    }
+    if payload.you_tube_auth.cookies.is_empty()
+        && payload.you_tube_auth.cookie_header.trim().is_empty()
+        && !payload.you_tube_auth.authorization.trim().is_empty()
+    {
+        warnings.push("youtube_authorization_unsupported".into());
+    }
+    if !payload.you_tube_auth.x_goog_auth_user.trim().is_empty()
+        && payload.you_tube_auth.x_goog_auth_user.trim() != "0"
+    {
+        warnings.push("youtube_multi_account_unsupported".into());
+    }
+    let _ = (
+        &payload.you_tube_auth.origin,
+        &payload.you_tube_auth.user_agent,
+    );
+
+    let has_github_sync = payload.git_hub_sync.has_data();
+    let has_webdav_sync = payload.web_dav_sync.has_data();
+    let has_sync_preferences = payload.sync_preferences.has_data()
+        || !payload
+            .git_hub_sync
+            .play_history_update_mode
+            .trim()
+            .is_empty();
+
+    Ok(ParsedConfigImport {
+        settings,
+        listen_together: has_listen_together_section.then_some(listen_together),
+        language: payload
+            .language
+            .has_value()
+            .then(|| payload.language.clone()),
+        auth,
+        github_sync: has_github_sync.then_some(ConfigGitHubSync {
+            token: payload.git_hub_sync.token,
+            owner: payload.git_hub_sync.repo_owner,
+            repo: payload.git_hub_sync.repo_name,
+            auto_sync: payload.git_hub_sync.auto_sync_enabled,
+            data_saver: payload.git_hub_sync.data_saver_mode,
+            silent_failures: payload
+                .settings
+                .booleans
+                .get("silent_github_sync_failure")
+                .copied()
+                .unwrap_or(false),
+            history_update_mode: history_update_mode.clone(),
+            ..Default::default()
+        }),
+        webdav_sync: has_webdav_sync.then_some(ConfigWebDavSync {
+            server_url: payload.web_dav_sync.server_url,
+            username: payload.web_dav_sync.username,
+            password: payload.web_dav_sync.password,
+            base_path: payload.web_dav_sync.base_path,
+            auto_sync: payload.web_dav_sync.auto_sync_enabled,
+            ..Default::default()
+        }),
+        sync_preferences: has_sync_preferences.then_some(ConfigSyncPreferences {
+            history_update_mode,
+        }),
+        auth_platforms,
+        platform: "android",
+        warnings,
+    })
+}
+
+async fn hydrate_android_netease_auth(payload: &mut ParsedConfigImport, state: &AppState) {
+    if payload.platform != "android" {
+        return;
+    }
+    let Some(auth) = payload.auth.as_mut().and_then(|auth| auth.netease.as_mut()) else {
+        return;
+    };
+    if auth.user_id.is_some() || !auth.cookies.iter().any(|cookie| cookie.name == "MUSIC_U") {
+        return;
+    }
+
+    let candidate_jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
+    crate::auth::cookies::inject_cookies(&candidate_jar, &auth.cookies);
+    let profile = state
+        .http_with_cookie_jar(candidate_jar)
+        .map_err(|error| AppError::Other(error.to_string()))
+        .and_then(|http| Ok(crate::api::netease::client::NeteaseClient::new(&http)));
+    let result = match profile {
+        Ok(client) => tokio::time::timeout(
+            crate::auth::netease_hydration::REQUEST_TIMEOUT,
+            client.get_user_account(),
+        )
+        .await
+        .map_err(|_| AppError::Other("NetEase account verification timed out".into()))
+        .and_then(|result| result)
+        .and_then(|body| crate::api::netease::client::parse_netease_account_profile(&body)),
+        Err(error) => Err(error),
+    };
+
+    match result {
+        Ok(profile) => {
+            auth.user_id = Some(profile.user_id);
+            auth.nickname = profile.nickname;
+            auth.avatar_url = profile.avatar_url;
+        }
+        Err(error) => {
+            log::warn!(target: "config-import", "NetEase account verification failed: {error}");
+            payload
+                .warnings
+                .push("netease_auth_verification_failed".into());
+        }
+    }
+}
+
 /// 启动时迁移旧版同步凭据，避免只有打开设置页后才清理明文
 pub fn initialize_secure_storage(app: &AppHandle) {
     let _ = load_github_config(app);
@@ -243,16 +936,62 @@ fn load_github_config(app: &AppHandle) -> GitHubSyncConfig {
     config
 }
 
-fn save_github_config(app: &AppHandle, config: &GitHubSyncConfig) {
-    if config.token.is_empty() {
-        let _ = security::delete_secret(security::GITHUB_TOKEN_KEY);
-    } else if !security::set_secret(security::GITHUB_TOKEN_KEY, &config.token) {
-        log::error!(target: "sync", "凭据存储不可用，GitHub Token 未持久化");
+fn persist_sync_secret(key: &str, value: &str, label: &str) -> AppResult<()> {
+    let current = security::get_secret(key);
+    if value.is_empty() {
+        if current.is_some() && !security::delete_secret(key) {
+            return Err(AppError::Other(format!(
+                "Failed to remove {label} from credential storage"
+            )));
+        }
+    } else if current.as_deref() != Some(value) && !security::set_secret(key, value) {
+        return Err(AppError::Other(format!(
+            "Failed to save {label} to credential storage"
+        )));
     }
+    Ok(())
+}
 
-    if let Ok(s) = app.store(SYNC_STORE) {
-        let _ = s.set(GITHUB_CONFIG_KEY, github_config_store_value(config));
-        let _ = s.save();
+fn persist_sync_store_value(app: &AppHandle, key: &str, value: Value) -> AppResult<()> {
+    let store = app
+        .store(SYNC_STORE)
+        .map_err(|error| AppError::Other(error.to_string()))?;
+    let previous = store.get(key);
+    store.set(key, value);
+    if let Err(error) = store.save() {
+        match previous {
+            Some(value) => store.set(key, value),
+            None => {
+                store.delete(key);
+            }
+        }
+        let _ = store.save();
+        return Err(AppError::Other(error.to_string()));
+    }
+    Ok(())
+}
+
+fn save_github_config_checked(app: &AppHandle, config: &GitHubSyncConfig) -> AppResult<()> {
+    let previous_secret = security::get_secret(security::GITHUB_TOKEN_KEY);
+    persist_sync_secret(security::GITHUB_TOKEN_KEY, &config.token, "GitHub token")?;
+    if let Err(error) =
+        persist_sync_store_value(app, GITHUB_CONFIG_KEY, github_config_store_value(config))
+    {
+        if let Err(rollback_error) = persist_sync_secret(
+            security::GITHUB_TOKEN_KEY,
+            previous_secret.as_deref().unwrap_or_default(),
+            "previous GitHub token",
+        ) {
+            log::error!(target: "sync", "GitHub credential rollback failed: {rollback_error}");
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn save_github_config(app: &AppHandle, config: &GitHubSyncConfig) {
+    if let Err(error) = save_github_config_checked(app, config) {
+        log::error!(target: "sync", "GitHub sync config persistence failed: {error}");
     }
 }
 
@@ -289,16 +1028,31 @@ fn load_webdav_config(app: &AppHandle) -> WebDavSyncConfig {
     config
 }
 
-fn save_webdav_config(app: &AppHandle, config: &WebDavSyncConfig) {
-    if config.password.is_empty() {
-        let _ = security::delete_secret(security::WEBDAV_PASSWORD_KEY);
-    } else if !security::set_secret(security::WEBDAV_PASSWORD_KEY, &config.password) {
-        log::error!(target: "sync", "凭据存储不可用，WebDAV 密码未持久化");
+fn save_webdav_config_checked(app: &AppHandle, config: &WebDavSyncConfig) -> AppResult<()> {
+    let previous_secret = security::get_secret(security::WEBDAV_PASSWORD_KEY);
+    persist_sync_secret(
+        security::WEBDAV_PASSWORD_KEY,
+        &config.password,
+        "WebDAV password",
+    )?;
+    if let Err(error) =
+        persist_sync_store_value(app, WEBDAV_CONFIG_KEY, webdav_config_store_value(config))
+    {
+        if let Err(rollback_error) = persist_sync_secret(
+            security::WEBDAV_PASSWORD_KEY,
+            previous_secret.as_deref().unwrap_or_default(),
+            "previous WebDAV password",
+        ) {
+            log::error!(target: "sync", "WebDAV credential rollback failed: {rollback_error}");
+        }
+        return Err(error);
     }
+    Ok(())
+}
 
-    if let Ok(s) = app.store(SYNC_STORE) {
-        let _ = s.set(WEBDAV_CONFIG_KEY, webdav_config_store_value(config));
-        let _ = s.save();
+fn save_webdav_config(app: &AppHandle, config: &WebDavSyncConfig) {
+    if let Err(error) = save_webdav_config_checked(app, config) {
+        log::error!(target: "sync", "WebDAV sync config persistence failed: {error}");
     }
 }
 
@@ -324,10 +1078,17 @@ fn load_sync_preferences(app: &AppHandle) -> SyncPreferencesConfig {
     config
 }
 
+fn save_sync_preferences_checked(app: &AppHandle, config: &SyncPreferencesConfig) -> AppResult<()> {
+    persist_sync_store_value(
+        app,
+        SYNC_PREFERENCES_KEY,
+        sync_preferences_store_value(config),
+    )
+}
+
 fn save_sync_preferences(app: &AppHandle, config: &SyncPreferencesConfig) {
-    if let Ok(store) = app.store(SYNC_STORE) {
-        let _ = store.set(SYNC_PREFERENCES_KEY, sync_preferences_store_value(config));
-        let _ = store.save();
+    if let Err(error) = save_sync_preferences_checked(app, config) {
+        log::error!(target: "sync", "Sync preferences persistence failed: {error}");
     }
 }
 
@@ -363,7 +1124,11 @@ fn webdav_config_store_value(config: &WebDavSyncConfig) -> Value {
 
 /// 获取 GitHub 同步配置（不含 token 明文）
 #[tauri::command]
-pub async fn get_github_sync_config(app: AppHandle) -> AppResult<Value> {
+pub async fn get_github_sync_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Value> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let config = load_github_config(&app);
     let preferences = load_sync_preferences(&app);
     Ok(serde_json::json!({
@@ -380,7 +1145,8 @@ pub async fn get_github_sync_config(app: AppHandle) -> AppResult<Value> {
 
 /// 获取全局同步偏好
 #[tauri::command]
-pub async fn get_sync_preferences(app: AppHandle) -> AppResult<Value> {
+pub async fn get_sync_preferences(app: AppHandle, state: State<'_, AppState>) -> AppResult<Value> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let preferences = load_sync_preferences(&app);
     Ok(serde_json::json!({
         "historyUpdateMode": preferences.history_update_mode,
@@ -391,8 +1157,10 @@ pub async fn get_sync_preferences(app: AppHandle) -> AppResult<Value> {
 #[tauri::command]
 pub async fn update_sync_preferences(
     app: AppHandle,
+    state: State<'_, AppState>,
     history_update_mode: Option<String>,
 ) -> AppResult<()> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let mut preferences = load_sync_preferences(&app);
     if let Some(mode) = history_update_mode {
         preferences.history_update_mode = normalize_history_update_mode(&mode);
@@ -411,6 +1179,7 @@ pub async fn validate_github_token(
     let api = crate::sync::github_api::GitHubApiClient::new(&state.http(), &token);
     let username = api.validate_token().await?;
 
+    let _config_guard = state.config_persistence_gate.lock().await;
     // 暂存 token（还没配置完，只保存 token 和 owner）
     let mut config = load_github_config(&app);
     config.token = token;
@@ -430,6 +1199,7 @@ pub async fn create_github_repo(
     state: State<'_, AppState>,
     repo_name: String,
 ) -> AppResult<Value> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let config = load_github_config(&app);
     if config.token.is_empty() {
         return Err(AppError::Api("Token not validated yet".into()));
@@ -463,6 +1233,7 @@ pub async fn use_existing_github_repo(
     owner: String,
     repo: String,
 ) -> AppResult<Value> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let config = load_github_config(&app);
     if config.token.is_empty() {
         return Err(AppError::Api("Token not validated yet".into()));
@@ -505,6 +1276,7 @@ pub async fn configure_github_sync(
         Err(error) => return Err(error.into()),
     }
 
+    let _config_guard = state.config_persistence_gate.lock().await;
     let config = GitHubSyncConfig {
         token,
         owner: owner.clone(),
@@ -530,6 +1302,7 @@ pub async fn sync_github(
     history_entries: Option<Vec<manager::SyncHistoryEntry>>,
     history_deletions: Option<Vec<manager::SyncHistoryDeletion>>,
 ) -> AppResult<SyncResult> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let mut config = load_github_config(&app);
     if config.token.is_empty() {
         return Err(AppError::Api("GitHub sync not configured".into()));
@@ -552,14 +1325,19 @@ pub async fn sync_github(
 
 /// 断开 GitHub 同步
 #[tauri::command]
-pub async fn disconnect_github_sync(app: AppHandle) -> AppResult<()> {
+pub async fn disconnect_github_sync(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     save_github_config(&app, &GitHubSyncConfig::default());
     Ok(())
 }
 
 /// 获取 WebDAV 同步配置
 #[tauri::command]
-pub async fn get_webdav_sync_config(app: AppHandle) -> AppResult<Value> {
+pub async fn get_webdav_sync_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Value> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let config = load_webdav_config(&app);
     let preferences = load_sync_preferences(&app);
     Ok(serde_json::json!({
@@ -592,6 +1370,7 @@ pub async fn configure_webdav_sync(
     );
     api.validate_connection().await?;
 
+    let _config_guard = state.config_persistence_gate.lock().await;
     let config = WebDavSyncConfig {
         server_url: server_url.clone(),
         username,
@@ -616,6 +1395,7 @@ pub async fn sync_webdav(
     history_entries: Option<Vec<manager::SyncHistoryEntry>>,
     history_deletions: Option<Vec<manager::SyncHistoryDeletion>>,
 ) -> AppResult<SyncResult> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let mut config = load_webdav_config(&app);
     if config.server_url.is_empty() {
         return Err(AppError::Api("WebDAV sync not configured".into()));
@@ -639,11 +1419,13 @@ pub async fn sync_webdav(
 #[tauri::command]
 pub async fn update_github_sync_settings(
     app: AppHandle,
+    state: State<'_, AppState>,
     auto_sync: Option<bool>,
     data_saver: Option<bool>,
     silent_failures: Option<bool>,
     history_update_mode: Option<String>,
 ) -> AppResult<()> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let mut config = load_github_config(&app);
     if config.token.is_empty() {
         return Err(AppError::Api("GitHub sync not configured".into()));
@@ -673,7 +1455,12 @@ pub async fn update_github_sync_settings(
 
 /// 更新 WebDAV 同步子设置
 #[tauri::command]
-pub async fn update_webdav_sync_settings(app: AppHandle, auto_sync: Option<bool>) -> AppResult<()> {
+pub async fn update_webdav_sync_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    auto_sync: Option<bool>,
+) -> AppResult<()> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     let mut config = load_webdav_config(&app);
     if config.server_url.is_empty() {
         return Err(AppError::Api("WebDAV sync not configured".into()));
@@ -810,80 +1597,101 @@ pub async fn export_playlists(app: AppHandle) -> AppResult<Value> {
     }
 }
 
-/// 导入播放列表 JSON（兼容 Android BackupData 和 Desktop 两种格式）
+/// 导入播放列表（兼容 Android BackupData、完整同步快照和 Desktop 格式）
 #[tauri::command]
 pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
-    use crate::library::playlist::{Playlist, PlaylistStore};
-    use crate::sync::manager::save_imported_playlists;
+    use crate::library::playlist::Playlist;
     use crate::sync::models::{SyncData, SyncPlaylist};
     use tauri_plugin_dialog::DialogExt;
 
     let path = app
         .dialog()
         .file()
-        .add_filter("JSON", &["json"])
+        .add_filter("NeriPlayer backup", &["json", "bin"])
         .blocking_pick_file();
 
     match path {
         Some(p) => {
-            let data = std::fs::read_to_string(p.as_path().unwrap())
-                .map_err(|e| AppError::Other(format!("Read failed: {}", e)))?;
-
-            let parsed: serde_json::Value = serde_json::from_str(&data)
-                .map_err(|e| AppError::Other(format!("Parse failed: {}", e)))?;
-
-            // 检测格式：Android BackupData 有 "playlists" 顶层数组（每项有 "songs"）
-            //           Desktop 格式是直接的 Playlist 数组（每项有 "tracks"）
-            let count;
-
-            if parsed.is_object() && parsed.get("playlists").is_some() {
-                // Android BackupData 格式：{ version, playlists: [SyncPlaylist] }
-                let sync_playlists: Vec<SyncPlaylist> =
-                    serde_json::from_value(parsed["playlists"].clone())
-                        .map_err(|e| AppError::Other(format!("Parse sync playlists: {}", e)))?;
-                count = sync_playlists.len();
-
-                // 转换并回写普通歌单，不改动独立存储的收藏歌单
-                let sync_data = SyncData {
-                    playlists: sync_playlists,
-                    ..Default::default()
-                };
-                save_imported_playlists(&sync_data);
-            } else if parsed.is_array() {
-                // 尝试 Desktop 格式
-                if let Ok(imported) = serde_json::from_value::<Vec<Playlist>>(parsed.clone()) {
-                    count = imported.len();
-                    let playlists_path = {
-                        let mut path =
-                            dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-                        path.push("NeriPlayer");
-                        path.push("playlists.json");
-                        path
-                    };
-                    let mut store = PlaylistStore::load(&playlists_path);
-                    for pl in imported {
-                        if !store.playlists.iter().any(|p| p.name == pl.name) {
-                            store.playlists.push(pl);
-                        }
-                    }
-                    store.save(&playlists_path)?;
-                } else {
-                    // 可能是 SyncPlaylist 数组（无外层包装）
-                    let sync_playlists: Vec<SyncPlaylist> = serde_json::from_value(parsed)
-                        .map_err(|e| AppError::Other(format!("Parse playlists array: {}", e)))?;
-                    count = sync_playlists.len();
-                    let sync_data = SyncData {
-                        playlists: sync_playlists,
-                        ..Default::default()
-                    };
-                    save_imported_playlists(&sync_data);
-                }
+            let file_path = p.as_path().unwrap();
+            let is_binary = file_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"));
+            let metadata = std::fs::metadata(file_path)
+                .map_err(|e| AppError::Other(format!("Read metadata failed: {}", e)))?;
+            let max_input_bytes = if is_binary {
+                24 * 1024 * 1024
             } else {
-                return Err(AppError::Other("Unrecognized playlist format".into()));
+                12 * 1024 * 1024
+            };
+            if metadata.len() > max_input_bytes {
+                return Err(AppError::Other("Playlist backup is too large".into()));
+            }
+            let data = std::fs::read_to_string(file_path)
+                .map_err(|e| AppError::Other(format!("Read failed: {}", e)))?;
+            let count;
+            let mut imported_favorites = 0usize;
+            let mut favorites_changed = false;
+            let online_favorites_available;
+
+            if is_binary {
+                let sync_data = crate::sync::serializer::deserialize(&data, true)?;
+                count = sync_data.playlists.len();
+                online_favorites_available = true;
+                favorites_changed = sync_data
+                    .favorite_playlists
+                    .iter()
+                    .any(|favorite| !favorite.is_deleted);
+                imported_favorites = manager::save_imported_playlist_backup(&sync_data).await?;
+            } else {
+                let parsed: serde_json::Value = serde_json::from_str(&data)
+                    .map_err(|e| AppError::Other(format!("Parse failed: {}", e)))?;
+
+                // Android BackupData / SyncData 使用对象，Desktop 旧格式使用数组。
+                online_favorites_available = parsed
+                    .as_object()
+                    .is_some_and(|object| object.contains_key("favoritePlaylists"));
+                if parsed.is_object() && parsed.get("playlists").is_some() {
+                    // Android BackupData / SyncData：完整解析以保留可选的 favoritePlaylists。
+                    let sync_data: SyncData = serde_json::from_value(parsed)
+                        .map_err(|e| AppError::Other(format!("Parse Android playlists: {}", e)))?;
+                    count = sync_data.playlists.len();
+                    favorites_changed = sync_data
+                        .favorite_playlists
+                        .iter()
+                        .any(|favorite| !favorite.is_deleted);
+                    imported_favorites = manager::save_imported_playlist_backup(&sync_data).await?;
+                } else if parsed.is_array() {
+                    if let Ok(imported) = serde_json::from_value::<Vec<Playlist>>(parsed.clone()) {
+                        count = imported.len();
+                        manager::save_imported_desktop_playlists(imported).await?;
+                    } else {
+                        let sync_playlists: Vec<SyncPlaylist> = serde_json::from_value(parsed)
+                            .map_err(|e| {
+                                AppError::Other(format!("Parse playlists array: {}", e))
+                            })?;
+                        count = sync_playlists.len();
+                        let sync_data = SyncData {
+                            playlists: sync_playlists,
+                            ..Default::default()
+                        };
+                        manager::save_imported_playlists(&sync_data).await?;
+                    }
+                } else {
+                    return Err(AppError::Other("Unrecognized playlist format".into()));
+                }
             }
 
             let _ = app.emit("playlists-changed", ());
-            Ok(serde_json::json!({ "success": true, "imported": count }))
+            if favorites_changed {
+                let _ = app.emit("favorite-playlists-changed", ());
+            }
+            Ok(serde_json::json!({
+                "success": true,
+                "imported": count,
+                "importedFavorites": imported_favorites,
+                "onlineFavoritesAvailable": online_favorites_available,
+            }))
         }
         None => Ok(serde_json::json!({ "success": false, "reason": "cancelled" })),
     }
@@ -899,6 +1707,7 @@ pub async fn export_config(
 ) -> AppResult<Value> {
     use tauri_plugin_dialog::DialogExt;
 
+    let _config_guard = state.config_persistence_gate.lock().await;
     let auth = state.auth.lock().clone();
     let preferences = load_sync_preferences(&app);
     let mut github = load_github_config(&app);
@@ -929,6 +1738,7 @@ pub async fn export_config(
     };
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| AppError::Other(format!("Serialize config failed: {}", e)))?;
+    drop(_config_guard);
     let file_name = format!(
         "neriplayer-desktop-config-{}.json",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
@@ -954,7 +1764,40 @@ pub async fn export_config(
     }
 }
 
-/// 导入 PC 配置文件并恢复设置、登录状态和同步配置
+fn rollback_config_import_persistence(
+    app: &AppHandle,
+    previous_settings: &AppSettings,
+    previous_auth: Option<&crate::auth::state::AuthState>,
+    previous_preferences: Option<&SyncPreferencesConfig>,
+    previous_github: Option<&GitHubSyncConfig>,
+    previous_webdav: Option<&WebDavSyncConfig>,
+) {
+    if let Some(auth) = previous_auth {
+        if let Err(error) = crate::auth::cookies::save_auth_strict(app, auth) {
+            log::error!(target: "config-import", "Authentication rollback failed: {error}");
+        }
+    }
+    if let Err(error) = store::save_settings(app, previous_settings.clone()) {
+        log::error!(target: "config-import", "Settings rollback failed: {error}");
+    }
+    if let Some(webdav) = previous_webdav {
+        if let Err(error) = save_webdav_config_checked(app, webdav) {
+            log::error!(target: "config-import", "WebDAV config rollback failed: {error}");
+        }
+    }
+    if let Some(github) = previous_github {
+        if let Err(error) = save_github_config_checked(app, github) {
+            log::error!(target: "config-import", "GitHub config rollback failed: {error}");
+        }
+    }
+    if let Some(preferences) = previous_preferences {
+        if let Err(error) = save_sync_preferences_checked(app, preferences) {
+            log::error!(target: "config-import", "Sync preferences rollback failed: {error}");
+        }
+    }
+}
+
+/// 导入 PC 或 Android 配置文件并恢复设置、登录状态和同步配置
 #[tauri::command]
 pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppResult<Value> {
     use tauri_plugin_dialog::DialogExt;
@@ -975,25 +1818,21 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     }
     let content = std::fs::read_to_string(file_path)
         .map_err(|e| AppError::Other(format!("Read config failed: {}", e)))?;
-    let payload: DesktopConfigFile = serde_json::from_str(&content)
-        .map_err(|e| AppError::Other(format!("Parse config failed: {}", e)))?;
-    if payload.kind != CONFIG_FILE_KIND
-        || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
-        || payload.platform != "pc"
-    {
-        return Err(AppError::Other("Unsupported config file".into()));
-    }
+    let _config_guard = state.config_persistence_gate.lock().await;
+    let _cookie_guard = state.auth_cookie_gate.lock().await;
+    let current_settings = store::load_settings(&app)?.settings;
+    let current_auth = state.auth.lock().clone();
+    let mut payload = parse_config_import(&content, current_settings.clone(), &current_auth)?;
 
-    let imported_listen_together = payload.listen_together;
-    let imported_language = payload.language;
-    let mut settings = payload.settings;
-    if let Some(language) = imported_language
+    let mut settings = payload.settings.clone();
+    if let Some(language) = payload
+        .language
         .as_ref()
         .filter(|language| !language.code.is_empty())
     {
         settings.locale = language.code.clone();
     }
-    if let Some(listen_together) = imported_listen_together.as_ref() {
+    if let Some(listen_together) = payload.listen_together.as_ref() {
         if !listen_together.server_url.is_empty() {
             settings.lt_server_url = listen_together.server_url.clone();
         }
@@ -1002,46 +1841,109 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
         settings.lt_auto_pause_on_member_change = listen_together.auto_pause_on_member_change;
         settings.lt_share_audio_links = listen_together.share_audio_links;
     }
-    let settings = store::save_settings(&app, settings)?;
     state.rebuild_http(settings.bypass_proxy);
+    hydrate_android_netease_auth(&mut payload, &state).await;
 
-    if let Some(imported_auth) = payload.auth {
-        let _cookie_guard = state.auth_cookie_gate.lock().await;
-        {
-            let mut auth = state.auth.lock();
-            let previous_auth = auth.clone();
-            for platform in ["netease", "bilibili", "youtube"] {
-                crate::auth::cookies::expire_platform_cookies(
-                    &state.cookie_jar,
-                    &previous_auth,
-                    platform,
-                );
-            }
-            *auth = imported_auth;
-            crate::auth::cookies::save_auth(&app, &auth);
-        }
-
-        crate::commands::auth_cmd::clear_and_reinject_webview_cookies(&app, &state).await?;
-    }
+    let imported_platform = payload.platform;
+    let imported_listen_together = payload.listen_together;
     let legacy_history_mode = payload
         .github_sync
         .as_ref()
         .map(|github| github.history_update_mode.clone());
-    if let Some(preferences) = payload.sync_preferences {
-        save_sync_preferences(&app, &preferences.into_config());
+    let imported_preferences = if let Some(preferences) = payload.sync_preferences {
+        Some(preferences.into_config())
     } else if let Some(mode) = legacy_history_mode {
-        save_sync_preferences(
-            &app,
-            &SyncPreferencesConfig {
-                history_update_mode: normalize_history_update_mode(&mode),
-            },
-        );
-    }
-    if let Some(github) = payload.github_sync {
-        save_github_config(&app, &github.into_config());
-    }
-    if let Some(webdav) = payload.webdav_sync {
-        save_webdav_config(&app, &webdav.into_config());
+        Some(SyncPreferencesConfig {
+            history_update_mode: normalize_history_update_mode(&mode),
+        })
+    } else {
+        None
+    };
+    let imported_github = payload.github_sync.map(ConfigGitHubSync::into_config);
+    let imported_webdav = payload.webdav_sync.map(ConfigWebDavSync::into_config);
+    let auth_platforms = payload.auth_platforms;
+    let imported_auth = payload.auth;
+
+    let previous_auth = state.auth.lock().clone();
+    let imported_auth = imported_auth
+        .map(|auth| merge_imported_auth_platforms(previous_auth.clone(), auth, &auth_platforms));
+    let previous_preferences = imported_preferences
+        .as_ref()
+        .map(|_| load_sync_preferences(&app));
+    let previous_github = imported_github.as_ref().map(|_| load_github_config(&app));
+    let previous_webdav = imported_webdav.as_ref().map(|_| load_webdav_config(&app));
+
+    let persistence_result = (|| -> AppResult<AppSettings> {
+        if let Some(preferences) = imported_preferences.as_ref() {
+            save_sync_preferences_checked(&app, preferences)?;
+        }
+        if let Some(github) = imported_github.as_ref() {
+            save_github_config_checked(&app, github)?;
+        }
+        if let Some(webdav) = imported_webdav.as_ref() {
+            save_webdav_config_checked(&app, webdav)?;
+        }
+        let persisted_settings = store::save_settings(&app, settings.clone())?;
+        if let Some(auth) = imported_auth.as_ref() {
+            crate::auth::cookies::save_auth_strict(&app, auth)?;
+        }
+        Ok(persisted_settings)
+    })();
+
+    let settings = match persistence_result {
+        Ok(settings) => settings,
+        Err(error) => {
+            rollback_config_import_persistence(
+                &app,
+                &current_settings,
+                imported_auth.as_ref().map(|_| &previous_auth),
+                previous_preferences.as_ref(),
+                previous_github.as_ref(),
+                previous_webdav.as_ref(),
+            );
+            state.rebuild_http(current_settings.bypass_proxy);
+            return Err(AppError::Other(format!(
+                "Config import persistence failed: {error}"
+            )));
+        }
+    };
+
+    if let Some(imported_auth) = imported_auth {
+        for platform in &auth_platforms {
+            crate::auth::cookies::expire_platform_cookies(
+                &state.cookie_jar,
+                &previous_auth,
+                platform,
+            );
+        }
+        *state.auth.lock() = imported_auth.clone();
+
+        if let Err(error) =
+            crate::commands::auth_cmd::clear_and_reinject_webview_cookies(&app, &state).await
+        {
+            *state.auth.lock() = previous_auth.clone();
+            for platform in &auth_platforms {
+                crate::auth::cookies::expire_platform_cookies(
+                    &state.cookie_jar,
+                    &imported_auth,
+                    platform,
+                );
+            }
+            crate::auth::cookies::inject_all(&state.cookie_jar, &previous_auth);
+            rollback_config_import_persistence(
+                &app,
+                &current_settings,
+                Some(&previous_auth),
+                previous_preferences.as_ref(),
+                previous_github.as_ref(),
+                previous_webdav.as_ref(),
+            );
+            state.rebuild_http(current_settings.bypass_proxy);
+            let _ =
+                crate::commands::auth_cmd::clear_and_reinject_webview_cookies(&app, &state).await;
+            return Err(error);
+        }
+        state.netease_hydration.lock().reset();
     }
 
     Ok(serde_json::json!({
@@ -1050,13 +1952,15 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
         "listenTogetherUserUuid": imported_listen_together
             .map(|listen_together| listen_together.user_uuid)
             .unwrap_or_default(),
-        "platform": "pc",
+        "platform": imported_platform,
+        "warnings": payload.warnings,
     }))
 }
 
 /// 断开 WebDAV 同步
 #[tauri::command]
-pub async fn disconnect_webdav_sync(app: AppHandle) -> AppResult<()> {
+pub async fn disconnect_webdav_sync(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let _config_guard = state.config_persistence_gate.lock().await;
     save_webdav_config(&app, &WebDavSyncConfig::default());
     Ok(())
 }
@@ -1064,11 +1968,11 @@ pub async fn disconnect_webdav_sync(app: AppHandle) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        github_config_store_value, webdav_config_store_value, ConfigGitHubSync,
-        ConfigSyncPreferences, ConfigWebDavSync, DesktopConfigFile, CONFIG_FILE_KIND,
-        CONFIG_FILE_VERSION,
+        github_config_store_value, parse_config_import, webdav_config_store_value,
+        ConfigGitHubSync, ConfigSyncPreferences, ConfigWebDavSync, DesktopConfigFile,
+        CONFIG_FILE_KIND, CONFIG_FILE_VERSION,
     };
-    use crate::auth::state::AuthState;
+    use crate::auth::state::{AuthState, CookieEntry, YouTubeAuth};
     use crate::settings::store::AppSettings;
     use crate::sync::models::{GitHubSyncConfig, SyncPreferencesConfig, WebDavSyncConfig};
 
@@ -1145,5 +2049,141 @@ mod tests {
         });
 
         assert_eq!(value["historyUpdateMode"], "every_15_minutes");
+    }
+
+    #[test]
+    fn android_config_maps_mobile_sections_to_desktop() {
+        let content = serde_json::json!({
+            "kind": CONFIG_FILE_KIND,
+            "formatVersion": CONFIG_FILE_VERSION,
+            "settings": {
+                "booleans": {
+                    "follow_system_dark": false,
+                    "force_dark": false,
+                    "netease_auto_source_switch": false
+                },
+                "floats": { "playback_speed": 1.25 },
+                "ints": {},
+                "longs": {
+                    "cloud_music_lyric_default_offset_ms": 750,
+                    "max_cache_size_bytes": 536870912
+                },
+                "strings": {
+                    "audio_quality": "lossless",
+                    "download_file_name_template": "{artist} - {title}"
+                }
+            },
+            "listenTogether": {
+                "workerBaseUrl": "https://worker.example",
+                "userUuid": "mobile-user",
+                "nickname": "Mobile"
+            },
+            "language": { "code": "en" },
+            "neteaseAuth": { "cookies": { "MUSIC_U": "netease-cookie" } },
+            "biliAuth": { "cookies": { "DedeUserID": "123" } },
+            "youTubeAuth": { "cookieHeader": "SID=youtube-cookie" },
+            "gitHubSync": {
+                "token": "github-token",
+                "repoOwner": "owner",
+                "repoName": "repo",
+                "autoSyncEnabled": true,
+                "playHistoryUpdateMode": "EVERY_15_MINUTES"
+            },
+            "webDavSync": {
+                "serverUrl": "https://dav.example",
+                "basePath": "/neri",
+                "username": "user",
+                "password": "password",
+                "autoSyncEnabled": true
+            },
+            "syncPreferences": { "playHistoryUpdateMode": "EVERY_30_MINUTES" }
+        })
+        .to_string();
+
+        let mut current_settings = AppSettings::default();
+        current_settings.download_dir = "D:/desktop-music".into();
+        current_settings.volume = 0.42;
+        current_settings.log_level = "debug".into();
+        let parsed =
+            parse_config_import(&content, current_settings, &AuthState::default()).unwrap();
+
+        assert_eq!(parsed.platform, "android");
+        assert_eq!(parsed.settings.dark_mode, "light");
+        assert!(!parsed.settings.netease_auto_source_switch);
+        assert_eq!(parsed.settings.playback_speed, 1.25);
+        assert_eq!(parsed.settings.cloud_music_offset, 750);
+        assert_eq!(parsed.settings.max_cache_size, 512);
+        assert_eq!(parsed.settings.netease_quality, "lossless");
+        assert_eq!(parsed.settings.download_dir, "D:/desktop-music");
+        assert_eq!(parsed.settings.volume, 0.42);
+        assert_eq!(parsed.settings.log_level, "debug");
+        assert_eq!(parsed.language.unwrap().code, "en");
+        assert_eq!(parsed.listen_together.unwrap().user_uuid, "mobile-user");
+        assert_eq!(parsed.auth.unwrap().bilibili.unwrap().mid, Some(123));
+        assert_eq!(parsed.github_sync.unwrap().owner, "owner");
+        assert_eq!(parsed.webdav_sync.unwrap().base_path, "/neri");
+        assert_eq!(
+            parsed.sync_preferences.unwrap().history_update_mode,
+            "EVERY_30_MINUTES"
+        );
+    }
+
+    #[test]
+    fn android_config_preserves_unconverted_platform_auth() {
+        let content = serde_json::json!({
+            "kind": CONFIG_FILE_KIND,
+            "formatVersion": CONFIG_FILE_VERSION,
+            "settings": {
+                "booleans": { "netease_auto_source_switch": false }
+            },
+            "neteaseAuth": { "cookies": { "MUSIC_U": "phone-session" } },
+            "youTubeAuth": { "authorization": "SAPISIDHASH unsupported-on-desktop" }
+        })
+        .to_string();
+        let current_auth = AuthState {
+            youtube: Some(YouTubeAuth {
+                cookies: vec![CookieEntry {
+                    name: "SAPISID".into(),
+                    value: "desktop-session".into(),
+                    domain: ".youtube.com".into(),
+                }],
+                nickname: Some("Desktop account".into()),
+                avatar_url: None,
+            }),
+            ..Default::default()
+        };
+
+        let parsed = parse_config_import(&content, AppSettings::default(), &current_auth).unwrap();
+        let imported_auth = parsed.auth.expect("NetEase cookies should be imported");
+
+        assert_eq!(
+            imported_auth.youtube.unwrap().cookies[0].value,
+            "desktop-session"
+        );
+        assert_eq!(
+            imported_auth.netease.unwrap().cookies[0].value,
+            "phone-session"
+        );
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning == "youtube_authorization_unsupported"));
+    }
+
+    #[test]
+    fn android_config_rejects_a_header_without_restorable_sections() {
+        let content = serde_json::json!({
+            "kind": CONFIG_FILE_KIND,
+            "formatVersion": CONFIG_FILE_VERSION
+        })
+        .to_string();
+
+        let error = parse_config_import(&content, AppSettings::default(), &AuthState::default())
+            .err()
+            .expect("empty Android config must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("Config backup has no restorable content"));
     }
 }

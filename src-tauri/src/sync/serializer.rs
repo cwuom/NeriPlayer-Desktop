@@ -12,6 +12,8 @@ use crate::error::{AppError, AppResult};
 use super::models::*;
 use super::proto_models::*;
 
+const MAX_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
+
 /// 返回省流模式使用的文件名
 pub fn get_filename(data_saver: bool) -> &'static str {
     if data_saver { "backup.bin" } else { "backup.json" }
@@ -43,8 +45,21 @@ pub fn deserialize_compressed(content: &str) -> AppResult<SyncData> {
     // GZIP 解压
     let mut decoder = GzDecoder::new(&compressed[..]);
     let mut proto_bytes = Vec::new();
-    decoder.read_to_end(&mut proto_bytes)
-        .map_err(|e| AppError::Other(format!("GZIP decompress: {}", e)))?;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = decoder
+            .read(&mut buffer)
+            .map_err(|e| AppError::Other(format!("GZIP decompress: {}", e)))?;
+        if read == 0 {
+            break;
+        }
+        if read > MAX_DECOMPRESSED_BYTES - proto_bytes.len() {
+            return Err(AppError::Other(
+                "Decompressed sync data is too large".into(),
+            ));
+        }
+        proto_bytes.extend_from_slice(&buffer[..read]);
+    }
 
     let current = ProtoSyncData::decode(&proto_bytes[..]).map(|proto| proto_to_sync_data(&proto));
     match current {
@@ -922,5 +937,22 @@ mod compressed_contract_tests {
             Some("original translated")
         );
         assert_eq!(decoded.sync_log[0].action, "ADD_SONG");
+    }
+
+    #[test]
+    fn compressed_decode_rejects_payload_over_android_size_limit() {
+        let oversized = vec![0_u8; MAX_DECOMPRESSED_BYTES + 1];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&oversized).unwrap();
+        let encoded = BASE64.encode(encoder.finish().unwrap());
+
+        let error = deserialize_compressed(&encoded).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Decompressed sync data is too large"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -5,7 +5,7 @@ use super::models::*;
 use super::serializer;
 use super::webdav_api::WebDavApiClient;
 use crate::error::{AppError, AppResult};
-use crate::library::playlist::{Playlist, PlaylistStore};
+use crate::library::playlist::{acquire_playlist_io_lock, Playlist, PlaylistStore};
 use crate::state::{TrackInfo, TrackSource};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -141,7 +141,7 @@ pub async fn sync_github(
     let merged = final_merged
         .ok_or_else(|| AppError::Api("GitHub upload conflict retry budget exhausted".into()))?;
 
-    save_synced_playlists(&merged);
+    save_synced_playlists(&merged)?;
     save_recent_play_history(&merged);
     save_base_snapshot(&merged, "github");
 
@@ -319,7 +319,7 @@ pub async fn sync_webdav(
         config.last_sync_time,
         &base_snapshot,
     );
-    save_synced_playlists(&merged);
+    save_synced_playlists(&merged)?;
     save_recent_play_history(&merged);
     save_base_snapshot(&merged, "webdav");
 
@@ -917,7 +917,15 @@ const FAVORITES_NAMES: &[&str] = &[
     "Liked Songs",
     "My Favorite Music",
 ];
-const LOCAL_NAMES: &[&str] = &["本地音乐", "本機音樂", "ローカル音楽", "Local Music"];
+const LOCAL_NAMES: &[&str] = &[
+    "本地文件",
+    "本地音乐",
+    "本機音樂",
+    "ローカルファイル",
+    "ローカル音楽",
+    "Local Files",
+    "Local Music",
+];
 
 fn is_favorites_name(name: &str) -> bool {
     FAVORITES_NAMES.iter().any(|n| *n == name)
@@ -949,7 +957,12 @@ fn resolve_system_id(sp_id: &str, sp_name: &str) -> i64 {
 }
 
 /// 将同步数据中的普通歌单回写到本地存储（对齐 Android applyMergedDataToLocal）
-fn save_playlists(merged: &SyncData) {
+fn save_playlists(merged: &SyncData) -> AppResult<()> {
+    let _playlist_guard = acquire_playlist_io_lock()?;
+    save_playlists_unlocked(merged)
+}
+
+fn save_playlists_unlocked(merged: &SyncData) -> AppResult<()> {
     let path = playlists_path();
     let mut store = PlaylistStore::load(&path);
     let existing_playlists = store.playlists.clone();
@@ -1074,22 +1087,249 @@ fn save_playlists(merged: &SyncData) {
         })
         .collect();
     store.fix_next_id();
-    let _ = store.save(&path);
+    store.save(&path)
 }
 
-/// 导入普通歌单时不改动独立存储的收藏歌单。
-pub fn save_imported_playlists(imported: &SyncData) {
-    save_playlists(imported);
+fn merge_imported_playlists_into_store(store: &mut PlaylistStore, imported: &SyncData) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut max_id = store
+        .playlists
+        .iter()
+        .map(|playlist| playlist.id)
+        .filter(|id| *id > 0)
+        .max()
+        .unwrap_or(0);
+
+    for imported_playlist in imported
+        .playlists
+        .iter()
+        .filter(|playlist| !playlist.is_deleted)
+    {
+        let playlist = imported_playlist.normalized_for_display_order(now);
+        let resolved_id = resolve_system_id(&playlist.id, &playlist.name);
+        let existing_index = store.playlists.iter().position(|current| {
+            (resolved_id != 0 && current.id == resolved_id)
+                || sync_playlist_id(current.id, &current.name) == playlist.id
+                || current.name == playlist.name
+        });
+
+        let mut seen_song_keys = HashSet::new();
+        let imported_tracks: Vec<TrackInfo> = playlist
+            .songs
+            .iter()
+            .filter(|song| {
+                let keys = song.identity_keys();
+                if keys.iter().any(|key| seen_song_keys.contains(key)) {
+                    return false;
+                }
+                seen_song_keys.extend(keys);
+                true
+            })
+            .map(sync_song_to_track)
+            .filter(|track| !track.id.is_empty())
+            .collect();
+
+        if let Some(index) = existing_index {
+            let current = &mut store.playlists[index];
+            let current_id = current.id;
+            let mut known_keys = HashSet::new();
+            for track in &current.tracks {
+                if track.source == TrackSource::Local {
+                    known_keys.insert(playlist_track_identity_key_pub(track));
+                } else {
+                    known_keys.extend(track_to_sync_song(track).identity_keys());
+                }
+            }
+
+            let mut missing = Vec::new();
+            for track in imported_tracks {
+                let keys = if track.source == TrackSource::Local {
+                    vec![playlist_track_identity_key_pub(&track)]
+                } else {
+                    track_to_sync_song(&track).identity_keys()
+                };
+                if keys.iter().any(|key| known_keys.contains(key)) {
+                    continue;
+                }
+                known_keys.extend(keys);
+                missing.push(track);
+            }
+
+            if !missing.is_empty() {
+                missing.append(&mut current.tracks);
+                current.tracks = missing;
+                current.modified_at = now.max(0) as u64;
+            }
+            store.deleted_playlist_ids.retain(|id| *id != current_id);
+            continue;
+        }
+
+        let local_id = if resolved_id != 0 {
+            resolved_id
+        } else {
+            max_id += 1;
+            max_id
+        };
+        max_id = max_id.max(local_id);
+        store.deleted_playlist_ids.retain(|id| *id != local_id);
+        store.playlists.push(Playlist {
+            id: local_id,
+            name: playlist.name,
+            tracks: imported_tracks,
+            modified_at: now.max(0) as u64,
+        });
+    }
+
+    store.playlists.sort_by_key(|playlist| {
+        if playlist.id == SYSTEM_FAVORITES_ID {
+            -1
+        } else if playlist.id == SYSTEM_LOCAL_ID {
+            1
+        } else {
+            0
+        }
+    });
+    store.fix_next_id();
+}
+
+fn merge_imported_playlists_unlocked(imported: &SyncData) -> AppResult<()> {
+    let path = playlists_path();
+    let mut store = PlaylistStore::load_strict(&path)?;
+    merge_imported_playlists_into_store(&mut store, imported);
+    store.save(&path)
+}
+
+/// 导入普通歌单时逐项合并，不删除本机独有歌单，也不改动独立存储的在线收藏。
+pub async fn save_imported_playlists(imported: &SyncData) -> AppResult<()> {
+    let _sync_guard = acquire_sync_lock().await;
+    let _playlist_guard = acquire_playlist_io_lock()?;
+    merge_imported_playlists_unlocked(imported)
+}
+
+/// 合并 Desktop 旧格式歌单；损坏的现有库会报错而不是被空库覆盖。
+pub async fn save_imported_desktop_playlists(imported: Vec<Playlist>) -> AppResult<()> {
+    let _sync_guard = acquire_sync_lock().await;
+    let _playlist_guard = acquire_playlist_io_lock()?;
+    let path = playlists_path();
+    let mut store = PlaylistStore::load_strict(&path)?;
+    for playlist in imported {
+        if !store
+            .playlists
+            .iter()
+            .any(|saved| saved.name == playlist.name)
+        {
+            store.playlists.push(playlist);
+        }
+    }
+    store.fix_next_id();
+    store.save(&path)
+}
+
+fn merge_imported_favorite_playlists(
+    local: Vec<SyncFavoritePlaylist>,
+    imported: Vec<SyncFavoritePlaylist>,
+) -> (Vec<SyncFavoritePlaylist>, usize) {
+    let mut imported: Vec<_> = imported
+        .into_iter()
+        .filter(|favorite| !favorite.is_deleted)
+        .map(|favorite| favorite.normalized_for_sync())
+        .collect();
+    let imported_count = imported.len();
+
+    // 手工“导入”采用加法恢复语义：备份墓碑不删除桌面收藏，活动条目可恢复本地墓碑。
+    for favorite in &mut imported {
+        if let Some(deleted_local) = local
+            .iter()
+            .find(|saved| saved.group_key() == favorite.group_key() && saved.is_deleted)
+        {
+            favorite.modified_at = favorite
+                .modified_at
+                .max(deleted_local.modified_at.saturating_add(1));
+            favorite.is_deleted = false;
+        }
+    }
+
+    let local = SyncData {
+        favorite_playlists: local,
+        ..Default::default()
+    };
+    let remote = SyncData {
+        favorite_playlists: imported,
+        ..Default::default()
+    };
+    (
+        merge::three_way_merge(&local, &remote, 0, &HashMap::new()).favorite_playlists,
+        imported_count,
+    )
+}
+
+fn merge_imported_favorites_unlocked(imported: Vec<SyncFavoritePlaylist>) -> AppResult<usize> {
+    let local = load_favorite_playlists_unlocked()?;
+    let (merged, imported_count) = merge_imported_favorite_playlists(local, imported);
+    save_favorite_playlists_unlocked(merged)?;
+    Ok(imported_count)
+}
+
+/// 合并导入文件中的在线收藏歌单，保留本机未出现在备份中的收藏。
+pub async fn save_imported_favorite_playlists(
+    imported: Vec<SyncFavoritePlaylist>,
+) -> AppResult<usize> {
+    let _sync_guard = acquire_sync_lock().await;
+    let _favorites_guard = FAVORITES_IO_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| AppError::Other("Favorites storage lock poisoned".into()))?;
+    merge_imported_favorites_unlocked(imported)
+}
+
+/// 完整备份的普通歌单与在线收藏在同一个同步临界区内落盘。
+pub async fn save_imported_playlist_backup(imported: &SyncData) -> AppResult<usize> {
+    let _sync_guard = acquire_sync_lock().await;
+    let _playlist_guard = acquire_playlist_io_lock()?;
+    let _favorites_guard = FAVORITES_IO_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| AppError::Other("Favorites storage lock poisoned".into()))?;
+
+    let path = playlists_path();
+    let original_store = PlaylistStore::load_strict(&path)?;
+    let mut merged_store = original_store.clone();
+    merge_imported_playlists_into_store(&mut merged_store, imported);
+
+    let original_favorites = load_favorite_playlists_unlocked()?;
+    let (merged_favorites, imported_count) = merge_imported_favorite_playlists(
+        original_favorites.clone(),
+        imported.favorite_playlists.clone(),
+    );
+
+    merged_store.save(&path)?;
+    if let Err(error) = save_favorite_playlists_unlocked(merged_favorites) {
+        let favorites_rollback = save_favorite_playlists_unlocked(original_favorites);
+        let playlists_rollback = original_store.save(&path);
+        return match (playlists_rollback, favorites_rollback) {
+            (Ok(()), Ok(())) => Err(error),
+            (Err(playlist_error), Ok(())) => Err(AppError::Other(format!(
+                "Favorite import failed: {error}; playlist rollback failed: {playlist_error}"
+            ))),
+            (Ok(()), Err(favorites_error)) => Err(AppError::Other(format!(
+                "Favorite import failed: {error}; favorites rollback failed: {favorites_error}"
+            ))),
+            (Err(playlist_error), Err(favorites_error)) => Err(AppError::Other(format!(
+                "Favorite import failed: {error}; playlist rollback failed: {playlist_error}; favorites rollback failed: {favorites_error}"
+            ))),
+        };
+    }
+
+    Ok(imported_count)
 }
 
 /// 将完整同步结果回写到本地存储。
-pub fn save_synced_playlists(merged: &SyncData) {
-    save_playlists(merged);
+pub fn save_synced_playlists(merged: &SyncData) -> AppResult<()> {
+    save_playlists(merged)?;
 
     // 保存收藏歌单到独立文件
-    if let Err(error) = save_favorite_playlists_pub(merged.favorite_playlists.clone()) {
-        log::error!(target: "sync", "failed to persist favorite playlists: {}", error);
-    }
+    save_favorite_playlists_pub(merged.favorite_playlists.clone())?;
+    Ok(())
 }
 
 /// 收藏歌单存储路径
@@ -1577,6 +1817,105 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(std::fs::read(&path).expect("read favorites"), previous);
         assert!(!staging_path.expect("observed staging path").exists());
+    }
+
+    #[test]
+    fn playlist_import_merges_without_deleting_desktop_only_playlists() {
+        let mut store = PlaylistStore::default();
+        store.playlists = vec![
+            Playlist {
+                id: 1,
+                name: "Desktop only".into(),
+                tracks: vec![track("netease:1", 100)],
+                modified_at: 100,
+            },
+            Playlist {
+                id: 2,
+                name: "Shared".into(),
+                tracks: vec![track("netease:2", 200)],
+                modified_at: 200,
+            },
+        ];
+        let imported = SyncData {
+            playlists: vec![
+                SyncPlaylist {
+                    id: "2".into(),
+                    name: "Shared".into(),
+                    songs: vec![SyncSong {
+                        id: "3".into(),
+                        name: "Imported".into(),
+                        channel_id: Some("netease".into()),
+                        audio_id: Some("3".into()),
+                        ..Default::default()
+                    }],
+                    created_at: 2,
+                    modified_at: 300,
+                    is_deleted: false,
+                    song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
+                },
+                SyncPlaylist {
+                    id: "3".into(),
+                    name: "Phone only".into(),
+                    songs: Vec::new(),
+                    created_at: 3,
+                    modified_at: 300,
+                    is_deleted: false,
+                    song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
+                },
+            ],
+            ..Default::default()
+        };
+
+        merge_imported_playlists_into_store(&mut store, &imported);
+
+        assert_eq!(store.playlists.len(), 3);
+        assert!(store
+            .playlists
+            .iter()
+            .any(|playlist| playlist.name == "Desktop only"));
+        let shared = store
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == 2)
+            .expect("shared playlist");
+        assert_eq!(
+            shared
+                .tracks
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["netease:3", "netease:2"]
+        );
+        assert!(store
+            .playlists
+            .iter()
+            .any(|playlist| playlist.name == "Phone only"));
+    }
+
+    #[test]
+    fn playlist_import_preserves_android_system_playlist_ids() {
+        let mut store = PlaylistStore::default();
+        let imported = SyncData {
+            playlists: vec![
+                SyncPlaylist {
+                    id: SYSTEM_LOCAL_ID.to_string(),
+                    name: "Local Files".into(),
+                    ..Default::default()
+                },
+                SyncPlaylist {
+                    id: SYSTEM_FAVORITES_ID.to_string(),
+                    name: "My Favorite Music".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        merge_imported_playlists_into_store(&mut store, &imported);
+
+        assert_eq!(store.playlists.len(), 2);
+        assert_eq!(store.playlists.first().unwrap().id, SYSTEM_FAVORITES_ID);
+        assert_eq!(store.playlists.last().unwrap().id, SYSTEM_LOCAL_ID);
     }
 
     fn track(id: &str, added_at: i64) -> TrackInfo {

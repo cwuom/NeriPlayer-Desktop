@@ -58,6 +58,7 @@ pub async fn fetch_bilibili_cover(
     let app_for_setup = app.clone();
     let cache_key_url = cover_url.clone();
     let setup_host = cover_host.clone();
+    let config_guard = state.config_persistence_gate.lock().await;
     let (settings, cache) = tokio::task::spawn_blocking(move || {
         log::info!(
             target: "cover-cache",
@@ -78,6 +79,7 @@ pub async fn fetch_bilibili_cover(
     })
     .await
     .map_err(|err| AppError::Other(err.to_string()))??;
+    drop(config_guard);
     log::info!(
         target: "cover-fetch",
         "cache ready host={}, setup_ms={}, force_refresh={}",

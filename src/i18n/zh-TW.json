@@ -593,7 +593,12 @@
     "import_config_desc": "從檔案還原設定、登入狀態與同步配置",
     "export_config_success": "PC 設定匯出成功",
     "export_config_failed": "PC 設定匯出失敗",
-    "import_config_success": "PC 設定匯入完成",
+    "import_config_success": "設定匯入完成",
+    "import_config_warning_listen_together_url": "一起聽服務位址無效，已保留桌面端預設位址",
+    "import_config_warning_youtube_authorization": "手機備份只有 YouTube Authorization，缺少桌面端所需 Cookie",
+    "import_config_warning_youtube_account": "YouTube 多帳號索引暫時無法移轉，請確認目前帳號",
+    "import_config_warning_netease_auth": "網易雲 Cookie 已匯入，但帳號驗證失敗；連線後會自動重試",
+    "import_config_warning_unknown": "部分手機設定無法移轉",
     "import_config_failed": "PC 設定匯入失敗",
     "export_config_warning_title": "設定檔包含敏感資訊",
     "export_config_warning_desc": "匯出的 PC 設定會包含登入憑證、授權 Cookie、同步 Token 與密碼，只能保存到可信位置，不能分享給他人。",
@@ -695,6 +700,8 @@
     "export_success": "已匯出 {count} 個播放清單",
     "export_failed": "匯出失敗",
     "import_success": "已匯入 {count} 個播放清單",
+    "import_success_with_favorites": "已匯入 {count} 個播放清單和 {favorites} 個線上收藏",
+    "import_online_favorites_unavailable": "此手機一般備份不含線上收藏；請選擇同步目錄中的 backup.json 或 backup.bin",
     "import_failed": "匯入失敗"
   },
   "listen_together": {
