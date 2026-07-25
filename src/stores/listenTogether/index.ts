@@ -27,6 +27,7 @@ import { createLogger } from '@/utils/logger'
 const log = createLogger('listen-together')
 
 const LT_UUID_KEY = 'neri:lt-uuid'
+const LT_SESSION_GENERATION_KEY = 'neri:lt-session-generation'
 const DEFAULT_BASE_URL = 'https://neriplayer.hancat.work'
 
 // 进度纠偏阈值
@@ -42,6 +43,19 @@ const HEARTBEAT_INTERVAL_MS = 10_000
 
 // 重连配置
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
+
+interface LtBackendSessionEvent {
+  sessionId: number
+}
+
+interface LtBackendMessageEvent extends LtBackendSessionEvent {
+  envelope: ListenTogetherSocketEnvelope
+}
+
+interface LtBackendDisconnectedEvent extends LtBackendSessionEvent {
+  code: number
+  reason: string
+}
 
 export const useListenTogetherStore = defineStore('listenTogether', () => {
   const settings = useSettingsStore()
@@ -81,8 +95,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   // 内部状态
   let _heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let _sessionGeneration = loadInitialSessionGeneration()
+  let _backendSessionQueue: Promise<void> = Promise.resolve()
   let _reconnectAttempt = 0
   let _reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let _pendingPlayerSyncTimer: ReturnType<typeof setTimeout> | null = null
+  let _suppressPlayerWatchTimer: ReturnType<typeof setTimeout> | null = null
   let _wsUrl: string | null = null
   let _unlistenMessage: UnlistenFn | null = null
   let _unlistenConnected: UnlistenFn | null = null
@@ -108,28 +126,146 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   const isController = computed(() => role.value === 'controller')
   const members = computed(() => roomState.value?.members ?? [])
 
+  function currentStreamUrlForSharing(
+    player: ReturnType<typeof usePlayerStore>,
+  ): string | undefined {
+    if (!roomSettings.value.shareAudioLinks) return undefined
+    const streamUrl = player.currentResolvedStreamUrl?.trim()
+    if (!streamUrl || !/^https?:\/\//i.test(streamUrl)) return undefined
+    return streamUrl
+  }
+
+  function isCurrentSession(generation: number) {
+    if (generation !== _sessionGeneration) return false
+    try {
+      return generation === loadSessionGeneration()
+    } catch {
+      return false
+    }
+  }
+
+  function advanceSessionGeneration() {
+    if (!Number.isSafeInteger(_sessionGeneration) || _sessionGeneration < 0) {
+      throw new Error('invalid persisted session generation')
+    }
+    const persistedGeneration = loadSessionGeneration()
+    const currentGeneration = Math.max(_sessionGeneration, persistedGeneration)
+    if (currentGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Listen Together session generation exhausted')
+    }
+    const nextGeneration = currentGeneration + 1
+    persistSessionGeneration(nextGeneration)
+    _sessionGeneration = nextGeneration
+    return _sessionGeneration
+  }
+
+  function isCurrentRoomSession(generation: number, expectedRoomId: string | null) {
+    return isCurrentSession(generation) && roomId.value === expectedRoomId
+  }
+
+  function cancelReconnect() {
+    if (_reconnectTimer) {
+      clearTimeout(_reconnectTimer)
+      _reconnectTimer = null
+    }
+    _reconnectAttempt = 0
+  }
+
+  function cancelPendingPlayerSync() {
+    if (_pendingPlayerSyncTimer) {
+      clearTimeout(_pendingPlayerSyncTimer)
+      _pendingPlayerSyncTimer = null
+    }
+  }
+
+  function cancelPlayerWatchRelease() {
+    if (_suppressPlayerWatchTimer) {
+      clearTimeout(_suppressPlayerWatchTimer)
+      _suppressPlayerWatchTimer = null
+    }
+  }
+
+  function resetLocalSession() {
+    stopHeartbeat()
+    teardownPlayerWatch()
+    teardownListeners()
+    cancelReconnect()
+    cancelPendingPlayerSync()
+    cancelPlayerWatchRelease()
+    _suppressPlayerWatch = false
+
+    roomId.value = null
+    role.value = null
+    roomState.value = null
+    _lastAppliedRoomVersion = 0
+    sessionError.value = null
+    connectionState.value = 'disconnected'
+    lastSyncEventType.value = null
+    lastSyncAt.value = null
+    lastReconnectAt.value = null
+    _wsUrl = null
+    _lastReportedTrackId = null
+    _lastReportedIsPlaying = null
+    _lastReportedRepeatMode = null
+    _lastReportedShuffle = null
+    _lastSentControlType = null
+    _lastSentControlAt = 0
+    _lastSentSeekPosition = null
+    _lastSentSeekAt = 0
+    _recentOutboundEventIds.clear()
+  }
+
+  function beginSessionAttempt() {
+    const departedSessionId = _sessionGeneration
+    const generation = advanceSessionGeneration()
+    resetLocalSession()
+    connectionState.value = 'connecting'
+    return { generation, departedSessionId }
+  }
+
+  function rollbackSession(generation: number, error: string) {
+    if (!isCurrentSession(generation)) return
+    resetLocalSession()
+    sessionError.value = error
+  }
+
+  async function disconnectBackend(sessionId: number) {
+    try {
+      await invoke('lt_disconnect_ws', { sessionId })
+    } catch (e) {
+      log.error('disconnect failed:', e)
+    }
+  }
+
+  function runBackendSessionOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = _backendSessionQueue.then(operation, operation)
+    _backendSessionQueue = result.then(() => undefined, () => undefined)
+    return result
+  }
+
   // 房间操作
   /** 创建房间 */
   async function createRoom() {
     const player = usePlayerStore()
     const toast = useToastStore()
     const t = (i18n.global as any).t
+    const { generation, departedSessionId } = beginSessionAttempt()
 
     try {
-      sessionError.value = null
-      connectionState.value = 'connecting'
-
       // 构建初始快照
       const { queue: ltQueue, resolvedIndex } = toShareableQueueSnapshot(
         player.queue,
         player.queueIndex,
         roomSettings.value.shareAudioLinks,
+        currentStreamUrlForSharing(player),
       )
 
       const snapshot: ListenTogetherInitialSnapshot = {
         queue: ltQueue,
         currentIndex: resolvedIndex,
-        track: player.currentTrack ? trackInfoToLtTrack(player.currentTrack) : undefined,
+        track: player.currentTrack
+          ? trackInfoToLtTrack(player.currentTrack, currentStreamUrlForSharing(player))
+          : undefined,
         settings: roomSettings.value,
         isPlaying: player.isPlaying,
         positionMs: player.positionMs,
@@ -138,12 +274,18 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         shuffleEnabled: !!player.shuffleEnabled,
       }
 
-      const resp = await invoke<any>('lt_create_room', {
-        baseUrl: baseUrl.value,
-        userUuid: userUuid.value,
-        nickname: nickname.value,
-        initialSnapshot: snapshot,
+      const resp = await runBackendSessionOperation(async () => {
+        if (!isCurrentSession(generation)) return null
+        await disconnectBackend(departedSessionId)
+        if (!isCurrentSession(generation)) return null
+        return invoke<any>('lt_create_room', {
+          baseUrl: baseUrl.value,
+          userUuid: userUuid.value,
+          nickname: nickname.value,
+          initialSnapshot: snapshot,
+        })
       })
+      if (!isCurrentSession(generation) || !resp) return
 
       if (!resp.ok) {
         throw new Error(resp.error || 'Create room failed')
@@ -159,35 +301,40 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
       // 连接 WebSocket
       const wsUrl = resp.wsUrl || buildWsUrl(baseUrl.value, resp.roomId, resp.token)
-      await connectWs(wsUrl)
+      await connectWs(wsUrl, generation)
+      if (!isCurrentSession(generation)) return
 
       startHeartbeat()
       setupPlayerWatch()
 
     } catch (e) {
+      if (!isCurrentSession(generation)) return
       const msg = e instanceof Error ? e.message : String(e)
-      sessionError.value = msg
-      connectionState.value = 'disconnected'
+      rollbackSession(generation, msg)
+      await runBackendSessionOperation(() => disconnectBackend(generation))
       toast.error(t('listen_together.create_failed', { msg }))
     }
   }
 
   /** 加入房间 */
   async function joinRoom(targetRoomId: string) {
-    const player = usePlayerStore()
     const toast = useToastStore()
     const t = (i18n.global as any).t
+    const { generation, departedSessionId } = beginSessionAttempt()
 
     try {
-      sessionError.value = null
-      connectionState.value = 'connecting'
-
-      const resp = await invoke<any>('lt_join_room', {
-        baseUrl: baseUrl.value,
-        roomId: targetRoomId,
-        userUuid: userUuid.value,
-        nickname: nickname.value,
+      const resp = await runBackendSessionOperation(async () => {
+        if (!isCurrentSession(generation)) return null
+        await disconnectBackend(departedSessionId)
+        if (!isCurrentSession(generation)) return null
+        return invoke<any>('lt_join_room', {
+          baseUrl: baseUrl.value,
+          roomId: targetRoomId,
+          userUuid: userUuid.value,
+          nickname: nickname.value,
+        })
       })
+      if (!isCurrentSession(generation) || !resp) return
 
       if (!resp.ok) {
         throw new Error(resp.error || 'Join room failed')
@@ -195,94 +342,121 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
       roomId.value = targetRoomId
       role.value = (resp.role as LtRole) || 'listener'
-      if (resp.state) {
-        roomState.value = resp.state
-        _lastAppliedRoomVersion = resp.state.version || 0
-        roomSettings.value = resp.state.settings || roomSettings.value
-        markSync('INITIAL_STATE', resp.state.updatedAt || Date.now())
-        // 将服务端状态应用到本地播放器
-        applyRoomStateToPlayer(resp.state, 'join', resp.state.playback?.basePositionMs)
-      }
+      const initialState = resp.state as ListenTogetherRoomState | undefined
 
       const wsUrl = resp.wsUrl || buildWsUrl(baseUrl.value, targetRoomId, resp.token)
-      await connectWs(wsUrl)
+      await connectWs(wsUrl, generation)
+      if (!isCurrentSession(generation)) return
+
+      if (initialState && (!roomState.value || roomState.value.version < initialState.version)) {
+        roomState.value = initialState
+        _lastAppliedRoomVersion = initialState.version || 0
+        roomSettings.value = initialState.settings || roomSettings.value
+        markSync('INITIAL_STATE', initialState.updatedAt || Date.now())
+        applyRoomStateToPlayer(initialState, 'join', initialState.playback?.basePositionMs)
+      } else if (roomState.value) {
+        applyRoomStateToPlayer(
+          roomState.value,
+          'join',
+          roomState.value.playback?.basePositionMs,
+        )
+      }
 
       setupPlayerWatch()
 
     } catch (e) {
+      if (!isCurrentSession(generation)) return
       const msg = e instanceof Error ? e.message : String(e)
-      sessionError.value = msg
-      connectionState.value = 'disconnected'
+      rollbackSession(generation, msg)
+      await runBackendSessionOperation(() => disconnectBackend(generation))
       toast.error(t('listen_together.join_failed', { msg }))
     }
   }
 
   /** 离开房间 */
   async function leaveRoom() {
-    stopHeartbeat()
-    teardownPlayerWatch()
-    teardownListeners()
-
+    const departedSessionId = _sessionGeneration
+    let generationError: Error | null = null
     try {
-      await invoke('lt_disconnect_ws')
-    } catch {}
-
-    roomId.value = null
-    role.value = null
-    roomState.value = null
-    _lastAppliedRoomVersion = 0
-    sessionError.value = null
-    connectionState.value = 'disconnected'
-    lastSyncEventType.value = null
-    lastSyncAt.value = null
-    lastReconnectAt.value = null
-    _wsUrl = null
-    _reconnectAttempt = 0
-    _lastReportedTrackId = null
-    _lastReportedIsPlaying = null
-    _lastReportedRepeatMode = null
-    _lastReportedShuffle = null
-    _lastSentControlType = null
-    _lastSentControlAt = 0
-    _lastSentSeekPosition = null
-    _lastSentSeekAt = 0
-    clearPendingSeekReport()
-    _recentOutboundEventIds.clear()
+      if (!Number.isSafeInteger(departedSessionId) || departedSessionId < 0) {
+        throw new Error('invalid persisted session generation')
+      }
+      const persistedGeneration = loadSessionGeneration()
+      if (persistedGeneration < departedSessionId) {
+        throw new Error('persisted session generation moved backwards')
+      }
+      if (persistedGeneration === departedSessionId) {
+        advanceSessionGeneration()
+      }
+    } catch (e) {
+      generationError = e instanceof Error ? e : new Error(String(e))
+    }
+    resetLocalSession()
+    if (Number.isSafeInteger(departedSessionId) && departedSessionId >= 0) {
+      await Promise.all([
+        disconnectBackend(departedSessionId),
+        runBackendSessionOperation(() => disconnectBackend(departedSessionId)),
+      ])
+    }
+    if (generationError) throw generationError
   }
 
   // WebSocket 连接
-  async function connectWs(wsUrl: string) {
+  async function connectWs(wsUrl: string, generation: number) {
+    if (!isCurrentSession(generation)) return
     _wsUrl = wsUrl
-    await setupListeners()
-    await invoke('lt_connect_ws', { wsUrl })
+    await setupListeners(generation)
+    if (!isCurrentSession(generation)) return
+    await invoke('lt_connect_ws', { wsUrl, sessionId: generation })
   }
 
-  async function setupListeners() {
+  async function setupListeners(generation: number) {
+    const listeningRoomId = roomId.value
+    const [unlistenMessage, unlistenConnected, unlistenDisconnected] = await Promise.all([
+      listen<LtBackendMessageEvent>('lt:message', (event) => {
+        if (!isCurrentRoomSession(generation, listeningRoomId)) return
+        if (event.payload.sessionId !== generation) return
+        handleSocketMessage(event.payload.envelope)
+      }),
+      listen<LtBackendSessionEvent>('lt:connected', (event) => {
+        if (!isCurrentRoomSession(generation, listeningRoomId)) return
+        if (event.payload.sessionId !== generation) return
+        const reconnected = _reconnectAttempt > 0
+        if (_reconnectTimer) {
+          clearTimeout(_reconnectTimer)
+          _reconnectTimer = null
+        }
+        connectionState.value = 'connected'
+        if (reconnected) {
+          lastReconnectAt.value = Date.now()
+          markSync('RECONNECTED', lastReconnectAt.value)
+        }
+        _reconnectAttempt = 0
+      }),
+      listen<LtBackendDisconnectedEvent>('lt:disconnected', (event) => {
+        if (!isCurrentRoomSession(generation, listeningRoomId)) return
+        if (event.payload.sessionId !== generation) return
+        const wasConnected = connectionState.value === 'connected'
+        connectionState.value = 'disconnected'
+
+        // 是否需要重连
+        if (wasConnected) {
+          scheduleReconnect(generation)
+        }
+      }),
+    ])
+
+    if (!isCurrentRoomSession(generation, listeningRoomId)) {
+      unlistenMessage()
+      unlistenConnected()
+      unlistenDisconnected()
+      return
+    }
+
     teardownListeners()
-
-    _unlistenMessage = await listen<ListenTogetherSocketEnvelope>('lt:message', (event) => {
-      handleSocketMessage(event.payload)
-    })
-
-    _unlistenConnected = await listen('lt:connected', () => {
-      const reconnected = _reconnectAttempt > 0
-      connectionState.value = 'connected'
-      if (reconnected) {
-        lastReconnectAt.value = Date.now()
-        markSync('RECONNECTED', lastReconnectAt.value)
-      }
-      _reconnectAttempt = 0
-    })
-
-    _unlistenDisconnected = await listen<{ code: number; reason: string }>('lt:disconnected', (event) => {
-      const wasConnected = connectionState.value === 'connected'
-      connectionState.value = 'disconnected'
-
-      // 是否需要重连
-      if (wasConnected && roomId.value) {
-        scheduleReconnect()
-      }
-    })
+    _unlistenMessage = unlistenMessage
+    _unlistenConnected = unlistenConnected
+    _unlistenDisconnected = unlistenDisconnected
   }
 
   function teardownListeners() {
@@ -334,10 +508,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       role.value = envelope.role as LtRole
     }
     if (envelope.state) {
+      if ((envelope.state.version || 0) < _lastAppliedRoomVersion) return
       roomState.value = envelope.state
       _lastAppliedRoomVersion = envelope.state.version || 0
       roomSettings.value = envelope.state.settings || roomSettings.value
       markSync('WELCOME', envelope.state.updatedAt || Date.now())
+      applyRoomStateToPlayer(
+        envelope.state,
+        'welcome',
+        envelope.state.playback?.basePositionMs,
+      )
     }
   }
 
@@ -369,21 +549,64 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   function handleLinkRequested(envelope: ListenTogetherSocketEnvelope) {
-    // 房主收到链接请求：下发当前已解析的音频 URL
-    if (!isController.value) return
+    if (
+      !isController.value
+      || connectionState.value !== 'connected'
+      || !roomSettings.value.shareAudioLinks
+    ) return
 
-    // 检查 requestTrackStableKey 是否与当前曲目匹配
     const player = usePlayerStore()
-    if (!player.currentTrack) return
+    const requestedStableKey = envelope.requestTrackStableKey
+    const requestedTrack = player.currentTrack
+    const generation = _sessionGeneration
+    if (!requestedStableKey || !requestedTrack) return
 
-    const currentLt = trackInfoToLtTrack(player.currentTrack)
-    if (envelope.requestTrackStableKey && envelope.requestTrackStableKey !== currentLt.stableKey) {
-      return // 请求的曲目已不是当前播放的
+    const sendLinkReadyIfCurrent = (resolvedStreamUrl?: string) => {
+      if (
+        !isCurrentSession(generation)
+        || !isController.value
+        || connectionState.value !== 'connected'
+        || !roomSettings.value.shareAudioLinks
+        || player.currentTrack !== requestedTrack
+      ) return
+
+      const streamUrl = currentStreamUrlForSharing(player)
+      if (!streamUrl || (resolvedStreamUrl && streamUrl !== resolvedStreamUrl)) return
+      const currentLt = trackInfoToLtTrack(player.currentTrack, streamUrl)
+      if (requestedStableKey !== currentLt.stableKey) return
+
+      const { queue, resolvedIndex } = toShareableQueueSnapshot(
+        player.queue,
+        player.queueIndex,
+        true,
+        streamUrl,
+      )
+      const sharedTrack = queue[resolvedIndex]
+      if (!sharedTrack || sharedTrack.stableKey !== requestedStableKey) return
+
+      sendEvent({
+        type: 'LINK_READY',
+        requestTrackStableKey: requestedStableKey,
+        track: sharedTrack,
+        queue,
+        currentIndex: resolvedIndex,
+        state: player.isPlaying ? 'playing' : 'paused',
+        positionMs: player.positionMs,
+      })
     }
 
-    // 构建 LINK_READY 事件（此处 streamUrl 在实际实现中需要从播放缓存获取）
-    // Desktop 端暂无直接获取已解析 URL 的接口，跳过链接下发
-    // 听众会自行解析
+    if (currentStreamUrlForSharing(player)) {
+      sendLinkReadyIfCurrent()
+      return
+    }
+
+    if (typeof player.resolveCurrentStreamUrl !== 'function') return
+    void player.resolveCurrentStreamUrl()
+      .then(resolvedStreamUrl => {
+        if (!resolvedStreamUrl) return
+        sendLinkReadyIfCurrent(resolvedStreamUrl)
+      })
+      .catch(() => {})
   }
 
   function handleMemberControlRequested(envelope: ListenTogetherSocketEnvelope) {
@@ -434,7 +657,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         }
       }
     } finally {
-      setTimeout(() => { _suppressPlayerWatch = false }, 350)
+      schedulePlayerWatchRelease(350)
     }
   }
 
@@ -463,9 +686,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     expectedPositionMs?: number,
   ) {
     const player = usePlayerStore()
-    if (!state.track) return
+    cancelPendingPlayerSync()
+    cancelPlayerWatchRelease()
+    if (!state.track) {
+      _suppressPlayerWatch = false
+      return
+    }
 
     _suppressPlayerWatch = true
+    const generation = _sessionGeneration
+    const applyingRoomId = roomId.value
 
     try {
       const remoteTrack = ltTrackToTrackInfo(state.track)
@@ -491,7 +721,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         // 使用 remote_sync source 播放
         player.play(remoteTrack, 'remote_sync')
         // 播放后对齐进度与播放态
-        setTimeout(() => {
+        _pendingPlayerSyncTimer = setTimeout(() => {
+          _pendingPlayerSyncTimer = null
+          if (!isCurrentRoomSession(generation, applyingRoomId)) return
+          if (roomState.value?.track?.stableKey !== state.track?.stableKey) return
+          if (player.currentTrack?.id !== remoteTrack.id) return
           if (expectedPos > 1000) {
             player.seekTo(expectedPos, 'remote_sync')
           }
@@ -543,8 +777,21 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         : !!player.shuffleEnabled
     } finally {
       // 延迟恢复 watch，避免同步操作触发上报
-      setTimeout(() => { _suppressPlayerWatch = false }, 500)
+      schedulePlayerWatchRelease(500, generation, applyingRoomId)
     }
+  }
+
+  function schedulePlayerWatchRelease(
+    delayMs: number,
+    generation = _sessionGeneration,
+    expectedRoomId = roomId.value,
+  ) {
+    cancelPlayerWatchRelease()
+    _suppressPlayerWatchTimer = setTimeout(() => {
+      _suppressPlayerWatchTimer = null
+      if (!isCurrentRoomSession(generation, expectedRoomId)) return
+      _suppressPlayerWatch = false
+    }, delayMs)
   }
 
   // 本地变化上报
@@ -639,6 +886,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   async function sendEvent(event: ListenTogetherEvent) {
+    const generation = _sessionGeneration
+    const sendingRoomId = roomId.value
     if (!event.eventId) event.eventId = generateEventId()
     if (!event.clientTimeMs) event.clientTimeMs = Date.now()
 
@@ -650,10 +899,33 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }
 
     try {
-      await invoke('lt_send_event', { event })
+      const sent = await invoke<boolean>('lt_send_event', {
+        event,
+        sessionId: generation,
+      })
+      if (!sent) {
+        handleSendFailure(generation, sendingRoomId, 'WebSocket is not connected')
+      }
     } catch (e) {
       log.error('send event failed:', e)
+      handleSendFailure(
+        generation,
+        sendingRoomId,
+        e instanceof Error ? e.message : String(e),
+      )
     }
+  }
+
+  function handleSendFailure(
+    generation: number,
+    sendingRoomId: string | null,
+    error: string,
+  ) {
+    if (!isCurrentRoomSession(generation, sendingRoomId) || !sendingRoomId) return
+    sessionError.value = error
+    const wasConnected = connectionState.value === 'connected'
+    connectionState.value = 'disconnected'
+    if (wasConnected) scheduleReconnect(generation)
   }
 
   function shouldSkipControlEvent(type: string) {
@@ -771,15 +1043,18 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   function reportSetTrackEvent(track: any, currentIndex: number) {
     const player = usePlayerStore()
-    const { queue: ltQueue } = toShareableQueueSnapshot(
+    const streamUrl = currentStreamUrlForSharing(player)
+    const { queue: ltQueue, resolvedIndex } = toShareableQueueSnapshot(
       player.queue,
       player.queueIndex,
       roomSettings.value.shareAudioLinks,
+      streamUrl,
     )
     sendEvent({
       type: 'SET_TRACK',
-      track,
-      currentIndex,
+      track: ltQueue[resolvedIndex]
+        ?? (player.currentTrack ? trackInfoToLtTrack(player.currentTrack, streamUrl) : track),
+      currentIndex: ltQueue.length > 0 ? resolvedIndex : currentIndex,
       queue: ltQueue,
       positionMs: 0,
       shouldPlay: player.isPlaying,
@@ -804,10 +1079,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       if (connectionState.value !== 'connected') return
 
       const player = usePlayerStore()
+      const streamUrl = currentStreamUrlForSharing(player)
       const { queue: ltQueue, resolvedIndex } = toShareableQueueSnapshot(
         player.queue,
         player.queueIndex,
         roomSettings.value.shareAudioLinks,
+        streamUrl,
       )
 
       sendEvent({
@@ -816,7 +1093,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         state: player.isPlaying ? 'playing' : 'paused',
         queue: ltQueue,
         currentIndex: resolvedIndex,
-        track: player.currentTrack ? trackInfoToLtTrack(player.currentTrack) : undefined,
+        track: player.currentTrack
+          ? trackInfoToLtTrack(player.currentTrack, streamUrl)
+          : undefined,
         repeatMode: desktopRepeatToWire(player.repeatMode),
         shuffleEnabled: !!player.shuffleEnabled,
       })
@@ -831,24 +1110,33 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   // 断线重连
-  function scheduleReconnect() {
+  function scheduleReconnect(generation = _sessionGeneration) {
+    if (!isCurrentSession(generation)) return
     if (_reconnectTimer) return
 
+    const reconnectRoomId = roomId.value
+    const reconnectWsUrl = _wsUrl
+    if (!reconnectRoomId || !reconnectWsUrl) return
     const delay = RECONNECT_DELAYS[Math.min(_reconnectAttempt, RECONNECT_DELAYS.length - 1)]
     _reconnectAttempt++
 
     _reconnectTimer = setTimeout(async () => {
       _reconnectTimer = null
-      if (!_wsUrl || !roomId.value) return
+      if (!isCurrentRoomSession(generation, reconnectRoomId)) return
 
       connectionState.value = 'connecting'
       try {
-        await invoke('lt_connect_ws', { wsUrl: _wsUrl })
+        await invoke('lt_connect_ws', {
+          wsUrl: reconnectWsUrl,
+          sessionId: generation,
+        })
+        if (!isCurrentRoomSession(generation, reconnectRoomId)) return
         // 重连后拉取最新 state
         const stateResp = await invoke<any>('lt_get_room_state', {
           baseUrl: baseUrl.value,
-          roomId: roomId.value,
+          roomId: reconnectRoomId,
         })
+        if (!isCurrentRoomSession(generation, reconnectRoomId)) return
         if (stateResp.ok && stateResp.state) {
           roomState.value = stateResp.state
           _lastAppliedRoomVersion = stateResp.state.version || 0
@@ -856,7 +1144,10 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         }
         if (isController.value) startHeartbeat()
       } catch {
-        scheduleReconnect()
+        if (isCurrentRoomSession(generation, reconnectRoomId)) {
+          connectionState.value = 'disconnected'
+          scheduleReconnect(generation)
+        }
       }
     }, delay)
   }
@@ -919,6 +1210,42 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       localStorage.setItem(LT_UUID_KEY, uuid)
     }
     return uuid
+  }
+
+  function loadSessionGeneration(): number {
+    try {
+      const stored = localStorage.getItem(LT_SESSION_GENERATION_KEY)
+      if (stored === null) return 0
+      if (!/^(0|[1-9]\d*)$/.test(stored)) {
+        throw new Error('invalid persisted session generation')
+      }
+
+      const generation = Number(stored)
+      if (!Number.isSafeInteger(generation) || generation < 0) {
+        throw new Error('invalid persisted session generation')
+      }
+      return generation
+    } catch (e) {
+      log.error('failed to load session generation:', e)
+      throw e
+    }
+  }
+
+  function loadInitialSessionGeneration(): number {
+    try {
+      return loadSessionGeneration()
+    } catch {
+      return Number.NaN
+    }
+  }
+
+  function persistSessionGeneration(generation: number) {
+    try {
+      localStorage.setItem(LT_SESSION_GENERATION_KEY, String(generation))
+    } catch (e) {
+      log.error('failed to persist session generation:', e)
+      throw e
+    }
   }
 
   function markSync(eventType: string, timestamp = Date.now()) {

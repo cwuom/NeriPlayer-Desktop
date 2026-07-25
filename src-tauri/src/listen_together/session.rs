@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -12,6 +13,9 @@ pub struct LtSession {
     pub user_uuid: String,
     pub nickname: String,
     pub ws_client: Arc<TokioMutex<Option<LtWsClient>>>,
+    pub ws_revision: Arc<AtomicU64>,
+    pub ws_session_id: Arc<AtomicU64>,
+    pub ws_generation: Arc<AtomicU64>,
 }
 
 impl LtSession {
@@ -24,6 +28,9 @@ impl LtSession {
             user_uuid: String::new(),
             nickname: String::new(),
             ws_client: Arc::new(TokioMutex::new(None)),
+            ws_revision: Arc::new(AtomicU64::new(0)),
+            ws_session_id: Arc::new(AtomicU64::new(0)),
+            ws_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 

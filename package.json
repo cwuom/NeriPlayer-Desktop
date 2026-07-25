@@ -19,6 +19,8 @@
     "test:lyric-offset": "node scripts/test-lyric-offset.mjs",
     "test:lyrics-format": "node scripts/test-lyrics-format.mjs",
     "test:listen-together-mapper": "node scripts/test-listen-together-mapper.mjs",
+    "test:listen-together-lifecycle": "node --test scripts/test-listen-together-lifecycle.mjs",
+    "test:listen-together-panel": "node scripts/test-listen-together-panel-structure.mjs",
     "test:now-playing-view-mode": "node scripts/test-now-playing-view-mode.mjs",
     "test:explore-platform-placeholders": "node scripts/test-explore-platform-placeholders.mjs",
     "test:explore-request-state": "node scripts/test-explore-request-state.mjs",
