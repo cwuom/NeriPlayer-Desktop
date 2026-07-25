@@ -69,7 +69,6 @@ await run('auth-bearing config import clears WebView cookies before injecting im
   const expire = importedAuth.indexOf('expire_platform_cookies')
   const replace = importedAuth.indexOf('*auth = imported_auth')
   const persist = importedAuth.indexOf('save_auth')
-  const unlock = importedAuth.indexOf('drop(auth)')
   const cleanup = importedAuth.indexOf('clear_and_reinject_webview_cookies')
   assert.ok(gate >= 0, 'config import must acquire the shared cookie gate')
   assert.ok(authLock > gate, 'config import must lock auth after acquiring the cookie gate')
@@ -77,7 +76,12 @@ await run('auth-bearing config import clears WebView cookies before injecting im
   assert.ok(replace > expire, 'config import must replace auth after expiring old cookies')
   assert.ok(persist > replace, 'config import must persist the imported auth under the auth lock')
   assert.ok(cleanup > persist, 'config import must synchronously clear shared WebView cookies')
-  assert.ok(unlock > persist && unlock < cleanup, 'config import must release auth before the cleaner re-reads it')
+  assert.doesNotMatch(importedAuth, /drop\(auth\)/)
+  assert.match(
+    importedAuth,
+    /let _cookie_guard = state\.auth_cookie_gate\.lock\(\)\.await;\s*\{\s*let mut auth = state\.auth\.lock\(\);[\s\S]*?save_auth\(&app,\s*&auth\);\s*\}\s*crate::commands::auth_cmd::clear_and_reinject_webview_cookies/,
+    'config import must end the non-Send auth guard scope before awaiting WebView cleanup',
+  )
   assert.equal(
     importedAuth.indexOf('inject_all'),
     -1,
@@ -101,6 +105,22 @@ await run('auth-bearing config import clears WebView cookies before injecting im
   assert.ok(clear >= 0, 'shared cleaner must attempt to clear WebView browsing data')
   assert.ok(currentAuth > clear, 'shared cleaner must read current auth after the destructive clear')
   assert.ok(inject > currentAuth, 'shared cleaner must inject current auth into reqwest Jar after cleanup')
+})
+
+await run('logout releases its non-Send auth guard before WebView cleanup', async () => {
+  const auth = await read('src-tauri/src/commands/auth_cmd.rs')
+  const source = sliceBetween(
+    auth,
+    'pub async fn logout',
+    'pub(crate) async fn clear_and_reinject_webview_cookies',
+  )
+
+  assert.doesNotMatch(source, /drop\(auth\)/)
+  assert.match(
+    source,
+    /let _cookie_guard = state\.auth_cookie_gate\.lock\(\)\.await;\s*\{\s*let mut auth = state\.auth\.lock\(\);[\s\S]*?cookies::save_auth\(&app,\s*&auth\);\s*\}\s*clear_and_reinject_webview_cookies\(&app,\s*&state\)\.await\?;/,
+    'logout must end the non-Send auth guard scope before awaiting WebView cleanup',
+  )
 })
 
 await run('auth cookie writer contract is part of the Netease regression suite', async () => {
