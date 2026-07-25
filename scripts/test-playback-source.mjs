@@ -6,11 +6,30 @@ const mockModule = Buffer.from(`
   export const invoke = (command, args) => globalThis.__playbackInvoke(command, args)
 `).toString('base64')
 const mockModuleUrl = `data:text/javascript;base64,${mockModule}`
+const loggerMockModule = Buffer.from(`
+  const write = (scope, level, args) => {
+    globalThis.__playbackLogs ??= []
+    globalThis.__playbackLogs.push({ scope, level, args })
+  }
+  export const createLogger = scope => ({
+    trace: (...args) => write(scope, 'trace', args),
+    debug: (...args) => write(scope, 'debug', args),
+    info: (...args) => write(scope, 'info', args),
+    warn: (...args) => write(scope, 'warn', args),
+    error: (...args) => write(scope, 'error', args),
+  })
+`).toString('base64')
+const loggerMockModuleUrl = `data:text/javascript;base64,${loggerMockModule}`
 const sourceUrl = new URL('../src/modules/playback/playbackSource.ts', import.meta.url)
-const source = (await readFile(sourceUrl, 'utf8')).replace(
-  "from '@tauri-apps/api/core'",
-  `from '${mockModuleUrl}'`,
-)
+const source = (await readFile(sourceUrl, 'utf8'))
+  .replace(
+    "from '@tauri-apps/api/core'",
+    `from '${mockModuleUrl}'`,
+  )
+  .replace(
+    "from '@/utils/logger'",
+    `from '${loggerMockModuleUrl}'`,
+  )
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
@@ -19,6 +38,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
 const {
+  bilibiliAutoSourceDurationFilter,
   canonicalizePlaybackTrack,
   PlaybackUrlResolver,
   playbackSourceCandidates,
@@ -57,6 +77,14 @@ function track(id) {
 async function run(name, test) {
   await test()
   console.log(`ok - ${name}`)
+}
+
+function resetPlaybackLogs() {
+  globalThis.__playbackLogs = []
+}
+
+function playbackLogMessages() {
+  return globalThis.__playbackLogs.map(entry => String(entry.args[0] ?? ''))
 }
 
 await run('continues below preview quality and selects the first full resource', async () => {
@@ -868,6 +896,191 @@ await run('keeps the Android auto-source trigger boundary narrow', async () => {
   assert.equal(shouldAutoSwitchNeteaseSource(false, true, 'no_permission'), false)
   assert.equal(shouldAutoSwitchNeteaseSource(true, false, 'unknown'), false)
   assert.equal(shouldAutoSwitchNeteaseSource(true, false, null), false)
+})
+
+await run('uses Android Bilibili duration buckets and retries without a filter', async () => {
+  assert.equal(bilibiliAutoSourceDurationFilter(0), 0)
+  assert.equal(bilibiliAutoSourceDurationFilter(599_999), 1)
+  assert.equal(bilibiliAutoSourceDurationFilter(600_000), 2)
+  assert.equal(bilibiliAutoSourceDurationFilter(1_800_000), 3)
+  assert.equal(bilibiliAutoSourceDurationFilter(3_600_000), 4)
+
+  const searchDurations = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      searchDurations.push(args.bilibiliDuration)
+      if (args.bilibiliDuration === 1) return []
+      assert.equal(args.bilibiliDuration, 0)
+      return [{
+        id: 'bilibili:BVdurationretry',
+        title: 'song-117 official audio',
+        artist: 'artist',
+        duration_ms: 180_000,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      return [{ cid: 1_170, title: 'song-117 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      return {
+        url: 'https://audio.example/bili-duration-retry',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolved = await resolvePlaybackSource(track(117), autoSourceSettings)
+
+  assert.equal(resolved?.url, 'https://audio.example/bili-duration-retry')
+  assert.deepEqual(searchDurations, [1, 0, 1, 0, 1, 0])
+})
+
+await run('reports and sanitizes Bilibili fallback search failures and empty results', async () => {
+  resetPlaybackLogs()
+  let searchCalls = 0
+  globalThis.__playbackInvoke = async (command) => {
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      searchCalls++
+      if (searchCalls === 1) {
+        throw new Error('search failed at https://api.example/search Cookie=session-secret')
+      }
+      return []
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolution = await new PlaybackUrlResolver().resolve(track(117), autoSourceSettings)
+  const messages = playbackLogMessages()
+  const serializedLogs = JSON.stringify(globalThis.__playbackLogs)
+
+  assert.equal(resolution.type, 'failure')
+  assert.match(
+    resolution.message,
+    /Bilibili fallback was attempted but failed during search: no usable candidates/i,
+  )
+  assert.notEqual(resolution.message, 'No playable stream returned')
+  assert.ok(messages.includes('NetEase Bilibili auto-source fallback started'))
+  assert.ok(messages.includes('NetEase Bilibili auto-source search failed'))
+  assert.ok(messages.includes('NetEase Bilibili auto-source search returned no usable results'))
+  assert.ok(messages.includes('NetEase Bilibili auto-source fallback failed'))
+  assert.doesNotMatch(serializedLogs, /session-secret/)
+  assert.doesNotMatch(serializedLogs, /https?:\/\//)
+})
+
+await run('reports Bilibili page errors and low matches before the final page failure', async () => {
+  resetPlaybackLogs()
+  globalThis.__playbackInvoke = async (command, args) => {
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [
+        {
+          id: 'bilibili:BVpageerror',
+          title: 'unrelated upload',
+          artist: 'someone else',
+          duration_ms: 600_000,
+          source: 'bilibili',
+        },
+        {
+          id: 'bilibili:BVlowmatch',
+          title: 'another unrelated upload',
+          artist: 'someone else',
+          duration_ms: 600_000,
+          source: 'bilibili',
+        },
+      ]
+    }
+    if (command === 'get_bili_video_pages') {
+      if (args.bvid === 'BVpageerror') {
+        throw new Error('page lookup failed Authorization=Bearer page-secret https://api.example/pages')
+      }
+      return [{ cid: 1_181, title: 'unrelated long video', duration_seconds: 600 }]
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolution = await new PlaybackUrlResolver().resolve(track(118), autoSourceSettings)
+  const messages = playbackLogMessages()
+  const serializedLogs = JSON.stringify(globalThis.__playbackLogs)
+
+  assert.equal(resolution.type, 'failure')
+  assert.match(resolution.message, /failed during page: no page passed matching/i)
+  assert.ok(messages.includes('NetEase Bilibili auto-source page lookup failed'))
+  assert.ok(messages.includes('NetEase Bilibili auto-source page match rejected'))
+  assert.ok(messages.includes('NetEase Bilibili auto-source fallback failed'))
+  assert.doesNotMatch(serializedLogs, /page-secret/)
+  assert.doesNotMatch(serializedLogs, /https?:\/\//)
+})
+
+await run('reports and sanitizes Bilibili stream lookup failures', async () => {
+  resetPlaybackLogs()
+  globalThis.__playbackInvoke = async (command) => {
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_play_url',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVstreamerror',
+        title: 'song-119 official audio',
+        artist: 'artist',
+        duration_ms: 180_000,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      return [{ cid: 1_190, title: 'song-119 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      throw new Error('stream failed at https://stream.example/audio Authorization=Bearer stream-secret')
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolution = await new PlaybackUrlResolver().resolve(track(119), autoSourceSettings)
+  const messages = playbackLogMessages()
+  const serializedLogs = JSON.stringify(globalThis.__playbackLogs)
+
+  assert.equal(resolution.type, 'failure')
+  assert.match(resolution.message, /failed during stream: no playable stream/i)
+  assert.ok(messages.includes('NetEase Bilibili auto-source stream lookup failed'))
+  assert.ok(messages.includes('NetEase Bilibili auto-source fallback failed'))
+  assert.doesNotMatch(serializedLogs, /stream-secret/)
+  assert.doesNotMatch(serializedLogs, /https?:\/\//)
 })
 
 await run('switches a no-play-url NetEase track to Bilibili and caches it under a reusable fallback key', async () => {

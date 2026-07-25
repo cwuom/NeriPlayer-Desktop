@@ -578,7 +578,10 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
         .and_then(|c| c.value.parse::<u64>().ok());
 
     // 调用 B站 nav API 获取用户信息
-    let client = crate::api::bilibili::client::BiliClient::new(&state.http());
+    let client = crate::api::bilibili::client::BiliClient::new(
+        &state.http(),
+        state.cookie_jar.clone(),
+    );
     let (nickname, avatar_url) = match client.get_user_info().await {
         Ok(info) => {
             let data = &info["data"];
@@ -724,7 +727,10 @@ pub async fn login_with_cookies(
                 .find(|c| c.name == "DedeUserID")
                 .and_then(|c| c.value.parse::<u64>().ok());
 
-            let client = crate::api::bilibili::client::BiliClient::new(&state.http());
+            let client = crate::api::bilibili::client::BiliClient::new(
+                &state.http(),
+                state.cookie_jar.clone(),
+            );
             let (nickname, avatar_url) = match client.get_user_info().await {
                 Ok(info) => {
                     let data = &info["data"];

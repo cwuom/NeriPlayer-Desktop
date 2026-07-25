@@ -1,16 +1,22 @@
 // B站 API 客户端
-use reqwest::Client;
+use reqwest::cookie::{CookieStore, Jar};
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::wbi;
 use crate::error::{AppError, AppResult};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const FINGERPRINT_USER_AGENT: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1 Edg/114.0.0.0";
+const FINGERPRINT_URL: &str = "https://api.bilibili.com/x/frontend/finger/spi";
+const BILIBILI_API_URL: &str = "https://api.bilibili.com/";
 
 pub struct BiliClient {
     http: Client,
+    cookie_jar: Arc<Jar>,
     mixin_key: parking_lot::Mutex<Option<String>>,
 }
 
@@ -40,11 +46,48 @@ pub struct BiliVideoPage {
 }
 
 impl BiliClient {
-    pub fn new(http: &Client) -> Self {
+    pub fn new(http: &Client, cookie_jar: Arc<Jar>) -> Self {
         Self {
             http: http.clone(),
+            cookie_jar,
             mixin_key: parking_lot::Mutex::new(None),
         }
+    }
+
+    async fn ensure_effective_cookies(&self) -> AppResult<()> {
+        let api_url = Url::parse(BILIBILI_API_URL)
+            .map_err(|error| AppError::Api(format!("Invalid Bilibili API URL: {error}")))?;
+        if has_effective_bilibili_cookie(self.cookie_jar.cookies(&api_url).as_ref()) {
+            return Ok(());
+        }
+
+        let response = self
+            .http
+            .get(FINGERPRINT_URL)
+            .header("User-Agent", FINGERPRINT_USER_AGENT)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AppError::Api(format!(
+                "Bilibili fingerprint request failed with HTTP {status}"
+            )));
+        }
+        let body: Value = response.json().await?;
+        if body["code"].as_i64().unwrap_or(-1) != 0 {
+            return Err(AppError::Api(format!(
+                "Bilibili fingerprint API error: {}",
+                body["message"].as_str().unwrap_or("unknown error")
+            )));
+        }
+        let cookies = parse_fingerprint_cookies(&body);
+        if cookies.is_empty() {
+            return Err(AppError::Api(
+                "Bilibili fingerprint response contained no cookies".into(),
+            ));
+        }
+        inject_fingerprint_cookies(&self.cookie_jar, &api_url, &cookies);
+        Ok(())
     }
 
     /// 获取或刷新 mixin_key
@@ -52,6 +95,8 @@ impl BiliClient {
         if let Some(ref key) = *self.mixin_key.lock() {
             return Ok(key.clone());
         }
+
+        self.ensure_effective_cookies().await?;
 
         let resp: Value = self
             .http
@@ -210,10 +255,13 @@ impl BiliClient {
     }
 
     /// 搜索视频
-    pub async fn search(&self, keyword: &str) -> AppResult<Value> {
+    pub async fn search(&self, keyword: &str, duration: u8) -> AppResult<Value> {
         let mut params = BTreeMap::new();
         params.insert("search_type".into(), "video".into());
         params.insert("keyword".into(), keyword.into());
+        params.insert("order".into(), "totalrank".into());
+        params.insert("duration".into(), duration.min(4).to_string());
+        params.insert("tids".into(), "0".into());
         params.insert("page".into(), "1".into());
 
         self.wbi_get(
@@ -317,6 +365,49 @@ impl BiliClient {
     }
 }
 
+fn has_effective_bilibili_cookie(header: Option<&reqwest::header::HeaderValue>) -> bool {
+    let Some(header) = header.and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    header.split(';').any(|part| {
+        part.trim().split_once('=').is_some_and(|(name, value)| {
+            matches!(name.trim(), "SESSDATA" | "buvid3" | "buvid4") && !value.trim().is_empty()
+        })
+    })
+}
+
+fn parse_fingerprint_cookies(response: &Value) -> BTreeMap<String, String> {
+    let data = &response["data"];
+    [
+        (
+            "buvid3",
+            data["b_3"].as_str().or_else(|| data["buvid3"].as_str()),
+        ),
+        (
+            "buvid4",
+            data["b_4"].as_str().or_else(|| data["buvid4"].as_str()),
+        ),
+        ("buvid_fp", data["buvid_fp"].as_str()),
+        ("buvid_fp_plain", data["buvid_fp_plain"].as_str()),
+        ("b_lsid", data["b_lsid"].as_str()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| {
+        let value = value?.trim();
+        (!value.is_empty()).then(|| (name.to_string(), value.to_string()))
+    })
+    .collect()
+}
+
+fn inject_fingerprint_cookies(jar: &Jar, url: &Url, cookies: &BTreeMap<String, String>) {
+    for (name, value) in cookies {
+        jar.add_cookie_str(
+            &format!("{name}={value}; Domain=.bilibili.com; Path=/"),
+            url,
+        );
+    }
+}
+
 fn parse_video_pages(response: &Value) -> AppResult<Vec<BiliVideoPage>> {
     let pages = response["data"]
         .as_array()
@@ -345,7 +436,12 @@ fn find_video_page_cid(response: &Value, page: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_video_page_cid, parse_video_pages};
+    use super::{
+        find_video_page_cid, has_effective_bilibili_cookie, inject_fingerprint_cookies,
+        parse_fingerprint_cookies, parse_video_pages,
+    };
+    use reqwest::cookie::{CookieStore, Jar};
+    use reqwest::Url;
     use serde_json::json;
 
     #[test]
@@ -380,5 +476,53 @@ mod tests {
         assert_eq!(pages[1].cid, 202);
         assert_eq!(pages[1].title, "target song");
         assert_eq!(pages[1].duration_seconds, 180);
+    }
+
+    #[test]
+    fn parses_and_attaches_android_anonymous_fingerprint_cookies() {
+        let response = json!({
+            "code": 0,
+            "data": {
+                "b_3": "anon-buvid-3",
+                "b_4": "anon-buvid-4",
+                "buvid_fp": "fingerprint",
+                "buvid_fp_plain": "fingerprint-plain",
+                "b_lsid": "browser-session"
+            }
+        });
+        let cookies = parse_fingerprint_cookies(&response);
+        assert_eq!(
+            cookies.get("buvid3").map(String::as_str),
+            Some("anon-buvid-3")
+        );
+        assert_eq!(
+            cookies.get("buvid4").map(String::as_str),
+            Some("anon-buvid-4")
+        );
+
+        let jar = Jar::default();
+        let search_url = Url::parse("https://api.bilibili.com/x/web-interface/wbi/search/type")
+            .expect("valid Bilibili search URL");
+        inject_fingerprint_cookies(&jar, &search_url, &cookies);
+
+        let header = jar.cookies(&search_url).expect("fingerprint cookie header");
+        let header_text = header.to_str().expect("ASCII cookie header");
+        assert!(header_text.contains("buvid3=anon-buvid-3"));
+        assert!(header_text.contains("buvid4=anon-buvid-4"));
+        assert!(header_text.contains("buvid_fp=fingerprint"));
+        assert!(header_text.contains("b_lsid=browser-session"));
+        assert!(has_effective_bilibili_cookie(Some(&header)));
+    }
+
+    #[test]
+    fn distinguishes_effective_bilibili_cookies_from_unrelated_values() {
+        let unrelated = reqwest::header::HeaderValue::from_static("bili_jct=csrf; sid=short");
+        let logged_in = reqwest::header::HeaderValue::from_static("SESSDATA=session");
+        let empty = reqwest::header::HeaderValue::from_static("SESSDATA=; buvid3= ");
+
+        assert!(!has_effective_bilibili_cookie(Some(&unrelated)));
+        assert!(has_effective_bilibili_cookie(Some(&logged_in)));
+        assert!(!has_effective_bilibili_cookie(Some(&empty)));
+        assert!(!has_effective_bilibili_cookie(None));
     }
 }

@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { TrackInfo } from '@/stores/player'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('playback-source')
 
 export type PlaybackSourceKind = 'netease' | 'qq' | 'bilibili' | 'youtube'
 export type PlaybackAudioSource = PlaybackSourceKind | 'local'
@@ -65,6 +68,18 @@ interface BilibiliVideoPage {
   title: string
   duration_seconds: number
 }
+
+type BilibiliAutoSourceFailureStage = 'search' | 'page' | 'stream'
+
+type BilibiliAutoSourceAttemptResult =
+  | { resolved: ResolvedPlaybackSource; failure: null }
+  | {
+      resolved: null
+      failure: {
+        stage: BilibiliAutoSourceFailureStage
+        reason: string
+      }
+    }
 
 export type PlaybackResolution =
   | ResolvedPlaybackSource
@@ -669,26 +684,91 @@ function bilibiliAutoSourceQueries(track: TrackInfo): string[] {
     .filter((query, index, values) => query && values.indexOf(query) === index)
 }
 
+export function bilibiliAutoSourceDurationFilter(durationMs: number): number {
+  const durationSeconds = Math.floor(Math.max(0, Number.isFinite(durationMs) ? durationMs : 0) / 1_000)
+  if (durationSeconds <= 0) return 0
+  if (durationSeconds < 10 * 60) return 1
+  if (durationSeconds < 30 * 60) return 2
+  if (durationSeconds < 60 * 60) return 3
+  return 4
+}
+
+function safeAutoSourceFailureReason(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const sanitized = raw
+    .replace(/\b(?:set-cookie|cookie|authorization)\s*[:=][^\r\n]*/gi, '[redacted-credential]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[redacted-url]')
+    .trim()
+    .slice(0, 240)
+  return sanitized || 'unknown error'
+}
+
+function failedBilibiliAutoSourceAttempt(
+  track: TrackInfo,
+  stage: BilibiliAutoSourceFailureStage,
+  reason: string,
+): BilibiliAutoSourceAttemptResult {
+  log.error('NetEase Bilibili auto-source fallback failed', {
+    trackId: track.id,
+    stage,
+    reason,
+  })
+  return { resolved: null, failure: { stage, reason } }
+}
+
 async function resolveNeteaseAutoBilibiliSource(
   track: TrackInfo,
   settings: PlaybackSourceSettings,
   options: PlaybackResolveOptions,
-): Promise<ResolvedPlaybackSource | null> {
+): Promise<BilibiliAutoSourceAttemptResult> {
+  const queries = bilibiliAutoSourceQueries(track)
+  const durationFilter = bilibiliAutoSourceDurationFilter(track.durationMs)
+  log.info('NetEase Bilibili auto-source fallback started', {
+    trackId: track.id,
+    queryCount: queries.length,
+    durationFilter,
+    quality: settings.biliQuality.trim().toLowerCase() || 'high',
+  })
+
   const ranked = new Map<string, {
     candidate: BilibiliFallbackSearchResult
     score: number
   }>()
+  let searchErrors = 0
+  let emptySearches = 0
 
-  for (const query of bilibiliAutoSourceQueries(track)) {
-    let results: BilibiliFallbackSearchResult[]
-    try {
-      results = await invoke<BilibiliFallbackSearchResult[]>('search', {
-        query,
-        platform: 'bilibili',
-        includeLyrics: false,
+  for (const [queryIndex, query] of queries.entries()) {
+    let results: BilibiliFallbackSearchResult[] = []
+    const filters = durationFilter > 0 ? [durationFilter, 0] : [0]
+    for (const [attemptIndex, filter] of filters.entries()) {
+      try {
+        const response = await invoke<BilibiliFallbackSearchResult[]>('search', {
+          query,
+          platform: 'bilibili',
+          includeLyrics: false,
+          bilibiliDuration: filter,
+        })
+        results = Array.isArray(response) ? response : []
+      } catch (error) {
+        searchErrors++
+        log.warn('NetEase Bilibili auto-source search failed', {
+          trackId: track.id,
+          queryIndex,
+          attemptIndex,
+          durationFilter: filter,
+          reason: safeAutoSourceFailureReason(error),
+        })
+        continue
+      }
+      if (results.length > 0) break
+      emptySearches++
+      log.warn('NetEase Bilibili auto-source search returned no usable results', {
+        trackId: track.id,
+        queryIndex,
+        attemptIndex,
+        durationFilter: filter,
+        resultCount: 0,
       })
-    } catch {
-      continue
     }
 
     const queryCandidates = results
@@ -696,6 +776,19 @@ async function resolveNeteaseAutoBilibiliSource(
       .map(candidate => ({ candidate, score: scoreBilibiliAutoSource(track, candidate) }))
       .sort((left, right) => right.score - left.score)
       .slice(0, BILIBILI_AUTO_SOURCE_SEARCH_LIMIT)
+
+    if (queryCandidates.length === 0) {
+      if (results.length > 0) {
+        emptySearches++
+        log.warn('NetEase Bilibili auto-source search returned no usable results', {
+          trackId: track.id,
+          queryIndex,
+          durationFilter: filters[filters.length - 1] ?? 0,
+          resultCount: results.length,
+        })
+      }
+      continue
+    }
 
     for (const { candidate, score } of queryCandidates) {
       const current = ranked.get(candidate.id)
@@ -706,28 +799,64 @@ async function resolveNeteaseAutoBilibiliSource(
   const candidates = [...ranked.values()]
     .sort((left, right) => right.score - left.score)
 
+  if (candidates.length === 0) {
+    return failedBilibiliAutoSourceAttempt(
+      track,
+      'search',
+      `no usable candidates (${searchErrors} errors, ${emptySearches} empty results)`,
+    )
+  }
+
   const pageMatches: Array<{
     candidate: BilibiliFallbackSearchResult
     page: BilibiliVideoPage
     score: number
   }> = []
+  let pageErrors = 0
+  let lowPageMatches = 0
   for (const { candidate } of candidates) {
     const bvid = candidate.id.replace(/^bilibili:/i, '')
     if (!bvid) continue
     try {
       const pages = await invoke<BilibiliVideoPage[]>('get_bili_video_pages', { bvid })
       const match = selectBilibiliAutoSourcePage(track, candidate, pages)
-      if (!match || match.score < BILIBILI_AUTO_SOURCE_SCORE_THRESHOLD) continue
+      if (!match || match.score < BILIBILI_AUTO_SOURCE_SCORE_THRESHOLD) {
+        lowPageMatches++
+        log.warn('NetEase Bilibili auto-source page match rejected', {
+          trackId: track.id,
+          bvid,
+          pageCount: Array.isArray(pages) ? pages.length : 0,
+          score: match?.score ?? null,
+          threshold: BILIBILI_AUTO_SOURCE_SCORE_THRESHOLD,
+        })
+        continue
+      }
       pageMatches.push({ candidate, ...match })
-    } catch {
+    } catch (error) {
+      pageErrors++
+      log.warn('NetEase Bilibili auto-source page lookup failed', {
+        trackId: track.id,
+        bvid,
+        reason: safeAutoSourceFailureReason(error),
+      })
       continue
     }
   }
   pageMatches.sort((left, right) => right.score - left.score)
 
+  if (pageMatches.length === 0) {
+    return failedBilibiliAutoSourceAttempt(
+      track,
+      'page',
+      `no page passed matching (${pageErrors} errors, ${lowPageMatches} low matches)`,
+    )
+  }
+
   const resolvedCandidates: ResolvedPlaybackSource[] = []
   const neteaseId = trackValue(track, 'netease')
   const quality = settings.biliQuality.trim().toLowerCase() || 'high'
+  let streamErrors = 0
+  let emptyStreams = 0
   for (const { candidate, page } of pageMatches) {
     if (resolvedCandidates.length >= BILIBILI_AUTO_SOURCE_CANDIDATE_LIMIT) break
     const bvid = candidate.id.replace(/^bilibili:/i, '')
@@ -741,7 +870,15 @@ async function resolveNeteaseAutoBilibiliSource(
     }
     try {
       const resolved = await resolveBilibili(biliTrack, settings, options)
-      if (!resolved) continue
+      if (!resolved) {
+        emptyStreams++
+        log.warn('NetEase Bilibili auto-source stream lookup returned no playable stream', {
+          trackId: track.id,
+          bvid,
+          cid: page.cid,
+        })
+        continue
+      }
       const cacheKey = `bili-auto-${neteaseId}-${bvid}-${page.cid}-${quality}`
       const autoSourceCacheKey = neteaseAutoSourceCacheKey(track, quality)
       resolvedCandidates.push({
@@ -753,16 +890,32 @@ async function resolveNeteaseAutoBilibiliSource(
         cacheKeyOverride: autoSourceCacheKey,
         fallbackSources: undefined,
       })
-    } catch {
+    } catch (error) {
+      streamErrors++
+      log.warn('NetEase Bilibili auto-source stream lookup failed', {
+        trackId: track.id,
+        bvid,
+        cid: page.cid,
+        reason: safeAutoSourceFailureReason(error),
+      })
       continue
     }
   }
 
   const primary = resolvedCandidates[0]
-  if (!primary) return null
+  if (!primary) {
+    return failedBilibiliAutoSourceAttempt(
+      track,
+      'stream',
+      `no playable stream (${streamErrors} errors, ${emptyStreams} empty results)`,
+    )
+  }
   return {
-    ...primary,
-    fallbackSources: resolvedCandidates.slice(1),
+    resolved: {
+      ...primary,
+      fallbackSources: resolvedCandidates.slice(1),
+    },
+    failure: null,
   }
 }
 
@@ -843,8 +996,13 @@ function resolveNetease(
       lastUnavailableReason,
     )
     if (shouldTryAutoSource) {
-      const fallback = await resolveNeteaseAutoBilibiliSource(track, settings, options)
-      if (fallback) return fallback
+      const fallbackAttempt = await resolveNeteaseAutoBilibiliSource(track, settings, options)
+      if (fallbackAttempt.resolved) return fallbackAttempt.resolved
+      if (!previewFallback) {
+        throw new Error(
+          `Bilibili fallback was attempted but failed during ${fallbackAttempt.failure.stage}: ${fallbackAttempt.failure.reason}`,
+        )
+      }
     }
     if (previewFallback) return previewFallback
     if (lastError) throw lastError

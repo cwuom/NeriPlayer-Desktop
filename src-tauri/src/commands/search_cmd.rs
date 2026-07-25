@@ -32,13 +32,15 @@ pub async fn search(
     query: String,
     platform: String,
     include_lyrics: Option<bool>,
+    bilibili_duration: Option<u8>,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<SearchResult>> {
     let include_lyrics = include_lyrics.unwrap_or(false);
+    let bilibili_duration = bilibili_duration.unwrap_or(0).min(4);
     match platform.as_str() {
         "netease" => search_netease(&query, &state).await,
         "qq" => search_qq(&query, &state, include_lyrics).await,
-        "bilibili" => search_bilibili(&query, &state).await,
+        "bilibili" => search_bilibili(&query, &state, bilibili_duration).await,
         "youtube" => search_youtube(&query, &state).await,
         "lrclib" => search_lrclib(&query, &state).await,
         // 全平台搜索
@@ -51,7 +53,7 @@ pub async fn search(
             if let Ok(mut r) = search_qq(&query, &state, include_lyrics).await {
                 all.append(&mut r);
             }
-            if let Ok(mut r) = search_bilibili(&query, &state).await {
+            if let Ok(mut r) = search_bilibili(&query, &state, 0).await {
                 all.append(&mut r);
             }
             Ok(all)
@@ -125,9 +127,13 @@ async fn search_qq(
     Ok(results)
 }
 
-async fn search_bilibili(query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {
-    let client = BiliClient::new(&state.http());
-    let resp = client.search(query).await?;
+async fn search_bilibili(
+    query: &str,
+    state: &State<'_, AppState>,
+    duration: u8,
+) -> AppResult<Vec<SearchResult>> {
+    let client = BiliClient::new(&state.http(), state.cookie_jar.clone());
+    let resp = client.search(query, duration).await?;
 
     let results = resp["data"]["result"]
         .as_array()
@@ -142,18 +148,7 @@ async fn search_bilibili(query: &str, state: &State<'_, AppState>) -> AppResult<
                 .replace("<em class=\"keyword\">", "")
                 .replace("</em>", "");
             let author = item["author"].as_str().unwrap_or("").to_string();
-            let duration: u64 = {
-                // B站返回 "mm:ss" 格式
-                let d = item["duration"].as_str().unwrap_or("0:00");
-                let parts: Vec<&str> = d.split(':').collect();
-                if parts.len() == 2 {
-                    let m: u64 = parts[0].parse().unwrap_or(0);
-                    let s: u64 = parts[1].parse().unwrap_or(0);
-                    (m * 60 + s) * 1000
-                } else {
-                    0
-                }
-            };
+            let duration = parse_bilibili_duration_ms(item["duration"].as_str().unwrap_or("0:00"));
             let cover = item["pic"].as_str().map(|s| {
                 if s.starts_with("//") {
                     format!("https:{}", s)
@@ -178,6 +173,17 @@ async fn search_bilibili(query: &str, state: &State<'_, AppState>) -> AppResult<
         .collect();
 
     Ok(results)
+}
+
+fn parse_bilibili_duration_ms(value: &str) -> u64 {
+    value
+        .split(':')
+        .try_fold(0u64, |total, part| {
+            let field = part.trim().parse::<u64>().ok()?;
+            total.checked_mul(60)?.checked_add(field)
+        })
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .unwrap_or(0)
 }
 
 async fn search_youtube(_query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {
@@ -326,7 +332,14 @@ fn is_google_image_host(url: &str) -> bool {
 
 #[cfg(test)]
 mod youtube_cover_tests {
-    use super::upgrade_youtube_thumbnail_url;
+    use super::{parse_bilibili_duration_ms, upgrade_youtube_thumbnail_url};
+
+    #[test]
+    fn parses_bilibili_multi_field_durations_like_android() {
+        assert_eq!(parse_bilibili_duration_ms("03:45"), 225_000);
+        assert_eq!(parse_bilibili_duration_ms("1:02:03"), 3_723_000);
+        assert_eq!(parse_bilibili_duration_ms("invalid"), 0);
+    }
 
     #[test]
     fn upgrades_w_h_size_params() {

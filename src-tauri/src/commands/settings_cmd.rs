@@ -168,7 +168,7 @@ pub async fn get_bili_video_pages(
     bvid: String,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<BiliVideoPage>> {
-    BiliClient::new(&state.http())
+    BiliClient::new(&state.http(), state.cookie_jar.clone())
         .get_video_page_details(&bvid)
         .await
 }
@@ -191,7 +191,7 @@ pub async fn get_bili_audio_url(
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
-    let client = BiliClient::new(&state.http());
+    let client = BiliClient::new(&state.http(), state.cookie_jar.clone());
 
     // 确定 bvid 和 cid
     let (real_bvid, real_cid) = if let Some(aid) = avid {
