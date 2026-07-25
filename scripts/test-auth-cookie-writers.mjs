@@ -40,14 +40,16 @@ await run('YouTube playlist refresh commits only under the auth cookie gate', as
 
   const gate = refreshCommit.indexOf('state.auth_cookie_gate.lock().await')
   const authLock = refreshCommit.indexOf('state.auth.lock()')
-  const assignment = refreshCommit.indexOf('*saved = updated')
-  const persist = refreshCommit.indexOf('cookies::save_auth')
+  const snapshot = refreshCommit.indexOf('let mut updated_state = auth_state.clone()')
+  const persist = refreshCommit.indexOf('cookies::save_auth_strict')
+  const assignment = refreshCommit.indexOf('*auth_state = updated_state')
   const inject = refreshCommit.indexOf('cookies::inject_cookies')
   assert.ok(gate >= 0, 'playlist refresh must acquire the shared cookie gate')
   assert.ok(authLock > gate, 'playlist refresh must lock auth after acquiring the cookie gate')
-  assert.ok(assignment > authLock, 'playlist refresh must only assign after locking current auth')
-  assert.ok(persist > assignment, 'playlist refresh must persist after the guarded assignment')
-  assert.ok(inject > persist, 'playlist refresh must inject cookies after persistence')
+  assert.ok(snapshot > authLock, 'playlist refresh must prepare an isolated auth snapshot')
+  assert.ok(persist > snapshot, 'playlist refresh must strictly persist the snapshot')
+  assert.ok(assignment > persist, 'playlist refresh must publish auth only after persistence')
+  assert.ok(inject > assignment, 'playlist refresh must inject cookies after publishing auth')
   assert.match(
     refreshCommit,
     /if\s*!?\s*crate::commands::auth_cmd::youtube_auth_matches\(saved,\s*&updated\)/,
@@ -116,11 +118,35 @@ await run('logout releases its non-Send auth guard before WebView cleanup', asyn
   )
 
   assert.doesNotMatch(source, /drop\(auth\)/)
-  assert.match(
-    source,
-    /let _cookie_guard = state\.auth_cookie_gate\.lock\(\)\.await;\s*\{\s*let mut auth = state\.auth\.lock\(\);[\s\S]*?cookies::save_auth\(&app,\s*&auth\);\s*\}\s*clear_and_reinject_webview_cookies\(&app,\s*&state\)\.await\?;/,
-    'logout must end the non-Send auth guard scope before awaiting WebView cleanup',
-  )
+  const commit = source.indexOf('commit_auth_update(&app, &state')
+  const expire = source.indexOf('cookies::expire_platform_cookies', commit)
+  const cleanup = source.indexOf('clear_and_reinject_webview_cookies(&app, &state).await?', expire)
+  assert.ok(commit >= 0, 'logout must use the transactional auth updater')
+  assert.ok(expire > commit, 'logout must expire cookies only after persistence succeeds')
+  assert.ok(cleanup > expire, 'logout must await WebView cleanup after the synchronous auth commit')
+  assert.doesNotMatch(source, /cookies::save_auth\(/, 'logout must not swallow persistence failures')
+})
+
+await run('interactive auth changes persist before publishing state or cookies', async () => {
+  const auth = await read('src-tauri/src/commands/auth_cmd.rs')
+  const helper = sliceBetween(auth, 'fn commit_auth_update', 'fn bilibili_client_with_cookies')
+  const persist = helper.indexOf('cookies::save_auth_strict')
+  const publish = helper.indexOf('*current = updated')
+  assert.ok(persist >= 0, 'auth update helper must use strict persistence')
+  assert.ok(publish > persist, 'auth update helper must publish only after persistence succeeds')
+
+  for (const [start, end] of [
+    ['pub async fn login_netease', 'pub async fn login_bilibili'],
+    ['pub async fn login_bilibili', 'pub async fn login_youtube'],
+    ['pub async fn login_youtube', 'pub async fn login_with_cookies'],
+    ['pub async fn login_with_cookies', 'pub async fn refresh_youtube_profile'],
+  ]) {
+    const source = sliceBetween(auth, start, end)
+    const commit = source.lastIndexOf('commit_auth_update')
+    const inject = source.lastIndexOf('cookies::inject_cookies')
+    assert.ok(commit >= 0, `${start} must commit auth transactionally`)
+    assert.ok(inject > commit, `${start} must inject shared cookies only after persistence`)
+  }
 })
 
 await run('auth cookie writer contract is part of the Netease regression suite', async () => {

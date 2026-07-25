@@ -160,15 +160,19 @@ await run('failed Netease popup validation clears the stale browser session', as
   const clearWebView = popupLogin.indexOf(
     'clear_and_reinject_webview_cookies(&app, &state).await',
   )
-  const sharedJarInjection = popupLogin.indexOf('cookies::inject_cookies(&state.cookie_jar, &entries)')
+  const persist = popupLogin.lastIndexOf('commit_auth_update(&app, &state')
+  const sharedJarInjection = popupLogin.indexOf(
+    'cookies::inject_cookies(&state.cookie_jar, &auth.cookies)',
+  )
 
   assert.ok(validation >= 0, 'popup login must handle candidate validation failures')
   assert.ok(clearPersistedAuth > validation, 'failed validation must remove stale persisted auth')
   assert.ok(expireJar > validation, 'failed validation must expire the stale shared Jar session')
   assert.ok(clearWebView > expireJar, 'failed validation must clear stale WebView cookies')
+  assert.ok(persist > clearWebView, 'validated auth must persist before shared cookies are published')
   assert.ok(
-    sharedJarInjection > clearWebView,
-    'candidate cookies must only reach the shared Jar after validation succeeds',
+    sharedJarInjection > persist,
+    'candidate cookies must only reach the shared Jar after validation and persistence succeed',
   )
 })
 

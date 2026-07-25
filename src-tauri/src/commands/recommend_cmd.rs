@@ -312,12 +312,23 @@ pub async fn get_youtube_playlist_detail(
     if let Some(updated) = refreshed_auth {
         let _cookie_guard = state.auth_cookie_gate.lock().await;
         let mut auth_state = state.auth.lock();
-        if let Some(saved) = auth_state.youtube.as_mut() {
+        if let Some(saved) = auth_state.youtube.as_ref() {
             if crate::commands::auth_cmd::youtube_auth_matches(saved, &updated) {
-                *saved = updated;
-                let refreshed_cookies = saved.cookies.clone();
-                crate::auth::cookies::save_auth(&app, &auth_state);
-                crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
+                let refreshed_cookies = updated.cookies.clone();
+                let mut updated_state = auth_state.clone();
+                updated_state.youtube = Some(updated);
+                match crate::auth::cookies::save_auth_strict(&app, &updated_state) {
+                    Ok(()) => {
+                        *auth_state = updated_state;
+                        crate::auth::cookies::inject_cookies(
+                            &state.cookie_jar,
+                            &refreshed_cookies,
+                        );
+                    }
+                    Err(error) => {
+                        log::error!(target: "youtube-refresh", "failed to persist playlist session refresh: {error}");
+                    }
+                }
             }
         }
     }

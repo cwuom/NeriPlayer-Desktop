@@ -14,12 +14,6 @@ const STORE_FILE: &str = "auth.json";
 const STORE_KEY: &str = "auth_state";
 
 /// 持久化 AuthState
-pub fn save_auth(app: &AppHandle, auth: &AuthState) {
-    if let Err(error) = save_auth_strict(app, auth) {
-        log::error!(target: "auth", "Failed to persist authentication credentials: {error}");
-    }
-}
-
 /// Persist AuthState and surface serialization and credential-storage failures.
 pub fn save_auth_strict(app: &AppHandle, auth: &AuthState) -> AppResult<()> {
     let Some(serialized) = auth_persistence_payload(auth)? else {
