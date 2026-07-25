@@ -119,8 +119,8 @@ assert.match(
 )
 assert.match(
   appSource,
-  /getCurrentWindow\(\)\.onCloseRequested\(handleBeforeUnload\)/,
-  'the app must flush player state for a native Tauri window close',
+  /function handleCloseRequested\(event: CloseRequestedEvent\)[\s\S]*?handleBeforeUnload\(\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?closeApplication\(\)[\s\S]*?onCloseRequested\(handleCloseRequested\)/,
+  'native window close must flush player state before entering coordinated shutdown',
 )
 assert.match(
   appSource,

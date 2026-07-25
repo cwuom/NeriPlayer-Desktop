@@ -8,9 +8,9 @@ import { useSettingsStore } from '@/stores/settings'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { invoke } from '@tauri-apps/api/core'
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
+import { getCurrentWindow, type CloseRequestedEvent } from '@tauri-apps/api/window'
+import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow'
 import MiniPlayer from '@/components/MiniPlayer.vue'
 import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
@@ -22,6 +22,7 @@ import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { applyDynamicColorFromCover, clearDynamicColor } from '@/utils/colorExtractor'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
+import { createLogger } from '@/utils/logger'
 
 type CoverSnapshot = {
   rect: { left: number; top: number; width: number; height: number }
@@ -30,6 +31,7 @@ type CoverSnapshot = {
 }
 
 const player = usePlayerStore()
+const log = createLogger('app')
 const settingsStore = useSettingsStore()
 const likedSongs = useLikedSongsStore()
 const route = useRoute()
@@ -184,6 +186,40 @@ function handleBeforeUnload() {
   player.flushPlayerState()
 }
 
+let isClosingApplication = false
+
+async function closeApplication() {
+  if (isClosingApplication) return
+  if (!isTauri()) {
+    window.close()
+    return
+  }
+
+  isClosingApplication = true
+  handleBeforeUnload()
+
+  try {
+    const appWindow = getCurrentWindow()
+    const windows = await getAllWebviewWindows()
+    await Promise.all(
+      windows
+        .filter(candidate => candidate.label !== appWindow.label)
+        .map(candidate => candidate.destroy()),
+    )
+    await appWindow.close()
+  } catch (error) {
+    log.error('application close failed:', error)
+    isClosingApplication = false
+  }
+}
+
+function handleCloseRequested(event: CloseRequestedEvent) {
+  handleBeforeUnload()
+  if (isClosingApplication) return
+  event.preventDefault()
+  void closeApplication()
+}
+
 function scheduleDebouncedSync() {
   const syncStore = useSyncStore()
   // 同步进行中不调度
@@ -266,7 +302,7 @@ onMounted(async () => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('pagehide', handleBeforeUnload)
   try {
-    unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleBeforeUnload)
+    unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested)
   } catch {
     // 浏览器开发模式没有原生窗口事件时依赖 pagehide/beforeunload
   }
@@ -405,6 +441,7 @@ onUnmounted(() => {
       :transition-state="nowPlayingMotionState"
       @collapse="closeNowPlaying()"
       @toggle-more="nowPlayingRef?.toggleMore?.()"
+      @request-close="closeApplication"
     />
 
     <Transition name="flip-cover-fade">
