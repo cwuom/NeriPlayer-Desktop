@@ -39,6 +39,7 @@ const deferred = () => {
   assert.equal(first.started, true)
   assert.equal(second.started, false)
   assert.equal(first.promise, second.promise)
+  await Promise.resolve()
   assert.equal(playlistCalls, 1)
   assert.equal(albumCalls, 1)
 
@@ -56,6 +57,47 @@ const deferred = () => {
   playlists.resolve(false)
   albums.resolve(true)
   assert.deepEqual(await request.promise, { current: true, playlistsOk: false, albumsOk: true })
+}
+
+{
+  const coordinator = new NeteaseLibraryRequestCoordinator()
+  const request = coordinator.run(
+    () => { throw new Error('playlist loader failed synchronously') },
+    () => Promise.resolve(true),
+  )
+
+  assert.deepEqual(await request.promise, { current: true, playlistsOk: false, albumsOk: true })
+}
+
+{
+  const coordinator = new NeteaseLibraryRequestCoordinator()
+  let nested
+  let nestedPlaylistCalls = 0
+  let nestedAlbumCalls = 0
+  const outer = coordinator.run(
+    () => {
+      nested = coordinator.run(
+        () => {
+          nestedPlaylistCalls += 1
+          return Promise.resolve(true)
+        },
+        () => {
+          nestedAlbumCalls += 1
+          return Promise.resolve(true)
+        },
+      )
+      return Promise.resolve(true)
+    },
+    () => Promise.resolve(true),
+  )
+
+  await Promise.resolve()
+  assert.ok(nested)
+  assert.equal(nested.started, false)
+  assert.equal(nested.promise, outer.promise)
+  assert.equal(nestedPlaylistCalls, 0)
+  assert.equal(nestedAlbumCalls, 0)
+  assert.deepEqual(await outer.promise, { current: true, playlistsOk: true, albumsOk: true })
 }
 
 {
