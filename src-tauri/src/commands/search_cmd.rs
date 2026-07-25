@@ -7,6 +7,9 @@ use crate::state::AppState;
 use serde::Serialize;
 use tauri::State;
 
+mod youtube_search_metadata;
+use youtube_search_metadata::parse_youtube_search_metadata;
+
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
     pub id: String,
@@ -217,15 +220,7 @@ async fn search_youtube(_query: &str, state: &State<'_, AppState>) -> AppResult<
                             .unwrap_or("")
                             .to_string();
 
-                        let artist = renderer["flexColumns"]
-                            .get(1)
-                            .and_then(|c| {
-                                c["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
-                                    .get(0)
-                                    .and_then(|r| r["text"].as_str())
-                            })
-                            .unwrap_or("")
-                            .to_string();
+                        let metadata = parse_youtube_search_metadata(renderer);
 
                         let thumbnail = renderer["thumbnail"]["musicThumbnailRenderer"]
                             ["thumbnail"]["thumbnails"]
@@ -237,9 +232,9 @@ async fn search_youtube(_query: &str, state: &State<'_, AppState>) -> AppResult<
                         results.push(SearchResult {
                             id: format!("youtube:{}", vid),
                             title,
-                            artist,
+                            artist: metadata.artist,
                             album: String::new(),
-                            duration_ms: 0, // InnerTube 不直接返回时长
+                            duration_ms: metadata.duration_ms,
                             source: "youtube".into(),
                             cover_url: thumbnail,
                             synced_lyrics: None,
