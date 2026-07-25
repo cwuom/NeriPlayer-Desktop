@@ -16,6 +16,14 @@ const player = usePlayerStore()
 const recommend = useRecommendStore()
 
 // 搜索
+type PlatformTab = 'netease' | 'bilibili' | 'youtube'
+
+const selectedPlatform = ref<PlatformTab>('netease')
+const platformTabs = computed(() => [
+  { key: 'netease' as const, label: t('player.source_netease'), icon: 'cloud' },
+  { key: 'bilibili' as const, label: t('player.source_bilibili'), icon: 'smart_display' },
+  { key: 'youtube' as const, label: t('player.source_youtube'), icon: 'play_circle' },
+])
 const searchQuery = ref('')
 const isFocused = ref(false)
 
@@ -75,11 +83,18 @@ function retryQualityPlaylists() {
 const isSearching = computed(() => !!searchQuery.value.trim())
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
-watch(searchQuery, (q) => {
+
+function selectPlatform(platform: PlatformTab) {
+  if (platform === selectedPlatform.value) return
+  searchStore.clear()
+  selectedPlatform.value = platform
+}
+
+watch([searchQuery, selectedPlatform], ([q]) => {
   if (searchTimer) clearTimeout(searchTimer)
   if (!q.trim()) { searchStore.clear(); return }
   searchTimer = setTimeout(() => {
-    searchStore.search(q, 'netease')
+    searchStore.search(q, selectedPlatform.value)
   }, 300)
 })
 
@@ -98,6 +113,7 @@ function playResult(r: any) {
     durationMs: r.duration_ms,
     coverUrl: r.cover_url || '',
     audioUrl: '',
+    source: r.source || selectedPlatform.value,
   })
 }
 
@@ -105,13 +121,17 @@ function goToPlaylist(pl: PlaylistInfo) {
   router.push({ name: 'netease-playlist', params: { id: pl.id } })
 }
 
-function platformLabel() {
-  return t('player.source_netease')
+function platformLabel(source?: string) {
+  switch ((source || selectedPlatform.value).toLowerCase()) {
+    case 'bilibili': return t('player.source_bilibili')
+    case 'youtube': return t('player.source_youtube')
+    default: return t('player.source_netease')
+  }
 }
 
 function retrySearch() {
   const q = searchQuery.value.trim()
-  if (q) searchStore.search(q, 'netease')
+  if (q) searchStore.search(q, selectedPlatform.value)
 }
 
 // 初始化
@@ -126,6 +146,22 @@ onMounted(() => {
 <template>
   <div class="explore-view">
     <h1 class="page-title">{{ t('explore.title') }}</h1>
+
+    <div class="platform-tabs" role="tablist" :aria-label="t('explore.title')">
+      <button
+        v-for="platform in platformTabs"
+        :key="platform.key"
+        class="platform-tab"
+        :class="{ active: selectedPlatform === platform.key }"
+        type="button"
+        role="tab"
+        :aria-selected="selectedPlatform === platform.key"
+        @click="selectPlatform(platform.key)"
+      >
+        <span class="material-symbols-rounded" aria-hidden="true">{{ platform.icon }}</span>
+        <span>{{ platform.label }}</span>
+      </button>
+    </div>
 
     <!-- 搜索栏 -->
     <div class="search-bar" :class="{ focused: isFocused }">
@@ -174,7 +210,7 @@ onMounted(() => {
           <div class="result-title">{{ r.title }}</div>
           <div class="result-meta">{{ r.artist }}<span v-if="r.album"> · {{ r.album }}</span></div>
         </div>
-        <div class="result-source">{{ platformLabel() }}</div>
+        <div class="result-source">{{ platformLabel(r.source) }}</div>
         <div class="result-duration">{{ formatDuration(r.duration_ms) }}</div>
       </div>
     </div>
@@ -186,7 +222,7 @@ onMounted(() => {
     </div>
 
     <!-- 默认内容 -->
-    <template v-else>
+    <template v-else-if="selectedPlatform === 'netease'">
 
       <!-- 网易云 Tag 选择 + 精品歌单 -->
       <div class="tag-section">
@@ -243,6 +279,52 @@ onMounted(() => {
   font-weight: 700;
   letter-spacing: -0.5px;
   margin-bottom: 20px;
+}
+
+.platform-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  width: min(100%, 440px);
+  min-height: 40px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container);
+}
+
+.platform-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  color: var(--md-on-surface-variant);
+  font-size: 12px;
+  font-weight: 600;
+  transition: background var(--duration-short), color var(--duration-short);
+
+  .material-symbols-rounded {
+    flex: 0 0 auto;
+    font-size: 18px;
+  }
+
+  span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &:hover { background: var(--md-surface-container-high); }
+
+  &.active {
+    color: var(--md-on-secondary-container);
+    background: var(--md-secondary-container);
+  }
 }
 
 /* 搜索栏 */
