@@ -3538,6 +3538,7 @@ const sliderActiveColor = computed(() => {
   box-shadow: 0 12px 30px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.18);
   backdrop-filter: blur(24px) saturate(1.14);
   -webkit-backdrop-filter: blur(24px) saturate(1.14);
+  isolation: isolate;
   pointer-events: none;
   z-index: 0;
 }
