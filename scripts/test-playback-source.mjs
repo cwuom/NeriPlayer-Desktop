@@ -553,6 +553,99 @@ await run('selects the matching Bilibili page CID instead of defaulting to the f
   )
 })
 
+await run('ranks the complete Bilibili result set before applying the Android search limit', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [
+        ...Array.from({ length: 6 }, (_, index) => ({
+          id: `bilibili:BVweak${index}`,
+          title: `unrelated clip ${index}`,
+          artist: 'someone else',
+          duration_ms: 500_000,
+          source: 'bilibili',
+        })),
+        {
+          id: 'bilibili:BVranked',
+          title: 'song-116 official audio',
+          artist: 'artist',
+          duration_ms: 180_000,
+          source: 'bilibili',
+        },
+      ]
+    }
+    if (command === 'get_bili_video_pages') {
+      if (args.bvid !== 'BVranked') return []
+      return [{ cid: 1_160, title: 'song-116 official audio', duration_seconds: 180 }]
+    }
+    if (command === 'get_bili_audio_url') {
+      assert.equal(args.bvid, 'BVranked')
+      return {
+        url: 'https://audio.example/bili-auto-ranked',
+        bandwidth: 320_000,
+        codecs: 'mp4a.40.2',
+        candidates: [],
+      }
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolved = await resolvePlaybackSource(track(116), autoSourceSettings)
+
+  assert.equal(resolved?.url, 'https://audio.example/bili-auto-ranked')
+  assert.ok(calls.some(call => call.command === 'get_bili_audio_url'))
+})
+
+await run('rejects a multipage Bilibili fallback that only matches by duration', async () => {
+  const calls = []
+  globalThis.__playbackInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'get_netease_song_url') {
+      return {
+        url: null,
+        bitrate: 0,
+        format: 'mp3',
+        is_preview: false,
+        unavailable_reason: 'no_permission',
+      }
+    }
+    if (command === 'search') {
+      return [{
+        id: 'bilibili:BVcollection',
+        title: 'song-115 complete collection',
+        artist: 'artist',
+        duration_ms: 0,
+        source: 'bilibili',
+      }]
+    }
+    if (command === 'get_bili_video_pages') {
+      return [
+        { cid: 1_151, title: 'Disc 1', duration_seconds: 240 },
+        { cid: 1_152, title: 'Disc 2', duration_seconds: 180 },
+      ]
+    }
+    if (command === 'get_bili_audio_url') {
+      throw new Error('a duration-only page must not be resolved')
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const resolved = await resolvePlaybackSource(track(115), autoSourceSettings)
+
+  assert.equal(resolved, null)
+  assert.equal(calls.some(call => call.command === 'get_bili_audio_url'), false)
+})
+
 await run('rejects a matching Bilibili collection when none of its pages match the song', async () => {
   const calls = []
   globalThis.__playbackInvoke = async (command, args) => {

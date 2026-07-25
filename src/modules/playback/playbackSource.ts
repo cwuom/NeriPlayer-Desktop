@@ -636,18 +636,22 @@ function selectBilibiliAutoSourcePage(
   const candidateScore = scoreBilibiliAutoSource(track, candidate)
   let best: { page: BilibiliVideoPage; score: number } | null = null
 
-  for (const page of pages) {
-    if (!Number.isSafeInteger(page.cid) || page.cid <= 0) continue
+  const validPages = pages.filter(page => Number.isSafeInteger(page.cid) && page.cid > 0)
+
+  for (const page of validPages) {
     const durationSeconds = Number.isFinite(page.duration_seconds)
       ? Math.max(0, page.duration_seconds)
       : 0
+    const pageTitle = page.title || ''
+    const pageTitleScore = autoSourceTitleScore(track.title, pageTitle)
+    if (validPages.length > 1 && pageTitleScore < 35) continue
+
     const pageScore = scoreBilibiliAutoSource(track, {
-      title: page.title || '',
+      title: pageTitle,
       artist: candidate.artist,
       duration_ms: durationSeconds * 1_000,
     })
-    if (pages.length > 1 && autoSourceTitleScore(track.title, page.title || '') < 35) continue
-    const score = candidateScore + pageScore
+    const score = candidateScore + pageScore + pageTitleScore
     if (!best || score > best.score) best = { page, score }
   }
 
@@ -687,9 +691,13 @@ async function resolveNeteaseAutoBilibiliSource(
       continue
     }
 
-    for (const candidate of results.slice(0, BILIBILI_AUTO_SOURCE_SEARCH_LIMIT)) {
-      if (!candidate.id.toLowerCase().startsWith('bilibili:')) continue
-      const score = scoreBilibiliAutoSource(track, candidate)
+    const queryCandidates = results
+      .filter(candidate => candidate.id.toLowerCase().startsWith('bilibili:'))
+      .map(candidate => ({ candidate, score: scoreBilibiliAutoSource(track, candidate) }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, BILIBILI_AUTO_SOURCE_SEARCH_LIMIT)
+
+    for (const { candidate, score } of queryCandidates) {
       const current = ranked.get(candidate.id)
       if (!current || score > current.score) ranked.set(candidate.id, { candidate, score })
     }

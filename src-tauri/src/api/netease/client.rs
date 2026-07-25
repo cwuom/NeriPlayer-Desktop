@@ -491,7 +491,7 @@ fn parse_download_url_response(body: &Value) -> AppResult<NeteaseSongUrl> {
 }
 
 fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
-    let root_code = body["code"].as_i64().unwrap_or(-1);
+    let root_code = json_i64(&body["code"]).unwrap_or(-1);
     if root_code == 301 {
         return unavailable_song_url(NeteasePlaybackUnavailableReason::RequiresLogin);
     }
@@ -510,7 +510,7 @@ fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
 
     let url = clean_json_string(&data["url"]);
     let unavailable_reason = if url.is_none() {
-        let data_code = data["code"].as_i64().unwrap_or(-1);
+        let data_code = json_i64(&data["code"]).unwrap_or(-1);
         let cannot_listen_reason = data["freeTrialPrivilege"]["cannotListenReason"]
             .as_i64()
             .or_else(|| {
@@ -518,7 +518,7 @@ fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
                     .as_str()
                     .and_then(|value| value.parse::<i64>().ok())
             });
-        let fee = data["fee"].as_i64().unwrap_or(0);
+        let fee = json_i64(&data["fee"]).unwrap_or(0);
         Some(
             if data_code == 404 || cannot_listen_reason == Some(1) || fee > 0 {
                 NeteasePlaybackUnavailableReason::NoPermission
@@ -619,6 +619,24 @@ mod tests {
                 "code": 404,
                 "fee": 0,
                 "freeTrialPrivilege": { "cannotListenReason": 1 }
+            }]
+        }));
+
+        assert_eq!(result.url, None);
+        assert_eq!(
+            result.unavailable_reason,
+            Some(NeteasePlaybackUnavailableReason::NoPermission)
+        );
+    }
+
+    #[test]
+    fn playback_response_accepts_string_business_codes_for_source_switching() {
+        let result = parse_song_url_response(&json!({
+            "code": "200",
+            "data": [{
+                "url": null,
+                "code": "404",
+                "fee": "0"
             }]
         }));
 
