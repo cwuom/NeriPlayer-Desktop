@@ -301,6 +301,7 @@ fn main() {
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
             settings_cmd::get_log_dir,
+            settings_cmd::open_log_dir,
             settings_cmd::get_netease_song_url,
             settings_cmd::get_netease_song_download_url,
             settings_cmd::get_qq_song_url,

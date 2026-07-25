@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { SUPPORTED_LOCALES, setLocaleWithTransition } from '@/i18n'
-import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
@@ -83,8 +83,7 @@ const logLevelOptions = computed<Array<{ value: string; label: string }>>(() => 
 
 async function openLogDir() {
   try {
-    const dir = await invoke<string>('get_log_dir')
-    await revealItemInDir(dir)
+    await invoke('open_log_dir')
   } catch (error) {
     log.error('failed to open log dir:', error)
     toast.error(t('settings.open_log_dir_failed'))
@@ -1932,14 +1931,14 @@ function confirmDataSaverChange() {
         </div>
       </div>
 
-      <div class="setting-card" style="cursor: pointer" @click="openLogDir">
+      <button type="button" class="setting-card setting-card-action" @click="openLogDir">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">folder_open</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.open_log_dir') }}</div>
           <div class="setting-desc">{{ t('settings.open_log_dir_desc') }}</div>
         </div>
         <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">chevron_right</span>
-      </div>
+      </button>
     </div></Transition>
         </div>
 
@@ -2653,6 +2652,20 @@ function confirmDataSaverChange() {
   transition: background var(--duration-short);
 
   &:hover { background: var(--md-surface-container-high); }
+}
+
+.setting-card-action {
+  width: 100%;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+  }
 }
 
 .about-card { cursor: pointer; }
