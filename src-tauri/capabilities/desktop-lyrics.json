@@ -1,0 +1,14 @@
+{
+  "identifier": "desktop-lyrics",
+  "description": "Minimal capabilities for the local desktop lyrics window",
+  "windows": ["desktop-lyrics"],
+  "permissions": [
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-position",
+    "core:window:allow-center",
+    "core:window:allow-start-dragging"
+  ]
+}

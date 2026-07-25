@@ -52,6 +52,11 @@ import {
 import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { summarizeLogError } from '@/utils/logSanitizer'
+import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import {
+  logicalPlaybackSource,
+  resolvedPlaybackSourceForUi,
+} from '@/modules/playback/playbackUiSource'
 
 const log = createLogger('now-playing')
 
@@ -102,6 +107,16 @@ function hideMoreSheet() {
   showMoreSheet.value = false
 }
 
+async function showDesktopLyrics() {
+  hideMoreSheet()
+  try {
+    await openDesktopLyricsWindow()
+  } catch (error) {
+    log.error('Open desktop lyrics failed:', error)
+    toast.error(String(error))
+  }
+}
+
 // 均衡器辅助
 import { EQ_PRESETS } from '@/stores/player'
 const eqPresetIds = Object.keys(EQ_PRESETS)
@@ -115,22 +130,23 @@ function onEqBandChange(index: number, value: number) {
   settings.equalizerPresetId = 'custom'
 }
 
+const currentSource = computed(() => logicalPlaybackSource(player.currentTrack))
+const currentPlaybackSource = computed(() =>
+  resolvedPlaybackSourceForUi(
+    player.currentTrack,
+    player.audioInfo?.source,
+  ),
+)
+
 // 来源徽章（对齐 Android PlaybackSourceBadge）
 const playbackSourceLabel = computed(() => {
-  const id = player.currentTrack?.id || ''
-  if (id.startsWith('netease:')) return t('player.source_netease')
-  if (id.startsWith('qq:')) return t('player.source_qq')
-  if (id.startsWith('bilibili:')) return t('player.source_bilibili')
-  if (id.startsWith('youtube:')) return t('player.source_youtube')
-  if (id.startsWith('local:') || player.currentTrack?.audioUrl?.startsWith('file:')) return t('player.source_local')
-  return ''
+  return player.currentTrack ? platformLabel(currentPlaybackSource.value) : ''
 })
 const playbackSourceIcon = computed(() => {
-  const id = player.currentTrack?.id || ''
-  if (id.startsWith('netease:')) return 'netease'
-  if (id.startsWith('qq:')) return 'music_note'
-  if (id.startsWith('bilibili:')) return 'smart_display'
-  if (id.startsWith('youtube:')) return 'play_circle'
+  if (currentPlaybackSource.value === 'netease') return 'netease'
+  if (currentPlaybackSource.value === 'qq') return 'music_note'
+  if (currentPlaybackSource.value === 'bilibili') return 'smart_display'
+  if (currentPlaybackSource.value === 'youtube') return 'play_circle'
   return 'folder'
 })
 const showSourceBadge = computed(() => settings.showCoverBadge && playbackSourceLabel.value !== '')
@@ -1258,16 +1274,6 @@ function restoreInfo() {
   goBackToMain()
 }
 
-// 音质切换
-const currentSource = computed(() => {
-  const id = player.currentTrack?.id || ''
-  if (id.startsWith('netease:')) return 'netease'
-  if (id.startsWith('qq:')) return 'qq'
-  if (id.startsWith('bilibili:')) return 'bilibili'
-  if (id.startsWith('youtube:')) return 'youtube'
-  return 'local'
-})
-
 // 偏移分桶: netease→cloud, qq→qq, youtube/bili/local→none(默认 0)
 const currentOffsetBucket = computed(() => offsetBucketForSource(currentSource.value))
 
@@ -1363,7 +1369,7 @@ const trackDetailAudioParams = computed(() => {
 const trackDetailCacheStatus = computed(() => {
   if (player.isPlayingFromDownload) return t('player.cache_status_download')
   if (player.isPlayingFromCache) return t('player.cache_status_playback_cache')
-  if (isRemotePlaybackSource(currentSource.value)) return t('player.cache_status_stream')
+  if (isRemotePlaybackSource(currentPlaybackSource.value)) return t('player.cache_status_stream')
   return t('player.cache_status_local')
 })
 
@@ -1460,7 +1466,7 @@ const isQualitySwitching = ref(false)
 
 async function switchQuality(key: string) {
   if (isQualitySwitching.value) return
-  const source = currentSource.value
+  const source = currentPlaybackSource.value
   const previousKey = currentQualityKey(source)
   if (!previousKey || previousKey === key) {
     showMoreSheet.value = false
@@ -1480,7 +1486,7 @@ async function switchQuality(key: string) {
   }
 }
 
-function currentQualityKey(source = currentSource.value): string {
+function currentQualityKey(source = currentPlaybackSource.value): string {
   if (source === 'netease') return settings.neteaseQuality
   if (source === 'qq') return settings.qqMusicQuality
   if (source === 'bilibili') return settings.biliQuality
@@ -1612,7 +1618,7 @@ const audioInfoDisplay = computed(() => {
 
 function currentAudioQualityLabel() {
   const info = player.audioInfo
-  const source = info?.source && info.source !== 'local' ? info.source : currentSource.value
+  const source = currentPlaybackSource.value
   // 优先已本地化的 qualityLabel; 否则用 qualityKey 映射到 标准/极高/最高…
   const labeled = info?.qualityLabel?.trim()
   if (labeled && !/kbps/i.test(labeled) && labeled !== info?.qualityKey) {
@@ -2331,7 +2337,7 @@ const sliderActiveColor = computed(() => {
             </button>
 
             <!-- 音质切换（仅在线来源显示） -->
-            <button v-if="currentSource !== 'local'" class="np-more-list-item" @click="goToSubView('quality')">
+            <button v-if="currentPlaybackSource !== 'local'" class="np-more-list-item" @click="goToSubView('quality')">
               <span class="material-symbols-rounded">music_note</span>
               <div class="np-more-list-info">
                 <span class="np-more-list-headline">{{ t('player.quality_switch') }}</span>
@@ -2358,6 +2364,19 @@ const sliderActiveColor = computed(() => {
                 <span class="np-more-list-desc">{{ currentLyricUserOffsetMs > 0 ? '+' : '' }}{{ currentLyricUserOffsetMs }}ms · {{ currentLyricOffsetSourceLabel }}</span>
               </div>
               <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+            </button>
+
+            <button
+              class="np-more-list-item"
+              data-np-action="desktop-lyrics"
+              @click="showDesktopLyrics"
+            >
+              <span class="material-symbols-rounded">subtitles</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.desktop_lyrics') }}</span>
+                <span class="np-more-list-desc">{{ t('player.desktop_lyrics_desc') }}</span>
+              </div>
+              <span class="material-symbols-rounded np-more-chevron">open_in_new</span>
             </button>
 
             <!-- 歌词字号 -->
@@ -2711,7 +2730,7 @@ const sliderActiveColor = computed(() => {
               </div>
               <div class="np-track-detail-row">
                 <span>来源</span>
-                <strong>{{ playbackSourceLabel || currentSource }}</strong>
+                <strong>{{ playbackSourceLabel || currentPlaybackSource }}</strong>
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_duration') }}</span>
@@ -2764,9 +2783,9 @@ const sliderActiveColor = computed(() => {
               </button>
               <h4 class="np-more-title">{{ t('player.quality_switch') }}</h4>
             </div>
-            <div v-if="qualityOptionsForSource(currentSource).length" class="np-more-quality-list">
+            <div v-if="qualityOptionsForSource(currentPlaybackSource).length" class="np-more-quality-list">
               <button
-                v-for="q in qualityOptionsForSource(currentSource)"
+                v-for="q in qualityOptionsForSource(currentPlaybackSource)"
                 :key="q.key"
                 class="np-more-quality-item"
                 :class="{ active: currentQualityKey() === q.key }"

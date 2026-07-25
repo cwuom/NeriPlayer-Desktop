@@ -31,6 +31,8 @@ import {
 import { switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import { createLogger } from '@/utils/logger'
+import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { shouldReplayForQualityChange } from '@/modules/playback/playbackUiSource'
 
 const log = createLogger('settings-view')
 
@@ -54,7 +56,7 @@ const {
   cloudMusicOffset, qqMusicOffset,
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
-  neteaseQuality, youtubeQuality, biliQuality,
+  neteaseQuality, neteaseAutoSourceSwitch, youtubeQuality, biliQuality,
   bypassProxy, internationalizationEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
@@ -86,6 +88,15 @@ async function openLogDir() {
   } catch (error) {
     log.error('failed to open log dir:', error)
     toast.error(t('settings.open_log_dir_failed'))
+  }
+}
+
+async function handleOpenDesktopLyrics() {
+  try {
+    await openDesktopLyricsWindow()
+  } catch (error) {
+    log.error('failed to open desktop lyrics:', error)
+    toast.error(String(error))
   }
 }
 
@@ -252,8 +263,13 @@ async function handleQualityChange(source: OnlineQualitySource, value: string) {
 
   setQualityForSource(source, value)
   const track = player.currentTrack
-  const isCurrentSource = !!track && track.id.startsWith(`${source}:`)
-  if (!track || player.isLoadingAudio || player.isPlayingFromDownload || !isCurrentSource) return
+  const shouldReplay = shouldReplayForQualityChange(source, {
+    track,
+    audioInfoSource: player.audioInfo?.source,
+    isLoadingAudio: player.isLoadingAudio,
+    isPlayingFromDownload: player.isPlayingFromDownload,
+  })
+  if (!shouldReplay) return
 
   qualitySwitching.value = true
   try {
@@ -1604,6 +1620,20 @@ function confirmDataSaverChange() {
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('lyrics') }">expand_more</span>
     </div>
 
+    <button
+      type="button"
+      class="setting-card"
+      data-settings-action="desktop-lyrics"
+      @click="handleOpenDesktopLyrics"
+    >
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">subtitles</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('player.desktop_lyrics') }}</div>
+        <div class="setting-desc">{{ t('player.desktop_lyrics_desc') }}</div>
+      </div>
+      <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.45">open_in_new</span>
+    </button>
+
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">translate</span></div>
       <div class="setting-info">
@@ -1777,6 +1807,18 @@ function confirmDataSaverChange() {
             <button v-for="o in neteaseQualityOptions" :key="o.value" class="m3-chip sm" :class="{ active: neteaseQuality === o.value }" :disabled="qualitySwitching" @click="handleQualityChange('netease', o.value)">{{ o.label }}</button>
           </div>
         </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">swap_horiz</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.netease_auto_source_switch') }}</div>
+          <div class="setting-desc">{{ t('settings.netease_auto_source_switch_desc') }}</div>
+        </div>
+        <label class="m3-switch">
+          <input type="checkbox" v-model="neteaseAutoSourceSwitch" />
+          <span class="track"><span class="thumb"><span v-if="neteaseAutoSourceSwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+        </label>
       </div>
 
       <div class="setting-card quality-card">

@@ -37,9 +37,15 @@ const isMac = /Mac|iPhone|iPad/.test(
   (navigator as any).userAgentData?.platform || navigator.platform || navigator.userAgent
 )
 
-const appWindow = getCurrentWindow()
+let appWindow: ReturnType<typeof getCurrentWindow> | null = null
+try {
+  appWindow = getCurrentWindow()
+} catch {
+  // Browser preview does not expose the Tauri window runtime.
+}
 
 async function refreshMaximized() {
+  if (!appWindow) return
   try {
     isMaximized.value = await appWindow.isMaximized()
   } catch {
@@ -48,19 +54,23 @@ async function refreshMaximized() {
 }
 
 function minimize() {
+  if (!appWindow) return
   appWindow.minimize().catch(() => {})
 }
 
 function toggleMaximize() {
+  if (!appWindow) return
   appWindow.toggleMaximize().then(refreshMaximized).catch(() => {})
 }
 
 function close() {
+  if (!appWindow) return
   appWindow.close().catch(() => {})
 }
 
 onMounted(async () => {
   await refreshMaximized()
+  if (!appWindow) return
   try {
     unlistenResize = await appWindow.onResized(() => refreshMaximized())
   } catch {}
