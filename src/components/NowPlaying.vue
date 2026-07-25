@@ -4588,6 +4588,7 @@ const sliderActiveColor = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .now-playing,
   .now-playing *,
   .now-playing *::before,
   .now-playing *::after {
