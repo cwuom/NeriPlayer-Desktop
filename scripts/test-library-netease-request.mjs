@@ -126,4 +126,28 @@ const deferred = () => {
   assert.deepEqual(await freshRequest.promise, { current: true, playlistsOk: true, albumsOk: true })
 }
 
+const recommendCommand = await readFile(
+  new URL('../src-tauri/src/commands/recommend_cmd.rs', import.meta.url),
+  'utf8',
+)
+const userPlaylistsCommand = recommendCommand.slice(
+  recommendCommand.indexOf('pub async fn get_user_playlists'),
+  recommendCommand.indexOf('pub async fn get_user_account'),
+)
+const starredAlbumsCommand = recommendCommand.slice(
+  recommendCommand.indexOf('pub async fn get_user_stared_albums'),
+  recommendCommand.indexOf('pub async fn get_bili_fav_folder_info'),
+)
+
+assert.match(
+  userPlaylistsCommand,
+  /client\.get_user_playlists\(uid,\s*1000,\s*0\)\.await/,
+  'the desktop library must request the same 1000-playlist window as Android',
+)
+assert.match(
+  starredAlbumsCommand,
+  /limit\.unwrap_or\(1000\)/,
+  'the desktop library must default to the same 1000 starred albums as Android',
+)
+
 console.log('library netease request tests passed')

@@ -3,6 +3,14 @@ import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
 const source = await readFile(new URL('../src/views/NeteasePlaylistView.vue', import.meta.url), 'utf8')
+const recommendCommand = await readFile(
+  new URL('../src-tauri/src/commands/recommend_cmd.rs', import.meta.url),
+  'utf8',
+)
+const neteaseClient = await readFile(
+  new URL('../src-tauri/src/api/netease/client.rs', import.meta.url),
+  'utf8',
+)
 const scopeHelperUrl = new URL(
   '../src/modules/library/neteaseDetailCacheScope.ts',
   import.meta.url,
@@ -167,6 +175,31 @@ assert.doesNotMatch(
   loadDetailSource,
   /requestGeneration\s*===\s*detailRequestGeneration\s*&&\s*!cached/,
   'a cached response must not suppress a revalidation error',
+)
+
+const playlistDetailCommand = recommendCommand.slice(
+  recommendCommand.indexOf('pub async fn get_netease_playlist_detail'),
+  recommendCommand.indexOf('const YOUTUBE_PLAYLIST_MAX_PAGES'),
+)
+const songDetailClient = neteaseClient.slice(
+  neteaseClient.indexOf('pub async fn get_song_detail'),
+  neteaseClient.indexOf('pub async fn get_playlist'),
+)
+
+assert.match(
+  playlistDetailCommand,
+  /let\s+batch\s*=\s*client\.get_song_detail\(chunk\)\.await\?;/,
+  'every large-playlist song-detail batch failure must fail the command',
+)
+assert.doesNotMatch(
+  playlistDetailCommand,
+  /get_song_detail batch failed/,
+  'large-playlist expansion must not log and suppress a failed batch',
+)
+assert.match(
+  songDetailClient,
+  /parse_song_detail_response\(body\)/,
+  'the NetEase client must validate song-detail business codes',
 )
 
 console.log('Netease detail route refresh tests passed')

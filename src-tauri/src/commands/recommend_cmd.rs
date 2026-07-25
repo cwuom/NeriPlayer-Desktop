@@ -1,8 +1,8 @@
 // 推荐 & 用户数据命令
-use serde_json::Value;
-use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use serde_json::Value;
+use tauri::State;
 
 /// 获取网易云个性化推荐歌单（需登录）
 #[tauri::command]
@@ -23,26 +23,25 @@ pub async fn get_recommended_songs(state: State<'_, AppState>) -> AppResult<Valu
 
 /// 获取用户歌单列表（多平台）
 #[tauri::command]
-pub async fn get_user_playlists(
-    platform: String,
-    state: State<'_, AppState>,
-) -> AppResult<Value> {
+pub async fn get_user_playlists(platform: String, state: State<'_, AppState>) -> AppResult<Value> {
     match platform.as_str() {
         "netease" => {
             // 在独立作用域内取值，确保 MutexGuard 在 await 前释放
             let uid = {
                 let auth = state.auth.lock();
-                auth.netease.as_ref()
+                auth.netease
+                    .as_ref()
                     .and_then(|a| a.user_id)
                     .ok_or_else(|| AppError::Api("Netease not logged in".into()))?
             };
             let client = crate::api::netease::client::NeteaseClient::new(&state.http());
-            client.get_user_playlists(uid, 50, 0).await
+            client.get_user_playlists(uid, 1000, 0).await
         }
         "bilibili" => {
             let mid = {
                 let auth = state.auth.lock();
-                auth.bilibili.as_ref()
+                auth.bilibili
+                    .as_ref()
                     .and_then(|a| a.mid)
                     .ok_or_else(|| AppError::Api("Bilibili not logged in".into()))?
             };
@@ -60,8 +59,13 @@ pub async fn get_user_playlists(
                         if let Some(media_id) = folder["id"].as_u64() {
                             let c = crate::api::bilibili::client::BiliClient::new(&state.http());
                             futures.push(async move {
-                                let pic = c.get_fav_folder_info(media_id).await.ok()
-                                    .and_then(|r| r["data"]["cover"].as_str().map(|s| s.to_string()))
+                                let pic = c
+                                    .get_fav_folder_info(media_id)
+                                    .await
+                                    .ok()
+                                    .and_then(|r| {
+                                        r["data"]["cover"].as_str().map(|s| s.to_string())
+                                    })
                                     .unwrap_or_default();
                                 (idx, pic)
                             });
@@ -86,7 +90,8 @@ pub async fn get_user_playlists(
         "youtube" => {
             let yt_auth = {
                 let auth = state.auth.lock();
-                auth.youtube.as_ref()
+                auth.youtube
+                    .as_ref()
                     .ok_or_else(|| AppError::Api("YouTube not logged in".into()))?
                     .clone()
             };
@@ -99,10 +104,7 @@ pub async fn get_user_playlists(
 
 /// 获取用户账号信息（多平台）
 #[tauri::command]
-pub async fn get_user_account(
-    platform: String,
-    state: State<'_, AppState>,
-) -> AppResult<Value> {
+pub async fn get_user_account(platform: String, state: State<'_, AppState>) -> AppResult<Value> {
     match platform.as_str() {
         "netease" => {
             let client = crate::api::netease::client::NeteaseClient::new(&state.http());
@@ -123,7 +125,8 @@ pub async fn get_home_feed(app: tauri::AppHandle, state: State<'_, AppState>) ->
     crate::commands::auth_cmd::maybe_refresh_youtube_session(&app, state.inner(), false).await;
     let yt_auth = {
         let auth = state.auth.lock();
-        auth.youtube.as_ref()
+        auth.youtube
+            .as_ref()
             .ok_or_else(|| AppError::Api("YouTube not logged in".into()))?
             .clone()
     };
@@ -139,10 +142,9 @@ pub async fn get_high_quality_playlists(
     state: State<'_, AppState>,
 ) -> AppResult<Value> {
     let client = crate::api::netease::client::NeteaseClient::new(&state.http());
-    client.get_high_quality_playlists(
-        cat.as_deref().unwrap_or("全部"),
-        limit.unwrap_or(30),
-    ).await
+    client
+        .get_high_quality_playlists(cat.as_deref().unwrap_or("全部"), limit.unwrap_or(30))
+        .await
 }
 
 /// 获取精品歌单分类标签
@@ -154,11 +156,7 @@ pub async fn get_high_quality_tags(state: State<'_, AppState>) -> AppResult<Valu
 
 /// 喜欢/取消喜欢歌曲（网易云）
 #[tauri::command]
-pub async fn like_song(
-    song_id: u64,
-    like: bool,
-    state: State<'_, AppState>,
-) -> AppResult<Value> {
+pub async fn like_song(song_id: u64, like: bool, state: State<'_, AppState>) -> AppResult<Value> {
     let client = crate::api::netease::client::NeteaseClient::new(&state.http());
     client.like_song(song_id, like).await
 }
@@ -168,7 +166,8 @@ pub async fn like_song(
 pub async fn get_liked_song_ids(state: State<'_, AppState>) -> AppResult<Value> {
     let uid = {
         let auth = state.auth.lock();
-        auth.netease.as_ref()
+        auth.netease
+            .as_ref()
             .and_then(|a| a.user_id)
             .ok_or_else(|| AppError::Api("Netease not logged in".into()))?
     };
@@ -178,20 +177,14 @@ pub async fn get_liked_song_ids(state: State<'_, AppState>) -> AppResult<Value> 
 
 /// 获取专辑详情（网易云）
 #[tauri::command]
-pub async fn get_album_detail(
-    album_id: u64,
-    state: State<'_, AppState>,
-) -> AppResult<Value> {
+pub async fn get_album_detail(album_id: u64, state: State<'_, AppState>) -> AppResult<Value> {
     let client = crate::api::netease::client::NeteaseClient::new(&state.http());
     client.get_album_detail(album_id).await
 }
 
 /// 获取歌曲详情（网易云）
 #[tauri::command]
-pub async fn get_netease_song_detail(
-    song_id: u64,
-    state: State<'_, AppState>,
-) -> AppResult<Value> {
+pub async fn get_netease_song_detail(song_id: u64, state: State<'_, AppState>) -> AppResult<Value> {
     let client = crate::api::netease::client::NeteaseClient::new(&state.http());
     client.get_song_detail(&[song_id]).await
 }
@@ -204,7 +197,9 @@ pub async fn get_user_stared_albums(
     state: State<'_, AppState>,
 ) -> AppResult<Value> {
     let client = crate::api::netease::client::NeteaseClient::new(&state.http());
-    client.get_user_stared_albums(offset.unwrap_or(0), limit.unwrap_or(50)).await
+    client
+        .get_user_stared_albums(offset.unwrap_or(0), limit.unwrap_or(1000))
+        .await
 }
 
 /// 获取 B站收藏夹详情
@@ -254,15 +249,9 @@ pub async fn get_netease_playlist_detail(
         let mut all_extra_songs: Vec<Value> = Vec::new();
 
         for chunk in missing_ids.chunks(300) {
-            match client.get_song_detail(chunk).await {
-                Ok(batch) => {
-                    if let Some(songs) = batch["songs"].as_array() {
-                        all_extra_songs.extend(songs.iter().cloned());
-                    }
-                }
-                Err(e) => {
-                    log::warn!(target: "recommend", "get_song_detail batch failed: {}", e);
-                }
+            let batch = client.get_song_detail(chunk).await?;
+            if let Some(songs) = batch["songs"].as_array() {
+                all_extra_songs.extend(songs.iter().cloned());
             }
         }
 
@@ -289,7 +278,8 @@ pub async fn get_youtube_playlist_detail(
     crate::commands::auth_cmd::maybe_refresh_youtube_session(&app, state.inner(), false).await;
     let yt_auth = {
         let auth = state.auth.lock();
-        auth.youtube.as_ref()
+        auth.youtube
+            .as_ref()
             .ok_or_else(|| AppError::Api("YouTube not logged in".into()))?
             .clone()
     };
@@ -322,10 +312,7 @@ pub async fn get_youtube_playlist_detail(
 
 /// 验证平台登录状态是否仍有效
 #[tauri::command]
-pub async fn validate_auth(
-    platform: String,
-    state: State<'_, AppState>,
-) -> AppResult<bool> {
+pub async fn validate_auth(platform: String, state: State<'_, AppState>) -> AppResult<bool> {
     match platform.as_str() {
         "netease" => {
             let client = crate::api::netease::client::NeteaseClient::new(&state.http());
