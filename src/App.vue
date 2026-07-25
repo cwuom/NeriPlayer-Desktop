@@ -206,7 +206,7 @@ async function closeApplication() {
         .filter(candidate => candidate.label !== appWindow.label)
         .map(candidate => candidate.destroy()),
     )
-    await appWindow.close()
+    await appWindow.destroy()
   } catch (error) {
     log.error('application close failed:', error)
     isClosingApplication = false
@@ -215,8 +215,8 @@ async function closeApplication() {
 
 function handleCloseRequested(event: CloseRequestedEvent) {
   handleBeforeUnload()
-  if (isClosingApplication) return
   event.preventDefault()
+  if (isClosingApplication) return
   void closeApplication()
 }
 

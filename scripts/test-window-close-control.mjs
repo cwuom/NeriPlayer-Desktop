@@ -38,8 +38,8 @@ assert.ok(
 )
 assert.match(
   appSource,
-  /function handleCloseRequested\(event: CloseRequestedEvent\)[\s\S]*?if \(isClosingApplication\) return[\s\S]*?event\.preventDefault\(\)[\s\S]*?closeApplication\(\)/,
-  'system close and Alt+F4 must enter the same coordinated shutdown path without recursion',
+  /function handleCloseRequested\(event: CloseRequestedEvent\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?if \(isClosingApplication\) return[\s\S]*?closeApplication\(\)/,
+  'every system close request must stay intercepted while coordinated shutdown is running',
 )
 assert.match(
   appSource,
@@ -48,8 +48,13 @@ assert.match(
 )
 assert.match(
   appSource,
-  /filter\(candidate => candidate\.label !== appWindow\.label\)[\s\S]*?candidate\.destroy\(\)[\s\S]*?appWindow\.close\(\)/,
-  'auxiliary windows must be destroyed before the main window so close interceptors cannot keep the app alive',
+  /filter\(candidate => candidate\.label !== appWindow\.label\)[\s\S]*?candidate\.destroy\(\)[\s\S]*?appWindow\.destroy\(\)/,
+  'auxiliary windows must be destroyed before the main window without re-entering close interceptors',
+)
+assert.doesNotMatch(
+  appSource,
+  /appWindow\.close\(\)/,
+  'coordinated shutdown must not depend on allowing a recursive main-window close request',
 )
 assert.match(
   appSource,
