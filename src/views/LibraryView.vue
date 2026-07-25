@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { RouterLink, useRouter, useRoute } from 'vue-router'
 
 defineOptions({ name: 'LibraryView' })
@@ -70,6 +70,8 @@ const tabs = computed<LibraryTabDefinition[]>(() => [
   { label: t('library.tab_favorites'), icon: 'favorite', key: 'favorites' },
   { label: t('library.tab_downloads'), icon: 'download', key: 'downloads' },
   { label: t('library.tab_netease'), icon: 'cloud', key: 'netease' },
+  { label: t('settings.bilibili_account'), icon: 'video_library', key: 'bilibili' },
+  { label: t('settings.youtube_account'), icon: 'subscriptions', key: 'youtube' },
 ])
 
 const neteaseCategories = computed<NeteaseCategoryDefinition[]>(() => [
@@ -165,20 +167,22 @@ function exitMultiSelect() {
   selectedPlaylists.value.clear()
 }
 function togglePlaylistSelection(id: number) {
+  const playlist = playlists.value.find(pl => pl.id === id)
+  if (!playlist || isProtectedPlaylist(playlist)) return
   const set = selectedPlaylists.value
   if (set.has(id)) set.delete(id)
   else set.add(id)
 }
 function selectAll() {
   for (const pl of playlists.value) {
-    if (!LIKED_NAMES.includes(pl.name) && !LOCAL_NAMES.includes(pl.name)) {
+    if (!isProtectedPlaylist(pl)) {
       selectedPlaylists.value.add(pl.id)
     }
   }
 }
 function invertSelection() {
   for (const pl of playlists.value) {
-    if (LIKED_NAMES.includes(pl.name) || LOCAL_NAMES.includes(pl.name)) continue
+    if (isProtectedPlaylist(pl)) continue
     if (selectedPlaylists.value.has(pl.id)) selectedPlaylists.value.delete(pl.id)
     else selectedPlaylists.value.add(pl.id)
   }
@@ -262,8 +266,8 @@ async function loadPlaylists() {
     const localFiles: PlaylistInfo[] = []
     const normal: PlaylistInfo[] = []
     for (const pl of raw) {
-      if (LIKED_NAMES.includes(pl.name)) liked.push(pl)
-      else if (LOCAL_NAMES.includes(pl.name)) localFiles.push(pl)
+      if (isLikedPlaylist(pl)) liked.push(pl)
+      else if (isLocalFilesPlaylist(pl)) localFiles.push(pl)
       else normal.push(pl)
     }
     // 应用用户自定义排序
@@ -345,13 +349,22 @@ const contextMenu = ref<{ show: boolean; x: number; y: number; playlist: Playlis
 })
 
 // 特殊歌单：跨语言匹配（同步数据可能是任何语言的名称）
-const LIKED_NAMES = ['我喜欢的音乐', '我喜歡的音樂', 'お気に入りの曲', 'Liked Songs']
-const LOCAL_NAMES = ['本地音乐', '本機音樂', 'ローカル音楽', 'Local Music']
-const ALL_PROTECTED = [...LIKED_NAMES, ...LOCAL_NAMES]
+const SYSTEM_LIKED_PLAYLIST_ID = -1001
+const SYSTEM_LOCAL_PLAYLIST_ID = -1002
+const LIKED_NAMES = ['我喜欢的音乐', '我喜歡的音樂', 'お気に入りの曲', 'Liked Songs', 'My Favorite Music']
+const LOCAL_NAMES = ['本地文件', '本地音乐', '本機音樂', 'ローカルファイル', 'ローカル音楽', 'Local Files', 'Local Music']
+
+function isLikedPlaylist(pl: PlaylistInfo): boolean {
+  return pl.id === SYSTEM_LIKED_PLAYLIST_ID || LIKED_NAMES.includes(pl.name)
+}
+
+function isLocalFilesPlaylist(pl: PlaylistInfo): boolean {
+  return pl.id === SYSTEM_LOCAL_PLAYLIST_ID || LOCAL_NAMES.includes(pl.name)
+}
 
 async function ensureLocalPlaylistId(): Promise<number> {
   const raw = await invoke<PlaylistInfo[]>('list_playlists')
-  const localPlaylist = raw.find((pl) => LOCAL_NAMES.includes(pl.name))
+  const localPlaylist = raw.find(isLocalFilesPlaylist)
   if (localPlaylist) return localPlaylist.id
 
   const created = await invoke<PlaylistInfo>('create_playlist', { name: t('home.local_music') })
@@ -407,13 +420,13 @@ async function selectAndScanLocalMusic() {
 }
 
 function isProtectedPlaylist(pl: PlaylistInfo) {
-  return ALL_PROTECTED.includes(pl.name)
+  return isLikedPlaylist(pl) || isLocalFilesPlaylist(pl)
 }
 
 // 显示名：特殊歌单用当前语言翻译，其他原样
 function displayName(pl: PlaylistInfo): string {
-  if (LIKED_NAMES.includes(pl.name)) return t('library.liked_songs')
-  if (LOCAL_NAMES.includes(pl.name)) return t('library.local_files')
+  if (isLikedPlaylist(pl)) return t('library.liked_songs')
+  if (isLocalFilesPlaylist(pl)) return t('library.local_files')
   return pl.name
 }
 
@@ -435,6 +448,7 @@ const showDeleteDialog = ref(false)
 const deleteTarget = ref<PlaylistInfo | null>(null)
 
 function requestDelete(pl: PlaylistInfo) {
+  if (isProtectedPlaylist(pl)) return
   closeContextMenu()
   deleteTarget.value = pl
   showDeleteDialog.value = true
@@ -459,6 +473,7 @@ const renameValue = ref('')
 const renameInputRef = ref<InstanceType<typeof M3Input>>()
 
 function requestRename(pl: PlaylistInfo) {
+  if (isProtectedPlaylist(pl)) return
   closeContextMenu()
   renameTarget.value = pl
   renameValue.value = pl.name
@@ -514,7 +529,8 @@ function requestDeleteSelected() {
 }
 
 async function confirmDeleteSelected() {
-  const ids = [...selectedPlaylists.value]
+  const protectedIds = new Set(playlists.value.filter(isProtectedPlaylist).map(pl => pl.id))
+  const ids = [...selectedPlaylists.value].filter(id => !protectedIds.has(id))
   try {
     for (const id of ids) {
       await invoke('delete_playlist', { id })
@@ -569,6 +585,54 @@ async function loadNeteaseLibrary() {
   neteasePlaylistError.value = result.playlistsOk ? null : t('player.load_failed')
   neteaseAlbumError.value = result.albumsOk ? null : t('player.load_failed')
   return result
+}
+
+type CloudLibraryPlatform = 'bilibili' | 'youtube'
+
+const bilibiliPlaylists = computed(() => recommend.userPlaylists.bilibili || [])
+const youtubePlaylists = computed(() => recommend.userPlaylists.youtube || [])
+const cloudLibraryLoading = reactive<Record<CloudLibraryPlatform, boolean>>({
+  bilibili: false,
+  youtube: false,
+})
+const cloudLibraryError = reactive<Record<CloudLibraryPlatform, string | null>>({
+  bilibili: null,
+  youtube: null,
+})
+const cloudLibraryRequestGeneration: Record<CloudLibraryPlatform, number> = {
+  bilibili: 0,
+  youtube: 0,
+}
+
+function isCloudPlatformLoggedIn(platform: CloudLibraryPlatform): boolean {
+  return platform === 'bilibili' ? auth.bilibili.loggedIn : auth.youtube.loggedIn
+}
+
+async function loadCloudLibrary(platform: CloudLibraryPlatform) {
+  if (!isCloudPlatformLoggedIn(platform)) return
+
+  const requestGeneration = ++cloudLibraryRequestGeneration[platform]
+  cloudLibraryLoading[platform] = true
+  cloudLibraryError[platform] = null
+  const loaded = await recommend.fetchUserPlaylists(platform)
+  if (
+    requestGeneration !== cloudLibraryRequestGeneration[platform]
+    || !isCloudPlatformLoggedIn(platform)
+  ) return
+
+  cloudLibraryLoading[platform] = false
+  cloudLibraryError[platform] = loaded ? null : t('player.load_failed')
+  if (!loaded && (recommend.userPlaylists[platform]?.length || 0) > 0) {
+    toast.error(t('player.load_failed'))
+  }
+}
+
+function resetCloudLibrary(platform: CloudLibraryPlatform) {
+  cloudLibraryRequestGeneration[platform]++
+  cloudLibraryLoading[platform] = false
+  cloudLibraryError[platform] = null
+  recommend.userPlaylists[platform] = []
+  if (isCloudPlatformLoggedIn(platform)) void loadCloudLibrary(platform)
 }
 
 const favoritePlaylists = ref<FavoritePlaylist[]>([])
@@ -761,6 +825,8 @@ function handleDownloadMenuClick(item: ContextMenuActionItem) {
 }
 
 const neteaseSessionFingerprint = computed(() => `${auth.netease.loggedIn ? '1' : '0'}:${auth.neteaseSessionVersion}`)
+const bilibiliSessionFingerprint = computed(() => `${auth.bilibili.loggedIn ? '1' : '0'}:${auth.bilibiliSessionVersion}`)
+const youtubeSessionFingerprint = computed(() => `${auth.youtube.loggedIn ? '1' : '0'}:${auth.youtubeSessionVersion}`)
 
 // Login restoration and account changes must invalidate stale Netease library requests together.
 watch(neteaseSessionFingerprint, () => {
@@ -776,6 +842,9 @@ watch(neteaseSessionFingerprint, () => {
     void loadNeteaseLibrary()
   }
 }, { immediate: true })
+
+watch(bilibiliSessionFingerprint, () => resetCloudLibrary('bilibili'), { immediate: true })
+watch(youtubeSessionFingerprint, () => resetCloudLibrary('youtube'), { immediate: true })
 
 // 监听同步完成后的歌单变更事件
 let unlistenPlaylistsChanged: UnlistenFn | null = null
@@ -799,6 +868,8 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   favoritePlaylistsRequestGeneration++
+  cloudLibraryRequestGeneration.bilibili++
+  cloudLibraryRequestGeneration.youtube++
   unlistenPlaylistsChanged?.()
   unlistenFavoritePlaylistsChanged?.()
 })
@@ -1043,6 +1114,144 @@ onUnmounted(() => {
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">download</span></div>
         <p class="empty-title">{{ t('library.downloads_empty_title') }}</p>
         <p class="empty-desc">{{ t('library.downloads_empty_desc') }}</p>
+      </div>
+    </div>
+
+    <!-- Tab: Bilibili favorites -->
+    <div v-else-if="activeTab === 'bilibili'" class="playlist-list">
+      <div v-if="auth.bilibili.loggedIn" class="cloud-library-tools">
+        <button
+          class="netease-refresh"
+          type="button"
+          :disabled="cloudLibraryLoading.bilibili"
+          :aria-label="t('common.refresh')"
+          :title="t('common.refresh')"
+          @click="loadCloudLibrary('bilibili')"
+        >
+          <span class="material-symbols-rounded" :class="{ spinning: cloudLibraryLoading.bilibili }" aria-hidden="true">refresh</span>
+        </button>
+      </div>
+      <div v-if="!auth.bilibili.loggedIn" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">video_library</span></div>
+        <p class="empty-title">{{ t('settings.bilibili_account') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
+        <button
+          class="retry-btn netease-login-button"
+          type="button"
+          :disabled="auth.loggingIn === 'bilibili'"
+          @click="auth.loginBilibili"
+        >
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">login</span>
+          <span>{{ t('settings.sign_in') }}</span>
+        </button>
+      </div>
+      <div v-else-if="cloudLibraryLoading.bilibili && bilibiliPlaylists.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded spinning" style="font-size: 40px" aria-hidden="true">progress_activity</span></div>
+        <p class="empty-title">{{ t('player.loading') }}</p>
+      </div>
+      <div v-else-if="cloudLibraryError.bilibili && bilibiliPlaylists.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">cloud_off</span></div>
+        <p class="empty-title">{{ t('player.load_failed') }}</p>
+        <p class="empty-desc">{{ cloudLibraryError.bilibili }}</p>
+        <button class="retry-btn" type="button" @click="loadCloudLibrary('bilibili')">
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">refresh</span>
+          <span>{{ t('common.retry') }}</span>
+        </button>
+      </div>
+      <template v-else-if="bilibiliPlaylists.length > 0">
+        <RouterLink
+          v-for="playlist in bilibiliPlaylists"
+          :key="`bilibili-${playlist.id}`"
+          class="playlist-item netease-result-link"
+          :to="{ name: 'bili-playlist', params: { mediaId: playlist.id } }"
+        >
+          <div class="pl-icon" :class="{ 'has-cover': playlist.coverUrl }">
+            <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" class="pl-cover-img">
+              <span class="material-symbols-rounded filled" style="font-size: 22px" aria-hidden="true">video_library</span>
+            </BilibiliCoverImage>
+            <span v-else class="material-symbols-rounded filled" style="font-size: 22px" aria-hidden="true">video_library</span>
+          </div>
+          <div class="pl-info">
+            <div class="pl-name">{{ playlist.name }}</div>
+            <div class="pl-count">{{ t('library.track_count', { count: playlist.trackCount || 0 }) }}</div>
+          </div>
+          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3" aria-hidden="true">chevron_right</span>
+        </RouterLink>
+      </template>
+      <div v-else class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">video_library</span></div>
+        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
+      </div>
+    </div>
+
+    <!-- Tab: YouTube Music playlists -->
+    <div v-else-if="activeTab === 'youtube'" class="playlist-list">
+      <div v-if="auth.youtube.loggedIn" class="cloud-library-tools">
+        <button
+          class="netease-refresh"
+          type="button"
+          :disabled="cloudLibraryLoading.youtube"
+          :aria-label="t('common.refresh')"
+          :title="t('common.refresh')"
+          @click="loadCloudLibrary('youtube')"
+        >
+          <span class="material-symbols-rounded" :class="{ spinning: cloudLibraryLoading.youtube }" aria-hidden="true">refresh</span>
+        </button>
+      </div>
+      <div v-if="!auth.youtube.loggedIn" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">subscriptions</span></div>
+        <p class="empty-title">{{ t('settings.youtube_account') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
+        <button
+          class="retry-btn netease-login-button"
+          type="button"
+          :disabled="auth.loggingIn === 'youtube'"
+          @click="auth.loginYoutube"
+        >
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">login</span>
+          <span>{{ t('settings.sign_in') }}</span>
+        </button>
+      </div>
+      <div v-else-if="cloudLibraryLoading.youtube && youtubePlaylists.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded spinning" style="font-size: 40px" aria-hidden="true">progress_activity</span></div>
+        <p class="empty-title">{{ t('player.loading') }}</p>
+      </div>
+      <div v-else-if="cloudLibraryError.youtube && youtubePlaylists.length === 0" class="empty-tab library-state">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">cloud_off</span></div>
+        <p class="empty-title">{{ t('player.load_failed') }}</p>
+        <p class="empty-desc">{{ cloudLibraryError.youtube }}</p>
+        <button class="retry-btn" type="button" @click="loadCloudLibrary('youtube')">
+          <span class="material-symbols-rounded" style="font-size: 18px" aria-hidden="true">refresh</span>
+          <span>{{ t('common.retry') }}</span>
+        </button>
+      </div>
+      <template v-else-if="youtubePlaylists.length > 0">
+        <RouterLink
+          v-for="playlist in youtubePlaylists"
+          :key="`youtube-${playlist.id}`"
+          class="playlist-item netease-result-link"
+          :to="{ name: 'youtube-playlist', params: { browseId: playlist.id } }"
+        >
+          <div class="pl-icon" :class="{ 'has-cover': playlist.coverUrl }">
+            <img
+              v-if="playlist.coverUrl && !isLibraryCoverFailed('youtube-playlist', playlist.id, playlist.coverUrl)"
+              :src="toDisplayableLibraryCoverUrl(playlist.coverUrl)"
+              referrerpolicy="no-referrer"
+              class="pl-cover-img"
+              @error="markLibraryCoverFailed('youtube-playlist', playlist.id, playlist.coverUrl)"
+            />
+            <span v-else class="material-symbols-rounded filled" style="font-size: 22px" aria-hidden="true">subscriptions</span>
+          </div>
+          <div class="pl-info">
+            <div class="pl-name">{{ playlist.name }}</div>
+            <div class="pl-count" :title="playlist.description || undefined">{{ playlist.description || t('library.track_count', { count: playlist.trackCount || 0 }) }}</div>
+          </div>
+          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3" aria-hidden="true">chevron_right</span>
+        </RouterLink>
+      </template>
+      <div v-else class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px" aria-hidden="true">subscriptions</span></div>
+        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
       </div>
     </div>
 
@@ -1345,7 +1554,7 @@ onUnmounted(() => {
 /* M3 Filter Chips */
 .tab-bar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 4px;
   min-height: 44px;
   padding: 4px;
@@ -1440,6 +1649,12 @@ onUnmounted(() => {
   grid-template-columns: minmax(0, 1fr) 40px;
   align-items: center;
   gap: 8px;
+  margin-bottom: 12px;
+}
+
+.cloud-library-tools {
+  display: flex;
+  justify-content: flex-end;
   margin-bottom: 12px;
 }
 
@@ -1808,6 +2023,9 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--md-on-surface-variant);
   margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 歌单封面图 */

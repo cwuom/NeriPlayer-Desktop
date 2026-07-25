@@ -122,6 +122,7 @@
     "downloads_empty_desc": "在播放页点击更多选项下载歌曲到本地"
   },
   "common": {
+    "refresh": "\u5237\u65b0",
     "retry": "\u91cd\u8bd5",
     "save": "保存",
     "cancel": "取消",

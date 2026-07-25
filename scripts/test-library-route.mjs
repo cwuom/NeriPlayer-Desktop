@@ -11,6 +11,8 @@ const { resolveLibraryLocation, buildLibraryQuery, isCanonicalLibraryLocation } 
 
 assert.deepEqual(resolveLibraryLocation('local', undefined), { tab: 'local', category: 'playlists' })
 assert.deepEqual(resolveLibraryLocation('netease', 'albums'), { tab: 'netease', category: 'albums' })
+assert.deepEqual(resolveLibraryLocation('bilibili', undefined), { tab: 'bilibili', category: 'playlists' })
+assert.deepEqual(resolveLibraryLocation('youtube', undefined), { tab: 'youtube', category: 'playlists' })
 assert.deepEqual(resolveLibraryLocation(['netease'], ['playlists']), { tab: 'netease', category: 'playlists' })
 assert.deepEqual(resolveLibraryLocation(null, null), { tab: 'local', category: 'playlists' })
 assert.deepEqual(resolveLibraryLocation([null, 'netease'], ['albums']), { tab: 'local', category: 'playlists' })
@@ -20,6 +22,8 @@ assert.deepEqual(resolveLibraryLocation('netease_albums', undefined), { tab: 'ne
 assert.deepEqual(resolveLibraryLocation('unknown', 'albums'), { tab: 'local', category: 'playlists' })
 assert.deepEqual(buildLibraryQuery({ tab: 'netease', category: 'albums' }), { tab: 'netease', category: 'albums' })
 assert.deepEqual(buildLibraryQuery({ tab: 'downloads', category: 'albums' }), { tab: 'downloads' })
+assert.deepEqual(buildLibraryQuery({ tab: 'bilibili', category: 'albums' }), { tab: 'bilibili' })
+assert.deepEqual(buildLibraryQuery({ tab: 'youtube', category: 'albums' }), { tab: 'youtube' })
 assert.equal(isCanonicalLibraryLocation('netease', 'albums'), true)
 assert.equal(isCanonicalLibraryLocation('local', undefined), true)
 assert.equal(isCanonicalLibraryLocation(['netease', 'netease'], ['albums', 'albums']), false)

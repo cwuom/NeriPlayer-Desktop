@@ -18,6 +18,7 @@ interface ToggleTrackOptions {
 }
 
 const DEFAULT_LIKED_PLAYLIST_NAME = '我喜欢的音乐'
+const SYSTEM_LIKED_PLAYLIST_ID = -1001
 const LIKED_PLAYLIST_NAMES = [
   DEFAULT_LIKED_PLAYLIST_NAME,
   '我喜歡的音樂',
@@ -118,7 +119,9 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
       isLoading.value = true
       try {
         const playlists = await invoke<PlaylistInfo[]>('list_playlists')
-        const liked = playlists.find(p => LIKED_PLAYLIST_NAMES.includes(p.name))
+        const liked = playlists.find(
+          p => p.id === SYSTEM_LIKED_PLAYLIST_ID || LIKED_PLAYLIST_NAMES.includes(p.name),
+        )
         if (!liked) {
           likedPlaylistId.value = null
           localLikedTrackIds = new Set()

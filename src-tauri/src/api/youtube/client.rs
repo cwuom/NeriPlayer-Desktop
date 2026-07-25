@@ -258,7 +258,9 @@ impl YouTubeClient {
             .header("X-Goog-AuthUser", "0")
             .header("Cookie", cookie_header)
             .json(body)
-            .send().await?;
+            .send()
+            .await?
+            .error_for_status()?;
 
         let set_cookie: Vec<String> = resp
             .headers()

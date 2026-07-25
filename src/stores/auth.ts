@@ -47,12 +47,23 @@ function hasNeteaseSessionBoundary(previous: PlatformAuth, next: PlatformAuth) {
   )
 }
 
+function hasPlatformSessionBoundary(previous: PlatformAuth, next: PlatformAuth) {
+  return previous.loggedIn !== next.loggedIn || (
+    next.loggedIn
+    && previous.accountId !== null
+    && next.accountId !== null
+    && previous.accountId !== next.accountId
+  )
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const netease = ref<PlatformAuth>(emptyAuth())
   const bilibili = ref<PlatformAuth>(emptyAuth())
   const youtube = ref<PlatformAuth>(emptyAuth())
   // Changes even when the account keeps the same display name.
   const neteaseSessionVersion = ref(0)
+  const bilibiliSessionVersion = ref(0)
+  const youtubeSessionVersion = ref(0)
   const authMutationRequestCoordinator = new AuthMutationRequestCoordinator()
   const authStatusRequestCoordinator = new AuthStatusRequestCoordinator<any>()
   const hasVerifiedNeteaseAuth = ref(false)
@@ -72,7 +83,7 @@ export const useAuthStore = defineStore('auth', () => {
   )
 
   /** 启动时检查所有平台登录状态 */
-  async function checkStatus() {
+  async function checkStatus(invalidatePlatformSessions = false) {
     try {
       const statusRequest = authStatusRequestCoordinator.run(
         () => invoke<any>('check_auth_status'),
@@ -93,17 +104,37 @@ export const useAuthStore = defineStore('auth', () => {
 
       const status = statusResult.value
       const nextNetease = mapAuth(status.netease)
+      const nextBilibili = mapAuth(status.bilibili)
+      const nextYoutube = mapAuth(status.youtube)
       const neteaseSessionChanged = hasNeteaseSessionBoundary(netease.value, nextNetease)
+      const bilibiliSessionChanged = hasPlatformSessionBoundary(bilibili.value, nextBilibili)
+      const youtubeSessionChanged = hasPlatformSessionBoundary(youtube.value, nextYoutube)
+      const advanceNeteaseSession = (
+        (invalidatePlatformSessions && !neteaseSessionChanged)
+        || (nextNetease.loggedIn && (neteaseSessionChanged || needsNeteaseVerification))
+      )
       if (neteaseSessionChanged && !needsNeteaseVerification) {
         useRecommendStore().clearPlatformCache('netease')
         useLikedSongsStore().clearCloudLikes()
       }
+      if (bilibiliSessionChanged || invalidatePlatformSessions) {
+        useRecommendStore().clearPlatformCache('bilibili')
+        bilibiliSessionVersion.value++
+      }
+      if (youtubeSessionChanged || invalidatePlatformSessions) {
+        useRecommendStore().clearPlatformCache('youtube')
+        youtubeSessionVersion.value++
+      }
+      if (invalidatePlatformSessions && !neteaseSessionChanged) {
+        useRecommendStore().clearPlatformCache('netease')
+        useLikedSongsStore().clearCloudLikes()
+      }
       netease.value = nextNetease
-      bilibili.value = mapAuth(status.bilibili)
-      youtube.value = mapAuth(status.youtube)
-      if (nextNetease.loggedIn && (neteaseSessionChanged || needsNeteaseVerification)) {
+      bilibili.value = nextBilibili
+      youtube.value = nextYoutube
+      if (advanceNeteaseSession) {
         neteaseSessionVersion.value++
-        void useLikedSongsStore().refreshCloudLikes()
+        if (nextNetease.loggedIn) void useLikedSongsStore().refreshCloudLikes()
       }
       if (needsYoutubeProfileRefresh(youtube.value)) {
         void refreshYoutubeProfile()
@@ -129,9 +160,9 @@ export const useAuthStore = defineStore('auth', () => {
     authStatusRequestCoordinator.invalidate()
   }
 
-  async function reconcileStatus() {
+  async function reconcileStatus(invalidatePlatformSessions = false) {
     invalidateAuthStatusRequests()
-    await checkStatus()
+    await checkStatus(invalidatePlatformSessions)
   }
 
   function beginLoginOperation(platform: string): number {
@@ -208,7 +239,13 @@ export const useAuthStore = defineStore('auth', () => {
         neteaseSessionVersion.value++
         void useLikedSongsStore().refreshCloudLikes()
       }
+      if (key === 'bilibili' && mapped.loggedIn) {
+        useRecommendStore().clearPlatformCache('bilibili')
+        bilibiliSessionVersion.value++
+      }
       if (key === 'youtube') {
+        useRecommendStore().clearPlatformCache('youtube')
+        youtubeSessionVersion.value++
         youtubeProfileRefreshAttempted.value = false
         if (needsYoutubeProfileRefresh(mapped)) void refreshYoutubeProfile()
       }
@@ -266,8 +303,14 @@ export const useAuthStore = defineStore('auth', () => {
           netease.value = emptyAuth()
           useLikedSongsStore().clearCloudLikes()
           break
-        case 'bilibili': bilibili.value = emptyAuth(); break
-        case 'youtube': youtube.value = emptyAuth(); break
+        case 'bilibili':
+          bilibili.value = emptyAuth()
+          bilibiliSessionVersion.value++
+          break
+        case 'youtube':
+          youtube.value = emptyAuth()
+          youtubeSessionVersion.value++
+          break
       }
       useRecommendStore().clearPlatformCache(platform)
       toast.success(t('settings.logout_success', { platform: platformLabel(platform) }))
@@ -302,7 +345,13 @@ export const useAuthStore = defineStore('auth', () => {
         neteaseSessionVersion.value++
         void useLikedSongsStore().refreshCloudLikes()
       }
+      if (platform === 'bilibili' && mapped.loggedIn) {
+        useRecommendStore().clearPlatformCache('bilibili')
+        bilibiliSessionVersion.value++
+      }
       if (platform === 'youtube') {
+        useRecommendStore().clearPlatformCache('youtube')
+        youtubeSessionVersion.value++
         youtubeProfileRefreshAttempted.value = false
         if (needsYoutubeProfileRefresh(mapped)) void refreshYoutubeProfile()
       }
@@ -320,7 +369,9 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    netease, bilibili, youtube, neteaseSessionVersion, loggingIn, isAnyLoggedIn, canMutateNetease,
+    netease, bilibili, youtube,
+    neteaseSessionVersion, bilibiliSessionVersion, youtubeSessionVersion,
+    loggingIn, isAnyLoggedIn, canMutateNetease,
     checkStatus, reconcileStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, logout,
   }
 })

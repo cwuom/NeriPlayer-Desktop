@@ -119,14 +119,14 @@ export const useRecommendStore = defineStore('recommend', () => {
   // accidentally finish an unrelated platform request.
   let activeLoadingRequests = 0
   let loadingRequestId = 0
-  const loadingRequests = new Map<number, 'netease' | undefined>()
+  const loadingRequests = new Map<number, string | undefined>()
 
   function syncLoadingState() {
     activeLoadingRequests = loadingRequests.size
     isLoading.value = activeLoadingRequests > 0
   }
 
-  function beginLoading(platform?: 'netease') {
+  function beginLoading(platform?: string) {
     const id = ++loadingRequestId
     loadingRequests.set(id, platform)
     syncLoadingState()
@@ -142,6 +142,11 @@ export const useRecommendStore = defineStore('recommend', () => {
   const CACHE_KEY = 'neri:recommend:cache'
   const CACHE_MAX_AGE_MS = 30 * 60 * 1000 // 30 分钟
   let neteaseRequestGeneration = 0
+  const userPlaylistRequestGeneration: Record<string, number> = {
+    netease: 0,
+    bilibili: 0,
+    youtube: 0,
+  }
 
   function isCurrentNeteaseRequest(generation: number) {
     return generation === neteaseRequestGeneration
@@ -183,13 +188,14 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   function clearPlatformCache(platform: string) {
+    userPlaylistRequestGeneration[platform] = (userPlaylistRequestGeneration[platform] || 0) + 1
     if (platform === 'netease') {
       neteaseRequestGeneration++
-      for (const [id, requestPlatform] of loadingRequests) {
-        if (requestPlatform === 'netease') loadingRequests.delete(id)
-      }
-      syncLoadingState()
     }
+    for (const [id, requestPlatform] of loadingRequests) {
+      if (requestPlatform === platform) loadingRequests.delete(id)
+    }
+    syncLoadingState()
     const cleared = clearPlatformRecommendCache({
       recommendedPlaylists: recommendedPlaylists.value,
       userPlaylists: userPlaylists.value,
@@ -313,8 +319,8 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   /** 获取用户歌单 */
   async function fetchUserPlaylists(platform: string): Promise<boolean> {
-    const requestGeneration = platform === 'netease' ? neteaseRequestGeneration : null
-    const loadingRequest = beginLoading(platform === 'netease' ? 'netease' : undefined)
+    const requestGeneration = userPlaylistRequestGeneration[platform] || 0
+    const loadingRequest = beginLoading(platform)
     try {
       const data = await invoke<any>('get_user_playlists', { platform })
 
@@ -334,7 +340,11 @@ export const useRecommendStore = defineStore('recommend', () => {
           creator: p.creator?.nickname || '',
         }))
       } else if (platform === 'bilibili') {
-        const list = data?.data?.list || []
+        if (Number(data?.code) !== 0) {
+          throw new Error(`Bilibili playlist request failed (${data?.code ?? 'invalid'})`)
+        }
+        const list = data?.data?.list
+        if (!Array.isArray(list)) throw new Error('Bilibili playlist response was invalid')
         playlists = list.map((f: any) => ({
           id: f.id,
           name: f.title,
@@ -360,16 +370,19 @@ export const useRecommendStore = defineStore('recommend', () => {
           )
         }
       } else if (platform === 'youtube') {
+        if (!data || typeof data !== 'object' || data.error) {
+          throw new Error(data?.error?.message || 'YouTube playlist response was invalid')
+        }
         // YouTube browse 响应需要解析 sectionListRenderer
         playlists = parseYouTubeLibraryPlaylistsShared(data)
       }
 
-      if (requestGeneration !== null && !isCurrentNeteaseRequest(requestGeneration)) return false
+      if (requestGeneration !== (userPlaylistRequestGeneration[platform] || 0)) return false
       userPlaylists.value[platform] = playlists
       saveCache()
       return true
     } catch (e) {
-      if (requestGeneration !== null && !isCurrentNeteaseRequest(requestGeneration)) return false
+      if (requestGeneration !== (userPlaylistRequestGeneration[platform] || 0)) return false
       log.error(`fetchUserPlaylists(${platform}):`, e)
       return false
     } finally {

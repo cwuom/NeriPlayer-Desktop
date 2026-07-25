@@ -122,6 +122,7 @@
     "downloads_empty_desc": "Download songs from the Now Playing more options menu"
   },
   "common": {
+    "refresh": "Refresh",
     "retry": "Retry",
     "save": "Save",
     "cancel": "Cancel",

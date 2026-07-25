@@ -1,4 +1,4 @@
-export type LibraryTabKey = 'local' | 'favorites' | 'downloads' | 'netease'
+export type LibraryTabKey = 'local' | 'favorites' | 'downloads' | 'netease' | 'bilibili' | 'youtube'
 export type NeteaseLibraryCategory = 'playlists' | 'albums'
 
 export interface LibraryLocation {
@@ -6,7 +6,14 @@ export interface LibraryLocation {
   category: NeteaseLibraryCategory
 }
 
-const LIBRARY_TABS = new Set<LibraryTabKey>(['local', 'favorites', 'downloads', 'netease'])
+const LIBRARY_TABS = new Set<LibraryTabKey>([
+  'local',
+  'favorites',
+  'downloads',
+  'netease',
+  'bilibili',
+  'youtube',
+])
 const NETEASE_CATEGORIES = new Set<NeteaseLibraryCategory>(['playlists', 'albums'])
 
 function firstQueryValue(value: unknown): string | undefined {

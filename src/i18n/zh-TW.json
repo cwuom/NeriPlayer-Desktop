@@ -122,6 +122,7 @@
     "downloads_empty_desc": "在播放頁點擊更多選項下載歌曲到本機"
   },
   "common": {
+    "refresh": "\u91cd\u65b0\u6574\u7406",
     "retry": "\u91cd\u8a66",
     "save": "儲存",
     "cancel": "取消",
