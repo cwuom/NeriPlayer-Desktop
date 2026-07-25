@@ -304,6 +304,7 @@ fn main() {
             settings_cmd::get_netease_song_url,
             settings_cmd::get_netease_song_download_url,
             settings_cmd::get_qq_song_url,
+            settings_cmd::get_bili_video_pages,
             settings_cmd::get_bili_audio_url,
             settings_cmd::get_youtube_audio_url,
             settings_cmd::save_file_bytes,

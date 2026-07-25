@@ -59,6 +59,7 @@ pub struct AppSettings {
     pub cover_blur_amount: f32,
     pub cover_blur_darken: f32,
     pub netease_quality: String,
+    pub netease_auto_source_switch: bool,
     pub qq_music_quality: String,
     pub youtube_quality: String,
     pub bili_quality: String,
@@ -125,6 +126,7 @@ impl Default for AppSettings {
             cover_blur_amount: 1.5,
             cover_blur_darken: 0.2,
             netease_quality: "exhigh".into(),
+            netease_auto_source_switch: true,
             qq_music_quality: "high".into(),
             youtube_quality: "very_high".into(),
             bili_quality: "high".into(),
@@ -157,17 +159,9 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn normalize(&mut self) {
         self.format_version = SETTINGS_FORMAT_VERSION;
-        self.dark_mode = normalize_choice(
-            &self.dark_mode,
-            &["system", "dark", "light"],
-            "dark",
-        );
+        self.dark_mode = normalize_choice(&self.dark_mode, &["system", "dark", "light"], "dark");
         self.theme_color = normalize_theme_color(&self.theme_color);
-        self.locale = normalize_choice(
-            &self.locale,
-            &["zh-CN", "zh-TW", "en", "ja"],
-            "zh-CN",
-        );
+        self.locale = normalize_choice(&self.locale, &["zh-CN", "zh-TW", "en", "ja"], "zh-CN");
         self.default_screen = normalize_choice(
             &self.default_screen,
             &["home", "explore", "library"],
@@ -197,14 +191,7 @@ impl AppSettings {
         self.netease_quality = normalize_choice(
             &self.netease_quality,
             &[
-                "standard",
-                "higher",
-                "high",
-                "exhigh",
-                "lossless",
-                "hires",
-                "jyeffect",
-                "sky",
+                "standard", "higher", "high", "exhigh", "lossless", "hires", "jyeffect", "sky",
                 "jymaster",
             ],
             "exhigh",
@@ -232,10 +219,8 @@ impl AppSettings {
         );
 
         self.background_image_uri = self.background_image_uri.trim().into();
-        self.download_name_template = non_empty_or_default(
-            &self.download_name_template,
-            DEFAULT_DOWNLOAD_NAME_TEMPLATE,
-        );
+        self.download_name_template =
+            non_empty_or_default(&self.download_name_template, DEFAULT_DOWNLOAD_NAME_TEMPLATE);
         self.download_dir = self.download_dir.trim().into();
         self.lt_server_url = self.lt_server_url.trim().trim_end_matches('/').into();
         self.lt_nickname = self.lt_nickname.trim().into();
@@ -330,9 +315,7 @@ fn normalize_choice(value: &str, allowed: &[&str], fallback: &str) -> String {
 fn normalize_theme_color(value: &str) -> String {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green" => {
-            normalized
-        }
+        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green" => normalized,
         "#6750a4" => "purple".into(),
         _ => "purple".into(),
     }
