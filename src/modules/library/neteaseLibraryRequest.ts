@@ -9,7 +9,7 @@ export interface CoordinatedNeteaseLibraryRequest {
   promise: Promise<NeteaseLibraryRequestResult>
 }
 
-type NeteaseLibraryLoader = () => Promise<unknown>
+type NeteaseLibraryLoader = () => Promise<boolean>
 
 export class NeteaseLibraryRequestCoordinator {
   private generation = 0
@@ -51,7 +51,7 @@ export class NeteaseLibraryRequestCoordinator {
   private load(loader: NeteaseLibraryLoader): Promise<boolean> {
     try {
       return Promise.resolve(loader()).then(
-        () => true,
+        value => value,
         () => false,
       )
     } catch {
