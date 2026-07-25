@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore, displayAlbum, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useLikedSongsStore } from '@/stores/likedSongs'
+import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { useDownloadStore } from '@/stores/download'
@@ -61,6 +62,7 @@ const props = defineProps<{
 }>()
 const player = usePlayerStore()
 const likedSongs = useLikedSongsStore()
+const auth = useAuthStore()
 const settings = useSettingsStore()
 const toast = useToastStore()
 const downloadStore = useDownloadStore()
@@ -655,9 +657,16 @@ function onLyricSeek(ms: number) {
 }
 
 const isFavorite = computed(() => likedSongs.isTrackLiked(player.currentTrack))
+const canToggleFavorite = computed(() => {
+  const track = player.currentTrack
+  return !!track && (!track.id.startsWith('netease:') || auth.canMutateNetease)
+})
 
 async function toggleFavorite() {
-  await likedSongs.toggleTrack(player.currentTrack)
+  if (!canToggleFavorite.value) return
+  await likedSongs.toggleTrack(player.currentTrack, {
+    neteaseAuthorized: auth.canMutateNetease,
+  })
 }
 
 // 睡眠定时器选项
@@ -2025,7 +2034,7 @@ const sliderActiveColor = computed(() => {
           <button
             class="tool-btn tool-btn--feedback fav-btn"
             :class="{ active: isFavorite }"
-            :disabled="!player.currentTrack"
+            :disabled="!canToggleFavorite"
             @click="toggleFavorite"
           >
             <transition name="np-favorite-swap" mode="out-in">

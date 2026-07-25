@@ -464,7 +464,7 @@ function selectSettingsSection(id: SettingsSectionId) {
       motion: ['effects'],
       lyrics: ['lyrics'],
       network: [],
-      storage: ['storage'],
+      storage: ['storage', 'downloads'],
       backup: ['backup'],
       listen_together: ['listen_together'],
       language: [],
@@ -1051,7 +1051,7 @@ function confirmDataSaverChange() {
     </div>
         </div>
 
-        <div v-show="activeSettingsSection === 'personalization'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'personalization'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('personal') }">
 
     <!-- YouTube 国际化 -->
     <div class="setting-card">
@@ -1288,7 +1288,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 播放 -->
-        <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('playback') }">
     <div class="section-label clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
       <span>{{ t('settings.playback') }}</span>
@@ -1443,7 +1443,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 一起听 -->
-        <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('listen_together') }">
     <div class="section-label clickable" @click="toggleSection('listen_together')">
       <span class="material-symbols-rounded" style="font-size: 18px">group</span>
       <span>{{ t('listen_together.title') }}</span>
@@ -1534,12 +1534,14 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 下载管理 -->
-        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel">
-    <div class="section-label">
+        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('downloads') }">
+    <div class="section-label clickable" @click="toggleSection('downloads')">
       <span class="material-symbols-rounded" style="font-size: 18px">download</span>
       <span>{{ t('settings.download_manage') }}</span>
+      <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('downloads') }">expand_more</span>
     </div>
 
+    <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('downloads')">
     <template v-if="activeDownloadCount > 0">
       <div class="setting-card download-summary-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">downloading</span></div>
@@ -1591,10 +1593,11 @@ function confirmDataSaverChange() {
       </div>
       <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">chevron_right</span>
     </div>
+    </div></Transition>
         </div>
 
     <!-- 歌词 -->
-        <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('lyrics') }">
     <div class="section-label clickable" @click="toggleSection('lyrics')">
       <span class="material-symbols-rounded" style="font-size: 18px">lyrics</span>
       <span>{{ t('settings.lyrics') }}</span>
@@ -1676,7 +1679,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 动效 & 视觉 -->
-        <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('effects') }">
     <div class="section-label clickable" @click="toggleSection('effects')">
       <span class="material-symbols-rounded" style="font-size: 18px">auto_awesome</span>
       <span>{{ t('settings.effects') }}</span>
@@ -1758,7 +1761,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 音质 -->
-        <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('quality') }">
     <div class="section-label clickable" @click="toggleSection('quality')">
       <span class="material-symbols-rounded" style="font-size: 18px">headphones</span>
       <span>{{ t('settings.audio_quality') }}</span>
@@ -1799,7 +1802,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 存储 & 缓存 -->
-        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('storage') }">
     <div class="section-label clickable" @click="toggleSection('storage')">
       <span class="material-symbols-rounded" style="font-size: 18px">folder</span>
       <span>{{ t('settings.storage') }}</span>
@@ -1899,7 +1902,7 @@ function confirmDataSaverChange() {
         </div>
 
     <!-- 备份 & 恢复 -->
-        <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel">
+        <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel" :class="{ 'is-collapsed': !isExpanded('backup') }">
     <div class="section-label clickable" @click="toggleSection('backup')">
       <span class="material-symbols-rounded" style="font-size: 18px">cloud_sync</span>
       <span>{{ t('settings.backup') }}</span>
@@ -2554,6 +2557,10 @@ function confirmDataSaverChange() {
 
 .settings-section-panel {
   min-width: 0;
+}
+
+.settings-section-panel.is-collapsed > .section-label.clickable ~ * {
+  display: none !important;
 }
 
 .settings-section-intro {

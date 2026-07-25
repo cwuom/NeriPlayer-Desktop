@@ -44,9 +44,13 @@ pub struct CookieEntry {
 }
 
 impl NeteaseAuth {
-    /// 检查是否有有效的 MUSIC_U Cookie
+    /// 检查是否有已验证账号和有效的 MUSIC_U Cookie
     pub fn has_login(&self) -> bool {
-        self.cookies.iter().any(|c| c.name == "MUSIC_U" && !c.value.is_empty())
+        self.user_id.is_some_and(|user_id| user_id > 0)
+            && self
+                .cookies
+                .iter()
+                .any(|c| c.name == "MUSIC_U" && !c.value.is_empty())
     }
 }
 
@@ -81,6 +85,7 @@ pub struct AuthInfo {
     pub logged_in: bool,
     pub nickname: Option<String>,
     pub avatar_url: Option<String>,
+    pub account_id: Option<String>,
 }
 
 /// 三平台登录状态聚合响应
@@ -101,12 +106,14 @@ impl AuthState {
                     logged_in: a.has_login(),
                     nickname: a.nickname.clone(),
                     avatar_url: a.avatar_url.clone(),
+                    account_id: a.user_id.map(|id| id.to_string()),
                 },
                 None => AuthInfo {
                     platform: "netease".into(),
                     logged_in: false,
                     nickname: None,
                     avatar_url: None,
+                    account_id: None,
                 },
             },
             bilibili: match &self.bilibili {
@@ -115,12 +122,14 @@ impl AuthState {
                     logged_in: a.has_login(),
                     nickname: a.nickname.clone(),
                     avatar_url: a.avatar_url.clone(),
+                    account_id: a.mid.map(|id| id.to_string()),
                 },
                 None => AuthInfo {
                     platform: "bilibili".into(),
                     logged_in: false,
                     nickname: None,
                     avatar_url: None,
+                    account_id: None,
                 },
             },
             youtube: match &self.youtube {
@@ -129,14 +138,65 @@ impl AuthState {
                     logged_in: a.has_login(),
                     nickname: a.nickname.clone(),
                     avatar_url: a.avatar_url.clone(),
+                    account_id: None,
                 },
                 None => AuthInfo {
                     platform: "youtube".into(),
                     logged_in: false,
                     nickname: None,
                     avatar_url: None,
+                    account_id: None,
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CookieEntry, NeteaseAuth};
+
+    fn music_cookie() -> CookieEntry {
+        CookieEntry {
+            name: "MUSIC_U".into(),
+            value: "session".into(),
+            domain: "music.163.com".into(),
+        }
+    }
+
+    #[test]
+    fn netease_auth_without_user_id_is_not_logged_in() {
+        let auth = NeteaseAuth {
+            cookies: vec![music_cookie()],
+            user_id: None,
+            nickname: None,
+            avatar_url: None,
+        };
+
+        assert!(!auth.has_login());
+    }
+
+    #[test]
+    fn netease_auth_with_zero_user_id_is_not_logged_in() {
+        let auth = NeteaseAuth {
+            cookies: vec![music_cookie()],
+            user_id: Some(0),
+            nickname: None,
+            avatar_url: None,
+        };
+
+        assert!(!auth.has_login());
+    }
+
+    #[test]
+    fn netease_auth_with_cookie_and_positive_user_id_is_logged_in() {
+        let auth = NeteaseAuth {
+            cookies: vec![music_cookie()],
+            user_id: Some(42),
+            nickname: None,
+            avatar_url: None,
+        };
+
+        assert!(auth.has_login());
     }
 }

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useDownloadStore } from '@/stores/download'
+import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
@@ -20,12 +21,14 @@ import {
   readPlaylistDetailCache,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { createNeteaseDetailCacheScope } from '@/modules/library/neteaseDetailCacheScope'
 
 const props = defineProps<{ isAlbum?: boolean }>()
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
 const downloadStore = useDownloadStore()
+const auth = useAuthStore()
 const { t } = useI18n()
 
 const isLoading = ref(true)
@@ -39,6 +42,14 @@ const creator = ref('')
 const searchQuery = ref('')
 
 const tracks = ref<TrackInfo[]>([])
+let detailRequestGeneration = 0
+
+const neteaseDetailCacheScope = computed(() =>
+  createNeteaseDetailCacheScope(auth.netease, auth.neteaseSessionVersion),
+)
+const neteaseSessionFingerprint = computed(
+  () => `${auth.netease.loggedIn ? '1' : '0'}:${auth.neteaseSessionVersion}`,
+)
 
 interface NeteaseDetailCache {
   playlistName: string
@@ -70,6 +81,17 @@ function saveDetailCache(cacheKey: string) {
     creator: creator.value,
     tracks: tracks.value,
   })
+}
+
+function resetDetailState() {
+  playlistName.value = ''
+  coverUrl.value = ''
+  trackCount.value = 0
+  playCount.value = 0
+  description.value = ''
+  creator.value = ''
+  tracks.value = []
+  error.value = null
 }
 
 const filteredTracks = computed(() => {
@@ -138,14 +160,43 @@ function resolveNeteaseCover(...candidates: unknown[]): string {
   return ''
 }
 
-async function loadDetail() {
-  const id = Number(route.params.id)
-  if (!id) return
+function assertNeteaseDetailResponse(data: any) {
+  const code = Number(data?.code)
+  if (code === 200) return
+  const message = typeof data?.message === 'string' && data.message.trim()
+    ? data.message.trim()
+    : `Netease API code: ${Number.isFinite(code) ? code : 'invalid'}`
+  throw new Error(message)
+}
 
-  const cacheKey = playlistDetailCacheKey(props.isAlbum ? 'netease-album' : 'netease-playlist', id)
-  const cached = readPlaylistDetailCache<NeteaseDetailCache>(cacheKey)
+async function loadDetail() {
+  const requestGeneration = ++detailRequestGeneration
+  resetDetailState()
+  const id = Number(route.params.id)
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    error.value = t('player.load_failed')
+    isLoading.value = false
+    return
+  }
+
+  if (!auth.netease.loggedIn) {
+    error.value = t('player.load_failed')
+    isLoading.value = false
+    return
+  }
+  const cacheScope = neteaseDetailCacheScope.value
+  const cacheKey = cacheScope
+    ? playlistDetailCacheKey(
+      `${props.isAlbum ? 'netease-album' : 'netease-playlist'}:${cacheScope}`,
+      id,
+    )
+    : null
+  const cached = cacheKey
+    ? readPlaylistDetailCache<NeteaseDetailCache>(cacheKey)
+    : null
   if (cached) {
     applyDetailCache(cached)
+    if (props.isAlbum) playCount.value = 0
     isLoading.value = false
   } else {
     isLoading.value = true
@@ -155,6 +206,8 @@ async function loadDetail() {
   try {
     if (props.isAlbum) {
       const data = await invoke<any>('get_album_detail', { albumId: id })
+      if (requestGeneration !== detailRequestGeneration) return
+      assertNeteaseDetailResponse(data)
       const album = data?.album || {}
       playlistName.value = album.name || ''
       const albumCover = resolveNeteaseCover(
@@ -180,8 +233,11 @@ async function loadDetail() {
         audioUrl: '',
       }))
       trackCount.value = tracks.value.length
+      playCount.value = 0
     } else {
       const data = await invoke<any>('get_netease_playlist_detail', { playlistId: id })
+      if (requestGeneration !== detailRequestGeneration) return
+      assertNeteaseDetailResponse(data)
       const pl = data?.playlist || {}
       playlistName.value = pl.name || ''
       coverUrl.value = resolveNeteaseCover(pl.coverImgUrl, pl.picUrl, pl.cover)
@@ -201,13 +257,16 @@ async function loadDetail() {
         audioUrl: '',
       }))
     }
-    saveDetailCache(cacheKey)
+    if (cacheKey) saveDetailCache(cacheKey)
   } catch (e: any) {
-    if (!cached) {
+    if (requestGeneration === detailRequestGeneration) {
+      resetDetailState()
       error.value = e?.toString() || t('player.load_failed')
     }
   } finally {
-    isLoading.value = false
+    if (requestGeneration === detailRequestGeneration) {
+      isLoading.value = false
+    }
   }
 }
 
@@ -396,6 +455,19 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
 onMounted(() => {
   downloadStore.initEvents()
   void downloadStore.loadDownloads()
+  void loadDetail()
+})
+
+watch(() => [route.params.id, props.isAlbum], () => {
+  searchQuery.value = ''
+  leaveSelectionMode()
+  void loadDetail()
+})
+
+watch(neteaseSessionFingerprint, () => {
+  searchQuery.value = ''
+  leaveSelectionMode()
+  resetDetailState()
   void loadDetail()
 })
 </script>

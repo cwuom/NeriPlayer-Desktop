@@ -964,6 +964,7 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     state.rebuild_http(settings.bypass_proxy);
 
     if let Some(imported_auth) = payload.auth {
+        let _cookie_guard = state.auth_cookie_gate.lock().await;
         let mut auth = state.auth.lock();
         let previous_auth = auth.clone();
         for platform in ["netease", "bilibili", "youtube"] {
@@ -974,8 +975,12 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
             );
         }
         *auth = imported_auth;
-        crate::auth::cookies::inject_all(&state.cookie_jar, &auth);
         crate::auth::cookies::save_auth(&app, &auth);
+
+        // Keep the gate while releasing auth: the cleaner clears WebView data, then reads current auth into the Jar.
+        drop(auth);
+
+        crate::commands::auth_cmd::clear_and_reinject_webview_cookies(&app, &state).await?;
     }
     let legacy_history_mode = payload
         .github_sync

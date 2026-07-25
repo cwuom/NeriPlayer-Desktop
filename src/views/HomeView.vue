@@ -34,9 +34,13 @@ const isHomeSearchLoading = computed(() => recommend.homeHotSongs.loading || rec
 const showSkeleton = computed(() =>
   (recommend.isLoading || isHomeSearchLoading.value) &&
   recommend.recommendedPlaylists.length === 0 &&
-  Object.keys(recommend.userPlaylists).length === 0 &&
+  (recommend.userPlaylists['netease']?.length || 0) === 0 &&
   hotSongs.value.length === 0 &&
   radarSongs.value.length === 0
+)
+
+const neteaseSessionFingerprint = computed(() =>
+  `${auth.netease.loggedIn ? '1' : '0'}:${auth.neteaseSessionVersion}`,
 )
 
 const greeting = computed(() => {
@@ -69,46 +73,29 @@ const dailySongs = computed(() => {
   return recommend.recommendedSongs.slice(0, 20)
 })
 
-// 用户歌单（多平台合并）
-const myPlaylists = computed(() => {
-  const all = Object.entries(recommend.userPlaylists).flatMap(([platform, list]) =>
-    list.map(pl => ({ ...pl, platform })),
-  )
-  return all.slice(0, 12)
-})
+// 用户歌单（网易云）
+const myPlaylists = computed(() =>
+  (recommend.userPlaylists['netease'] || [])
+    .slice(0, 12)
+    .map(pl => ({ ...pl, platform: 'netease' })),
+)
 
 const platformHubs = computed(() => [
   {
     key: 'netease',
     title: t('settings.netease_account'),
-    subtitle: recommend.recommendedPlaylists.length > 0 ? t('home.recommended_playlists') : t('explore.login_for_recommend'),
+    subtitle: !auth.netease.loggedIn
+      ? t('explore.login_for_recommend')
+      : recommend.error
+        ? t('home.recommend_load_failed')
+        : recommend.isLoading && recommend.recommendedPlaylists.length === 0
+          ? t('player.loading')
+          : t('home.recommended_playlists'),
     icon: '/icons/ic_netease.svg',
     color: '#e74c3c',
     action: () => router.push({ name: 'explore' }),
   },
-  {
-    key: 'bilibili',
-    title: t('settings.bilibili_account'),
-    subtitle: auth.bilibili.loggedIn
-      ? t('home.recommended_videos')
-      : t('explore.bili_hint'),
-    icon: '/icons/ic_bilibili.svg',
-    color: '#00a1d6',
-    action: () => router.push({ name: 'explore', query: { platform: 'bilibili' } }),
-  },
-  {
-    key: 'youtube',
-    title: t('settings.youtube_account'),
-    subtitle: auth.youtube.loggedIn
-      ? t('player.track_count', { count: recommend.userPlaylists.youtube?.length || 0 })
-      : t('explore.yt_hint'),
-    icon: '/icons/ic_youtube.svg',
-    color: '#ff0033',
-    action: () => router.push({ name: 'explore', query: { platform: 'youtube' } }),
-  },
 ])
-
-const youtubeHomeItems = computed(() => recommend.homeFeedShelves.flatMap(s => s.items).slice(0, 14))
 
 // 三列网格分页（每页 3列 x 4行 = 12 项）
 const GRID_PAGE_SIZE = 12
@@ -173,58 +160,27 @@ function playDailySong(song: any) {
 }
 
 function openPlatformPlaylist(pl: any) {
-  if (pl.platform === 'bilibili') {
-    router.push({ name: 'bili-playlist', params: { mediaId: pl.id } })
-  } else if (pl.platform === 'youtube') {
-    router.push({ name: 'youtube-playlist', params: { browseId: pl.id } })
-  } else {
-    router.push({ name: 'netease-playlist', params: { id: pl.id } })
-  }
-}
-
-function openYoutubeHomeItem(item: any) {
-  if (item.browseId) {
-    router.push({ name: 'youtube-playlist', params: { browseId: item.browseId } })
-    return
-  }
-  if (item.videoId) {
-    player.play({
-      id: `youtube:${item.videoId}`,
-      title: item.title,
-      artist: item.subtitle || 'YouTube Music',
-      album: '',
-      durationMs: 0,
-      coverUrl: item.coverUrl || '',
-      audioUrl: '',
-    })
-  }
+  router.push({ name: 'netease-playlist', params: { id: pl.id } })
 }
 
 // 启动时恢复上次扫描 + 拉取推荐
 onMounted(() => {
   if (library.tracks.length === 0) library.restoreLastScan()
-  if (recommend.recommendedPlaylists.length === 0) recommend.fetchRecommendedPlaylists()
   if (auth.netease.loggedIn) {
-    if (recommend.recommendedSongs.length === 0) recommend.fetchRecommendedSongs()
+    if (recommend.recommendedPlaylists.length === 0) void recommend.fetchRecommendedPlaylists().catch(() => {})
+    if (recommend.recommendedSongs.length === 0) void recommend.fetchRecommendedSongs().catch(() => {})
     if (!recommend.userPlaylists['netease']?.length) recommend.fetchUserPlaylists('netease')
     recommend.fetchHomeSearchRecommendations()
   } else {
     recommend.clearHomeSearchRecommendations()
   }
-  if (auth.bilibili.loggedIn && !recommend.userPlaylists.bilibili?.length) {
-    recommend.fetchUserPlaylists('bilibili')
-  }
-  if (auth.youtube.loggedIn) {
-    if (!recommend.userPlaylists.youtube?.length) recommend.fetchUserPlaylists('youtube')
-    if (recommend.homeFeedShelves.length === 0) recommend.fetchHomeFeed()
-  }
 })
 
 // 登录状态变化时刷新推荐
-watch(() => auth.netease.loggedIn, (loggedIn) => {
-  if (loggedIn) {
-    recommend.fetchRecommendedPlaylists()
-    recommend.fetchRecommendedSongs()
+watch(neteaseSessionFingerprint, () => {
+  if (auth.netease.loggedIn) {
+    void recommend.fetchRecommendedPlaylists().catch(() => {})
+    void recommend.fetchRecommendedSongs().catch(() => {})
     recommend.fetchUserPlaylists('netease')
     recommend.fetchHomeSearchRecommendations(true)
   } else {
@@ -238,17 +194,6 @@ watch(() => recommend.homeHotSongs.items.length, () => {
 
 watch(() => recommend.homeRadarSongs.items.length, () => {
   radarPage.value = 0
-})
-
-watch(() => auth.bilibili.loggedIn, (loggedIn) => {
-  if (loggedIn) recommend.fetchUserPlaylists('bilibili')
-})
-
-watch(() => auth.youtube.loggedIn, (loggedIn) => {
-  if (loggedIn) {
-    recommend.fetchUserPlaylists('youtube')
-    recommend.fetchHomeFeed()
-  }
 })
 
 // 通知历史
@@ -330,7 +275,7 @@ function formatNotifTime(ts: number): string {
       </div>
     </section>
 
-    <!-- 多平台入口 -->
+    <!-- 网易云入口 -->
     <section class="section platform-hubs">
       <div
         v-for="hub in platformHubs"
@@ -447,7 +392,7 @@ function formatNotifTime(ts: number): string {
     </section>
 
     <!-- 为你推荐（登录网易云后显示） -->
-    <section v-if="recommend.recommendedPlaylists.length > 0" class="section">
+    <section v-if="auth.netease.loggedIn && recommend.recommendedPlaylists.length > 0" class="section">
       <div class="section-header">
         <h2 class="section-title">{{ t('home.for_you') }}</h2>
         <button class="section-more" @click="router.push('/explore')">
@@ -472,7 +417,7 @@ function formatNotifTime(ts: number): string {
     </section>
 
     <!-- 每日推荐歌曲 -->
-    <section v-if="dailySongs.length > 0" class="section">
+    <section v-if="auth.netease.loggedIn && dailySongs.length > 0" class="section">
       <div class="section-header">
         <h2 class="section-title">{{ t('home.daily_recommend') }}</h2>
       </div>
@@ -493,37 +438,8 @@ function formatNotifTime(ts: number): string {
       </div>
     </section>
 
-    <!-- YouTube Music 首页 Feed -->
-    <section v-if="youtubeHomeItems.length > 0" class="section">
-      <div class="section-header">
-        <h2 class="section-title">
-          <span class="platform-inline-icon" style="--platform-color: #ff0033; mask-image: url('/icons/ic_youtube.svg')"></span>
-          YouTube Music
-        </h2>
-        <button class="section-more" @click="router.push({ name: 'explore', query: { platform: 'youtube' } })">
-          <span>{{ t('home.more') }}</span>
-          <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-        </button>
-      </div>
-      <div class="daily-scroll">
-        <div
-          v-for="item in youtubeHomeItems"
-          :key="item.browseId || item.videoId || item.title"
-          class="daily-card"
-          @click="openYoutubeHomeItem(item)"
-        >
-          <div class="daily-cover">
-            <span class="material-symbols-rounded filled cover-fallback">music_note</span>
-            <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" />
-          </div>
-          <div class="daily-name">{{ item.title }}</div>
-          <div class="daily-artist">{{ item.subtitle }}</div>
-        </div>
-      </div>
-    </section>
-
     <!-- 我的歌单 -->
-    <section v-if="myPlaylists.length > 0" class="section">
+    <section v-if="auth.netease.loggedIn && myPlaylists.length > 0" class="section">
       <div class="section-header">
         <h2 class="section-title">{{ t('home.my_playlists') }}</h2>
         <button class="section-more" @click="router.push('/library')">
@@ -645,10 +561,10 @@ function formatNotifTime(ts: number): string {
 }
 
 
-/* 多平台入口 */
+/* 网易云入口 */
 .platform-hubs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 
@@ -682,10 +598,9 @@ function formatNotifTime(ts: number): string {
   }
 }
 
-.platform-hub-icon,
-.platform-inline-icon {
+.platform-hub-icon {
   display: inline-block;
-  background: var(--hub-color, var(--platform-color, var(--md-primary)));
+  background: var(--hub-color, var(--md-primary));
   mask-size: contain;
   mask-repeat: no-repeat;
   mask-position: center;
@@ -720,17 +635,6 @@ function formatNotifTime(ts: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.platform-inline-icon {
-  width: 20px;
-  height: 20px;
-  vertical-align: -4px;
-  margin-right: 6px;
-}
-
-@media (max-width: 900px) {
-  .platform-hubs { grid-template-columns: 1fr; }
 }
 
 /* 快捷卡片 */
@@ -803,7 +707,7 @@ function formatNotifTime(ts: number): string {
 /* 段落 */
 .section { margin-bottom: 24px; }
 
-/* 三列歌曲网格（YouTube Music 风格） */
+/* 三列歌曲网格 */
 .song-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
