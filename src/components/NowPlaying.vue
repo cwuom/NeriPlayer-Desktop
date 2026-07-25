@@ -35,6 +35,7 @@ import CoverBlurBackground from './CoverBlurBackground.vue'
 import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import WaveformSlider from './WaveformSlider.vue'
 import LyricsView from './LyricsView.vue'
+import NowPlayingViewSwitch from './NowPlayingViewSwitch.vue'
 import QueuePanel from './QueuePanel.vue'
 import AddToPlaylistDialog from './AddToPlaylistDialog.vue'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
@@ -43,6 +44,10 @@ import EditableRangeValue from './ui/EditableRangeValue.vue'
 import ContextMenu from './ui/ContextMenu.vue'
 import type { ContextMenuActionItem } from '@/utils/contextMenu'
 import { playbackSessionTrackKey } from '@/modules/playback/playbackRequest'
+import {
+  resolveNowPlayingViewMode,
+  type NowPlayingViewMode,
+} from '@/modules/nowPlaying/viewMode'
 import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { summarizeLogError } from '@/utils/logSanitizer'
@@ -62,7 +67,7 @@ const downloadStore = useDownloadStore()
 const lyricOffsetStore = useLyricOffsetStore()
 const router = useRouter()
 const { t } = useI18n()
-const playViewMode = ref<'cover' | 'lyrics'>('cover')
+const playViewMode = ref<NowPlayingViewMode>('cover')
 const coverLoadError = ref(false)
 const coverUrl = ref('')
 const showVolumeSlider = ref(false)
@@ -1002,6 +1007,7 @@ const contextMenu = ref({ show: false, x: 0, y: 0, type: '' as 'title' | 'artist
 
 watch(() => player.hasPlaybackSession, (hasSession) => {
   if (hasSession) return
+  playViewMode.value = 'cover'
   closeToolbarPopovers()
   showQueue.value = false
   showMoreSheet.value = false
@@ -1080,6 +1086,25 @@ const displayLyrics = computed(() => {
   if (player.lyrics.length) return player.lyrics
   if (fetchedLyrics.value.length) return fetchedLyrics.value
   return []
+})
+
+const lyricsModeAvailable = computed(
+  () => displayLyrics.value.length > 0 || isFetchingLyrics.value,
+)
+
+function requestPlayViewMode(requestedMode: NowPlayingViewMode) {
+  playViewMode.value = resolveNowPlayingViewMode(
+    playViewMode.value,
+    requestedMode,
+    displayLyrics.value.length > 0,
+    isFetchingLyrics.value,
+  )
+}
+
+watch(lyricsModeAvailable, (available) => {
+  if (!available && playViewMode.value === 'lyrics') {
+    requestPlayViewMode('lyrics')
+  }
 })
 
 // 更多选项面板子视图
@@ -1830,7 +1855,15 @@ const sliderActiveColor = computed(() => {
             'cover-wrap--card': settings.coverStyle === 'card',
             'cover-wrap--disc': settings.coverStyle !== 'card',
             'cover-wrap--switching': isTrackSwitchAnimating,
+            'cover-wrap--lyrics-entry': lyricsModeAvailable,
           }"
+          :role="lyricsModeAvailable ? 'button' : undefined"
+          :tabindex="lyricsModeAvailable ? 0 : -1"
+          :aria-label="lyricsModeAvailable ? t('player.view_mode_lyrics') : undefined"
+          :title="lyricsModeAvailable ? t('player.view_mode_lyrics') : undefined"
+          @click="requestPlayViewMode('lyrics')"
+          @keydown.enter.prevent="requestPlayViewMode('lyrics')"
+          @keydown.space.prevent="requestPlayViewMode('lyrics')"
           @contextmenu="openContextMenu($event, 'cover')"
         >
           <!-- Card 模式（圆角矩形，对齐 Android） -->
@@ -2199,6 +2232,12 @@ const sliderActiveColor = computed(() => {
 
       <!-- 右侧歌词 -->
       <section class="np-right" :class="{ 'np-right--switching': isTrackSwitchAnimating, 'np-right--beat-active': isVisualBeatActive }">
+        <NowPlayingViewSwitch
+          class="np-view-switch-anchor"
+          :model-value="playViewMode"
+          :lyrics-available="lyricsModeAvailable"
+          @update:model-value="requestPlayViewMode"
+        />
         <LyricsView
           v-if="displayLyrics.length > 0"
           :lyrics="displayLyrics"
@@ -3139,6 +3178,7 @@ const sliderActiveColor = computed(() => {
 }
 
 .np-right {
+  position: relative;
   flex: 1;
   min-width: 0;
   background: transparent;
@@ -3148,6 +3188,15 @@ const sliderActiveColor = computed(() => {
   padding: 0 40px 8px 8px;
   transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 280ms ease, filter 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
+
+.np-view-switch-anchor {
+  position: absolute;
+  top: 8px;
+  right: 48px;
+  z-index: 4;
+}
+
+.np-body--lyrics-mode .np-view-switch-anchor { right: 48px; }
 
 /* 封面：全屏时更大更稳 */
 .cover-wrap {
@@ -3177,6 +3226,15 @@ const sliderActiveColor = computed(() => {
 
 .cover-wrap--beat-active {
   animation: np-cover-beat-unison 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cover-wrap--lyrics-entry {
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--np-primary-container, #fff);
+    outline-offset: 5px;
+  }
 }
 
 /* Card 模式（圆角矩形，对齐 Android） */
