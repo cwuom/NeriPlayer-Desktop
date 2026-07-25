@@ -11,8 +11,17 @@ export interface PlaylistInfo {
   name: string
   coverUrl: string
   trackCount: number
+  playCount?: number
   description?: string
   creator?: string
+}
+
+export interface UserAlbumInfo {
+  id: string | number
+  name: string
+  coverUrl: string
+  artist: string
+  trackCount: number
 }
 
 export interface HomeFeedShelf {
@@ -71,7 +80,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   const userPlaylists = ref<Record<string, PlaylistInfo[]>>({})
 
   // 用户收藏专辑（网易云）
-  const userAlbums = ref<any[]>([])
+  const userAlbums = ref<UserAlbumInfo[]>([])
 
   // 用户喜欢的歌曲 ID 集合
   const likedSongIds = ref<Set<number>>(new Set())
@@ -214,6 +223,7 @@ export const useRecommendStore = defineStore('recommend', () => {
           name: p.name,
           coverUrl: p.coverImgUrl || '',
           trackCount: p.trackCount || 0,
+          playCount: Number(p.playCount) || 0,
           creator: p.creator?.nickname || '',
         }))
       } else if (platform === 'bilibili') {
