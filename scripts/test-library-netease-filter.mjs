@@ -21,12 +21,16 @@ const albums = [
   { id: 301, name: 'Sunset', artist: 'Luna Gray', trackCount: 10 },
   { id: 'album-404', name: 'Ambient Field', artist: 'North Wind', trackCount: 24 },
 ]
+const unicodePlaylists = [
+  { id: 505, name: 'Caf\u00e9', playCount: 1, trackCount: 1 },
+]
 
 assert.equal(normalizeNeteaseLibrarySearch('  MoRnInG  '), 'morning')
 assert.deepEqual(filterNeteasePlaylists(playlists, 'FOCUS'), [playlists[0]])
 assert.deepEqual(filterNeteasePlaylists(playlists, 'cloud-202'), [playlists[1]])
 assert.deepEqual(filterNeteasePlaylists(playlists, '4200'), [playlists[0]])
 assert.deepEqual(filterNeteasePlaylists(playlists, '12'), [playlists[1]])
+assert.deepEqual(filterNeteasePlaylists(unicodePlaylists, 'Cafe\u0301'), unicodePlaylists)
 assert.equal(filterNeteasePlaylists(playlists, ''), playlists)
 assert.deepEqual(filterNeteasePlaylists(playlists, 'missing'), [])
 assert.deepEqual(filterNeteaseAlbums(albums, 'LUNA'), [albums[0]])
