@@ -8,12 +8,15 @@ import { offsetBucketForSource } from '@/modules/lyrics/lyricOffset'
 import { loadTrackLyrics } from '@/modules/lyrics/loadTrackLyrics'
 
 export const DESKTOP_LYRICS_WINDOW_LABEL = 'desktop-lyrics'
+// The legacy state event remains the full hydration payload; playback ticks are lightweight.
 export const DESKTOP_LYRICS_STATE_EVENT = 'desktop-lyrics:state'
+export const DESKTOP_LYRICS_PLAYBACK_EVENT = 'desktop-lyrics:playback'
 export const DESKTOP_LYRICS_READY_EVENT = 'desktop-lyrics:ready'
 export const DESKTOP_LYRICS_HIDDEN_EVENT = 'desktop-lyrics:hidden'
+export const DESKTOP_LYRICS_CONTROL_EVENT = 'desktop-lyrics:control'
 
 const MAIN_WINDOW_LABEL = 'main'
-const SNAPSHOT_THROTTLE_MS = 80
+const PLAYBACK_THROTTLE_MS = 80
 
 export interface DesktopLyricsSnapshot {
   track: Pick<TrackInfo, 'id' | 'title' | 'artist'> | null
@@ -22,9 +25,20 @@ export interface DesktopLyricsSnapshot {
   durationMs: number
   lyricOffsetMs: number
   isPlaying: boolean
+  isLoadingAudio: boolean
   isLoadingLyrics: boolean
   showTranslation: boolean
 }
+
+export interface DesktopLyricsPlaybackState {
+  trackId: string | null
+  positionMs: number
+  durationMs: number
+  isPlaying: boolean
+  isLoadingAudio: boolean
+}
+
+export type DesktopLyricsControl = 'previous' | 'toggle' | 'next'
 
 type PlayerStore = ReturnType<typeof usePlayerStore>
 type SettingsStore = ReturnType<typeof useSettingsStore>
@@ -78,12 +92,23 @@ export async function startDesktopLyricsBridge(
   let lyrics: LyricLine[] = []
   let isLoadingLyrics = false
   let loadGeneration = 0
-  let snapshotTimer: ReturnType<typeof setTimeout> | null = null
+  let playbackTimer: ReturnType<typeof setTimeout> | null = null
   let unlistenReady: UnlistenFn | null = null
   let unlistenHidden: UnlistenFn | null = null
+  let unlistenControl: UnlistenFn | null = null
   const stopWatches: WatchStopHandle[] = []
 
-  function snapshot(): DesktopLyricsSnapshot {
+  function playbackSnapshot(): DesktopLyricsPlaybackState {
+    return {
+      trackId: player.currentTrack?.id ?? null,
+      positionMs: player.interpolatedPositionMs,
+      durationMs: player.durationMs,
+      isPlaying: player.isPlaying,
+      isLoadingAudio: player.isLoadingAudio,
+    }
+  }
+
+  function stateSnapshot(): DesktopLyricsSnapshot {
     const track = player.currentTrack
     const bucket = offsetBucketForSource(trackSource(track))
     return {
@@ -93,29 +118,32 @@ export async function startDesktopLyricsBridge(
       durationMs: player.durationMs,
       lyricOffsetMs: lyricOffsetStore.effectiveOffsetMs(track, bucket),
       isPlaying: player.isPlaying,
+      isLoadingAudio: player.isLoadingAudio,
       isLoadingLyrics,
       showTranslation: settings.showTranslation,
     }
   }
 
-  function emitSnapshot() {
+  function emitState() {
     if (!active) return
-    void emitTo(DESKTOP_LYRICS_WINDOW_LABEL, DESKTOP_LYRICS_STATE_EVENT, snapshot()).catch(() => {})
+    void emitTo(DESKTOP_LYRICS_WINDOW_LABEL, DESKTOP_LYRICS_STATE_EVENT, stateSnapshot()).catch(() => {})
   }
 
-  function scheduleSnapshot(immediate = false) {
+  function emitPlayback() {
     if (!active) return
-    if (immediate) {
-      if (snapshotTimer) clearTimeout(snapshotTimer)
-      snapshotTimer = null
-      emitSnapshot()
-      return
-    }
-    if (snapshotTimer) return
-    snapshotTimer = setTimeout(() => {
-      snapshotTimer = null
-      emitSnapshot()
-    }, SNAPSHOT_THROTTLE_MS)
+    void emitTo(
+      DESKTOP_LYRICS_WINDOW_LABEL,
+      DESKTOP_LYRICS_PLAYBACK_EVENT,
+      playbackSnapshot(),
+    ).catch(() => {})
+  }
+
+  function schedulePlayback() {
+    if (!active || playbackTimer) return
+    playbackTimer = setTimeout(() => {
+      playbackTimer = null
+      emitPlayback()
+    }, PLAYBACK_THROTTLE_MS)
   }
 
   async function refreshLyrics() {
@@ -123,7 +151,7 @@ export async function startDesktopLyricsBridge(
     const track = player.currentTrack
     lyrics = []
     isLoadingLyrics = !!track
-    scheduleSnapshot(true)
+    emitState()
     if (!track) return
 
     try {
@@ -136,7 +164,7 @@ export async function startDesktopLyricsBridge(
     } finally {
       if (generation === loadGeneration) {
         isLoadingLyrics = false
-        scheduleSnapshot(true)
+        emitState()
       }
     }
   }
@@ -155,8 +183,23 @@ export async function startDesktopLyricsBridge(
     unlistenHidden = await listen(DESKTOP_LYRICS_HIDDEN_EVENT, () => {
       active = false
       loadGeneration++
-      if (snapshotTimer) clearTimeout(snapshotTimer)
-      snapshotTimer = null
+      if (playbackTimer) clearTimeout(playbackTimer)
+      playbackTimer = null
+    })
+  } catch {}
+  try {
+    unlistenControl = await listen<DesktopLyricsControl>(DESKTOP_LYRICS_CONTROL_EVENT, event => {
+      switch (event.payload) {
+        case 'previous':
+          void player.previous()
+          break
+        case 'toggle':
+          void player.togglePlayPause()
+          break
+        case 'next':
+          void player.next()
+          break
+      }
     })
   } catch {}
 
@@ -171,24 +214,31 @@ export async function startDesktopLyricsBridge(
     () => [
       player.currentTrack?.title,
       player.currentTrack?.artist,
-      player.interpolatedPositionMs,
-      player.durationMs,
-      player.isPlaying,
       settings.showTranslation,
       settings.cloudMusicOffset,
       settings.qqMusicOffset,
       lyricOffsetStore.offsets,
     ] as const,
-    () => scheduleSnapshot(),
+    () => emitState(),
     { deep: true },
+  ))
+  stopWatches.push(watch(
+    () => [
+      player.interpolatedPositionMs,
+      player.durationMs,
+      player.isPlaying,
+      player.isLoadingAudio,
+    ] as const,
+    () => schedulePlayback(),
   ))
 
   return () => {
     active = false
     loadGeneration++
-    if (snapshotTimer) clearTimeout(snapshotTimer)
+    if (playbackTimer) clearTimeout(playbackTimer)
     for (const stop of stopWatches) stop()
     unlistenReady?.()
     unlistenHidden?.()
+    unlistenControl?.()
   }
 }

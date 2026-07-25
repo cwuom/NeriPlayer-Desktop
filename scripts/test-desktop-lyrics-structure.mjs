@@ -35,6 +35,15 @@ for (const option of [
   assert.ok(bridgeSource.includes(option), `desktop lyrics window must use ${option}`)
 }
 assert.match(bridgeSource, /emitTo\(DESKTOP_LYRICS_WINDOW_LABEL, DESKTOP_LYRICS_STATE_EVENT/)
+assert.match(bridgeSource, /DESKTOP_LYRICS_PLAYBACK_EVENT\s*=\s*['"]desktop-lyrics:playback['"]/)
+assert.match(bridgeSource, /emitTo\([\s\S]*?DESKTOP_LYRICS_PLAYBACK_EVENT,[\s\S]*?playbackSnapshot\(\)/)
+const playbackSnapshotBody = bridgeSource.match(
+  /function playbackSnapshot\(\): DesktopLyricsPlaybackState\s*\{\s*return\s*\{([\s\S]*?)\n\s*\}\s*\n\s*\}/,
+)?.[1] || ''
+assert.ok(playbackSnapshotBody, 'the desktop lyrics bridge must build a lightweight playback payload')
+assert.match(playbackSnapshotBody, /trackId:/)
+assert.match(playbackSnapshotBody, /positionMs:/)
+assert.doesNotMatch(playbackSnapshotBody, /lyrics|showTranslation|lyricOffsetMs/)
 assert.match(bridgeSource, /listen\(DESKTOP_LYRICS_READY_EVENT/)
 assert.match(lyricLoaderSource, /loadLyricsSingleFlight/)
 assert.match(lyricLoaderSource, /getCachedLyrics/)
@@ -112,6 +121,8 @@ assert.equal(
 
 assert.ok(windowSource, 'desktop lyrics window component must exist')
 assert.match(windowSource, /listen<DesktopLyricsSnapshot>\(DESKTOP_LYRICS_STATE_EVENT/)
+assert.match(windowSource, /listen<DesktopLyricsPlaybackState>\([\s\S]*?DESKTOP_LYRICS_PLAYBACK_EVENT/)
+assert.match(windowSource, /\(current\.track\?\.id \?\? null\) !== event\.payload\.trackId/)
 assert.match(windowSource, /startDragging\(\)/)
 assert.match(windowSource, /locked\.value = !locked\.value/)
 assert.match(windowSource, /getCurrentWindow\(\)\.hide\(\)/)
@@ -127,9 +138,51 @@ assert.ok(
   'available monitor work areas must be checked before restoring a saved position',
 )
 assert.match(windowSource, /const nextLine = computed\(/)
+assert.match(windowSource, /if \(!currentLine\.value\) return firstTimedLyricLine\(state\.lyrics\)/)
 assert.match(windowSource, /resolveNextDesktopLyricLine\(state\.lyrics, currentLine\.value\)/)
 assert.match(windowSource, /const nextText = computed\(/)
+assert.match(
+  windowSource,
+  /const waitingForFirstLine = computed\(\(\) => !currentLine\.value && !!nextLine\.value\)/,
+)
+assert.match(windowSource, /v-if="!waitingForFirstLine"/)
 assert.match(windowSource, /<p v-if="nextText" class="desktop-lyrics-next">/)
+const firstTimedLyricFunctionSource = windowSource.match(
+  /(function firstTimedLyricLine[\s\S]*?\r?\n})\r?\n\r?\nconst currentLine/,
+)?.[1] || ''
+assert.ok(firstTimedLyricFunctionSource, 'the first-line waiting resolver must be executable')
+const compiledFirstTimedLyricFunction = ts.transpileModule(
+  `${firstTimedLyricFunctionSource}\nexport { firstTimedLyricLine }`,
+  {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+    },
+  },
+).outputText
+const firstTimedLyricModuleUrl = `data:text/javascript;base64,${Buffer.from(compiledFirstTimedLyricFunction).toString('base64')}`
+const { firstTimedLyricLine } = await import(firstTimedLyricModuleUrl)
+assert.equal(
+  firstTimedLyricLine([
+    { startMs: 3_000, text: 'second' },
+    { startMs: Number.NaN, text: 'invalid' },
+    { startMs: 1_000, text: 'first' },
+  ])?.text,
+  'first',
+  'the waiting state must show the earliest timed lyric even when input is not sorted',
+)
+assert.match(windowSource, /const progressPercent = computed\(/)
+assert.match(windowSource, /class="desktop-lyrics-progress-fill"/)
+assert.match(windowSource, /:style="\{ width: `\$\{progressPercent\}%` \}"/)
+for (const action of ['previous', 'toggle', 'next']) {
+  assert.match(
+    windowSource,
+    new RegExp(`sendPlaybackControl\\('${action}'\\)`),
+    `desktop lyrics must expose the ${action} playback control`,
+  )
+}
+assert.match(windowSource, /:disabled="!snapshot\?\.track"/)
+assert.match(windowSource, /aria-label=/)
 assert.ok(
   windowSource.indexOf('class="desktop-lyrics-translation"')
     < windowSource.indexOf('class="desktop-lyrics-next"'),
@@ -147,6 +200,13 @@ assert.match(
   'the 420px layout must leave the lyric column shrinkable',
 )
 assert.doesNotMatch(windowSource, /usePlayerStore|play_url|play_file|togglePlayPause/)
+assert.match(bridgeSource, /DESKTOP_LYRICS_CONTROL_EVENT/)
+assert.match(bridgeSource, /listen<DesktopLyricsControl>\(DESKTOP_LYRICS_CONTROL_EVENT/)
+assert.match(bridgeSource, /case 'previous':[\s\S]*?player\.previous\(\)/)
+assert.match(bridgeSource, /case 'toggle':[\s\S]*?player\.togglePlayPause\(\)/)
+assert.match(bridgeSource, /case 'next':[\s\S]*?player\.next\(\)/)
+assert.match(windowSource, /@media \(max-width: 620px\)/)
+assert.match(windowSource, /@media \(max-height: 132px\)/)
 
 function pxValue(selector, property) {
   const selectorPattern = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -218,6 +278,150 @@ const tauriConfig = JSON.parse(tauriConfigSource)
 assert.equal(tauriConfig.app.macOSPrivateApi, true, 'transparent macOS windows require macOSPrivateApi')
 
 const dataModuleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
+const bridgeVueMockUrl = dataModuleUrl(`
+  export const watch = (source, callback, options) => {
+    globalThis.__desktopLyricsBridgeWatches.push({ source, callback, options })
+    return () => {}
+  }
+`)
+const bridgeEventMockUrl = dataModuleUrl(`
+  export const emitTo = async (target, event, payload) => {
+    globalThis.__desktopLyricsBridgeEmits.push({ target, event, payload })
+  }
+  export const listen = async (event, callback) => {
+    globalThis.__desktopLyricsBridgeListeners.set(event, callback)
+    return () => {}
+  }
+`)
+const bridgeWindowMockUrl = dataModuleUrl(`
+  export class WebviewWindow {
+    static async getByLabel() { return null }
+    constructor() {}
+    async once() { return () => {} }
+  }
+`)
+const bridgeOffsetMockUrl = dataModuleUrl(`
+  export const offsetBucketForSource = () => 'none'
+`)
+const bridgeLyricsMockUrl = dataModuleUrl(`
+  export const loadTrackLyrics = async () => globalThis.__desktopLyricsBridgeLines
+`)
+
+globalThis.__desktopLyricsBridgeWatches = []
+globalThis.__desktopLyricsBridgeEmits = []
+globalThis.__desktopLyricsBridgeListeners = new Map()
+globalThis.__desktopLyricsBridgeLines = [{
+  startMs: 1_000,
+  durationMs: 2_000,
+  text: 'bridge lyric',
+  words: [],
+}]
+
+const compiledBridge = ts.transpileModule(
+  bridgeSource
+    .replace("from 'vue'", `from '${bridgeVueMockUrl}'`)
+    .replace("from '@tauri-apps/api/event'", `from '${bridgeEventMockUrl}'`)
+    .replace("from '@tauri-apps/api/webviewWindow'", `from '${bridgeWindowMockUrl}'`)
+    .replace("from '@/modules/lyrics/lyricOffset'", `from '${bridgeOffsetMockUrl}'`)
+    .replace("from '@/modules/lyrics/loadTrackLyrics'", `from '${bridgeLyricsMockUrl}'`),
+  {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+    },
+  },
+).outputText
+const bridgeModule = await import(dataModuleUrl(compiledBridge))
+const bridgePlayer = {
+  currentTrack: {
+    id: 'netease:bridge-test',
+    title: 'Bridge test',
+    artist: 'Artist',
+    source: 'netease',
+    durationMs: 180_000,
+    audioUrl: '',
+    syncPayload: {},
+  },
+  interpolatedPositionMs: 0,
+  durationMs: 180_000,
+  isPlaying: true,
+  isLoadingAudio: false,
+  previous: async () => {},
+  togglePlayPause: async () => {},
+  next: async () => {},
+}
+const bridgeSettings = {
+  showTranslation: false,
+  cloudMusicOffset: 1_000,
+  qqMusicOffset: 0,
+}
+const bridgeOffsetStore = {
+  offsets: {},
+  effectiveOffsetMs: () => 1_000,
+}
+const stopBridge = await bridgeModule.startDesktopLyricsBridge(
+  bridgePlayer,
+  bridgeSettings,
+  bridgeOffsetStore,
+)
+globalThis.__desktopLyricsBridgeListeners
+  .get(bridgeModule.DESKTOP_LYRICS_READY_EVENT)?.({ payload: null })
+await new Promise(resolve => setTimeout(resolve, 0))
+
+const initialStateEmits = globalThis.__desktopLyricsBridgeEmits.filter(
+  call => call.event === bridgeModule.DESKTOP_LYRICS_STATE_EVENT,
+)
+assert.ok(initialStateEmits.length >= 2, 'activation must emit loading and loaded content states')
+assert.deepEqual(initialStateEmits.at(-1).payload.lyrics, globalThis.__desktopLyricsBridgeLines)
+
+const playbackWatch = globalThis.__desktopLyricsBridgeWatches.find(({ source }) => {
+  const value = source()
+  return Array.isArray(value) && value.length === 4
+})
+assert.ok(playbackWatch, 'the bridge must register a dedicated lightweight playback watcher')
+const stateCountBeforePlayback = initialStateEmits.length
+bridgePlayer.interpolatedPositionMs = 1_234
+playbackWatch.callback()
+bridgePlayer.interpolatedPositionMs = 2_345
+playbackWatch.callback()
+await new Promise(resolve => setTimeout(resolve, 110))
+
+const playbackEmits = globalThis.__desktopLyricsBridgeEmits.filter(
+  call => call.event === bridgeModule.DESKTOP_LYRICS_PLAYBACK_EVENT,
+)
+assert.equal(playbackEmits.length, 1)
+assert.deepEqual(Object.keys(playbackEmits[0].payload).sort(), [
+  'durationMs',
+  'isLoadingAudio',
+  'isPlaying',
+  'positionMs',
+  'trackId',
+])
+assert.equal(playbackEmits[0].payload.positionMs, 2_345)
+assert.equal('lyrics' in playbackEmits[0].payload, false)
+assert.equal(
+  globalThis.__desktopLyricsBridgeEmits.filter(
+    call => call.event === bridgeModule.DESKTOP_LYRICS_STATE_EVENT,
+  ).length,
+  stateCountBeforePlayback,
+  'position ticks must not resend the full lyrics payload',
+)
+
+const contentWatch = globalThis.__desktopLyricsBridgeWatches.find(({ source }) => {
+  const value = source()
+  return Array.isArray(value) && value.length === 6
+})
+assert.ok(contentWatch, 'the bridge must register a separate content metadata watcher')
+bridgeSettings.showTranslation = true
+contentWatch.callback()
+const stateEmitsAfterContentChange = globalThis.__desktopLyricsBridgeEmits.filter(
+  call => call.event === bridgeModule.DESKTOP_LYRICS_STATE_EVENT,
+)
+assert.equal(stateEmitsAfterContentChange.length, stateCountBeforePlayback + 1)
+assert.equal(stateEmitsAfterContentChange.at(-1).payload.showTranslation, true)
+assert.deepEqual(stateEmitsAfterContentChange.at(-1).payload.lyrics, globalThis.__desktopLyricsBridgeLines)
+stopBridge()
+
 const tauriMockUrl = dataModuleUrl(`
   export const invoke = (...args) => globalThis.__desktopLyricsInvoke(...args)
 `)

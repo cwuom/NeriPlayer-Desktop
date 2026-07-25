@@ -9,9 +9,13 @@ import {
 } from '@/modules/desktopLyrics/activeLine'
 import { clampWindowPositionToWorkAreas } from '@/modules/desktopLyrics/windowPosition'
 import {
+  DESKTOP_LYRICS_CONTROL_EVENT,
   DESKTOP_LYRICS_HIDDEN_EVENT,
+  DESKTOP_LYRICS_PLAYBACK_EVENT,
   DESKTOP_LYRICS_READY_EVENT,
   DESKTOP_LYRICS_STATE_EVENT,
+  type DesktopLyricsControl,
+  type DesktopLyricsPlaybackState,
   type DesktopLyricsSnapshot,
 } from '@/modules/desktopLyrics/bridge'
 
@@ -61,8 +65,21 @@ async function restoreWindowPosition(appWindow: ReturnType<typeof getCurrentWind
 
 const locked = ref(readLocked())
 let unlistenState: UnlistenFn | null = null
+let unlistenPlayback: UnlistenFn | null = null
 let unlistenMoved: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
+
+function firstTimedLyricLine(lines: DesktopLyricsSnapshot['lyrics']) {
+  let first: DesktopLyricsSnapshot['lyrics'][number] | null = null
+  let firstStartMs = Number.POSITIVE_INFINITY
+  for (const line of lines) {
+    const startMs = Number(line.startMs)
+    if (!Number.isFinite(startMs) || startMs >= firstStartMs) continue
+    first = line
+    firstStartMs = startMs
+  }
+  return first
+}
 
 const currentLine = computed(() => {
   const state = snapshot.value
@@ -84,6 +101,7 @@ const currentTranslation = computed(() => {
 const nextLine = computed(() => {
   const state = snapshot.value
   if (!state) return null
+  if (!currentLine.value) return firstTimedLyricLine(state.lyrics)
   return resolveNextDesktopLyricLine(state.lyrics, currentLine.value)
 })
 
@@ -91,6 +109,20 @@ const nextText = computed(() => {
   const line = nextLine.value
   if (!line) return ''
   return line.text || line.words.map(word => word.text).join('')
+})
+
+const waitingForFirstLine = computed(() => !currentLine.value && !!nextLine.value)
+
+const progressPercent = computed(() => {
+  const positionMs = Number(snapshot.value?.positionMs) || 0
+  const durationMs = Number(snapshot.value?.durationMs) || 0
+  if (durationMs <= 0) return 0
+  return Math.min(100, Math.max(0, positionMs / durationMs * 100))
+})
+
+const playbackIcon = computed(() => {
+  if (snapshot.value?.isLoadingAudio) return 'progress_activity'
+  return snapshot.value?.isPlaying ? 'pause' : 'play_arrow'
 })
 
 const emptyText = computed(() => {
@@ -104,6 +136,11 @@ function toggleLocked() {
   try {
     localStorage.setItem(LOCK_STORAGE_KEY, String(locked.value))
   } catch {}
+}
+
+function sendPlaybackControl(action: DesktopLyricsControl) {
+  if (!snapshot.value?.track) return
+  void emitTo('main', DESKTOP_LYRICS_CONTROL_EVENT, action).catch(() => {})
 }
 
 async function beginDrag() {
@@ -128,6 +165,22 @@ onMounted(async () => {
     unlistenState = await listen<DesktopLyricsSnapshot>(DESKTOP_LYRICS_STATE_EVENT, event => {
       snapshot.value = event.payload
     })
+  } catch {}
+  try {
+    unlistenPlayback = await listen<DesktopLyricsPlaybackState>(
+      DESKTOP_LYRICS_PLAYBACK_EVENT,
+      event => {
+        const current = snapshot.value
+        if (!current || (current.track?.id ?? null) !== event.payload.trackId) return
+        snapshot.value = {
+          ...current,
+          positionMs: event.payload.positionMs,
+          durationMs: event.payload.durationMs,
+          isPlaying: event.payload.isPlaying,
+          isLoadingAudio: event.payload.isLoadingAudio,
+        }
+      },
+    )
   } catch {}
 
   let appWindow: ReturnType<typeof getCurrentWindow> | null = null
@@ -163,6 +216,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlistenState?.()
+  unlistenPlayback?.()
   unlistenMoved?.()
   unlistenCloseRequested?.()
   document.documentElement.classList.remove('desktop-lyrics-window')
@@ -188,7 +242,11 @@ onUnmounted(() => {
     <div class="desktop-lyrics-copy" aria-live="polite">
       <Transition name="desktop-line" mode="out-in">
         <div :key="currentLine?.startMs ?? 'empty'" class="desktop-lyrics-line-group">
-          <p class="desktop-lyrics-line" :class="{ 'is-empty': !currentText }">
+          <p
+            v-if="!waitingForFirstLine"
+            class="desktop-lyrics-line"
+            :class="{ 'is-empty': !currentText }"
+          >
             {{ currentText || emptyText }}
           </p>
           <p v-if="currentTranslation" class="desktop-lyrics-translation">
@@ -199,26 +257,78 @@ onUnmounted(() => {
           </p>
         </div>
       </Transition>
+      <div
+        v-if="snapshot?.track"
+        class="desktop-lyrics-progress"
+        role="progressbar"
+        :aria-valuenow="Math.round(progressPercent)"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
+        <span
+          class="desktop-lyrics-progress-fill"
+          :style="{ width: `${progressPercent}%` }"
+        ></span>
+      </div>
     </div>
 
     <div class="desktop-lyrics-actions" @mousedown.stop>
-      <button
-        type="button"
-        class="desktop-lyrics-action"
-        :class="{ active: locked }"
-        :title="t(locked ? 'player.desktop_lyrics_unlock' : 'player.desktop_lyrics_lock')"
-        @click="toggleLocked"
-      >
-        <span class="material-symbols-rounded">{{ locked ? 'lock' : 'lock_open' }}</span>
-      </button>
-      <button
-        type="button"
-        class="desktop-lyrics-action"
-        :title="t('player.desktop_lyrics_hide')"
-        @click="hideWindow"
-      >
-        <span class="material-symbols-rounded">close</span>
-      </button>
+      <div class="desktop-lyrics-transport">
+        <button
+          type="button"
+          class="desktop-lyrics-action"
+          :disabled="!snapshot?.track"
+          :aria-label="t('player.desktop_lyrics_previous')"
+          :title="t('player.desktop_lyrics_previous')"
+          @click="sendPlaybackControl('previous')"
+        >
+          <span class="material-symbols-rounded filled">skip_previous</span>
+        </button>
+        <button
+          type="button"
+          class="desktop-lyrics-action desktop-lyrics-play"
+          :disabled="!snapshot?.track || snapshot.isLoadingAudio"
+          :aria-label="t(snapshot?.isPlaying ? 'player.desktop_lyrics_pause' : 'player.desktop_lyrics_play')"
+          :title="t(snapshot?.isPlaying ? 'player.desktop_lyrics_pause' : 'player.desktop_lyrics_play')"
+          @click="sendPlaybackControl('toggle')"
+        >
+          <span
+            class="material-symbols-rounded filled"
+            :class="{ 'is-spinning': snapshot?.isLoadingAudio }"
+          >{{ playbackIcon }}</span>
+        </button>
+        <button
+          type="button"
+          class="desktop-lyrics-action"
+          :disabled="!snapshot?.track"
+          :aria-label="t('player.desktop_lyrics_next')"
+          :title="t('player.desktop_lyrics_next')"
+          @click="sendPlaybackControl('next')"
+        >
+          <span class="material-symbols-rounded filled">skip_next</span>
+        </button>
+      </div>
+      <div class="desktop-lyrics-utilities">
+        <button
+          type="button"
+          class="desktop-lyrics-action"
+          :class="{ active: locked }"
+          :aria-label="t(locked ? 'player.desktop_lyrics_unlock' : 'player.desktop_lyrics_lock')"
+          :title="t(locked ? 'player.desktop_lyrics_unlock' : 'player.desktop_lyrics_lock')"
+          @click="toggleLocked"
+        >
+          <span class="material-symbols-rounded">{{ locked ? 'lock' : 'lock_open' }}</span>
+        </button>
+        <button
+          type="button"
+          class="desktop-lyrics-action"
+          :aria-label="t('player.desktop_lyrics_hide')"
+          :title="t('player.desktop_lyrics_hide')"
+          @click="hideWindow"
+        >
+          <span class="material-symbols-rounded">close</span>
+        </button>
+      </div>
     </div>
   </main>
 </template>
@@ -235,16 +345,16 @@ onUnmounted(() => {
   height: 100%;
   overflow: hidden;
   display: grid;
-  grid-template-columns: minmax(118px, 0.3fr) minmax(0, 1fr) 76px;
+  grid-template-columns: minmax(112px, 0.28fr) minmax(0, 1fr) 104px;
   align-items: center;
-  gap: 14px;
-  padding-block: 14px;
-  padding-inline: 18px 12px;
+  gap: 12px;
+  padding-block: 12px;
+  padding-inline: 14px 10px;
   border-width: 1px;
   border-style: solid;
-  border-color: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.18);
   border-radius: 8px;
-  background: rgba(19, 19, 22, 0.82);
+  background: linear-gradient(105deg, rgba(20, 20, 24, 0.94), rgba(31, 31, 36, 0.86));
   color: rgba(255, 255, 255, 0.96);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
   backdrop-filter: blur(18px) saturate(1.12);
@@ -269,8 +379,15 @@ onUnmounted(() => {
 
 .desktop-lyrics-state {
   flex: 0 0 auto;
-  font-size: 20px;
-  color: rgb(134, 212, 184);
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 18px;
+  color: var(--md-primary, rgb(208, 188, 255));
+  background: color-mix(in srgb, var(--md-primary, rgb(208, 188, 255)) 14%, transparent);
 }
 
 .is-paused .desktop-lyrics-state {
@@ -303,6 +420,9 @@ onUnmounted(() => {
 
 .desktop-lyrics-copy {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   text-align: center;
 }
 
@@ -328,6 +448,8 @@ onUnmounted(() => {
   font-size: 23px;
   line-height: 29px;
   font-weight: 700;
+  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.98);
   text-shadow: 0 2px 10px rgba(0, 0, 0, 0.54);
 
   &.is-empty {
@@ -346,32 +468,60 @@ onUnmounted(() => {
 .desktop-lyrics-next {
   font-size: 15px;
   line-height: 19px;
-  color: rgba(255, 255, 255, 0.52);
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.46);
+}
+
+.desktop-lyrics-progress {
+  width: min(100%, 420px);
+  height: 2px;
+  margin: 4px auto 0;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.desktop-lyrics-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--md-primary, rgb(208, 188, 255));
+  transition: width 80ms linear;
 }
 
 .desktop-lyrics-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 4px;
-  opacity: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  opacity: 0.72;
   transition: opacity 150ms ease;
 }
 
 .desktop-lyrics-shell:hover .desktop-lyrics-actions,
-.desktop-lyrics-actions:focus-within,
-.is-locked .desktop-lyrics-actions {
+.desktop-lyrics-actions:focus-within {
   opacity: 1;
 }
 
+.desktop-lyrics-transport,
+.desktop-lyrics-utilities {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
 .desktop-lyrics-action {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
   color: rgba(255, 255, 255, 0.68);
-  transition: color 150ms ease, background 150ms ease;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease, opacity 150ms ease;
 
   .material-symbols-rounded {
     font-size: 18px;
@@ -382,6 +532,41 @@ onUnmounted(() => {
     color: rgba(255, 255, 255, 0.96);
     background: rgba(255, 255, 255, 0.12);
   }
+
+  &:focus-visible {
+    outline: 2px solid var(--md-primary, rgb(208, 188, 255));
+    outline-offset: 1px;
+  }
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.32;
+  }
+}
+
+.desktop-lyrics-play {
+  width: 34px;
+  height: 34px;
+  color: var(--md-on-primary-container, rgb(35, 23, 60));
+  background: var(--md-primary, rgb(208, 188, 255));
+
+  &:hover {
+    color: var(--md-on-primary-container, rgb(35, 23, 60));
+    background: color-mix(in srgb, var(--md-primary, rgb(208, 188, 255)) 88%, white);
+  }
+
+  &:disabled {
+    background: rgba(255, 255, 255, 0.18);
+    color: rgba(255, 255, 255, 0.52);
+  }
+}
+
+.is-spinning {
+  animation: desktop-lyrics-spin 900ms linear infinite;
+}
+
+@keyframes desktop-lyrics-spin {
+  to { transform: rotate(360deg); }
 }
 
 .desktop-line-enter-active,
@@ -399,13 +584,67 @@ onUnmounted(() => {
   transform: translateY(-5px);
 }
 
+@media (max-width: 620px) {
+  .desktop-lyrics-meta {
+    display: none;
+  }
+
+  .desktop-lyrics-shell {
+    grid-template-columns: minmax(0, 1fr) 104px;
+  }
+}
+
 @media (max-width: 520px) {
   .desktop-lyrics-shell {
     grid-template-columns: minmax(0, 1fr) 76px;
   }
 
-  .desktop-lyrics-meta {
-    display: none;
+  .desktop-lyrics-actions {
+    gap: 4px;
+  }
+
+  .desktop-lyrics-action,
+  .desktop-lyrics-play {
+    width: 24px;
+    height: 24px;
+  }
+
+  .desktop-lyrics-action .material-symbols-rounded {
+    font-size: 16px;
+  }
+}
+
+@media (max-height: 132px) {
+  .desktop-lyrics-shell {
+    padding-block: 8px;
+  }
+
+  .desktop-lyrics-line-group {
+    gap: 2px;
+  }
+
+  .desktop-lyrics-actions {
+    gap: 2px;
+  }
+
+  .desktop-lyrics-action {
+    width: 22px;
+    height: 22px;
+  }
+
+  .desktop-lyrics-play {
+    width: 26px;
+    height: 26px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-line-enter-active,
+  .desktop-line-leave-active,
+  .desktop-lyrics-progress-fill,
+  .is-spinning {
+    transition: none;
+    animation: none;
   }
 }
 </style>
