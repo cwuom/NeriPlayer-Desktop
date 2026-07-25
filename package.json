@@ -21,6 +21,7 @@
     "test:explore-platform-placeholders": "node scripts/test-explore-platform-placeholders.mjs",
     "test:explore-request-state": "node scripts/test-explore-request-state.mjs",
     "test:home-netease-surface": "node scripts/test-home-netease-surface.mjs",
+    "test:favorite-playlists": "node scripts/test-favorite-playlists.mjs",
     "test:library-route": "node scripts/test-library-route.mjs",
     "test:library-tab-config": "node scripts/test-library-tab-config.mjs",
     "test:library-netease-filter": "node scripts/test-library-netease-filter.mjs",
@@ -39,7 +40,8 @@
     "test:liked-songs-startup-auth": "node scripts/test-liked-songs-startup-auth.mjs",
     "test:recommend-liked-state": "node scripts/test-recommend-liked-state.mjs",
     "test:netease-download-source": "node scripts/test-netease-download-source.mjs",
-    "test:netease": "pnpm test:explore-platform-placeholders && pnpm test:explore-request-state && pnpm test:home-netease-surface && pnpm test:library-tab-config && pnpm test:library-netease-filter && pnpm test:library-netease-request && pnpm test:library-netease-surface && pnpm test:settings-collapse-structure && pnpm test:library-netease-auth-refresh && pnpm test:auth-session-concurrency && pnpm test:search-request-order && pnpm test:netease-detail-route-refresh && pnpm test:recommend-request-invalidation && pnpm test:netease-auth-hygiene && pnpm test:auth-cookie-writers && pnpm test:config-import-auth-reconcile && pnpm test:liked-songs-cloud && pnpm test:liked-songs-startup-auth && pnpm test:recommend-liked-state && pnpm test:netease-download-source && pnpm test:library-route",
+    "test:netease-playlist-actions": "node scripts/test-netease-playlist-actions.mjs",
+    "test:netease": "pnpm test:explore-platform-placeholders && pnpm test:explore-request-state && pnpm test:home-netease-surface && pnpm test:library-tab-config && pnpm test:library-netease-filter && pnpm test:library-netease-request && pnpm test:library-netease-surface && pnpm test:settings-collapse-structure && pnpm test:library-netease-auth-refresh && pnpm test:auth-session-concurrency && pnpm test:search-request-order && pnpm test:netease-detail-route-refresh && pnpm test:recommend-request-invalidation && pnpm test:netease-auth-hygiene && pnpm test:auth-cookie-writers && pnpm test:config-import-auth-reconcile && pnpm test:liked-songs-cloud && pnpm test:liked-songs-startup-auth && pnpm test:recommend-liked-state && pnpm test:netease-download-source && pnpm test:netease-playlist-actions && pnpm test:favorite-playlists && pnpm test:library-route",
     "test:youtube-playlist-parse": "node scripts/test-youtube-playlist-parse.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { RouterLink, useRouter, useRoute } from 'vue-router'
 
 defineOptions({ name: 'LibraryView' })
 import { useI18n } from 'vue-i18n'
@@ -32,6 +32,12 @@ import {
 } from '@/modules/library/libraryRoute'
 import { filterNeteaseAlbums, filterNeteasePlaylists } from '@/modules/library/neteaseLibraryFilter'
 import { NeteaseLibraryRequestCoordinator } from '@/modules/library/neteaseLibraryRequest'
+import {
+  favoritePlaylistKey,
+  favoritePlaylistLocation,
+  normalizeFavoritePlaylist,
+  type FavoritePlaylist,
+} from '@/modules/library/favoritePlaylists'
 
 const log = createLogger('library-view')
 
@@ -565,33 +571,28 @@ async function loadNeteaseLibrary() {
   return result
 }
 
-interface FavoritePlaylist {
-  id: string; name: string; coverUrl: string; trackCount: number; source: string;
-  songs: any[]; addedTime: number; modifiedAt: number; isDeleted: boolean;
-}
 const favoritePlaylists = ref<FavoritePlaylist[]>([])
+const favoritePlaylistRows = computed(() => favoritePlaylists.value.map(favorite => ({
+  ...favorite,
+  key: favoritePlaylistKey(favorite),
+  location: favoritePlaylistLocation(favorite),
+})))
+let favoritePlaylistsRequestGeneration = 0
 
 async function loadFavorites() {
+  const requestGeneration = ++favoritePlaylistsRequestGeneration
   try {
     const raw = await invoke<any[]>('list_favorite_playlists')
-    favoritePlaylists.value = (raw || []).map((f: any) => ({
-      id: f.id ?? '',
-      name: f.name ?? '',
-      coverUrl: f.cover_url ?? '',
-      trackCount: f.track_count ?? f.songs?.length ?? 0,
-      source: f.source ?? '',
-      songs: f.songs ?? [],
-      addedTime: f.added_time ?? 0,
-      modifiedAt: f.modified_at ?? 0,
-      isDeleted: f.is_deleted ?? false,
-    }))
+    if (requestGeneration !== favoritePlaylistsRequestGeneration) return
+    favoritePlaylists.value = (raw || [])
+      .map(normalizeFavoritePlaylist)
+      .filter(favorite => !favorite.isDeleted)
   } catch (e) {
     log.error('Load favorites failed:', e)
   }
 }
 
 onMounted(loadPlaylists)
-onMounted(loadFavorites)
 onMounted(() => downloadStore.loadDownloads())
 
 // 下载相关
@@ -778,13 +779,28 @@ watch(neteaseSessionFingerprint, () => {
 
 // 监听同步完成后的歌单变更事件
 let unlistenPlaylistsChanged: UnlistenFn | null = null
+let unlistenFavoritePlaylistsChanged: UnlistenFn | null = null
 onMounted(async () => {
-  unlistenPlaylistsChanged = await listen('playlists-changed', () => {
-    loadPlaylists()
-  })
+  try {
+    unlistenPlaylistsChanged = await listen('playlists-changed', () => {
+      void loadPlaylists()
+    })
+  } catch {
+    // Browser preview has no Tauri event bridge.
+  }
+  try {
+    unlistenFavoritePlaylistsChanged = await listen('favorite-playlists-changed', () => {
+      void loadFavorites()
+    })
+  } catch {
+    // Browser preview has no Tauri event bridge.
+  }
+  void loadFavorites()
 })
 onUnmounted(() => {
+  favoritePlaylistsRequestGeneration++
   unlistenPlaylistsChanged?.()
+  unlistenFavoritePlaylistsChanged?.()
 })
 </script>
 
@@ -914,28 +930,31 @@ onUnmounted(() => {
     <!-- Tab: 收藏（同步的收藏歌单） -->
     <div v-else-if="activeTab === 'favorites'" class="playlist-list">
       <template v-if="favoritePlaylists.length > 0">
-        <div
-          v-for="fpl in favoritePlaylists"
-          :key="'fav-' + fpl.id"
+        <component
+          v-for="row in favoritePlaylistRows"
+          :is="row.location ? RouterLink : 'div'"
+          :key="row.key"
+          :to="row.location ?? undefined"
           class="playlist-item"
+          :class="row.location ? 'favorite-detail-link' : 'favorite-static-row'"
         >
-          <div class="pl-icon has-cover" v-if="fpl.coverUrl && !isLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)">
+          <div class="pl-icon has-cover" v-if="row.coverUrl && !isLibraryCoverFailed('favorite', row.id, row.coverUrl)">
             <img
-              :src="toDisplayableLibraryCoverUrl(fpl.coverUrl)"
+              :src="toDisplayableLibraryCoverUrl(row.coverUrl)"
               referrerpolicy="no-referrer"
               class="pl-cover-img"
-              @error="markLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)"
+              @error="markLibraryCoverFailed('favorite', row.id, row.coverUrl)"
             />
           </div>
           <div class="pl-icon" v-else>
             <span class="material-symbols-rounded filled" style="font-size: 22px">bookmark</span>
           </div>
           <div class="pl-info">
-            <div class="pl-name">{{ fpl.name }}</div>
-            <div class="pl-count">{{ t('player.track_count', { count: fpl.trackCount }) }} · {{ platformLabel(fpl.source) }}</div>
+            <div class="pl-name">{{ row.name }}</div>
+            <div class="pl-count">{{ t('player.track_count', { count: row.trackCount }) }} · {{ platformLabel(row.source) }}</div>
           </div>
-          <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
-        </div>
+          <span v-if="row.location" class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
+        </component>
       </template>
       <div v-else class="empty-tab">
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">bookmark</span></div>
@@ -1497,6 +1516,21 @@ onUnmounted(() => {
     outline-offset: 2px;
     background: var(--md-surface-container);
   }
+}
+
+.favorite-detail-link {
+  color: inherit;
+  text-decoration: none;
+
+  &:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+    background: var(--md-surface-container);
+  }
+}
+
+.playlist-item.favorite-static-row {
+  cursor: default;
 }
 
 .netease-login-button {

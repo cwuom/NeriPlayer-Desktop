@@ -22,6 +22,10 @@ import {
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { createNeteaseDetailCacheScope } from '@/modules/library/neteaseDetailCacheScope'
+import {
+  normalizeFavoritePlaylist,
+  type FavoritePlaylist,
+} from '@/modules/library/favoritePlaylists'
 
 const props = defineProps<{ isAlbum?: boolean }>()
 const route = useRoute()
@@ -43,6 +47,86 @@ const searchQuery = ref('')
 
 const tracks = ref<TrackInfo[]>([])
 let detailRequestGeneration = 0
+const favoritePlaylists = ref<Array<Pick<FavoritePlaylist, 'id' | 'source'>>>([])
+const favoritePlaylistLoading = ref(false)
+let favoritePlaylistsRequestGeneration = 0
+const isPlaylistFavorited = computed(() => {
+  if (props.isAlbum) return false
+  const playlistId = String(route.params.id ?? '')
+  return favoritePlaylists.value.some(favorite =>
+    String(favorite.id) === playlistId && favorite.source.toLowerCase() === 'netease',
+  )
+})
+
+function toBackendTrack(track: TrackInfo) {
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    duration_ms: track.durationMs || 0,
+    source: 'netease',
+    url: track.audioUrl || '',
+    cover_url: track.coverUrl || null,
+    added_at: 0,
+    sync_payload: null,
+    playlist_key: null,
+  }
+}
+
+async function loadPlaylistFavorites() {
+  const requestGeneration = ++favoritePlaylistsRequestGeneration
+  if (props.isAlbum) {
+    favoritePlaylists.value = []
+    return
+  }
+  try {
+    const raw = await invoke<Record<string, unknown>[]>('list_favorite_playlists')
+    if (requestGeneration !== favoritePlaylistsRequestGeneration) return
+    favoritePlaylists.value = (raw || [])
+      .map(normalizeFavoritePlaylist)
+      .filter(favorite => !favorite.isDeleted)
+  } catch {
+    if (requestGeneration === favoritePlaylistsRequestGeneration) {
+      favoritePlaylists.value = []
+    }
+  }
+}
+
+async function togglePlaylistFavorite() {
+  if (props.isAlbum || favoritePlaylistLoading.value) return
+  const playlistId = String(route.params.id ?? '')
+  if (!/^\d+$/.test(playlistId)) return
+
+  favoritePlaylistLoading.value = true
+  try {
+    if (isPlaylistFavorited.value) {
+      await invoke('remove_favorite_playlist', { id: playlistId, source: 'netease' })
+      favoritePlaylists.value = favoritePlaylists.value.filter(favorite =>
+        !(String(favorite.id) === playlistId && favorite.source.toLowerCase() === 'netease'),
+      )
+    } else {
+      await invoke('add_favorite_playlist', {
+        input: {
+          id: playlistId,
+          name: playlistName.value,
+          coverUrl: coverUrl.value,
+          trackCount: tracks.value.length,
+          source: 'netease',
+          tracks: tracks.value.map(toBackendTrack),
+        },
+      })
+      favoritePlaylists.value = [
+        ...favoritePlaylists.value.filter(favorite =>
+          !(String(favorite.id) === playlistId && favorite.source.toLowerCase() === 'netease'),
+        ),
+        { id: playlistId, source: 'netease' },
+      ]
+    }
+  } finally {
+    favoritePlaylistLoading.value = false
+  }
+}
 
 const neteaseDetailCacheScope = computed(() =>
   createNeteaseDetailCacheScope(auth.netease, auth.neteaseSessionVersion),
@@ -456,12 +540,14 @@ onMounted(() => {
   downloadStore.initEvents()
   void downloadStore.loadDownloads()
   void loadDetail()
+  void loadPlaylistFavorites()
 })
 
 watch(() => [route.params.id, props.isAlbum], () => {
   searchQuery.value = ''
   leaveSelectionMode()
   void loadDetail()
+  void loadPlaylistFavorites()
 })
 
 watch(neteaseSessionFingerprint, () => {
@@ -523,6 +609,18 @@ watch(neteaseSessionFingerprint, () => {
             </button>
             <button class="hero-icon-btn" :title="t('player.shuffle_play')" @click="shufflePlay">
               <span class="material-symbols-rounded">shuffle</span>
+            </button>
+            <button
+              v-if="!props.isAlbum"
+              class="hero-icon-btn"
+              :class="{ active: isPlaylistFavorited }"
+              :disabled="favoritePlaylistLoading"
+              :title="t('library.tab_favorites')"
+              @click="togglePlaylistFavorite"
+            >
+              <span class="material-symbols-rounded" :class="{ filled: isPlaylistFavorited }">
+                {{ isPlaylistFavorited ? 'favorite' : 'favorite_border' }}
+              </span>
             </button>
             <button class="hero-icon-btn" :title="t('common.multi_select')" @click="enterSelectionMode()">
               <span class="material-symbols-rounded">checklist</span>

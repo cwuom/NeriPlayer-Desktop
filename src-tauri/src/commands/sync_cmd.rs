@@ -1,13 +1,13 @@
 // 同步相关命令
+use crate::error::{AppError, AppResult};
+use crate::security;
+use crate::settings::store::{self, AppSettings};
+use crate::state::AppState;
+use crate::sync::manager;
+use crate::sync::models::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
-use crate::error::{AppError, AppResult};
-use crate::settings::store::{self, AppSettings};
-use crate::state::AppState;
-use crate::sync::models::*;
-use crate::sync::manager;
-use crate::security;
 use tauri_plugin_store::StoreExt;
 
 // 同步配置存储键
@@ -18,8 +18,12 @@ const SYNC_STORE: &str = "sync-config.json";
 const CONFIG_FILE_KIND: &str = "moe.ouom.neriplayer.config";
 const CONFIG_FILE_VERSION: u32 = 1;
 
-fn config_default_true() -> bool { true }
-fn config_default_history_mode() -> String { "immediate".into() }
+fn config_default_true() -> bool {
+    true
+}
+fn config_default_history_mode() -> String {
+    "immediate".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -206,7 +210,9 @@ pub fn initialize_secure_storage(app: &AppHandle) {
 }
 
 fn load_github_config(app: &AppHandle) -> GitHubSyncConfig {
-    let mut config: GitHubSyncConfig = app.store(SYNC_STORE).ok()
+    let mut config: GitHubSyncConfig = app
+        .store(SYNC_STORE)
+        .ok()
         .and_then(|s| s.get(GITHUB_CONFIG_KEY))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
@@ -251,7 +257,9 @@ fn save_github_config(app: &AppHandle, config: &GitHubSyncConfig) {
 }
 
 fn load_webdav_config(app: &AppHandle) -> WebDavSyncConfig {
-    let mut config: WebDavSyncConfig = app.store(SYNC_STORE).ok()
+    let mut config: WebDavSyncConfig = app
+        .store(SYNC_STORE)
+        .ok()
         .and_then(|s| s.get(WEBDAV_CONFIG_KEY))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
@@ -295,7 +303,9 @@ fn save_webdav_config(app: &AppHandle, config: &WebDavSyncConfig) {
 }
 
 fn load_sync_preferences(app: &AppHandle) -> SyncPreferencesConfig {
-    let stored = app.store(SYNC_STORE).ok()
+    let stored = app
+        .store(SYNC_STORE)
+        .ok()
         .and_then(|s| s.get(SYNC_PREFERENCES_KEY))
         .and_then(|v| serde_json::from_value::<SyncPreferencesConfig>(v.clone()).ok());
     let has_stored = stored.is_some();
@@ -433,7 +443,7 @@ pub async fn create_github_repo(
         owner: config.owner.clone(),
         repo: repo_name.clone(),
         auto_sync: true,
-        data_saver: true,  // 默认开启省流
+        data_saver: true, // 默认开启省流
         ..Default::default()
     };
     save_github_config(&app, &updated);
@@ -466,7 +476,7 @@ pub async fn use_existing_github_repo(
         owner: owner.clone(),
         repo: repo.clone(),
         auto_sync: true,
-        data_saver: true,  // 默认开启省流
+        data_saver: true, // 默认开启省流
         ..Default::default()
     };
     save_github_config(&app, &updated);
@@ -500,7 +510,7 @@ pub async fn configure_github_sync(
         owner: owner.clone(),
         repo: repo.clone(),
         auto_sync: true,
-        data_saver: true,  // 默认开启省流
+        data_saver: true, // 默认开启省流
         ..Default::default()
     };
     save_github_config(&app, &config);
@@ -525,15 +535,18 @@ pub async fn sync_github(
         return Err(AppError::Api("GitHub sync not configured".into()));
     }
 
-    let local_data = manager::build_local_sync_data(
+    let result = manager::sync_github(
+        &state.http(),
+        &mut config,
         &app,
         history_entries.as_deref(),
         history_deletions.as_deref(),
-    );
-    let result = manager::sync_github(&state.http(), &mut config, &local_data).await?;
+    )
+    .await?;
     save_github_config(&app, &config);
     // 通知前端歌单数据可能已变更
     let _ = app.emit("playlists-changed", ());
+    let _ = app.emit("favorite-playlists-changed", ());
     Ok(result)
 }
 
@@ -571,7 +584,11 @@ pub async fn configure_webdav_sync(
 ) -> AppResult<Value> {
     let bp = base_path.unwrap_or_default();
     let api = crate::sync::webdav_api::WebDavApiClient::new(
-        &state.http(), &server_url, &username, &password, &bp,
+        &state.http(),
+        &server_url,
+        &username,
+        &password,
+        &bp,
     );
     api.validate_connection().await?;
 
@@ -604,14 +621,17 @@ pub async fn sync_webdav(
         return Err(AppError::Api("WebDAV sync not configured".into()));
     }
 
-    let local_data = manager::build_local_sync_data(
+    let result = manager::sync_webdav(
+        &state.http(),
+        &mut config,
         &app,
         history_entries.as_deref(),
         history_deletions.as_deref(),
-    );
-    let result = manager::sync_webdav(&state.http(), &mut config, &local_data).await?;
+    )
+    .await?;
     save_webdav_config(&app, &config);
     let _ = app.emit("playlists-changed", ());
+    let _ = app.emit("favorite-playlists-changed", ());
     Ok(result)
 }
 
@@ -628,15 +648,24 @@ pub async fn update_github_sync_settings(
     if config.token.is_empty() {
         return Err(AppError::Api("GitHub sync not configured".into()));
     }
-    if let Some(v) = auto_sync { config.auto_sync = v; }
-    if let Some(v) = data_saver { config.data_saver = v; }
-    if let Some(v) = silent_failures { config.silent_failures = v; }
+    if let Some(v) = auto_sync {
+        config.auto_sync = v;
+    }
+    if let Some(v) = data_saver {
+        config.data_saver = v;
+    }
+    if let Some(v) = silent_failures {
+        config.silent_failures = v;
+    }
     if let Some(v) = history_update_mode {
         let normalized = normalize_history_update_mode(&v);
         config.history_update_mode = normalized.clone();
-        save_sync_preferences(&app, &SyncPreferencesConfig {
-            history_update_mode: normalized,
-        });
+        save_sync_preferences(
+            &app,
+            &SyncPreferencesConfig {
+                history_update_mode: normalized,
+            },
+        );
     }
     save_github_config(&app, &config);
     Ok(())
@@ -644,15 +673,14 @@ pub async fn update_github_sync_settings(
 
 /// 更新 WebDAV 同步子设置
 #[tauri::command]
-pub async fn update_webdav_sync_settings(
-    app: AppHandle,
-    auto_sync: Option<bool>,
-) -> AppResult<()> {
+pub async fn update_webdav_sync_settings(app: AppHandle, auto_sync: Option<bool>) -> AppResult<()> {
     let mut config = load_webdav_config(&app);
     if config.server_url.is_empty() {
         return Err(AppError::Api("WebDAV sync not configured".into()));
     }
-    if let Some(v) = auto_sync { config.auto_sync = v; }
+    if let Some(v) = auto_sync {
+        config.auto_sync = v;
+    }
     save_webdav_config(&app, &config);
     Ok(())
 }
@@ -701,7 +729,9 @@ fn clear_directory_contents(dir: &std::path::Path) -> (u64, u64) {
                     failed += 1;
                 }
             } else if path.is_dir() {
-                if let Ok(size) = dir_size(&path) { cleared += size; }
+                if let Ok(size) = dir_size(&path) {
+                    cleared += size;
+                }
                 if std::fs::remove_dir_all(&path).is_err() {
                     failed += 1;
                 }
@@ -738,8 +768,10 @@ pub async fn export_playlists(app: AppHandle) -> AppResult<Value> {
     let store = PlaylistStore::load(&playlists_path);
 
     // 转换为 SyncPlaylist 格式（Android 兼容）
-    let sync_playlists: Vec<crate::sync::models::SyncPlaylist> = store.playlists.iter().map(|pl| {
-        crate::sync::models::SyncPlaylist {
+    let sync_playlists: Vec<crate::sync::models::SyncPlaylist> = store
+        .playlists
+        .iter()
+        .map(|pl| crate::sync::models::SyncPlaylist {
             id: pl.id.to_string(),
             name: pl.name.clone(),
             songs: crate::sync::manager::tracks_to_sync_songs_pub(&pl.tracks),
@@ -747,8 +779,8 @@ pub async fn export_playlists(app: AppHandle) -> AppResult<Value> {
             modified_at: pl.modified_at as i64,
             is_deleted: false,
             song_order_version: 1,
-        }
-    }).collect();
+        })
+        .collect();
 
     let backup_data = serde_json::json!({
         "version": "2.0",
@@ -761,7 +793,9 @@ pub async fn export_playlists(app: AppHandle) -> AppResult<Value> {
         .map_err(|e| AppError::Other(format!("Serialize failed: {}", e)))?;
 
     use tauri_plugin_dialog::DialogExt;
-    let path = app.dialog().file()
+    let path = app
+        .dialog()
+        .file()
         .set_file_name("neriplayer-playlists.json")
         .add_filter("JSON", &["json"])
         .blocking_save_file();
@@ -779,12 +813,14 @@ pub async fn export_playlists(app: AppHandle) -> AppResult<Value> {
 /// 导入播放列表 JSON（兼容 Android BackupData 和 Desktop 两种格式）
 #[tauri::command]
 pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
-    use crate::library::playlist::{PlaylistStore, Playlist};
-    use crate::sync::models::{SyncPlaylist, SyncData};
-    use crate::sync::manager::save_synced_playlists;
+    use crate::library::playlist::{Playlist, PlaylistStore};
+    use crate::sync::manager::save_imported_playlists;
+    use crate::sync::models::{SyncData, SyncPlaylist};
     use tauri_plugin_dialog::DialogExt;
 
-    let path = app.dialog().file()
+    let path = app
+        .dialog()
+        .file()
         .add_filter("JSON", &["json"])
         .blocking_pick_file();
 
@@ -802,23 +838,24 @@ pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
 
             if parsed.is_object() && parsed.get("playlists").is_some() {
                 // Android BackupData 格式：{ version, playlists: [SyncPlaylist] }
-                let sync_playlists: Vec<SyncPlaylist> = serde_json::from_value(
-                    parsed["playlists"].clone()
-                ).map_err(|e| AppError::Other(format!("Parse sync playlists: {}", e)))?;
+                let sync_playlists: Vec<SyncPlaylist> =
+                    serde_json::from_value(parsed["playlists"].clone())
+                        .map_err(|e| AppError::Other(format!("Parse sync playlists: {}", e)))?;
                 count = sync_playlists.len();
 
-                // 通过 save_synced_playlists 转换并回写（复用已有的去重 + 转换逻辑）
+                // 转换并回写普通歌单，不改动独立存储的收藏歌单
                 let sync_data = SyncData {
                     playlists: sync_playlists,
                     ..Default::default()
                 };
-                save_synced_playlists(&sync_data);
+                save_imported_playlists(&sync_data);
             } else if parsed.is_array() {
                 // 尝试 Desktop 格式
                 if let Ok(imported) = serde_json::from_value::<Vec<Playlist>>(parsed.clone()) {
                     count = imported.len();
                     let playlists_path = {
-                        let mut path = dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let mut path =
+                            dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
                         path.push("NeriPlayer");
                         path.push("playlists.json");
                         path
@@ -839,7 +876,7 @@ pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
                         playlists: sync_playlists,
                         ..Default::default()
                     };
-                    save_synced_playlists(&sync_data);
+                    save_imported_playlists(&sync_data);
                 }
             } else {
                 return Err(AppError::Other("Unrecognized playlist format".into()));
@@ -881,7 +918,9 @@ pub async fn export_config(
             auto_pause_on_member_change: settings.lt_auto_pause_on_member_change,
             share_audio_links: settings.lt_share_audio_links,
         }),
-        language: Some(ConfigLanguage { code: settings.locale.clone() }),
+        language: Some(ConfigLanguage {
+            code: settings.locale.clone(),
+        }),
         settings,
         auth: Some(auth),
         github_sync: Some(ConfigGitHubSync::from(&github)),
@@ -948,7 +987,10 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     let imported_listen_together = payload.listen_together;
     let imported_language = payload.language;
     let mut settings = payload.settings;
-    if let Some(language) = imported_language.as_ref().filter(|language| !language.code.is_empty()) {
+    if let Some(language) = imported_language
+        .as_ref()
+        .filter(|language| !language.code.is_empty())
+    {
         settings.locale = language.code.clone();
     }
     if let Some(listen_together) = imported_listen_together.as_ref() {
@@ -988,9 +1030,12 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     if let Some(preferences) = payload.sync_preferences {
         save_sync_preferences(&app, &preferences.into_config());
     } else if let Some(mode) = legacy_history_mode {
-        save_sync_preferences(&app, &SyncPreferencesConfig {
-            history_update_mode: normalize_history_update_mode(&mode),
-        });
+        save_sync_preferences(
+            &app,
+            &SyncPreferencesConfig {
+                history_update_mode: normalize_history_update_mode(&mode),
+            },
+        );
     }
     if let Some(github) = payload.github_sync {
         save_github_config(&app, &github.into_config());
@@ -1038,7 +1083,10 @@ mod tests {
         let value = github_config_store_value(&config);
 
         assert!(value.get("token").is_none());
-        assert!(serde_json::to_value(&config).unwrap().get("token").is_none());
+        assert!(serde_json::to_value(&config)
+            .unwrap()
+            .get("token")
+            .is_none());
         assert_eq!(value["owner"], "owner");
     }
 
@@ -1053,7 +1101,10 @@ mod tests {
         let value = webdav_config_store_value(&config);
 
         assert!(value.get("password").is_none());
-        assert!(serde_json::to_value(&config).unwrap().get("password").is_none());
+        assert!(serde_json::to_value(&config)
+            .unwrap()
+            .get("password")
+            .is_none());
         assert_eq!(value["serverUrl"], "https://dav.example.test");
     }
 
@@ -1069,8 +1120,14 @@ mod tests {
             listen_together: Some(Default::default()),
             language: Some(Default::default()),
             auth: Some(AuthState::default()),
-            github_sync: Some(ConfigGitHubSync { token: "token".into(), ..Default::default() }),
-            webdav_sync: Some(ConfigWebDavSync { password: "password".into(), ..Default::default() }),
+            github_sync: Some(ConfigGitHubSync {
+                token: "token".into(),
+                ..Default::default()
+            }),
+            webdav_sync: Some(ConfigWebDavSync {
+                password: "password".into(),
+                ..Default::default()
+            }),
             sync_preferences: Some(ConfigSyncPreferences::default()),
         })
         .unwrap();
