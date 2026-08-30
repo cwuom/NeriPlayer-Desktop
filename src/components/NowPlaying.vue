@@ -28,7 +28,7 @@ import {
   mergeParsedLyricsWithTranslations,
 } from '@/modules/lyrics/lyricsFormat'
 import { offsetBucketForSource } from '@/modules/lyrics/lyricOffset'
-import { isEditableTarget } from '@/modules/shortcuts/platform'
+import { isEditableTarget, isMacPlatform } from '@/modules/shortcuts/platform'
 import { persistTrackSyncPayload, withUpdatedCustomInfoPayload } from '@/modules/lyrics/syncTrackPayload'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import HyperBackground from './HyperBackground.vue'
@@ -1907,6 +1907,7 @@ const sliderActiveColor = computed(() => {
       {
         'np-shell--track-switching': isTrackSwitchAnimating,
         'np-shell--beat-active': isVisualBeatActive,
+        'np--rounded-window': isMacPlatform,
       },
     ]"
     :style="dynamicColorVars"
@@ -3028,11 +3029,17 @@ const sliderActiveColor = computed(() => {
   // 确保完全不透明
   isolation: isolate;
   overflow: hidden;
-  /* 与窗体圆角一致，避免全屏层直角顶出 OS 圆角 */
-  border-radius: var(--radius-lg);
+  // Windows/Linux 窗口为方形，圆角会让四角透出下层页面；
+  // macOS 原生窗口自带圆角，仅在 macOS 保持圆角（np--rounded-window）
+  border-radius: 0;
   user-select: none;
   -webkit-user-select: none;
   transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1), opacity 300ms ease;
+}
+
+.now-playing.np--rounded-window {
+  /* 与 macOS 窗体圆角一致，避免全屏层直角顶出 OS 圆角 */
+  border-radius: var(--radius-lg);
 }
 
 .np-empty-state {
@@ -4297,15 +4304,18 @@ const sliderActiveColor = computed(() => {
 }
 
 .volume-slider {
-  writing-mode: vertical-lr;
+  // 竖排滑条不能用 writing-mode（WebKitGTK 圆点错位且拖不动），
+  // 用原生横向滑条整体旋转：几何/命中计算保持原生，视觉为竖向。
+  // value = 1 - volume：rotate(90deg) 使 min 在上，即音量满格在上
   appearance: none;
-  width: 4px;
-  height: 100px;
-  background: rgba(255,255,255,0.15);
+  width: 100px;
+  height: 4px;
+  transform: rotate(90deg);
+  margin: 48px 0;
+  background: rgba(255, 255, 255, 0.15);
   border-radius: 2px;
   outline: none;
   cursor: pointer;
-  accent-color: var(--np-primary, #fff);
 
   &::-webkit-slider-thumb {
     appearance: none;
@@ -4313,7 +4323,7 @@ const sliderActiveColor = computed(() => {
     height: 14px;
     border-radius: 50%;
     background: var(--np-primary-container, white);
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
     cursor: pointer;
   }
 }

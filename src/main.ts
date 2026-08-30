@@ -37,6 +37,11 @@ const router = createRouter({
 // 崩溃收集才有前端现场可看
 const crashLog = createLogger('frontend-crash')
 window.addEventListener('error', (event) => {
+  // ResizeObserver 回调内改动被观察元素尺寸时，浏览器必然报一次
+  // "loop completed with undelivered notifications"（规范行为，下一帧自愈，
+  // 无实际危害）。歌词字号是视口相对值，窗口/面板尺寸变化时极易触发，
+  // 误报成崩溃只会污染日志，此处过滤
+  if (event.message === 'ResizeObserver loop completed with undelivered notifications.') return
   crashLog.error('uncaught error:', event.message, event.filename, `${event.lineno}:${event.colno}`)
 })
 window.addEventListener('unhandledrejection', (event) => {

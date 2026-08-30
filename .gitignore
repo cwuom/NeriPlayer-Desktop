@@ -49,3 +49,6 @@ docs-private/
 # 内部审查/对齐文档只留本地，不入库
 .report/
 docs/
+
+# Arch 打包工作目录（makepkg 产物与本地 PKGBUILD）
+/build/

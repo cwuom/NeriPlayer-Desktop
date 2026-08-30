@@ -190,6 +190,8 @@ let historyBatchedTimer: ReturnType<typeof setTimeout> | null = null
 let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
+let unlistenTrayNowPlaying: UnlistenFn | null = null
+let unlistenTrayHome: UnlistenFn | null = null
 
 function handleBeforeUnload() {
   player.flushPlayerState()
@@ -197,26 +199,21 @@ function handleBeforeUnload() {
   void usePlaybackStatsStore().flushFinal()
 }
 
-// 关窗流程标志位：flush 完成后 destroy，二次进入直接放行避免死循环
+// 关窗流程标志位：flush 完成后放行；窗口隐藏/关闭拦截全部由 Rust 侧完成
 let closeFlushDone = false
 
 async function handleCloseRequested(event: { preventDefault: () => void }) {
-  if (closeFlushDone) return
   event.preventDefault()
+  if (closeFlushDone) return
   closeFlushDone = true
   try {
-    // 同步保存播放器状态 + 等待统计落盘后再真正关窗
+    // 同步保存播放器状态 + 等待统计落盘（隐藏后播放继续，下次关闭不再有卸载事件）
     player.flushPlayerState()
     await usePlaybackStatsStore().flushFinal()
   } catch {
-    // 落盘失败不阻塞退出
+    // 落盘失败不阻塞
   }
-  try {
-    await getCurrentWindow().destroy()
-  } catch {
-    // destroy 不可用时退回 close（此时标志位已放行）
-    void getCurrentWindow().close().catch(() => {})
-  }
+  closeFlushDone = false
 }
 
 function scheduleDebouncedSync() {
@@ -409,6 +406,14 @@ onMounted(async () => {
     scheduleDebouncedSync()
   })
 
+  // 托盘菜单：正在播放 / 打开主页面（窗口可能处于隐藏状态，先由后端 show）
+  unlistenTrayNowPlaying = await listen('tray:open-now-playing', () => {
+    if (player.hasPlaybackSession) void openNowPlaying()
+  })
+  unlistenTrayHome = await listen('tray:open-home', () => {
+    void router.push({ name: 'home' })
+  })
+
   // 监听前端播放历史变更事件，触发历史自动同步
   window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
 })
@@ -428,6 +433,8 @@ onUnmounted(() => {
   window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
   if (unlistenCloseRequested) unlistenCloseRequested()
+  if (unlistenTrayNowPlaying) unlistenTrayNowPlaying()
+  if (unlistenTrayHome) unlistenTrayHome()
 })
 </script>
 
