@@ -1,0 +1,69 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="using:NeriPlayer.UI.ViewModels"
+        xmlns:views="using:NeriPlayer.UI.Views"
+        mc:Ignorable="d" d:DesignWidth="1280" d:DesignHeight="720"
+        x:Class="NeriPlayer.UI.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="NeriPlayer"
+        Background="{DynamicResource AppBackgroundBrush}">
+
+    <DockPanel>
+        <!-- 底部播放条（Dock=Bottom） -->
+        <views:PlaybackBarView DockPanel.Dock="Bottom"
+                               DataContext="{Binding PlaybackBar}" />
+
+        <!-- 三栏主布局 -->
+        <Grid ColumnDefinitions="240,*,320">
+
+            <!-- 侧边栏 -->
+            <StackPanel Grid.Column="0"
+                        Background="{DynamicResource SidebarBrush}"
+                        Spacing="4" Margin="8">
+                <TextBlock Text="NeriPlayer" FontSize="22" FontWeight="Bold"
+                           Margin="0,0,0,12" />
+                <Button Content="首页"      Command="{Binding NavigateToCommand}" CommandParameter="Home" />
+                <Button Content="发现"      Command="{Binding NavigateToCommand}" CommandParameter="Discover" />
+                <Button Content="音乐库"    Command="{Binding NavigateToCommand}" CommandParameter="Library" />
+                <Button Content="下载"      Command="{Binding NavigateToCommand}" CommandParameter="Downloads" />
+                <Button Content="设置"      Command="{Binding NavigateToCommand}" CommandParameter="Settings" />
+            </StackPanel>
+
+            <!-- 内容区 -->
+            <ContentControl Grid.Column="1"
+                            Content="{Binding CurrentPage}"
+                            Margin="8">
+                <ContentControl.DataTemplates>
+                    <DataTemplate DataType="{x:Type vm:HomeViewModel}">
+                        <views:HomeView />
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type vm:DiscoverViewModel}">
+                        <views:DiscoverView />
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type vm:LibraryViewModel}">
+                        <views:LibraryView />
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type vm:DownloadsViewModel}">
+                        <views:DownloadsView />
+                    </DataTemplate>
+                    <DataTemplate DataType="{x:Type vm:SettingsViewModel}">
+                        <views:SettingsView />
+                    </DataTemplate>
+                </ContentControl.DataTemplates>
+            </ContentControl>
+
+            <!-- 队列栏 -->
+            <Border Grid.Column="2"
+                    Background="{DynamicResource SidebarBrush}"
+                    Margin="8">
+                <TextBlock Text="队列（占位）"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"
+                           Opacity="0.5" />
+            </Border>
+
+        </Grid>
+    </DockPanel>
+</Window>

@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="NeriPlayer.UI.FloatingLyricsWindow"
+        ShowInTaskbar="False"
+        Topmost="True"
+        WindowStartupLocation="Manual"
+        Background="Transparent"
+        TransparencyLevelHint="Transparent"
+        Width="900" Height="80"
+        Title="NeriPlayer 歌词"
+        CanResize="False"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="NoChrome">
+  <Panel>
+    <!-- 拖动区域：整个歌词窗口可拖动 -->
+    <Border Name="DragArea"
+            Background="#40000000"
+            CornerRadius="12"
+            Padding="24,8"
+            Cursor="Hand">
+      <StackPanel VerticalAlignment="Center" Spacing="4">
+        <TextBlock Name="CurrentLine"
+                   TextAlignment="Center"
+                   FontSize="20"
+                   FontWeight="Bold"
+                   Foreground="White"
+                   TextWrapping="Wrap" />
+        <TextBlock Name="TranslatedLine"
+                   TextAlignment="Center"
+                   FontSize="13"
+                   Foreground="#C0FFFFFF"
+                   TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+  </Panel>
+</Window>

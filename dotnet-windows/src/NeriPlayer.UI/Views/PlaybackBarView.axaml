@@ -1,0 +1,39 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:NeriPlayer.UI.ViewModels"
+             xmlns:conv="using:NeriPlayer.UI.Converters"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="56"
+             x:Class="NeriPlayer.UI.Views.PlaybackBarView"
+             x:DataType="vm:PlaybackBarViewModel"
+             Height="56">
+
+    <UserControl.Resources>
+        <conv:BoolToPlayIconConverter x:Key="BoolToPlayIcon" />
+    </UserControl.Resources>
+
+    <Grid ColumnDefinitions="*,Auto" Margin="12,0">
+        <!-- 左：标题/艺人 -->
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+            <TextBlock Text="{Binding NowPlayingName}"
+                       FontWeight="Bold" FontSize="14"
+                       TextTrimming="CharacterEllipsis" />
+            <TextBlock Text="{Binding NowPlayingArtist}"
+                       FontSize="12" Opacity="0.7"
+                       TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+
+        <!-- 右：控制 + 进度 -->
+        <StackPanel Grid.Column="1" Orientation="Horizontal"
+                    Spacing="8" VerticalAlignment="Center">
+            <Button Content="⏮"  Command="{Binding PreviousCommand}" />
+            <Button Content="{Binding IsPlaying, Converter={StaticResource BoolToPlayIcon}}"
+                    Command="{Binding TogglePlayCommand}" />
+            <Button Content="⏭"  Command="{Binding NextCommand}" />
+            <Slider Width="200" Minimum="0"
+                    Maximum="{Binding DurationMs}"
+                    Value="{Binding PositionMs}" />
+        </StackPanel>
+    </Grid>
+</UserControl>
