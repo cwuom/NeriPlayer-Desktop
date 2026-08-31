@@ -43,6 +43,23 @@ fn classify_playback_finish(
     }
 }
 
+/// 同步托盘菜单「正在播放」项为当前曲目名（title 为空时恢复默认文案）
+fn update_tray_now_playing(item: &tauri::menu::MenuItem<tauri::Wry>, title: &str) {
+    let mut text = "正在播放".to_string();
+    let trimmed = title.trim();
+    if !trimmed.is_empty() {
+        // 超长标题截断，避免菜单被撑爆
+        let truncated: String = trimmed.chars().take(40).collect();
+        let truncated = if truncated.chars().count() < trimmed.chars().count() {
+            format!("{truncated}…")
+        } else {
+            truncated
+        };
+        text = format!("正在播放：{truncated}");
+    }
+    let _ = item.set_text(text);
+}
+
 fn main() {
     // 崩溃收集必须最早安装：之后任何线程 panic 都会把现场落盘
     neri_player_desktop::logging::install_panic_hook(env!("CARGO_PKG_VERSION"));
@@ -131,6 +148,11 @@ fn main() {
 
             // 系统托盘：窗口关闭后隐藏到托盘继续播放；左键单击恢复主窗口
             // 播放控制复用 media:* 事件（与系统媒体键同一套前端处理链路）
+            // 「正在播放」菜单项由后台 ticker 在曲目切换时更新标题
+            let tray_now_playing_item = MenuItem::with_id(
+                app, "tray-now-playing", "正在播放", true, None::<&str>,
+            )?;
+            let tray_now_playing_ticker = tray_now_playing_item.clone();
             {
                 let quit_flag = quitting_tray.clone();
                 fn show_main_window(app: &tauri::AppHandle) {
@@ -152,9 +174,7 @@ fn main() {
                     app, "tray-next", "下一首", true, None::<&str>,
                 )?)?;
                 tray_menu.append(&PredefinedMenuItem::separator(app)?)?;
-                tray_menu.append(&MenuItem::with_id(
-                    app, "tray-now-playing", "正在播放", true, None::<&str>,
-                )?)?;
+                tray_menu.append(&tray_now_playing_item)?;
                 tray_menu.append(&MenuItem::with_id(
                     app, "tray-home", "打开主页面", true, None::<&str>,
                 )?)?;
@@ -277,6 +297,7 @@ fn main() {
 
             // 后台定时器：每 200ms 推送播放位置 + 媒体会话同步
             let handle_ticker = handle.clone();
+            let tray_now_playing_ticker_thread = tray_now_playing_ticker.clone();
             std::thread::spawn(move || {
                 let mut last_ended = false;
                 let mut last_stalled = false;
@@ -391,7 +412,15 @@ fn main() {
                                     meta.cover_url.as_deref(),
                                     meta.duration_ms,
                                 );
+                                // 托盘菜单同步当前曲目名（仅在曲目切换时更新）
+                                update_tray_now_playing(
+                                    &tray_now_playing_ticker_thread,
+                                    &meta.title,
+                                );
                             }
+                        } else if !last_media_track_id.is_empty() {
+                            last_media_track_id.clear();
+                            update_tray_now_playing(&tray_now_playing_ticker_thread, "");
                         }
 
                         if media_update_counter >= 5 {

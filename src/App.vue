@@ -22,7 +22,7 @@ import { setLocale } from '@/i18n'
 import { applyTheme } from '@/utils/theme'
 import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
-import { applyDynamicColorFromCover, clearDynamicColor } from '@/utils/colorExtractor'
+import { applyDynamicColorFromCover, applyDynamicColorFromSeed, clearDynamicColor, resolveSystemAccentSeed } from '@/utils/colorExtractor'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
 
 type CoverSnapshot = {
@@ -287,22 +287,34 @@ function resolveDynamicIsDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
-// 开关、深浅色或封面变化时重算；关闭或无封面则还原预设主题色
+// 取色方式、深浅色或封面变化时重算；default 或无封面则还原预设主题色
 watch(
   () => [
-    settingsStore.dynamicColor,
+    settingsStore.colorMode,
     settingsStore.darkMode,
     player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
   ] as const,
-  ([enabled, , cover]) => {
+  ([mode, , cover]) => {
     // 圆形扩散中由 theme 路径同步重算，避免圆外提前换色
     if (document.documentElement.classList.contains('theme-ripple-active')) return
     const dark = resolveDynamicIsDark()
-    if (!enabled || !cover) {
+    if (mode === 'cover') {
+      if (cover) {
+        void applyDynamicColorFromCover(cover as string, dark)
+        return
+      }
       clearDynamicColor(dark)
       return
     }
-    void applyDynamicColorFromCover(cover as string, dark)
+    if (mode === 'system') {
+      const seed = resolveSystemAccentSeed()
+      if (seed) {
+        applyDynamicColorFromSeed(seed, dark)
+        return
+      }
+      // 引擎不支持解析系统强调色时回退默认取色
+    }
+    clearDynamicColor(dark)
   },
 )
 
@@ -372,9 +384,12 @@ onMounted(async () => {
   applyTheme(settingsStore.darkMode, false)
   applyThemeColor(settingsStore.themeColor, undefined, false)
   // 首屏在预设主题之后应用动态取色，避免被 applyThemeColor 覆盖
-  if (settingsStore.dynamicColor) {
+  if (settingsStore.colorMode === 'cover') {
     const cover = player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : ''
     if (cover) void applyDynamicColorFromCover(cover, resolveDynamicIsDark())
+  } else if (settingsStore.colorMode === 'system') {
+    const seed = resolveSystemAccentSeed()
+    if (seed) applyDynamicColorFromSeed(seed, resolveDynamicIsDark())
   }
   setLocale(settingsStore.locale, false)
   await player.applyPersistedSettings()

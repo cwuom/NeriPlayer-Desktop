@@ -207,7 +207,11 @@ impl AndroidTypedSettings {
                 "dev_mode_enabled" => settings.dev_mode_enabled = *value,
                 "internationalization_enabled" => settings.internationalization_enabled = *value,
                 "bypass_proxy" => settings.bypass_proxy = *value,
-                "dynamic_color" => settings.dynamic_color = *value,
+                // Android 的 dynamic_color = Material You 跟随系统取色，
+                // 语义与桌面旧 dynamic_color（跟随封面）不同，直接映射 color_mode
+                "dynamic_color" => {
+                    settings.color_mode = if *value { "system" } else { "default" }.into()
+                }
                 "nowplaying_audio_reactive_enabled" => settings.audio_reactive = *value,
                 "nowplaying_dynamic_background_enabled" => settings.dynamic_background = *value,
                 "nowplaying_cover_blur_background_enabled" => settings.cover_blur_bg = *value,
@@ -1594,6 +1598,31 @@ mod tests {
         // 未知键与桌面无关键不产生副作用
         assert!(settings.dynamic_background);
         assert_eq!(settings.theme_color, "purple");
+    }
+
+    #[test]
+    fn android_dynamic_color_maps_to_system_mode() {
+        use super::AndroidTypedSettings;
+        let android = AndroidTypedSettings {
+            booleans: [("dynamic_color".into(), true)].into_iter().collect(),
+            floats: Default::default(),
+            longs: Default::default(),
+            strings: Default::default(),
+        };
+        let mut settings = AppSettings::default();
+        android.apply_to(&mut settings);
+        // Android 的 dynamic_color = Material You 跟随系统取色
+        assert_eq!(settings.color_mode, "system");
+
+        let android = AndroidTypedSettings {
+            booleans: [("dynamic_color".into(), false)].into_iter().collect(),
+            floats: Default::default(),
+            longs: Default::default(),
+            strings: Default::default(),
+        };
+        let mut settings = AppSettings::default();
+        android.apply_to(&mut settings);
+        assert_eq!(settings.color_mode, "default");
     }
 
     #[test]

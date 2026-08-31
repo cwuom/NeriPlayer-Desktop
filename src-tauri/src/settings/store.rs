@@ -52,6 +52,10 @@ pub struct AppSettings {
     pub qq_music_offset: i32,
     pub cover_style: String,
     pub advanced_lyrics: bool,
+    /// 取色方式：system=跟随系统取色 / default=默认主题色 / cover=跟随封面动态取色
+    pub color_mode: String,
+    /// 旧版字段（封面取色开关），仅用于迁移，导出配置时不序列化
+    #[serde(default, skip_serializing)]
     pub dynamic_color: bool,
     pub dynamic_background: bool,
     pub audio_reactive: bool,
@@ -118,6 +122,7 @@ impl Default for AppSettings {
             qq_music_offset: 500,
             cover_style: "card".into(),
             advanced_lyrics: true,
+            color_mode: "default".into(),
             dynamic_color: false,
             dynamic_background: true,
             audio_reactive: true,
@@ -230,6 +235,20 @@ impl AppSettings {
             &["off", "error", "warn", "info", "debug", "trace"],
             "info",
         );
+
+        // 取色方式：旧版 dynamic_color（封面取色开关）迁移到 color_mode；
+        // Android 导入语义不同（dynamic_color=true=跟随系统），由导入路径直接写 color_mode
+        if self.color_mode.is_empty() || (self.color_mode == "default" && self.dynamic_color) {
+            if self.dynamic_color {
+                self.color_mode = "cover".into();
+            }
+        }
+        self.color_mode = normalize_choice(
+            &self.color_mode,
+            &["system", "default", "cover"],
+            "default",
+        );
+        self.dynamic_color = false;
 
         self.background_image_uri = self.background_image_uri.trim().into();
         self.download_name_template = non_empty_or_default(

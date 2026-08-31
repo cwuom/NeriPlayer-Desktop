@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
+export type ColorMode = 'system' | 'default' | 'cover'
 
 export interface AppSettings {
   formatVersion: number
@@ -36,7 +37,7 @@ export interface AppSettings {
   coverStyle: CoverStyle
   advancedLyrics: boolean
   dynamicBackground: boolean
-  dynamicColor: boolean
+  colorMode: ColorMode
   audioReactive: boolean
   coverBlurBg: boolean
   coverBlurAmount: number
@@ -114,7 +115,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   coverStyle: 'card',
   advancedLyrics: true,
   dynamicBackground: true,
-  dynamicColor: false,
+  colorMode: 'default',
   audioReactive: true,
   coverBlurBg: false,
   coverBlurAmount: 1.5,
@@ -355,7 +356,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const coverStyle = ref<CoverStyle>(initial.coverStyle)
   const advancedLyrics = ref(initial.advancedLyrics)
   const dynamicBackground = ref(initial.dynamicBackground)
-  const dynamicColor = ref(initial.dynamicColor)
+  const colorMode = ref<ColorMode>(initial.colorMode)
   const audioReactive = ref(initial.audioReactive)
   const coverBlurBg = ref(initial.coverBlurBg)
   const coverBlurAmount = ref(initial.coverBlurAmount)
@@ -394,7 +395,7 @@ export const useSettingsStore = defineStore('settings', () => {
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, keepPlaybackMode, showTranslation,
     lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, coverStyle,
-    advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
+    advancedLyrics, dynamicBackground, colorMode, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled,
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
@@ -480,7 +481,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
     keepProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, advancedLyrics, dynamicBackground,
-    dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
+    colorMode, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     internationalizationEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
