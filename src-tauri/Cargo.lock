@@ -3019,6 +3019,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "whoami",
+ "winreg",
 ]
 
 [[package]]

@@ -462,6 +462,23 @@ function clearSettleTimer(): void {
   }
 }
 
+let stopManualScrollWatcher: (() => void) | null = null
+
+/// 暂停态下手动滚动歌词：AMLL 的滚动由弹簧驱动，弹簧只在 update() 里推进，
+/// 帧循环停表时滚轮/触摸拖动不会产生视觉位移。滚动事件持续刷新续跑窗口，
+/// 停止滚动 500ms 后自动停表
+function startManualScrollWatcher(): void {
+  if (!hostRef.value || stopManualScrollWatcher) return
+  const onScroll = () => requestSettleLoop()
+  hostRef.value.addEventListener('wheel', onScroll, { passive: true })
+  hostRef.value.addEventListener('touchmove', onScroll, { passive: true })
+  stopManualScrollWatcher = () => {
+    hostRef.value?.removeEventListener('wheel', onScroll)
+    hostRef.value?.removeEventListener('touchmove', onScroll)
+    stopManualScrollWatcher = null
+  }
+}
+
 function cancelLayoutSync(): void {
   if (layoutFrameId) cancelAnimationFrame(layoutFrameId)
   layoutFrameId = 0
@@ -623,12 +640,14 @@ onMounted(() => {
 
     startResizeObserver()
     reloadLyrics()
+    startManualScrollWatcher()
     syncFrameLoop()
   })
 })
 
 onUnmounted(() => {
   clearSettleTimer()
+  stopManualScrollWatcher?.()
   stopFrameLoop()
   cancelLayoutSync()
   stopResizeObserver()

@@ -294,7 +294,7 @@ watch(
     settingsStore.darkMode,
     player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
   ] as const,
-  ([mode, , cover]) => {
+  async ([mode, , cover]) => {
     // 圆形扩散中由 theme 路径同步重算，避免圆外提前换色
     if (document.documentElement.classList.contains('theme-ripple-active')) return
     const dark = resolveDynamicIsDark()
@@ -307,7 +307,9 @@ watch(
       return
     }
     if (mode === 'system') {
-      const seed = resolveSystemAccentSeed()
+      const seed = await resolveSystemAccentSeed()
+      // 异步探测期间取色方式可能已切换，以最新状态为准
+      if (settingsStore.colorMode !== 'system') return
       if (seed) {
         applyDynamicColorFromSeed(seed, dark)
         return
@@ -388,7 +390,7 @@ onMounted(async () => {
     const cover = player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : ''
     if (cover) void applyDynamicColorFromCover(cover, resolveDynamicIsDark())
   } else if (settingsStore.colorMode === 'system') {
-    const seed = resolveSystemAccentSeed()
+    const seed = await resolveSystemAccentSeed()
     if (seed) applyDynamicColorFromSeed(seed, resolveDynamicIsDark())
   }
   setLocale(settingsStore.locale, false)

@@ -77,3 +77,6 @@ opt-level = 2
 
 [profile.dev.package.symphonia-format-ogg]
 opt-level = 2
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
