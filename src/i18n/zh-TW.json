@@ -873,5 +873,14 @@
     "copy_line": "複製這一句",
     "copy_all": "複製全部歌詞",
     "seek_here": "跳到這一句"
+  },
+  "tray": {
+    "prev": "上一首",
+    "toggle": "暫停/播放",
+    "next": "下一首",
+    "now_playing": "正在播放",
+    "now_playing_title": "正在播放：{title}",
+    "open_home": "開啟主頁面",
+    "quit": "結束"
   }
 }

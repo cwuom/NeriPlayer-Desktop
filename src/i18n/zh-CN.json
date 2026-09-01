@@ -873,5 +873,14 @@
     "copy_line": "复制这一句",
     "copy_all": "复制全部歌词",
     "seek_here": "跳到这一句"
+  },
+  "tray": {
+    "prev": "上一首",
+    "toggle": "暂停/播放",
+    "next": "下一首",
+    "now_playing": "正在播放",
+    "now_playing_title": "正在播放：{title}",
+    "open_home": "打开主页面",
+    "quit": "退出"
   }
 }

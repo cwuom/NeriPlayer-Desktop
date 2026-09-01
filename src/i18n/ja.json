@@ -873,5 +873,14 @@
     "copy_line": "この行をコピー",
     "copy_all": "歌詞をすべてコピー",
     "seek_here": "この行へジャンプ"
+  },
+  "tray": {
+    "prev": "前へ",
+    "toggle": "再生/一時停止",
+    "next": "次へ",
+    "now_playing": "再生中",
+    "now_playing_title": "再生中：{title}",
+    "open_home": "メインページを開く",
+    "quit": "終了"
   }
 }

@@ -5,7 +5,8 @@ use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionControl
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
     auth_cmd, download_cmd, image_cmd, library_cmd, listen_together_cmd, lyrics_cmd, player_cmd,
-    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, debug_cmd,};
+    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd,
+    debug_cmd,};
 use neri_player_desktop::state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -41,23 +42,6 @@ fn classify_playback_finish(
     } else {
         PlaybackFinishState::Stalled
     }
-}
-
-/// 同步托盘菜单「正在播放」项为当前曲目名（title 为空时恢复默认文案）
-fn update_tray_now_playing(item: &tauri::menu::MenuItem<tauri::Wry>, title: &str) {
-    let mut text = "正在播放".to_string();
-    let trimmed = title.trim();
-    if !trimmed.is_empty() {
-        // 超长标题截断，避免菜单被撑爆
-        let truncated: String = trimmed.chars().take(40).collect();
-        let truncated = if truncated.chars().count() < trimmed.chars().count() {
-            format!("{truncated}…")
-        } else {
-            truncated
-        };
-        text = format!("正在播放：{truncated}");
-    }
-    let _ = item.set_text(text);
 }
 
 fn main() {
@@ -152,7 +136,6 @@ fn main() {
             let tray_now_playing_item = MenuItem::with_id(
                 app, "tray-now-playing", "正在播放", true, None::<&str>,
             )?;
-            let tray_now_playing_ticker = tray_now_playing_item.clone();
             {
                 let quit_flag = quitting_tray.clone();
                 fn show_main_window(app: &tauri::AppHandle) {
@@ -164,24 +147,35 @@ fn main() {
                 }
 
                 let tray_menu = Menu::new(app)?;
-                tray_menu.append(&MenuItem::with_id(
-                    app, "tray-prev", "上一首", true, None::<&str>,
-                )?)?;
-                tray_menu.append(&MenuItem::with_id(
-                    app, "tray-toggle", "暂停/播放", true, None::<&str>,
-                )?)?;
-                tray_menu.append(&MenuItem::with_id(
-                    app, "tray-next", "下一首", true, None::<&str>,
-                )?)?;
+                let tray_prev_item =
+                    MenuItem::with_id(app, "tray-prev", "上一首", true, None::<&str>)?;
+                let tray_toggle_item =
+                    MenuItem::with_id(app, "tray-toggle", "暂停/播放", true, None::<&str>)?;
+                let tray_next_item =
+                    MenuItem::with_id(app, "tray-next", "下一首", true, None::<&str>)?;
+                let tray_home_item =
+                    MenuItem::with_id(app, "tray-home", "打开主页面", true, None::<&str>)?;
+                let tray_quit_item =
+                    MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
+                tray_menu.append(&tray_prev_item)?;
+                tray_menu.append(&tray_toggle_item)?;
+                tray_menu.append(&tray_next_item)?;
                 tray_menu.append(&PredefinedMenuItem::separator(app)?)?;
                 tray_menu.append(&tray_now_playing_item)?;
-                tray_menu.append(&MenuItem::with_id(
-                    app, "tray-home", "打开主页面", true, None::<&str>,
-                )?)?;
+                tray_menu.append(&tray_home_item)?;
                 tray_menu.append(&PredefinedMenuItem::separator(app)?)?;
-                tray_menu.append(&MenuItem::with_id(
-                    app, "tray-quit", "退出", true, None::<&str>,
-                )?)?;
+                tray_menu.append(&tray_quit_item)?;
+
+                // 注册句柄供 set_tray_texts / update_now_playing 使用（多语言 + 曲目名）
+                tray_cmd::register_tray_handles(tray_cmd::TrayMenuHandles {
+                        prev: tray_prev_item,
+                        toggle: tray_toggle_item,
+                        next: tray_next_item,
+                        now_playing: tray_now_playing_item,
+                        home: tray_home_item,
+                        quit: tray_quit_item,
+                    },
+                );
 
                 let mut builder = TrayIconBuilder::with_id("main-tray")
                     .menu(&tray_menu)
@@ -297,7 +291,6 @@ fn main() {
 
             // 后台定时器：每 200ms 推送播放位置 + 媒体会话同步
             let handle_ticker = handle.clone();
-            let tray_now_playing_ticker_thread = tray_now_playing_ticker.clone();
             std::thread::spawn(move || {
                 let mut last_ended = false;
                 let mut last_stalled = false;
@@ -412,15 +405,12 @@ fn main() {
                                     meta.cover_url.as_deref(),
                                     meta.duration_ms,
                                 );
-                                // 托盘菜单同步当前曲目名（仅在曲目切换时更新）
-                                update_tray_now_playing(
-                                    &tray_now_playing_ticker_thread,
-                                    &meta.title,
-                                );
+                                // 托盘菜单同步当前曲目名（仅在曲目切换时更新，前缀跟随语言）
+                                tray_cmd::update_now_playing(&meta.title);
                             }
                         } else if !last_media_track_id.is_empty() {
                             last_media_track_id.clear();
-                            update_tray_now_playing(&tray_now_playing_ticker_thread, "");
+                            tray_cmd::update_now_playing("");
                         }
 
                         if media_update_counter >= 5 {
@@ -649,6 +639,7 @@ fn main() {
             stats_cmd::clear_playback_stats,
             stats_cmd::remove_playback_stats,
             stats_cmd::playback_stats_identity_key,
+            tray_cmd::set_tray_texts,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();

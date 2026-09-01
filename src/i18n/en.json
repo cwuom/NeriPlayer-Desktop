@@ -873,5 +873,14 @@
     "copy_line": "Copy this line",
     "copy_all": "Copy all lyrics",
     "seek_here": "Jump to this line"
+  },
+  "tray": {
+    "prev": "Previous",
+    "toggle": "Play/Pause",
+    "next": "Next",
+    "now_playing": "Now Playing",
+    "now_playing_title": "Now Playing: {title}",
+    "open_home": "Open Main Page",
+    "quit": "Quit"
   }
 }

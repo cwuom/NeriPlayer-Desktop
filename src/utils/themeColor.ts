@@ -1,5 +1,10 @@
 // 主题色管理：点击色块实时切换全局 CSS 变量
 // 色值参考 Material Theme Builder (material-foundation/material-color-utilities) 生成
+import { detectPlatform } from '@/modules/shortcuts/platform'
+
+// WebKitGTK 的 View Transition 会整页快照合成，在 Linux 上曾导致
+// GTK 主循环内 WebKit 回调 SEGV 崩溃；Linux 走平滑过渡降级路径
+const VIEW_TRANSITION_SUPPORTED = detectPlatform() !== 'linux'
 
 export interface ThemeColorScheme {
   key: string
@@ -324,7 +329,7 @@ export function applyThemeColor(key: string, isDark?: boolean, persist = true) {
  * 参考 Android 端 pending state 模式：先切换视觉 -> 异步持久化
  */
 export async function switchThemeColorWithRipple(key: string, x: number, y: number, persist = true) {
-  if (!(document as any).startViewTransition) {
+  if (!(document as any).startViewTransition || !VIEW_TRANSITION_SUPPORTED) {
     applyThemeColor(key, undefined, persist)
     return
   }
