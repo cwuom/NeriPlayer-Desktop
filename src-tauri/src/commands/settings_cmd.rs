@@ -352,6 +352,35 @@ pub async fn get_build_info() -> AppResult<BuildInfo> {
     })
 }
 
+/// 读取系统强调色，供「自动跟随系统取色」使用，返回 "rgb(r, g, b)"。
+/// Windows 从注册表 Explorer\Accent 读取 SystemAccentColor（ABGR，Win10 1903+），
+/// 旧系统回退 AccentColorMenu；其余平台返回 None（由前端 CSS accent 关键字兜底）。
+#[tauri::command]
+pub fn get_system_accent_color() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let accent = hkcu
+            .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Accent")
+            .ok()?;
+        let raw: u32 = accent
+            .get_value("SystemAccentColor")
+            .or_else(|_| accent.get_value("AccentColorMenu"))
+            .ok()?;
+        let r = raw & 0xFF;
+        let g = (raw >> 8) & 0xFF;
+        let b = (raw >> 16) & 0xFF;
+        return Some(format!("rgb({r}, {g}, {b})"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -162,6 +162,57 @@ export function reapplyDynamicColorForTheme(isDark: boolean): boolean {
 }
 
 /**
+ * 探测系统强调色作为取色种子。
+ * 1) 优先 CSS accent-color: accent 关键字（WebKitGTK 等映射 GTK 主题）；
+ * 2) 失败则走 Rust 命令（Windows 读注册表 SystemAccentColor）。
+ * 都不支持时返回 null，调用方回退到默认取色。
+ */
+export async function resolveSystemAccentSeed(): Promise<RGB | null> {
+  try {
+    const probe = document.createElement('input')
+    probe.type = 'checkbox'
+    probe.style.position = 'fixed'
+    probe.style.opacity = '0'
+    probe.style.pointerEvents = 'none'
+    probe.style.accentColor = 'accent'
+    document.body.appendChild(probe)
+    const computed = getComputedStyle(probe).accentColor
+    probe.remove()
+    const match = computed?.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+    if (match) return [Number(match[1]), Number(match[2]), Number(match[3])]
+  } catch {
+    // 探测失败走平台命令兜底
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const color = await invoke<string | null>('get_system_accent_color')
+    const match = color?.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+    if (match) return [Number(match[1]), Number(match[2]), Number(match[3])]
+  } catch {
+    // 非 Tauri 环境或命令不可用时忽略
+  }
+  return null
+}
+
+/**
+ * 用指定种子色生成并应用全局动态主题色（system / cover 共用）。
+ * @returns 是否成功应用
+ */
+export function applyDynamicColorFromSeed(seed: RGB, isDark: boolean): boolean {
+  const vars = buildDynamicVars(seed, isDark)
+  beginSmoothThemeTransition()
+  applyThemeVars(vars, `${seed[0]}, ${seed[1]}, ${seed[2]}`, isDark)
+  lastSeed = seed
+  isActive = true
+  log.info('动态取色已应用（种子模式）:', {
+    seed,
+    isDark,
+    primary: vars['--md-primary'],
+  })
+  return true
+}
+
+/**
  * 从封面提取主色并应用为全局动态主题色。
  * @returns 是否成功应用
  */

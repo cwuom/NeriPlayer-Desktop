@@ -5,11 +5,15 @@ use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionControl
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
     auth_cmd, download_cmd, image_cmd, library_cmd, listen_together_cmd, lyrics_cmd, player_cmd,
-    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, debug_cmd,};
+    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd,
+    debug_cmd,};
 use neri_player_desktop::state::AppState;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlaybackFinishState {
@@ -61,6 +65,10 @@ fn main() {
     // 是否写文件与日志级别（此时尚无 app handle）
     let log_cfg = neri_player_desktop::logging::load_bootstrap_config();
 
+    // 托盘「退出」标记：窗口关闭只隐藏到托盘，仅托盘退出允许结束进程
+    let quitting = Arc::new(AtomicBool::new(false));
+    let quitting_tray = quitting.clone();
+
     tauri::Builder::default()
         // 单实例保护必须最先注册：双实例会共享 deviceId 与 causal counter，
         // 重复发号 token 造成跨设备同步静默数据损坏，playlists/stats 等
@@ -81,7 +89,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // macOS 使用原生红绿灯（Overlay 标题栏）；Windows/Linux 移除原生装饰，
@@ -120,6 +128,101 @@ fn main() {
                         ns_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
                     }
                 }
+            }
+
+            // 系统托盘：窗口关闭后隐藏到托盘继续播放；左键单击恢复主窗口
+            // 播放控制复用 media:* 事件（与系统媒体键同一套前端处理链路）
+            // 「正在播放」菜单项由后台 ticker 在曲目切换时更新标题
+            let tray_now_playing_item = MenuItem::with_id(
+                app, "tray-now-playing", "正在播放", true, None::<&str>,
+            )?;
+            {
+                let quit_flag = quitting_tray.clone();
+                fn show_main_window(app: &tauri::AppHandle) {
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }
+
+                let tray_menu = Menu::new(app)?;
+                let tray_prev_item =
+                    MenuItem::with_id(app, "tray-prev", "上一首", true, None::<&str>)?;
+                let tray_toggle_item =
+                    MenuItem::with_id(app, "tray-toggle", "暂停/播放", true, None::<&str>)?;
+                let tray_next_item =
+                    MenuItem::with_id(app, "tray-next", "下一首", true, None::<&str>)?;
+                let tray_home_item =
+                    MenuItem::with_id(app, "tray-home", "打开主页面", true, None::<&str>)?;
+                let tray_quit_item =
+                    MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
+                tray_menu.append(&tray_prev_item)?;
+                tray_menu.append(&tray_toggle_item)?;
+                tray_menu.append(&tray_next_item)?;
+                tray_menu.append(&PredefinedMenuItem::separator(app)?)?;
+                tray_menu.append(&tray_now_playing_item)?;
+                tray_menu.append(&tray_home_item)?;
+                tray_menu.append(&PredefinedMenuItem::separator(app)?)?;
+                tray_menu.append(&tray_quit_item)?;
+
+                // 注册句柄供 set_tray_texts / update_now_playing 使用（多语言 + 曲目名）
+                tray_cmd::register_tray_handles(app.handle(), tray_cmd::TrayMenuHandles {
+                        prev: tray_prev_item,
+                        toggle: tray_toggle_item,
+                        next: tray_next_item,
+                        now_playing: tray_now_playing_item,
+                        home: tray_home_item,
+                        quit: tray_quit_item,
+                    },
+                );
+
+                let mut builder = TrayIconBuilder::with_id("main-tray")
+                    .menu(&tray_menu)
+                    .tooltip("NeriPlayer")
+                    // Windows 上左键直接恢复窗口、右键弹菜单
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "tray-prev" => {
+                            let _ = app.emit("media:previous", ());
+                        }
+                        "tray-toggle" => {
+                            let _ = app.emit("media:toggle", ());
+                        }
+                        "tray-next" => {
+                            let _ = app.emit("media:next", ());
+                        }
+                        "tray-now-playing" => {
+                            show_main_window(app);
+                            let _ = app.emit("tray:open-now-playing", ());
+                        }
+                        "tray-home" => {
+                            show_main_window(app);
+                            let _ = app.emit("tray:open-home", ());
+                        }
+                        "tray-quit" => {
+                            quit_flag.store(true, Ordering::Relaxed);
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(move |tray, event| {
+                        // 左键单击恢复主窗口
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            show_main_window(tray.app_handle());
+                        }
+                    });
+
+                // 托盘图标默认取应用的 default_window_icon（bundle.icon 嵌入）
+                if let Some(icon) = app.default_window_icon() {
+                    builder = builder.icon(icon.clone());
+                }
+                builder.build(app)?;
             }
 
             // 恢复持久化的登录 Cookie
@@ -285,16 +388,15 @@ fn main() {
                         }
                     }
 
-                    // 媒体会话同步（每 1s = 每 5 个 tick）
-                    if let Some(ref ms) = media_session {
-                        media_update_counter += 1;
-
-                        // 元数据来源改为前端镜像: PlayQueue 从不被前端填充, 读它使
-                        // SMTC/MPRIS 永远拿不到曲目信息（PB-01）
-                        let current_meta = state.media_metadata.lock().clone();
-                        if let Some(meta) = current_meta {
-                            if !meta.id.is_empty() && meta.id != last_media_track_id {
-                                last_media_track_id = meta.id.clone();
+                    // 媒体会话同步（每 1s = 每 5 个 tick）与托盘曲目名同步。
+                    // 托盘更新不依赖 media_session：MPRIS/SMTC 不可用时曲目名也要更新
+                    let current_meta = state.media_metadata.lock().clone();
+                    if let Some(meta) = current_meta {
+                        if !meta.id.is_empty() && meta.id != last_media_track_id {
+                            last_media_track_id = meta.id.clone();
+                            // 托盘菜单同步当前曲目名（仅在曲目切换时更新）
+                            tray_cmd::update_now_playing(&meta.title);
+                            if let Some(ref ms) = media_session {
                                 ms.update_metadata(
                                     &meta.title,
                                     &meta.artist,
@@ -304,7 +406,13 @@ fn main() {
                                 );
                             }
                         }
+                    } else if !last_media_track_id.is_empty() {
+                        last_media_track_id.clear();
+                        tray_cmd::update_now_playing("");
+                    }
 
+                    if let Some(ref ms) = media_session {
+                        media_update_counter += 1;
                         if media_update_counter >= 5 {
                             media_update_counter = 0;
                             ms.update_playback(snap_playing, snap_pos);
@@ -448,6 +556,7 @@ fn main() {
             settings_cmd::save_file_bytes,
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
+            settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
             debug_cmd::export_debug_report,
@@ -530,6 +639,7 @@ fn main() {
             stats_cmd::clear_playback_stats,
             stats_cmd::remove_playback_stats,
             stats_cmd::playback_stats_identity_key,
+            tray_cmd::set_tray_texts,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();
@@ -549,12 +659,42 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            // 退出前 flush 一次轮转 Cookie：60s 定时器之外，退出前最后一窗口的
-            // Set-Cookie 轮换令牌若不落盘，下次启动会重放旧令牌导致偶发掉登录（AU-05）
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                let state = app_handle.state::<AppState>();
-                auth_cmd::persist_rotated_cookies(app_handle, state.inner());
+        .run({
+            let quitting = quitting.clone();
+            move |app_handle, event| match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !quitting.load(Ordering::Relaxed) && cfg!(not(target_os = "macos")) {
+                        // 窗口关闭只是隐藏到托盘；仅托盘「退出」允许结束进程。
+                        // macOS 保留原生 Cmd+Q 语义（关窗本就不退出）
+                        api.prevent_exit();
+                        for win in app_handle.webview_windows().values() {
+                            let _ = win.hide();
+                        }
+                    } else {
+                        // 退出前 flush 一次轮转 Cookie：60s 定时器之外，退出前最后一窗口的
+                        // Set-Cookie 轮换令牌若不落盘，下次启动会重放旧令牌导致偶发掉登录（AU-05）
+                        let state = app_handle.state::<AppState>();
+                        auth_cmd::persist_rotated_cookies(app_handle, state.inner());
+                    }
+                }
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: WindowEvent::CloseRequested { api, .. },
+                    ..
+                } => {
+                    // 关闭 = 隐藏到托盘。prevent_close 在 GTK 层真正取消
+                    // delete-event，不会重发；前端若在 JS 侧 hide()/close()
+                    // 回退会与平台关闭状态互扰，在 WebKitGTK 下造成
+                    // CloseRequested 死循环（flush 刷屏）并拖垮 GPU 上下文。
+                    // 已隐藏时忽略重复请求，避免重发循环
+                    api.prevent_close();
+                    if let Some(win) = app_handle.get_webview_window(&label) {
+                        if win.is_visible().unwrap_or(false) {
+                            let _ = win.hide();
+                        }
+                    }
+                }
+                _ => {}
             }
         });
 }

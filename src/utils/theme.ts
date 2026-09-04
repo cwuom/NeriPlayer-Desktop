@@ -1,5 +1,10 @@
 // 深色/浅色模式管理 + 圆形扩散过渡动画
 // 参考 Android 端 pending state 模式：视觉切换与持久化解耦，消除卡顿
+import { detectPlatform } from '@/modules/shortcuts/platform'
+
+// WebKitGTK 的 View Transition 在 Linux 上不稳定（整页快照合成可致
+// WebKit 回调内 SEGV），走 beginSmoothThemeTransition 平滑降级
+const VIEW_TRANSITION_SUPPORTED = detectPlatform() !== 'linux'
 import { reapplyDynamicColorForTheme } from './colorExtractor'
 import {
   applyThemeColor,
@@ -58,7 +63,7 @@ export async function switchThemeWithRipple(mode: ThemeMode, x: number, y: numbe
   // 如果浏览器不支持 View Transition，直接切换（走平滑过渡兜底）。
   // 调用方（SettingsView）可能已预加 theme-ripple-active，而本分支不会走
   // ripple 的清理流程，先移除以免残留导致全局 transition 被永久禁用
-  if (!(document as any).startViewTransition) {
+  if (!(document as any).startViewTransition || !VIEW_TRANSITION_SUPPORTED) {
     document.documentElement.classList.remove('theme-ripple-active')
     applyTheme(mode, persist)
     return

@@ -35,6 +35,55 @@ let animFrame = 0
 let startTime = 0
 let lastFrameMs = 0
 
+// —— 自适应渲染质量 ——
+// WebKitGTK 的 WebGL 在不同驱动下性能差异巨大：NVIDIA 混合显卡 EGL 路径、
+// 软件渲染（llvmpipe）时全屏 2x 分辨率逐帧重绘会严重卡顿，且 CPU/GPU 占用
+// 看着不高（瓶颈在 WebKit 内部光栅/合成路径）。按实测帧耗时动态调整内部
+// 渲染分辨率与帧率：GPU 富余时维持满质量，吃紧时逐级降档，恢复后再升回。
+const QUALITY_ADJUST_INTERVAL_MS = 1000
+const QUALITY_MIN_SCALE = 0.5
+const QUALITY_MAX_SCALE = 1.0
+let qualityScale = 1.0
+let qualityFps = 60
+let lastQualityCheckAt = 0
+let lastRenderedAt = 0
+let qualityDowns = 0
+
+function rendererIsSoftware(renderer: string): boolean {
+  return /llvmpipe|softpipe|swiftshader|software/i.test(renderer)
+}
+
+function adjustQuality(nowMs: number): void {
+  if (nowMs - lastQualityCheckAt < QUALITY_ADJUST_INTERVAL_MS) return
+  lastQualityCheckAt = nowMs
+  // 上一帧实际耗时（含 vsync 等待；60Hz 下健康值约 16-17ms）
+  const frameCost = nowMs - lastRenderedAt
+  if (frameCost > 33) {
+    // 低于 ~30fps：先降内部分辨率，再降帧率
+    if (qualityScale > QUALITY_MIN_SCALE) {
+      qualityScale = Math.max(QUALITY_MIN_SCALE, qualityScale - 0.25)
+    } else if (qualityFps > 24) {
+      qualityFps = Math.max(24, qualityFps - 12)
+    }
+    qualityDowns += 1
+    if (qualityDowns <= 3) {
+      log.warn('WebGL 帧耗时偏高，降档渲染:', {
+        frameCostMs: Math.round(frameCost),
+        qualityScale,
+        qualityFps,
+      })
+    }
+  } else if (frameCost < 20) {
+    // 帧率余裕：恢复档位
+    if (qualityScale < QUALITY_MAX_SCALE) {
+      qualityScale = Math.min(QUALITY_MAX_SCALE, qualityScale + 0.25)
+    } else if (qualityFps < 60) {
+      qualityFps = Math.min(60, qualityFps + 12)
+    }
+    qualityDowns = 0
+  }
+}
+
 // 音乐律动第二级非对称平滑（对齐 Android HyperBackground 帧循环）
 // Rust analyzer.rs 已做第一级帧率无关衰减，这里补一层 attack/release，
 // 并统一换算为与帧率无关的系数，避免 120Hz(ProMotion)/30fps 上手感不同。
@@ -125,6 +174,16 @@ function initGL() {
   gl = canvas.value.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: false })
   if (!gl) { log.error('WebGL not supported'); return }
 
+  // 诊断：记录实际 GL 渲染器，软件渲染（llvmpipe 等）直接预降档
+  const glRenderer = String(gl.getParameter(gl.RENDERER) ?? '')
+  const glVendor = String(gl.getParameter(gl.VENDOR) ?? '')
+  log.info('WebGL context:', { vendor: glVendor, renderer: glRenderer })
+  if (rendererIsSoftware(glRenderer)) {
+    log.warn('WebGL 为软件渲染，直接降到低档以保流畅:', { renderer: glRenderer })
+    qualityScale = QUALITY_MIN_SCALE
+    qualityFps = 24
+  }
+
   const vs = compileShader(gl, hyperBackgroundVertexShader, gl.VERTEX_SHADER)
   const fs = compileShader(gl, hyperBackgroundFragmentShader, gl.FRAGMENT_SHADER)
   if (!vs || !fs) return
@@ -189,16 +248,25 @@ function initGL() {
 
 function render() {
   if (!gl || !program) return
+  const nowMs = performance.now()
+
+  // 帧率档位低于满速时按目标帧间隔跳过绘制（保留 rAF 保证恢复及时）
+  if (qualityFps < 60 && nowMs - lastRenderedAt < 1000 / qualityFps) {
+    animFrame = requestAnimationFrame(render)
+    return
+  }
+  adjustQuality(nowMs)
+
   const c = canvas.value!
   // mac/GPU 富余场景允许到 2.0，保证 Retina/HiDPI 清晰度；其余仍限制以省 GPU
   const dprCap = window.devicePixelRatio >= 2 ? 2.0 : 1.5
-  const dpr = Math.min(window.devicePixelRatio || 1, dprCap)
-  const w = c.clientWidth * dpr
-  const h = c.clientHeight * dpr
+  // 内部渲染分辨率 = 设备缩放 × 自适应档位（低档时由 CSS 拉伸，背景本就模糊无感知）
+  const dpr = Math.min(window.devicePixelRatio || 1, dprCap) * qualityScale
+  const w = Math.max(1, Math.round(c.clientWidth * dpr))
+  const h = Math.max(1, Math.round(c.clientHeight * dpr))
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h }
   gl.viewport(0, 0, w, h)
 
-  const nowMs = performance.now()
   const dt = Math.min((nowMs - lastFrameMs) / 1000, 0.1) // 秒，钳制避免卡顿后跳变
   lastFrameMs = nowMs
 
@@ -254,6 +322,7 @@ function render() {
   gl.uniform1f(uSaturateOffset, smoothSaturateOffset)
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+  lastRenderedAt = nowMs
   animFrame = requestAnimationFrame(render)
 }
 

@@ -416,8 +416,11 @@
     "color_brown": "棕色",
     "color_orange": "橙色",
     "color_green": "绿色",
-    "dynamic_color": "动态取色",
-    "dynamic_color_desc": "跟随封面主题色自动调整界面色彩",
+    "color_mode": "取色方式",
+    "color_mode_desc": "选择界面主题色的来源",
+    "color_mode_system": "自动跟随系统取色",
+    "color_mode_default": "默认取色",
+    "color_mode_cover": "跟随歌曲封面动态取色",
     "personalization": "个性化",
     "nav_personalization_desc": "调整外观和播放界面",
     "motion": "动效设置",
@@ -870,5 +873,14 @@
     "copy_line": "复制这一句",
     "copy_all": "复制全部歌词",
     "seek_here": "跳到这一句"
+  },
+  "tray": {
+    "prev": "上一首",
+    "toggle": "暂停/播放",
+    "next": "下一首",
+    "now_playing": "正在播放",
+    "now_playing_title": "正在播放：{title}",
+    "open_home": "打开主页面",
+    "quit": "退出"
   }
 }

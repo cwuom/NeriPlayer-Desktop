@@ -22,7 +22,7 @@ import { setLocale } from '@/i18n'
 import { applyTheme } from '@/utils/theme'
 import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
-import { applyDynamicColorFromCover, clearDynamicColor } from '@/utils/colorExtractor'
+import { applyDynamicColorFromCover, applyDynamicColorFromSeed, clearDynamicColor, resolveSystemAccentSeed } from '@/utils/colorExtractor'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
 
 type CoverSnapshot = {
@@ -190,6 +190,8 @@ let historyBatchedTimer: ReturnType<typeof setTimeout> | null = null
 let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
+let unlistenTrayNowPlaying: UnlistenFn | null = null
+let unlistenTrayHome: UnlistenFn | null = null
 
 function handleBeforeUnload() {
   player.flushPlayerState()
@@ -197,26 +199,21 @@ function handleBeforeUnload() {
   void usePlaybackStatsStore().flushFinal()
 }
 
-// 关窗流程标志位：flush 完成后 destroy，二次进入直接放行避免死循环
+// 关窗流程标志位：flush 完成后放行；窗口隐藏/关闭拦截全部由 Rust 侧完成
 let closeFlushDone = false
 
 async function handleCloseRequested(event: { preventDefault: () => void }) {
-  if (closeFlushDone) return
   event.preventDefault()
+  if (closeFlushDone) return
   closeFlushDone = true
   try {
-    // 同步保存播放器状态 + 等待统计落盘后再真正关窗
+    // 同步保存播放器状态 + 等待统计落盘（隐藏后播放继续，下次关闭不再有卸载事件）
     player.flushPlayerState()
     await usePlaybackStatsStore().flushFinal()
   } catch {
-    // 落盘失败不阻塞退出
+    // 落盘失败不阻塞
   }
-  try {
-    await getCurrentWindow().destroy()
-  } catch {
-    // destroy 不可用时退回 close（此时标志位已放行）
-    void getCurrentWindow().close().catch(() => {})
-  }
+  closeFlushDone = false
 }
 
 function scheduleDebouncedSync() {
@@ -290,22 +287,36 @@ function resolveDynamicIsDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
-// 开关、深浅色或封面变化时重算；关闭或无封面则还原预设主题色
+// 取色方式、深浅色或封面变化时重算；default 或无封面则还原预设主题色
 watch(
   () => [
-    settingsStore.dynamicColor,
+    settingsStore.colorMode,
     settingsStore.darkMode,
     player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
   ] as const,
-  ([enabled, , cover]) => {
+  async ([mode, , cover]) => {
     // 圆形扩散中由 theme 路径同步重算，避免圆外提前换色
     if (document.documentElement.classList.contains('theme-ripple-active')) return
     const dark = resolveDynamicIsDark()
-    if (!enabled || !cover) {
+    if (mode === 'cover') {
+      if (cover) {
+        void applyDynamicColorFromCover(cover as string, dark)
+        return
+      }
       clearDynamicColor(dark)
       return
     }
-    void applyDynamicColorFromCover(cover as string, dark)
+    if (mode === 'system') {
+      const seed = await resolveSystemAccentSeed()
+      // 异步探测期间取色方式可能已切换，以最新状态为准
+      if (settingsStore.colorMode !== 'system') return
+      if (seed) {
+        applyDynamicColorFromSeed(seed, dark)
+        return
+      }
+      // 引擎不支持解析系统强调色时回退默认取色
+    }
+    clearDynamicColor(dark)
   },
 )
 
@@ -375,9 +386,12 @@ onMounted(async () => {
   applyTheme(settingsStore.darkMode, false)
   applyThemeColor(settingsStore.themeColor, undefined, false)
   // 首屏在预设主题之后应用动态取色，避免被 applyThemeColor 覆盖
-  if (settingsStore.dynamicColor) {
+  if (settingsStore.colorMode === 'cover') {
     const cover = player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : ''
     if (cover) void applyDynamicColorFromCover(cover, resolveDynamicIsDark())
+  } else if (settingsStore.colorMode === 'system') {
+    const seed = await resolveSystemAccentSeed()
+    if (seed) applyDynamicColorFromSeed(seed, resolveDynamicIsDark())
   }
   setLocale(settingsStore.locale, false)
   await player.applyPersistedSettings()
@@ -409,6 +423,14 @@ onMounted(async () => {
     scheduleDebouncedSync()
   })
 
+  // 托盘菜单：正在播放 / 打开主页面（窗口可能处于隐藏状态，先由后端 show）
+  unlistenTrayNowPlaying = await listen('tray:open-now-playing', () => {
+    if (player.hasPlaybackSession) void openNowPlaying()
+  })
+  unlistenTrayHome = await listen('tray:open-home', () => {
+    void router.push({ name: 'home' })
+  })
+
   // 监听前端播放历史变更事件，触发历史自动同步
   window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
 })
@@ -428,6 +450,8 @@ onUnmounted(() => {
   window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
   if (unlistenCloseRequested) unlistenCloseRequested()
+  if (unlistenTrayNowPlaying) unlistenTrayNowPlaying()
+  if (unlistenTrayHome) unlistenTrayHome()
 })
 </script>
 

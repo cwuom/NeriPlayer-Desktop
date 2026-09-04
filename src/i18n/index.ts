@@ -3,6 +3,16 @@ import zhCN from './zh-CN.json'
 import zhTW from './zh-TW.json'
 import en from './en.json'
 import ja from './ja.json'
+import { createLogger } from '@/utils/logger'
+
+const traySyncLog = createLogger('tray-sync')
+
+// WebKitGTK 的 View Transition 实现不稳定：语言切换会整树重渲染，在 Linux
+// 上曾导致 WebKit 主循环内 SEGV 崩溃（GTK 主循环 -> WebKit 回调 -> JSC）。
+// Linux 走平滑降级路径（直接切 locale），Windows/macOS 保留过渡动画
+import { detectPlatform } from '@/modules/shortcuts/platform'
+
+export const VIEW_TRANSITION_SUPPORTED = detectPlatform() !== 'linux'
 
 export const SUPPORTED_LOCALES = [
   { code: 'zh-CN', label: '简体中文' },
@@ -42,11 +52,27 @@ export function setLocale(locale: string, persist = true) {
   ;(i18n.global.locale as any).value = locale
   if (persist) localStorage.setItem('locale', locale)
   document.documentElement.lang = locale
+  // 同步托盘菜单文案：从中央 i18n 资源取当前语言的已翻译文案下发（浏览器开发模式静默失败）。
+  // 注意模板里的 {title} 会被 t() 当作插值占位符吞掉，必须用 getLocaleMessage 取原始文案
+  const t = i18n.global.t
+  const rawTray = (i18n.global.getLocaleMessage(locale) as { tray?: Record<string, string> })?.tray
+  const trayText = (key: string) => rawTray?.[key] ?? t(`tray.${key}`)
+  import('@tauri-apps/api/core')
+    .then(({ invoke }) => void invoke('set_tray_texts', {
+      prev: trayText('prev'),
+      toggle: trayText('toggle'),
+      next: trayText('next'),
+      nowPlaying: trayText('now_playing'),
+      nowPlayingTitle: trayText('now_playing_title'),
+      openHome: trayText('open_home'),
+      quit: trayText('quit'),
+    }).catch(() => {}))
+    .catch(() => {})
 }
 
 /** 带 View Transition 动画的语言切换 */
 export async function setLocaleWithTransition(locale: string, x?: number, y?: number, persist = true) {
-  if (!(document as any).startViewTransition || !x || !y) {
+  if (!(document as any).startViewTransition || !x || !y || !VIEW_TRANSITION_SUPPORTED) {
     setLocale(locale, persist)
     return
   }

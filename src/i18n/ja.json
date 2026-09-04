@@ -416,8 +416,11 @@
     "color_brown": "茶色",
     "color_orange": "オレンジ",
     "color_green": "緑",
-    "dynamic_color": "ダイナミックカラー",
-    "dynamic_color_desc": "カバーのテーマカラーに合わせて配色を自動調整",
+    "color_mode": "カラーモード",
+    "color_mode_desc": "UIアクセントカラーの出所を選択",
+    "color_mode_system": "システムカラーに追従",
+    "color_mode_default": "デフォルトカラー",
+    "color_mode_cover": "カバーから動的取得",
     "personalization": "カスタマイズ",
     "nav_personalization_desc": "外観と再生画面を調整",
     "motion": "モーション設定",
@@ -870,5 +873,14 @@
     "copy_line": "この行をコピー",
     "copy_all": "歌詞をすべてコピー",
     "seek_here": "この行へジャンプ"
+  },
+  "tray": {
+    "prev": "前へ",
+    "toggle": "再生/一時停止",
+    "next": "次へ",
+    "now_playing": "再生中",
+    "now_playing_title": "再生中：{title}",
+    "open_home": "メインページを開く",
+    "quit": "終了"
   }
 }

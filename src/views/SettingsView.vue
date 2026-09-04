@@ -12,6 +12,7 @@ import {
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
   useSettingsStore,
+  type ColorMode,
 } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore, type SyncFrequency } from '@/stores/sync'
@@ -53,7 +54,7 @@ const {
   keepProgress, keepPlaybackMode,
   showTranslation, lyricBlur, lyricBlurAmount,
   cloudMusicOffset, qqMusicOffset,
-  advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
+  advancedLyrics, dynamicBackground, colorMode, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
   bypassProxy, internationalizationEnabled,
@@ -204,6 +205,13 @@ const darkModeThumbIndex = computed(() => {
 const darkModeThumbStyle = computed(() => ({
   transform: `translateX(${darkModeThumbIndex.value * 38}px)`,
 }))
+
+// 取色方式三选项
+const colorModeOptions = computed(() => [
+  { value: 'system', label: t('settings.color_mode_system'), icon: 'brightness_auto' },
+  { value: 'default', label: t('settings.color_mode_default'), icon: 'format_paint' },
+  { value: 'cover', label: t('settings.color_mode_cover'), icon: 'colorize' },
+] as const)
 
 function handleDarkModeSwitch(mode: ThemeMode, event: MouseEvent) {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
@@ -1158,7 +1166,7 @@ function confirmDataSaverChange() {
       </div>
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.theme_color') }}</div>
-        <div class="color-row" :style="dynamicColor ? { opacity: 0.4, pointerEvents: 'none' } : undefined">
+        <div class="color-row" :style="colorMode !== 'default' ? { opacity: 0.4, pointerEvents: 'none' } : undefined">
           <button
             v-for="c in presetColors" :key="c.key"
             class="color-dot"
@@ -1172,14 +1180,25 @@ function confirmDataSaverChange() {
       </div>
     </div>
 
-    <!-- 动态取色 -->
+    <!-- 取色方式 -->
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">colorize</span></div>
       <div class="setting-info">
-        <div class="setting-title">{{ t('settings.dynamic_color') }}</div>
-        <div class="setting-desc">{{ t('settings.dynamic_color_desc') }}</div>
+        <div class="setting-title">{{ t('settings.color_mode') }}</div>
+        <div class="setting-desc">{{ t('settings.color_mode_desc') }}</div>
+        <div class="radio-group">
+          <label
+            v-for="opt in colorModeOptions"
+            :key="opt.value"
+            class="radio-option"
+            :class="{ active: colorMode === opt.value }"
+            @click="colorMode = opt.value as ColorMode"
+          >
+            <span class="radio-dot" :class="{ checked: colorMode === opt.value }"></span>
+            {{ opt.label }}
+          </label>
+        </div>
       </div>
-      <label class="m3-switch"><input type="checkbox" v-model="dynamicColor" /><span class="track"><span class="thumb"><span v-if="dynamicColor" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
     <!-- 个性化 -->

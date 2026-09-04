@@ -2,7 +2,7 @@ name: Artifacts
 
 on:
   push:
-    branches: [main, master]
+    # 任意分支推送都构建四平台产物（docs 等纯文档改动除外）
     paths-ignore:
       - '**/*.md'
       - '**/*.mdx'

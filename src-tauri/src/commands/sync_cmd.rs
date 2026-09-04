@@ -1,7 +1,9 @@
 // 同步相关命令
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
+use crate::auth::state::{AuthState, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth};
 use crate::error::{AppError, AppResult};
 use crate::settings::store::{self, AppSettings};
 use crate::state::AppState;
@@ -180,6 +182,372 @@ impl ConfigWebDavSync {
     }
 }
 
+// ---- Android 导出配置（AppConfigBackup.kt）兼容导入 ----
+
+/// Android 端 settings 是 DataStore 类型分组快照（TypedPreferenceSnapshot）。
+/// ints 分组暂无与桌面语义相同的键，不读取（serde 自动忽略未知键）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidTypedSettings {
+    #[serde(default)]
+    booleans: HashMap<String, bool>,
+    #[serde(default)]
+    floats: HashMap<String, f32>,
+    #[serde(default)]
+    longs: HashMap<String, i64>,
+    #[serde(default)]
+    strings: HashMap<String, String>,
+}
+
+impl AndroidTypedSettings {
+    /// 把 Android 分组偏好叠加到桌面设置上（仅映射两端语义相同的键，未知键忽略）
+    fn apply_to(&self, settings: &mut AppSettings) {
+        for (key, value) in &self.booleans {
+            match key.as_str() {
+                "dev_mode_enabled" => settings.dev_mode_enabled = *value,
+                "internationalization_enabled" => settings.internationalization_enabled = *value,
+                "bypass_proxy" => settings.bypass_proxy = *value,
+                // Android 的 dynamic_color = Material You 跟随系统取色，
+                // 语义与桌面旧 dynamic_color（跟随封面）不同，直接映射 color_mode
+                "dynamic_color" => {
+                    settings.color_mode = if *value { "system" } else { "default" }.into()
+                }
+                "nowplaying_audio_reactive_enabled" => settings.audio_reactive = *value,
+                "nowplaying_dynamic_background_enabled" => settings.dynamic_background = *value,
+                "nowplaying_cover_blur_background_enabled" => settings.cover_blur_bg = *value,
+                "nowplaying_toolbar_dock_enabled" => settings.show_toolbar_dock = *value,
+                _ => {}
+            }
+        }
+        for (key, value) in &self.floats {
+            match key.as_str() {
+                "lyric_font_scale" => settings.lyric_font_scale = *value,
+                "lyric_blur_amount" => settings.lyric_blur_amount = *value,
+                "nowplaying_cover_blur_amount" => settings.cover_blur_amount = *value,
+                _ => {}
+            }
+        }
+        for (key, value) in &self.longs {
+            match key.as_str() {
+                "cloud_music_lyric_default_offset_ms" => settings.cloud_music_offset = *value as i32,
+                // Android 以字节存储缓存上限，桌面端以 MB 为单位
+                "max_cache_size_bytes" => settings.max_cache_size = (*value / 1024 / 1024) as i32,
+                _ => {}
+            }
+        }
+        for (key, value) in &self.strings {
+            match key.as_str() {
+                "audio_quality" => settings.netease_quality = value.clone(),
+                "youtube_audio_quality" => settings.youtube_quality = value.clone(),
+                "bili_audio_quality" => settings.bili_quality = value.clone(),
+                _ => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidListenTogether {
+    #[serde(default)]
+    worker_base_url: String,
+    #[serde(default)]
+    user_uuid: String,
+    #[serde(default)]
+    nickname: String,
+    #[serde(default = "config_default_true")]
+    allow_member_control: bool,
+    #[serde(default = "config_default_true")]
+    auto_pause_on_member_change: bool,
+    #[serde(default = "config_default_true")]
+    share_audio_links: bool,
+}
+
+impl From<AndroidListenTogether> for ConfigListenTogether {
+    fn from(value: AndroidListenTogether) -> Self {
+        Self {
+            user_uuid: value.user_uuid,
+            server_url: value.worker_base_url,
+            nickname: value.nickname,
+            allow_member_control: value.allow_member_control,
+            auto_pause_on_member_change: value.auto_pause_on_member_change,
+            share_audio_links: value.share_audio_links,
+        }
+    }
+}
+
+/// 网易云 / B站 的 Cookie 快照（SavedCookieConfigSnapshot）
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidCookieAuth {
+    #[serde(default)]
+    cookies: HashMap<String, String>,
+}
+
+/// YouTube 的 Cookie 快照（YouTubeAuthConfigSnapshot，只取 cookies）
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidYouTubeAuth {
+    #[serde(default)]
+    cookies: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidGitHubSync {
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    repo_owner: String,
+    #[serde(default)]
+    repo_name: String,
+    #[serde(default)]
+    auto_sync_enabled: bool,
+    #[serde(default)]
+    play_history_update_mode: String,
+    #[serde(default = "config_default_true")]
+    data_saver_mode: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidWebDavSync {
+    #[serde(default)]
+    server_url: String,
+    #[serde(default)]
+    base_path: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    auto_sync_enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidSyncPreferences {
+    #[serde(default)]
+    play_history_update_mode: String,
+}
+
+/// Android 端导出的配置备份（字段与 AppConfigBackup.kt 对齐）
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidConfigFile {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    format_version: u32,
+    #[serde(default)]
+    settings: AndroidTypedSettings,
+    #[serde(default)]
+    listen_together: Option<AndroidListenTogether>,
+    #[serde(default)]
+    language: Option<ConfigLanguage>,
+    #[serde(default)]
+    netease_auth: Option<AndroidCookieAuth>,
+    #[serde(default)]
+    bili_auth: Option<AndroidCookieAuth>,
+    #[serde(default)]
+    you_tube_auth: Option<AndroidYouTubeAuth>,
+    #[serde(default)]
+    git_hub_sync: Option<AndroidGitHubSync>,
+    #[serde(default)]
+    web_dav_sync: Option<AndroidWebDavSync>,
+    #[serde(default)]
+    sync_preferences: Option<AndroidSyncPreferences>,
+}
+
+/// Android 与 PC 配置的判别：Android 的 settings 是类型分组
+/// （booleans/floats/...），PC 是扁平 AppSettings，无 "booleans" 键
+fn is_android_config(root: &Value) -> bool {
+    root.get("settings")
+        .and_then(|settings| settings.get("booleans"))
+        .is_some()
+}
+
+fn android_cookie_entries(cookies: &HashMap<String, String>, domain: &str) -> Vec<CookieEntry> {
+    cookies
+        .iter()
+        .filter(|(name, value)| !name.is_empty() && !value.is_empty())
+        .map(|(name, value)| CookieEntry {
+            name: name.clone(),
+            value: value.clone(),
+            domain: domain.into(),
+        })
+        .collect()
+}
+
+/// Android 三平台 Cookie 快照 → 桌面 AuthState（不包含用户资料字段）
+fn map_android_auth(config: &AndroidConfigFile) -> Option<AuthState> {
+    let netease = config
+        .netease_auth
+        .as_ref()
+        .filter(|auth| !auth.cookies.is_empty())
+        .map(|auth| NeteaseAuth {
+            cookies: android_cookie_entries(&auth.cookies, "music.163.com"),
+            user_id: None,
+            nickname: None,
+            avatar_url: None,
+        });
+    let bilibili = config
+        .bili_auth
+        .as_ref()
+        .filter(|auth| !auth.cookies.is_empty())
+        .map(|auth| BiliAuth {
+            cookies: android_cookie_entries(&auth.cookies, ".bilibili.com"),
+            mid: None,
+            nickname: None,
+            avatar_url: None,
+        });
+    let youtube = config
+        .you_tube_auth
+        .as_ref()
+        .filter(|auth| !auth.cookies.is_empty())
+        .map(|auth| YouTubeAuth {
+            cookies: android_cookie_entries(&auth.cookies, "music.youtube.com"),
+            nickname: None,
+            avatar_url: None,
+        });
+    if netease.is_none() && bilibili.is_none() && youtube.is_none() {
+        None
+    } else {
+        Some(AuthState {
+            netease,
+            bilibili,
+            youtube,
+        })
+    }
+}
+
+/// Android 导出总带全部分组；空段落不覆盖桌面已有配置（避免误清凭据）。
+/// 以下映射函数在有实际内容时才返回 Some。
+fn map_android_language(language: Option<ConfigLanguage>) -> Option<ConfigLanguage> {
+    language.filter(|language| !language.code.is_empty()).map(|mut language| {
+        // Android 语言码是 zh/en/ja，桌面端是 zh-CN/zh-TW/en/ja
+        if language.code == "zh" {
+            language.code = "zh-CN".into();
+        }
+        language
+    })
+}
+
+fn map_android_listen_together(
+    listen_together: Option<AndroidListenTogether>,
+) -> Option<ConfigListenTogether> {
+    listen_together
+        .filter(|lt| {
+            !lt.worker_base_url.is_empty() || !lt.user_uuid.is_empty() || !lt.nickname.is_empty()
+        })
+        .map(Into::into)
+}
+
+fn map_android_github(github: Option<AndroidGitHubSync>) -> Option<ConfigGitHubSync> {
+    github
+        .filter(|github| {
+            !github.token.is_empty()
+                || !github.repo_owner.is_empty()
+                || !github.repo_name.is_empty()
+                || !github.play_history_update_mode.is_empty()
+        })
+        .map(|github| ConfigGitHubSync {
+            token: github.token,
+            owner: github.repo_owner,
+            repo: github.repo_name,
+            last_remote_sha: String::new(),
+            last_sync_time: 0,
+            auto_sync: github.auto_sync_enabled,
+            data_saver: github.data_saver_mode,
+            silent_failures: false,
+            history_update_mode: normalize_history_update_mode(&github.play_history_update_mode),
+        })
+}
+
+fn map_android_webdav(webdav: Option<AndroidWebDavSync>) -> Option<ConfigWebDavSync> {
+    webdav
+        .filter(|webdav| {
+            !webdav.server_url.is_empty() || !webdav.username.is_empty() || !webdav.password.is_empty()
+        })
+        .map(|webdav| ConfigWebDavSync {
+            server_url: webdav.server_url,
+            username: webdav.username,
+            password: webdav.password,
+            base_path: webdav.base_path,
+            last_remote_fingerprint: String::new(),
+            last_sync_time: 0,
+            auto_sync: webdav.auto_sync_enabled,
+            data_saver: true,
+        })
+}
+
+fn map_android_sync_preferences(
+    preferences: Option<AndroidSyncPreferences>,
+) -> Option<ConfigSyncPreferences> {
+    preferences
+        .filter(|preferences| !preferences.play_history_update_mode.is_empty())
+        .map(|preferences| ConfigSyncPreferences {
+            history_update_mode: normalize_history_update_mode(&preferences.play_history_update_mode),
+        })
+}
+
+/// 归一化后的待导入配置（PC 与 Android 两种来源共用）
+struct ImportedConfig {
+    settings: AppSettings,
+    listen_together: Option<ConfigListenTogether>,
+    language: Option<ConfigLanguage>,
+    auth: Option<AuthState>,
+    github_sync: Option<ConfigGitHubSync>,
+    webdav_sync: Option<ConfigWebDavSync>,
+    sync_preferences: Option<ConfigSyncPreferences>,
+}
+
+/// 解析桌面端导出的配置文件
+fn parse_pc_config(root: Value) -> AppResult<ImportedConfig> {
+    let payload: DesktopConfigFile = serde_json::from_value(root)
+        .map_err(|e| AppError::Other(format!("Parse config failed: {}", e)))?;
+    if payload.kind != CONFIG_FILE_KIND
+        || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
+        || payload.platform != "pc"
+    {
+        return Err(AppError::Other("Unsupported config file".into()));
+    }
+    Ok(ImportedConfig {
+        settings: payload.settings,
+        listen_together: payload.listen_together,
+        language: payload.language,
+        auth: payload.auth,
+        github_sync: payload.github_sync,
+        webdav_sync: payload.webdav_sync,
+        sync_preferences: payload.sync_preferences,
+    })
+}
+
+/// 解析 Android 端导出的配置备份，偏好叠加到桌面当前设置上
+fn parse_android_config(app: &AppHandle, root: Value) -> AppResult<ImportedConfig> {
+    let payload: AndroidConfigFile = serde_json::from_value(root)
+        .map_err(|e| AppError::Other(format!("Parse android config failed: {}", e)))?;
+    if payload.kind != CONFIG_FILE_KIND
+        || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
+    {
+        return Err(AppError::Other("Unsupported config file".into()));
+    }
+
+    let mut settings = store::load_settings(app)?.settings;
+    payload.settings.apply_to(&mut settings);
+
+    let auth = map_android_auth(&payload);
+    Ok(ImportedConfig {
+        settings,
+        listen_together: map_android_listen_together(payload.listen_together),
+        language: map_android_language(payload.language),
+        auth,
+        github_sync: map_android_github(payload.git_hub_sync),
+        webdav_sync: map_android_webdav(payload.web_dav_sync),
+        sync_preferences: map_android_sync_preferences(payload.sync_preferences),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopConfigFile {
@@ -200,7 +568,7 @@ struct DesktopConfigFile {
     #[serde(default)]
     language: Option<ConfigLanguage>,
     #[serde(default)]
-    auth: Option<crate::auth::state::AuthState>,
+    auth: Option<AuthState>,
     #[serde(default)]
     github_sync: Option<ConfigGitHubSync>,
     #[serde(default)]
@@ -1046,18 +1414,18 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     }
     let content = std::fs::read_to_string(file_path)
         .map_err(|e| AppError::Other(format!("Read config failed: {}", e)))?;
-    let payload: DesktopConfigFile = serde_json::from_str(&content)
+    let root: Value = serde_json::from_str(&content)
         .map_err(|e| AppError::Other(format!("Parse config failed: {}", e)))?;
-    if payload.kind != CONFIG_FILE_KIND
-        || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
-        || payload.platform != "pc"
-    {
-        return Err(AppError::Other("Unsupported config file".into()));
-    }
 
-    let imported_listen_together = payload.listen_together;
-    let imported_language = payload.language;
-    let mut settings = payload.settings;
+    let imported = if is_android_config(&root) {
+        parse_android_config(&app, root)?
+    } else {
+        parse_pc_config(root)?
+    };
+
+    let imported_listen_together = imported.listen_together;
+    let imported_language = imported.language;
+    let mut settings = imported.settings;
     if let Some(language) = imported_language.as_ref().filter(|language| !language.code.is_empty()) {
         settings.locale = language.code.clone();
     }
@@ -1073,7 +1441,7 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     let settings = store::save_settings(&app, settings)?;
     state.rebuild_http(settings.bypass_proxy);
 
-    if let Some(imported_auth) = payload.auth {
+    if let Some(imported_auth) = imported.auth {
         let mut auth = state.auth.lock();
         let previous_auth = auth.clone();
         for platform in ["netease", "bilibili", "youtube"] {
@@ -1087,21 +1455,21 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
         crate::auth::cookies::inject_all(&state.cookie_jar, &auth);
         crate::auth::cookies::save_auth(&app, &auth);
     }
-    let legacy_history_mode = payload
+    let legacy_history_mode = imported
         .github_sync
         .as_ref()
         .map(|github| github.history_update_mode.clone());
-    if let Some(preferences) = payload.sync_preferences {
+    if let Some(preferences) = imported.sync_preferences {
         save_sync_preferences(&app, &preferences.into_config());
     } else if let Some(mode) = legacy_history_mode {
         save_sync_preferences(&app, &SyncPreferencesConfig {
             history_update_mode: normalize_history_update_mode(&mode),
         });
     }
-    if let Some(github) = payload.github_sync {
+    if let Some(github) = imported.github_sync {
         save_github_config(&app, &github.into_config());
     }
-    if let Some(webdav) = payload.webdav_sync {
+    if let Some(webdav) = imported.webdav_sync {
         save_webdav_config(&app, &webdav.into_config());
     }
 
@@ -1194,5 +1562,142 @@ mod tests {
         });
 
         assert_eq!(value["historyUpdateMode"], "every_15_minutes");
+    }
+
+    #[test]
+    fn android_settings_apply_maps_known_keys_only() {
+        use super::AndroidTypedSettings;
+        let android = AndroidTypedSettings {
+            booleans: [("bypass_proxy".into(), true), ("usb_exclusive_playback".into(), true)]
+                .into_iter()
+                .collect(),
+            floats: [("lyric_font_scale".into(), 1.25)].into_iter().collect(),
+            longs: [
+                ("cloud_music_lyric_default_offset_ms".into(), 250),
+                ("max_cache_size_bytes".into(), 10_737_418_240),
+            ]
+            .into_iter()
+            .collect(),
+            strings: [
+                ("audio_quality".into(), "jymaster".into()),
+                ("youtube_audio_quality".into(), "low".into()),
+                ("theme_color_spec".into(), "SPEC_2025".into()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut settings = AppSettings::default();
+        android.apply_to(&mut settings);
+
+        assert!(settings.bypass_proxy);
+        assert!((settings.lyric_font_scale - 1.25).abs() < f32::EPSILON);
+        assert_eq!(settings.cloud_music_offset, 250);
+        assert_eq!(settings.max_cache_size, 10_240);
+        assert_eq!(settings.netease_quality, "jymaster");
+        assert_eq!(settings.youtube_quality, "low");
+        // 未知键与桌面无关键不产生副作用
+        assert!(settings.dynamic_background);
+        assert_eq!(settings.theme_color, "purple");
+    }
+
+    #[test]
+    fn android_dynamic_color_maps_to_system_mode() {
+        use super::AndroidTypedSettings;
+        let android = AndroidTypedSettings {
+            booleans: [("dynamic_color".into(), true)].into_iter().collect(),
+            floats: Default::default(),
+            longs: Default::default(),
+            strings: Default::default(),
+        };
+        let mut settings = AppSettings::default();
+        android.apply_to(&mut settings);
+        // Android 的 dynamic_color = Material You 跟随系统取色
+        assert_eq!(settings.color_mode, "system");
+
+        let android = AndroidTypedSettings {
+            booleans: [("dynamic_color".into(), false)].into_iter().collect(),
+            floats: Default::default(),
+            longs: Default::default(),
+            strings: Default::default(),
+        };
+        let mut settings = AppSettings::default();
+        android.apply_to(&mut settings);
+        assert_eq!(settings.color_mode, "default");
+    }
+
+    #[test]
+    fn android_config_file_parses_and_maps() {
+        use super::{
+            is_android_config, map_android_auth, AndroidConfigFile, ConfigListenTogether,
+        };
+        let json = r#"{
+            "kind": "moe.ouom.neriplayer.config",
+            "formatVersion": 1,
+            "exportedAt": 1787906559291,
+            "settings": { "booleans": { "bypass_proxy": true }, "floats": {}, "ints": {}, "longs": {}, "strings": {} },
+            "listenTogether": { "workerBaseUrl": "https://lt.example", "userUuid": "abc", "nickname": "me" },
+            "language": { "code": "zh" },
+            "neteaseAuth": { "cookies": { "MUSIC_U": "v1", "__csrf": "" }, "savedAt": 1 },
+            "biliAuth": { "cookies": {}, "savedAt": 0 },
+            "youTubeAuth": { "cookies": { "SAPISID": "s1" }, "authorization": "SAPISIDHASH x", "savedAt": 1 },
+            "gitHubSync": { "token": "", "repoOwner": "", "repoName": "", "autoSyncEnabled": true, "playHistoryUpdateMode": "", "dataSaverMode": true },
+            "webDavSync": { "serverUrl": "https://dav.example", "basePath": "", "username": "u", "password": "p", "autoSyncEnabled": true },
+            "syncPreferences": { "playHistoryUpdateMode": "IMMEDIATE" }
+        }"#;
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(is_android_config(&root));
+
+        let config: AndroidConfigFile = serde_json::from_value(root).unwrap();
+        assert_eq!(config.kind, CONFIG_FILE_KIND);
+        assert_eq!(config.format_version, 1);
+        assert_eq!(
+            config.listen_together.as_ref().unwrap().worker_base_url,
+            "https://lt.example"
+        );
+        assert_eq!(config.language.as_ref().unwrap().code, "zh");
+        assert!(config.netease_auth.as_ref().unwrap().cookies.contains_key("MUSIC_U"));
+        assert!(config.bili_auth.as_ref().unwrap().cookies.is_empty());
+        assert!(config.git_hub_sync.is_some());
+        assert_eq!(config.web_dav_sync.as_ref().unwrap().server_url, "https://dav.example");
+
+        let lt: ConfigListenTogether = config.listen_together.clone().unwrap().into();
+        assert_eq!(lt.server_url, "https://lt.example");
+        assert_eq!(lt.user_uuid, "abc");
+
+        let auth = map_android_auth(&config).unwrap();
+        assert!(auth.netease.is_some());
+        assert!(auth.bilibili.is_none());
+        assert!(auth.youtube.is_some());
+        // 空值 Cookie 被过滤
+        assert_eq!(auth.netease.as_ref().unwrap().cookies.len(), 1);
+        assert_eq!(auth.netease.as_ref().unwrap().cookies[0].domain, "music.163.com");
+        assert_eq!(auth.youtube.as_ref().unwrap().cookies[0].domain, "music.youtube.com");
+    }
+
+    #[test]
+    fn android_empty_sections_do_not_clobber_existing_config() {
+        use super::{
+            map_android_auth, map_android_github, map_android_language,
+            map_android_listen_together, map_android_sync_preferences, map_android_webdav,
+            AndroidConfigFile,
+        };
+        let json = r#"{
+            "kind": "moe.ouom.neriplayer.config",
+            "formatVersion": 1,
+            "settings": { "booleans": {}, "floats": {}, "ints": {}, "longs": {}, "strings": {} },
+            "listenTogether": { "workerBaseUrl": "", "userUuid": "", "nickname": "" },
+            "language": { "code": "" },
+            "gitHubSync": { "token": "", "repoOwner": "", "repoName": "", "autoSyncEnabled": true, "playHistoryUpdateMode": "", "dataSaverMode": true },
+            "webDavSync": { "serverUrl": "", "basePath": "", "username": "", "password": "", "autoSyncEnabled": true },
+            "syncPreferences": { "playHistoryUpdateMode": "" }
+        }"#;
+        let config: AndroidConfigFile = serde_json::from_value(serde_json::from_str(json).unwrap())
+            .unwrap();
+        assert!(map_android_listen_together(config.listen_together.clone()).is_none());
+        assert!(map_android_language(config.language.clone()).is_none());
+        assert!(map_android_github(config.git_hub_sync.clone()).is_none());
+        assert!(map_android_webdav(config.web_dav_sync.clone()).is_none());
+        assert!(map_android_sync_preferences(config.sync_preferences.clone()).is_none());
+        assert!(map_android_auth(&config).is_none());
     }
 }

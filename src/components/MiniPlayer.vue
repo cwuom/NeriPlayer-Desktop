@@ -643,15 +643,18 @@ defineExpose({
 }
 
 .mp-volume-slider {
-  writing-mode: vertical-lr;
+  // 竖排滑条不能用 writing-mode（WebKitGTK 圆点错位且拖不动），
+  // 用原生横向滑条整体旋转：几何/命中计算保持原生，视觉为竖向。
+  // value = volume：rotate(-90deg) 使 min 在下，即静音在下、最大音量在上
   appearance: none;
-  width: 4px;
-  height: 100px;
+  width: 100px;
+  height: 4px;
+  transform: rotate(-90deg);
+  margin: 48px 0;
   background: var(--md-surface-container-highest);
   border-radius: 2px;
   outline: none;
   cursor: pointer;
-  direction: rtl;
 
   &::-webkit-slider-thumb {
     appearance: none;
@@ -660,7 +663,7 @@ defineExpose({
     border-radius: 50%;
     background: var(--md-primary);
     cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
   }
 }
 
