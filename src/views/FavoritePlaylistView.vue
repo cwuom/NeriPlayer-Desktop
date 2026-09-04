@@ -8,6 +8,7 @@ import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useIncrementalList } from '@/composables/useIncrementalList'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -113,6 +114,10 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   closeTrackMenu()
 }
 
+// 大列表分块渲染（收藏歌单可能很长，WebKitGTK 一次性渲染会卡顿）
+const { visibleItems: visibleTracks, onScroll: onTrackListScroll, ensureIndex: ensureTrackIndex } =
+  useIncrementalList(() => tracks.value)
+
 // 定位到当前播放
 const viewRef = ref<HTMLElement | null>(null)
 const currentRowKey = computed(() => {
@@ -123,13 +128,14 @@ const currentRowKey = computed(() => {
 const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCurrentTrack({
   containerRef: viewRef,
   currentKey: currentRowKey,
+  ensureRendered: key => ensureTrackIndex(tracks.value.findIndex(item => item.id === key)),
 })
 
 onMounted(load)
 </script>
 
 <template>
-  <div ref="viewRef" class="detail-view">
+  <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
     <div class="detail-header">
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
@@ -166,7 +172,7 @@ onMounted(load)
 
       <div class="track-list">
         <div
-          v-for="(track, index) in tracks"
+          v-for="(track, index) in visibleTracks"
           :key="track.id + '-' + index"
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"

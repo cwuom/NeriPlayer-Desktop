@@ -11,6 +11,7 @@ import ContextMenu from '@/components/ui/ContextMenu.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
+import { useIncrementalList } from '@/composables/useIncrementalList'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import {
   createContextMenuItem,
@@ -59,6 +60,10 @@ const {
   invertSelectionVisible,
 } = useTrackSelection(allHistoryTracks, visibleHistoryTracks)
 
+// 大列表分块渲染（最近播放可能很长）
+const { visibleItems: visibleEntries, onScroll: onTrackListScroll, ensureIndex: ensureEntryIndex } =
+  useIncrementalList(() => filteredEntries.value)
+
 // 定位到当前播放
 const viewRef = ref<HTMLElement | null>(null)
 const currentRowKey = computed(() => {
@@ -70,6 +75,10 @@ const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCu
   containerRef: viewRef,
   currentKey: currentRowKey,
   suppressed: selectionMode,
+  ensureRendered: key => {
+    const index = filteredEntries.value.findIndex(entry => entry.track.id === key)
+    return ensureEntryIndex(index)
+  },
 })
 
 function formatRelativeTime(timestamp: number): string {
@@ -208,7 +217,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
 </script>
 
 <template>
-  <div ref="viewRef" class="detail-view">
+  <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
     <header class="detail-header">
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
@@ -258,7 +267,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
       />
       <div class="track-list">
         <div
-          v-for="(entry, index) in filteredEntries"
+          v-for="(entry, index) in visibleEntries"
           :key="entry.track.id + entry.playedAt"
           class="track-item"
           :class="{ active: player.currentTrack?.id === entry.track.id, selected: selectionMode && selectedIds.has(entry.track.id), 'selection-mode': selectionMode }"

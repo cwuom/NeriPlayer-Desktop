@@ -13,6 +13,7 @@ import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useIncrementalList } from '@/composables/useIncrementalList'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -74,6 +75,10 @@ const filteredTracks = computed(() => {
   )
 })
 
+// 大列表分块渲染（WebKitGTK 上千行一次性渲染会卡顿）
+const { visibleItems: visibleTracks, onScroll: onTrackListScroll, ensureIndex: ensureTrackIndex } =
+  useIncrementalList(() => filteredTracks.value)
+
 const {
   selectionMode,
   selectedIds,
@@ -104,6 +109,7 @@ const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCu
   containerRef: viewRef,
   currentKey: currentRowKey,
   suppressed: selectionMode,
+  ensureRendered: key => ensureTrackIndex(filteredTracks.value.findIndex(item => item.id === key)),
 })
 
 // 解析 InnerTube browse 响应, 复用共享解析器统一多端布局
@@ -326,7 +332,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div ref="viewRef" class="detail-view">
+  <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
     <header class="detail-header">
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
@@ -394,7 +400,7 @@ onMounted(() => {
         />
         <div class="track-list">
           <div
-            v-for="(track, index) in filteredTracks"
+            v-for="(track, index) in visibleTracks"
             :key="track.id"
             class="track-item"
             :class="{ active: player.currentTrack?.id === track.id, selected: selectionMode && selectedIds.has(track.id), 'selection-mode': selectionMode }"

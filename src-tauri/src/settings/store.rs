@@ -238,10 +238,8 @@ impl AppSettings {
 
         // 取色方式：旧版 dynamic_color（封面取色开关）迁移到 color_mode；
         // Android 导入语义不同（dynamic_color=true=跟随系统），由导入路径直接写 color_mode
-        if self.color_mode.is_empty() || (self.color_mode == "default" && self.dynamic_color) {
-            if self.dynamic_color {
-                self.color_mode = "cover".into();
-            }
+        if self.dynamic_color && (self.color_mode.is_empty() || self.color_mode == "default") {
+            self.color_mode = "cover".into();
         }
         self.color_mode = normalize_choice(
             &self.color_mode,

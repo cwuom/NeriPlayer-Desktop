@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { usePlayerStore } from '@/stores/player'
 import { useI18n } from 'vue-i18n'
+import { useIncrementalList } from '@/composables/useIncrementalList'
 import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import {
@@ -26,6 +27,11 @@ function handleEscKeydown(event: KeyboardEvent) {
 }
 onMounted(() => document.addEventListener('keydown', handleEscKeydown))
 onUnmounted(() => document.removeEventListener('keydown', handleEscKeydown))
+// 大队列分块渲染（队列可达上千行，WebKitGTK 一次性渲染会卡顿）
+const { visibleItems: visibleQueue, onScroll: onQueueScroll } = useIncrementalList(
+  () => player.queue,
+)
+
 const queueContextMenuOpen = ref(false)
 const queueContextMenuPosition = ref<ContextMenuPosition>({ x: 0, y: 0 })
 const queueContextMenuIndex = ref(-1)
@@ -127,9 +133,9 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
         <p>{{ t('player.no_queue') }}</p>
       </div>
 
-      <div v-else class="queue-list">
+      <div v-else class="queue-list" @scroll="onQueueScroll">
         <div
-          v-for="(track, index) in player.queue"
+          v-for="(track, index) in visibleQueue"
           :key="track.id + index"
           class="queue-item"
           :class="{ active: index === player.queueIndex }"

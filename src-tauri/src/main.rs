@@ -167,7 +167,7 @@ fn main() {
                 tray_menu.append(&tray_quit_item)?;
 
                 // 注册句柄供 set_tray_texts / update_now_playing 使用（多语言 + 曲目名）
-                tray_cmd::register_tray_handles(tray_cmd::TrayMenuHandles {
+                tray_cmd::register_tray_handles(app.handle(), tray_cmd::TrayMenuHandles {
                         prev: tray_prev_item,
                         toggle: tray_toggle_item,
                         next: tray_next_item,
@@ -388,16 +388,15 @@ fn main() {
                         }
                     }
 
-                    // 媒体会话同步（每 1s = 每 5 个 tick）
-                    if let Some(ref ms) = media_session {
-                        media_update_counter += 1;
-
-                        // 元数据来源改为前端镜像: PlayQueue 从不被前端填充, 读它使
-                        // SMTC/MPRIS 永远拿不到曲目信息（PB-01）
-                        let current_meta = state.media_metadata.lock().clone();
-                        if let Some(meta) = current_meta {
-                            if !meta.id.is_empty() && meta.id != last_media_track_id {
-                                last_media_track_id = meta.id.clone();
+                    // 媒体会话同步（每 1s = 每 5 个 tick）与托盘曲目名同步。
+                    // 托盘更新不依赖 media_session：MPRIS/SMTC 不可用时曲目名也要更新
+                    let current_meta = state.media_metadata.lock().clone();
+                    if let Some(meta) = current_meta {
+                        if !meta.id.is_empty() && meta.id != last_media_track_id {
+                            last_media_track_id = meta.id.clone();
+                            // 托盘菜单同步当前曲目名（仅在曲目切换时更新）
+                            tray_cmd::update_now_playing(&meta.title);
+                            if let Some(ref ms) = media_session {
                                 ms.update_metadata(
                                     &meta.title,
                                     &meta.artist,
@@ -405,14 +404,15 @@ fn main() {
                                     meta.cover_url.as_deref(),
                                     meta.duration_ms,
                                 );
-                                // 托盘菜单同步当前曲目名（仅在曲目切换时更新，前缀跟随语言）
-                                tray_cmd::update_now_playing(&meta.title);
                             }
-                        } else if !last_media_track_id.is_empty() {
-                            last_media_track_id.clear();
-                            tray_cmd::update_now_playing("");
                         }
+                    } else if !last_media_track_id.is_empty() {
+                        last_media_track_id.clear();
+                        tray_cmd::update_now_playing("");
+                    }
 
+                    if let Some(ref ms) = media_session {
+                        media_update_counter += 1;
                         if media_update_counter >= 5 {
                             media_update_counter = 0;
                             ms.update_playback(snap_playing, snap_pos);
