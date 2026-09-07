@@ -2283,9 +2283,15 @@ export const usePlayerStore = defineStore('player', () => {
     )
     queue.value = [...tracks]
     queueIndex.value = startIndex
-    shuffleBag = []
     shuffleHistory = []
     shuffleFuture = []
+    // 队列整体替换后 shuffleBag 必须按新队列重建（排除当前索引）；
+    // 否则曲目自然结束/手动 next 走 bag 空 -> 提前 return，自动切歌永久卡死
+    if (shuffleEnabled.value) {
+      rebuildShuffleBag()
+    } else {
+      shuffleBag = []
+    }
     void play(queue.value[startIndex])
   }
 
@@ -2299,9 +2305,13 @@ export const usePlayerStore = defineStore('player', () => {
     }
     queue.value = shuffled
     queueIndex.value = 0
-    shuffleBag = []
     shuffleHistory = []
     shuffleFuture = []
+    if (shuffleEnabled.value) {
+      rebuildShuffleBag()
+    } else {
+      shuffleBag = []
+    }
     play(shuffled[0])
   }
 
