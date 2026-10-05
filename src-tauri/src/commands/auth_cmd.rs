@@ -210,10 +210,22 @@ fn youtube_auth_matches(left: &YouTubeAuth, right: &YouTubeAuth) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
+fn bili_verified_nav_mid(info: &serde_json::Value, entries: &[CookieEntry]) -> Option<u64> {
+    if info["code"].as_i64() != Some(0) || info["data"]["isLogin"].as_bool() != Some(true) {
+        return None;
+    }
+    // nav 属于服务端验证的当前会话，不能让旧 DedeUserID 覆盖它
+    info["data"]["mid"].as_u64()
+        .or_else(|| info["data"]["mid"].as_str().and_then(|value| value.trim().parse().ok()))
+        .filter(|mid| *mid > 0)
+        .or_else(|| entries.iter().find(|entry| entry.name == "DedeUserID")
+            .and_then(|entry| entry.value.trim().parse().ok()).filter(|mid| *mid > 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        cookie_domain_matches_urls, has_completed_login, has_new_completed_login,
+        bili_verified_nav_mid, cookie_domain_matches_urls, has_completed_login, has_new_completed_login,
     };
     use crate::auth::state::CookieEntry;
 
@@ -222,6 +234,27 @@ mod tests {
         "https://passport.bilibili.com",
         "https://api.bilibili.com",
     ];
+
+    #[test]
+    fn bilibili_imported_session_resolves_verified_nav_identity_without_dedeuserid_cookie() {
+        let nav = serde_json::json!({ "code": 0, "data": { "isLogin": true, "mid": 123 } });
+        assert_eq!(bili_verified_nav_mid(&nav, &[]), Some(123));
+        let nav = serde_json::json!({ "code": 0, "data": { "isLogin": true, "mid": "123" } });
+        assert_eq!(bili_verified_nav_mid(&nav, &[]), Some(123));
+    }
+
+    #[test]
+    fn bilibili_verified_nav_identity_wins_over_stale_cookie_and_fallback_is_positive() {
+        let entries = [CookieEntry { name: "DedeUserID".into(), value: "999".into(), domain: ".bilibili.com".into() }];
+        let nav = serde_json::json!({ "code": 0, "data": { "isLogin": true, "mid": 123 } });
+        assert_eq!(bili_verified_nav_mid(&nav, &entries), Some(123));
+        let nav = serde_json::json!({ "code": 0, "data": { "isLogin": true } });
+        assert_eq!(bili_verified_nav_mid(&nav, &entries), Some(999));
+        let invalid = [CookieEntry { value: "0".into(), ..entries[0].clone() }];
+        assert_eq!(bili_verified_nav_mid(&nav, &invalid), None);
+        let nav = serde_json::json!({ "code": -101, "data": { "isLogin": false, "mid": 123 } });
+        assert_eq!(bili_verified_nav_mid(&nav, &entries), None);
+    }
 
     #[test]
     fn parent_cookie_domain_matches_bilibili_subdomains() {
@@ -518,24 +551,25 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
 
     // 调用 B站 nav API 获取用户信息
     let client = state.bilibili();
-    let (nickname, avatar_url) = match client.get_user_info().await {
+    let (mid, nickname, avatar_url) = match client.get_user_info().await {
         Ok(info) => {
             let data = &info["data"];
             // 必须检查 isLogin，未登录时 data 中无有效用户信息
             let is_login = data["isLogin"].as_bool().unwrap_or(false);
             if is_login {
                 (
+                    bili_verified_nav_mid(&info, &entries),
                     data["uname"].as_str().map(String::from),
                     data["face"].as_str().map(String::from),
                 )
             } else {
                 log::warn!(target: "auth", "Bilibili nav API 返回 isLogin=false，cookie 可能未生效");
-                (None, None)
+                (mid, None, None)
             }
         }
         Err(e) => {
             log::warn!(target: "auth", "Bilibili get_user_info 失败: {}", e);
-            (None, None)
+            (mid, None, None)
         }
     };
 
@@ -688,23 +722,18 @@ pub async fn login_with_cookies(
             Ok(AuthInfo { platform: "netease".into(), logged_in: true, nickname, avatar_url })
         }
         "bilibili" => {
-            let mid = entries.iter()
-                .find(|c| c.name == "DedeUserID")
-                .and_then(|c| c.value.parse::<u64>().ok());
-
             let client = state.bilibili();
-            let (nickname, avatar_url) = match client.get_user_info().await {
+            let (mid, nickname, avatar_url) = match client.get_user_info().await {
                 Ok(info) => {
                     let data = &info["data"];
-                    let is_login = data["isLogin"].as_bool().unwrap_or(false);
-                    if is_login {
-                        (data["uname"].as_str().map(String::from), data["face"].as_str().map(String::from))
+                    if let Some(mid) = bili_verified_nav_mid(&info, &entries) {
+                        (Some(mid), data["uname"].as_str().map(String::from), data["face"].as_str().map(String::from))
                     } else {
                         return rollback_cookie_login(
                             &state.cookie_jar,
                             &entries,
                             previous_entries.as_deref(),
-                            AppError::Other("Cookie 验证失败：B站返回未登录状态".into()),
+                            AppError::Other("Cookie 验证失败：B站未返回有效登录身份".into()),
                         );
                     }
                 }
