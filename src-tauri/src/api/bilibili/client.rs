@@ -614,11 +614,11 @@ fn parse_progressive_audio_streams(body: &Value) -> Vec<BiliAudioStream> {
     let candidates = stream_urls(primary, backups);
     let duration_ms = json_u64(&item["length"]).unwrap_or(0);
     let size = json_u64(&item["size"]).unwrap_or(0);
-    let bandwidth = if duration_ms > 0 {
-        size.saturating_mul(8).saturating_mul(1000) / duration_ms
-    } else {
-        0
-    };
+    let bandwidth = size
+        .saturating_mul(8)
+        .saturating_mul(1000)
+        .checked_div(duration_ms)
+        .unwrap_or(0);
     vec![BiliAudioStream {
         url: candidates[0].clone(),
         candidate_urls: candidates,

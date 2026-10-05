@@ -652,6 +652,31 @@ fn json_u64(value: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+}
+
+fn positive_json_u64(value: &Value) -> Option<u64> {
+    let value = json_u64(value);
+    (value > 0).then_some(value)
+}
+
+fn random_session_cookie() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn cookie_header_has_value(header: &str, name: &str) -> bool {
+    header
+        .split(';')
+        .filter_map(|item| item.trim().split_once('='))
+        .any(|(key, value)| key == name && !value.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_song_url_response, NeteaseClient, NeteasePlaybackUnavailableReason};
@@ -853,29 +878,4 @@ mod tests {
             .unwrap()
             .contains("MUSIC_U=fixture-login"));
     }
-}
-
-fn json_i64(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
-}
-
-fn positive_json_u64(value: &Value) -> Option<u64> {
-    let value = json_u64(value);
-    (value > 0).then_some(value)
-}
-
-fn random_session_cookie() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
-
-fn cookie_header_has_value(header: &str, name: &str) -> bool {
-    header
-        .split(';')
-        .filter_map(|item| item.trim().split_once('='))
-        .any(|(key, value)| key == name && !value.trim().is_empty())
 }
