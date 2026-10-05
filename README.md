@@ -140,7 +140,7 @@ NeriPlayer Desktop 是一个 **Tauri 2** 桌面应用：**Vue 3** 前端与 **Ru
 - **跨端同步是字段级互通，不是"都能连 WebDAV"**：
   Rust 侧的 ProtoBuf 模型字段号与 Android 端 `SyncDataModels.kt` 的
   `@ProtoNumber` 逐一对齐，三路合并对照基准快照裁决冲突，
-  省流格式为 ProtoBuf + GZIP + Base64；同一份远端数据可被两端交替读写。
+  当前写入 Android V4 的 ProtoBuf 清单和 Zstd 分块归档，兼容读取旧 JSON、GZIP 和 V3 归档。
 - **一起听与 Android 端同协议**：
   桌面客户端连接同一套 Cloudflare Workers 服务端，
   支持房间、角色权限、队列同步、循环/随机模式同步、
@@ -257,7 +257,7 @@ pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
   独立页面浏览与管理，删除记录参与云同步（跨端删除不复活）。
 - ☁️ **GitHub / WebDAV 同步**：
   同步本地歌单、收藏、最近播放与播放统计，三路合并，
-  支持省流格式；另有歌单 JSON 与完整配置的导入/导出。
+  使用与 Android 对齐的 V4 分块归档；另有歌单 JSON 与完整配置的导入/导出。
 - 🎧 **一起听**：
   创建/加入房间，WebSocket 实时同步播放状态与队列，
   支持成员控制开关、成员进出自动暂停、循环/随机模式同步、
@@ -387,8 +387,8 @@ SAF 目录、安全模式等）不在桌面端范围内；桌面端仍在持续�
   播放统计（含每日桶与清空标记）、歌单歌曲删除记录与同步日志。
 - `merge.rs` 对照基准快照做三路合并（不是 last-write-wins）；
   歌曲成员携带因果 token，跨端删除/恢复不会互相覆盖。
-- 省流格式为 ProtoBuf + GZIP + Base64，关闭省流时为 JSON；
-  两种格式均与 Android 端互通。
+- 当前云端写入 V4 清单和 Zstd 分块归档，兼容读取旧 JSON、GZIP 和 V3；
+  迁移已有旧归档前需要在设置页确认升级，并先更新其它设备的客户端。
 - GitHub Token 与 WebDAV 密码保存在应用侧加密存储中
   （见下节），不落明文配置。
 
@@ -441,11 +441,13 @@ NeriPlayer Desktop 支持将本地元数据同步到 **用户自己的 GitHub �
 - 🧩 **冲突处理**：三路合并对照基准快照裁决歌单、收藏、历史、
   删除记录与播放统计；歌曲成员携带因果 token，
   从备份恢复的内容不会被旧删除记录再次删掉。
-- 🪶 **省流模式**：ProtoBuf + GZIP 的 `backup.bin`；
-  关闭省流模式时使用 JSON。
+- 🪶 **分块归档**：使用 Android V4 的 `neriplayer-sync-v3.manifest` 清单和 Zstd 对象；
+  旧格式可读取，升级确认分别绑定 GitHub 或 WebDAV 的当前目标与内容。
 - 🔄 **跨端互通**：与 Android 端共用同一数据模型，
   同一远端可被两端交替读写。
 - 🚫 **同步边界**：不会上传音频文件、下载内容、Cookie 或播放 Token。
+- 🧪 **对齐验证**：Kotlin 反向解码脚本为 `scripts/test-sync-android-interop.ps1`；
+  自动编解码测试不代替真实账号、provider 与跨设备交替同步验收。
 - 📦 **远端格式**：GitHub 仓库 / WebDAV 文件不是端到端加密备份，
   远端文件由用户自行保管。
 

@@ -76,7 +76,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Type-check and build frontend
-        run: pnpm build
+        run: pnpm test && pnpm build
 
   rust:
     name: Rust (${{ matrix.target }})

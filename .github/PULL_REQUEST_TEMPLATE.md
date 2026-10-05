@@ -37,7 +37,9 @@
 <!-- List commands, test scenarios, and results, and explain any checks not run -->
 
 - [ ] `pnpm build`
+- [ ] `pnpm test`
 - [ ] `cargo check --manifest-path src-tauri/Cargo.toml --locked`
+- [ ] `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib`
 - [ ] 已验证受影响的桌面平台 / Tested affected desktop platforms
 
 ## 界面变更 / UI changes

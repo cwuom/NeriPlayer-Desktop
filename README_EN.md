@@ -160,7 +160,8 @@ Current positioning:
 - **Cross-device sync is field-level interop, not just "both speak
   WebDAV"**: the Rust ProtoBuf models align tag-by-tag with the Android
   app's `SyncDataModels.kt` `@ProtoNumber`s, merging is three-way against
-  a base snapshot, and the data-saver format is ProtoBuf + GZIP + Base64.
+  a base snapshot. New writes use Android V4 ProtoBuf manifests and Zstd chunks;
+  legacy JSON, GZIP, and V3 archives remain readable.
   The same remote can be read and written alternately by both apps.
 - **Listen Together speaks the Android protocol**: the desktop client
   connects to the same Cloudflare Workers server, with rooms, roles,
@@ -285,7 +286,7 @@ the sidebar.
   a dedicated page; deletions sync across devices without resurrection.
 - ☁️ **GitHub / WebDAV sync**:
   playlists, favorites, recent plays, and stats with three-way merging
-  and a data-saver format; playlist JSON and full-config import/export.
+  and Android V4 chunked archives; playlist JSON and full-config import/export.
 - 🎧 **Listen Together**:
   create or join rooms with real-time WebSocket sync, member-control
   switch, auto-pause on member changes, repeat/shuffle sync, stream-link
@@ -430,8 +431,9 @@ file an issue when the two apps disagree.
 - `merge.rs` performs a three-way merge against a base snapshot (never
   last-write-wins); songs carry causal membership tokens so deletions
   and restores don't cancel each other across devices.
-- Data-saver format is ProtoBuf + GZIP + Base64; JSON otherwise. Both
-  interoperate with Android.
+- New cloud writes use V4 manifests and Zstd chunks; legacy JSON, GZIP, and
+  V3 archives remain readable. Existing legacy archives require confirmation
+  in Settings before migration; update clients on other devices first.
 - The GitHub token and WebDAV password live in app-side encrypted
   storage (below), never in plaintext config.
 
@@ -485,11 +487,14 @@ Details:
 - 🧩 **Conflict handling**: three-way merging against a base snapshot for
   playlists, favorites, history, deletions, and stats; songs carry causal
   tokens so restored content is not re-deleted by stale records.
-- 🪶 **Data-saver mode**: ProtoBuf + GZIP `backup.bin`; JSON when off.
+- 🪶 **Chunked archives**: Android V4 `neriplayer-sync-v3.manifest` and Zstd
+  objects; migration approval is bound to each backend's current target and content.
 - 🔄 **Cross-device interop**: the same remote can be read and written
   alternately by the desktop and Android apps.
 - 🚫 **Sync boundary**: audio files, downloads, cookies, and playback
   tokens are never uploaded.
+- 🧪 **Alignment evidence**: `scripts/test-sync-android-interop.ps1` checks Kotlin
+  decoding. Automated codec tests do not replace real-account, provider, or device tests.
 - 📦 **Remote format**: GitHub repos / WebDAV files are not end-to-end
   encrypted backups; you are responsible for the remote.
 

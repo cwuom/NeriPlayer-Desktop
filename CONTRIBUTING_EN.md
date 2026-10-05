@@ -41,6 +41,8 @@ sync with the source code and runtime behavior.
   positioning, capability boundaries, install/build, sync, privacy.
 - `CONTRIBUTING.md` / `CONTRIBUTING_EN.md` — for developers: real module
   boundaries, extension paths, testing, and PR requirements.
+- `scripts/test-sync-android-interop.ps1` — Kotlin reverse decoding with
+  read-only Android sources and existing Gradle caches.
 - `CODE_OF_CONDUCT.md` — community standards.
 - `CLAUDE.md` / `AGENTS.md` — repo guides for AI coding agents; human
   contributors can use them as an architecture primer.
@@ -195,8 +197,9 @@ talks to music platforms directly.
   (SAPISIDHASH).
 - `sync/` — `models.rs` (payloads), `proto_models.rs` (ProtoBuf models
   tag-aligned with Android), `merge.rs` (three-way merge),
-  `serializer.rs` (JSON / data-saver), `github_api.rs`,
-  `webdav_api.rs`, `manager.rs`.
+  `serializer.rs` (legacy JSON / GZIP), `archive/` (V4 manifests and chunks),
+  `cloud.rs` (publication), `github_api.rs`, `webdav_archive.rs`,
+  `webdav_gc.rs`, and `manager.rs`.
 - `listen_together/` — `protocol.rs` (events and models), `session.rs`,
   `ws_client.rs`.
 - `library/` (local scanning, playlist storage), `lyrics/` (multi-source
@@ -320,6 +323,14 @@ Protect these paths before submitting:
    reads.
 3. Credentials go through `security.rs`, never back into plaintext
    config.
+4. V4 migration approval is bound to the backend, target, credential fingerprint,
+   and current remote content. GitHub uses conditional HEAD updates; WebDAV V4
+   manifests require strong ETags or verified finite exclusive collection leases.
+   Legacy single-file migration requires a finite collection lease. Redirects, unconditional writes,
+   and local object caches must not replace remote closure validation.
+5. Run `pnpm test:sync-protocol-upgrade` and Rust `sync` tests. Run the Kotlin
+   reverse decoder with `./scripts/test-sync-android-interop.ps1 -AndroidRoot <AndroidRepo> -ExportFixtures`.
+   This does not replace full Gradle, provider, or device tests.
 
 #### 6. Changing Listen Together
 
