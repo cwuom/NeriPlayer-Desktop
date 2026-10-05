@@ -214,6 +214,10 @@
     "dir_fallback": "所選下載目錄不可用，已儲存到預設位置"
   },
   "player": {
+    "desktop_lyrics": "桌面歌詞",
+    "desktop_lyrics_failed": "無法開啟桌面歌詞視窗",
+    "open_artist": "開啟歌手頁面",
+    "artist_load_failed": "無法載入歌手資訊",
     "not_playing": "未在播放",
     "now_playing": "正在播放",
     "no_lyrics": "暫無歌詞",
@@ -382,6 +386,11 @@
     "clear_confirm_btn": "確定清空"
   },
   "settings": {
+    "audio_output": "音訊輸出裝置",
+    "audio_output_default": "跟隨系統預設裝置",
+    "audio_output_desc": "切換裝置時保留播放位置；預設選項自動跟隨系統變更",
+    "audio_output_unavailable": "{name}（未連接）",
+    "audio_output_failed": "無法切換音訊輸出裝置",
     "title": "設定",
     "accounts": "帳號",
     "nav_accounts_desc": "管理平台登入與授權狀態",
@@ -610,6 +619,9 @@
     "data_saver_warning_title": "切換資料節省模式？",
     "data_saver_warning_message": "切換同步檔案格式可能導致不同端短暫不一致，是否繼續？",
     "data_saver_warning_confirm": "繼續切換",
+    "sync_upgrade_title": "升級雲端同步格式？",
+    "sync_upgrade_message": "將 {provider} 雲端資料升級為 Android 目前使用的同步格式。升級後舊版客戶端可能無法讀取，請先更新其他裝置。",
+    "sync_upgrade_confirm": "升級並同步",
     "clear_config": "清除配置",
     "clear_config_title": "清除配置",
     "clear_config_msg": "清除同步配置。本地資料不會被刪除。",

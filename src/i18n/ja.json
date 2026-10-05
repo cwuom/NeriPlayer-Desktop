@@ -214,6 +214,10 @@
     "dir_fallback": "選択したダウンロードフォルダが利用できないため、既定の場所に保存しました"
   },
   "player": {
+    "desktop_lyrics": "デスクトップ歌詞",
+    "desktop_lyrics_failed": "デスクトップ歌詞を開けません",
+    "open_artist": "アーティストページを開く",
+    "artist_load_failed": "アーティスト情報を読み込めませんでした",
     "not_playing": "再生停止中",
     "now_playing": "再生中",
     "no_lyrics": "歌詞なし",
@@ -382,6 +386,11 @@
     "clear_confirm_btn": "消去する"
   },
   "settings": {
+    "audio_output": "音声出力デバイス",
+    "audio_output_default": "システムの既定に従う",
+    "audio_output_desc": "デバイス切替時も再生位置を保持し、既定の設定ではシステムの変更に追従します",
+    "audio_output_unavailable": "{name}（未接続）",
+    "audio_output_failed": "音声出力デバイスを切り替えられませんでした",
     "title": "設定",
     "accounts": "アカウント",
     "nav_accounts_desc": "サービスのログインと認証を管理",
@@ -610,6 +619,9 @@
     "data_saver_warning_title": "データセーバーを変更しますか？",
     "data_saver_warning_message": "同期ファイル形式を変更すると、一時的に端末間で不一致が生じる場合があります。続行しますか？",
     "data_saver_warning_confirm": "続行",
+    "sync_upgrade_title": "クラウド同期形式を更新しますか？",
+    "sync_upgrade_message": "{provider} のクラウドデータを現在の Android 同期形式に更新します。旧バージョンでは読み込めなくなる場合があります。他の端末を先に更新してください。",
+    "sync_upgrade_confirm": "更新して同期",
     "clear_config": "設定をクリア",
     "clear_config_title": "設定をクリア",
     "clear_config_msg": "同期設定をクリアします。ローカルデータは削除されません。",

@@ -214,6 +214,10 @@
     "dir_fallback": "Selected download folder unavailable, saved to default location"
   },
   "player": {
+    "desktop_lyrics": "Desktop lyrics",
+    "desktop_lyrics_failed": "Unable to open desktop lyrics",
+    "open_artist": "Open artist page",
+    "artist_load_failed": "Could not load artist information",
     "not_playing": "Not Playing",
     "now_playing": "Now Playing",
     "no_lyrics": "No Lyrics",
@@ -382,6 +386,11 @@
     "clear_confirm_btn": "Clear"
   },
   "settings": {
+    "audio_output": "Audio output device",
+    "audio_output_default": "Follow system default",
+    "audio_output_desc": "Keep your position when switching devices and follow system changes with the default option",
+    "audio_output_unavailable": "{name} (disconnected)",
+    "audio_output_failed": "Could not switch audio output device",
     "title": "Settings",
     "accounts": "Accounts",
     "nav_accounts_desc": "Manage platform sign-ins and access",
@@ -610,6 +619,9 @@
     "data_saver_warning_title": "Change Data Saver?",
     "data_saver_warning_message": "Changing the sync file format may temporarily leave devices out of sync. Continue?",
     "data_saver_warning_confirm": "Continue",
+    "sync_upgrade_title": "Upgrade cloud sync format?",
+    "sync_upgrade_message": "Upgrade the {provider} cloud data to the current Android sync format. Older clients may no longer read it. Update your other devices first.",
+    "sync_upgrade_confirm": "Upgrade and sync",
     "clear_config": "Clear Configuration",
     "clear_config_title": "Clear Configuration",
     "clear_config_msg": "Clear sync configuration. Local data won't be deleted.",

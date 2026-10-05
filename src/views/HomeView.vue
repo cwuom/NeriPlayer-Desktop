@@ -25,6 +25,16 @@ const toast = useToastStore()
 const { t } = useI18n()
 
 const showNotifications = ref(false)
+const homeSearchQuery = ref('')
+
+function submitHomeSearch() {
+  const q = homeSearchQuery.value.trim()
+  if (!q) return
+  void router.push({
+    name: 'explore',
+    query: { q, platform: settings.internationalizationEnabled ? 'youtube' : 'netease' },
+  })
+}
 
 const hotSection = computed(() => recommend.homeHotSongs)
 const radarSection = computed(() => recommend.homeRadarSongs)
@@ -272,6 +282,12 @@ function formatNotifTime(ts: number): string {
   <div class="home-view">
     <header class="home-header">
       <h1 class="greeting">{{ greeting }}</h1>
+      <form class="home-search" role="search" @submit.prevent="submitHomeSearch">
+        <input v-model="homeSearchQuery" type="search" :placeholder="t('explore.search_placeholder')" :aria-label="t('explore.search_placeholder')" data-shortcut-search />
+        <button type="submit" :aria-label="t('explore.title')" :disabled="!homeSearchQuery.trim()">
+          <span class="material-symbols-rounded">search</span>
+        </button>
+      </form>
       <div class="notif-wrap">
         <button class="header-action" @click="openNotifications">
           <span class="material-symbols-rounded">notifications</span>
@@ -658,6 +674,24 @@ function formatNotifTime(ts: number): string {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 24px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.home-search {
+  display: flex;
+  align-items: center;
+  flex: 1 1 220px;
+  max-width: 440px;
+  height: 42px;
+  padding-left: 16px;
+  border-radius: var(--radius-full);
+  background: var(--md-surface-container-high);
+
+  &:focus-within { outline: 2px solid var(--md-primary); }
+  input { width: 100%; min-width: 0; background: transparent; color: var(--md-on-surface); border: 0; outline: 0; }
+  button { display: grid; place-items: center; flex: 0 0 42px; height: 42px; color: var(--md-primary); }
+  button:disabled { opacity: 0.4; }
 }
 
 .greeting {

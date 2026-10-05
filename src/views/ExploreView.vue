@@ -176,6 +176,11 @@ watch(searchQuery, (q) => {
   }, 300)
 })
 
+watch(() => route.query.q, (q) => {
+  const value = typeof q === 'string' ? q.trim() : ''
+  if (searchQuery.value !== value) searchQuery.value = value
+}, { immediate: true })
+
 
 watch(() => route.query.platform, (platform) => {
   if (typeof platform === 'string' && PLATFORM_KEYS.includes(platform as PlatformTab)) {

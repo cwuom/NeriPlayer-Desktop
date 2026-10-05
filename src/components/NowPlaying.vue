@@ -17,7 +17,7 @@ import {
   resolveCoverImage,
 } from '@/utils/bilibiliCover'
 import { clearCachedLyrics, getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
-import { hasLyricsRequestInFlight, loadLyricsSingleFlight } from '@/modules/lyrics/lyricsRequest'
+import { hasLyricsRequestInFlight, hasWordTimedLyrics, loadLyricsSingleFlight } from '@/modules/lyrics/lyricsRequest'
 import {
   toEditableLyricsText,
   toEditableTranslationText,
@@ -26,6 +26,7 @@ import {
   withUpdatedLyricsPayload,
   mapBackendLyrics as mapBackendLyricsShared,
   mergeParsedLyricsWithTranslations,
+  mergeWordTimedLyricsWithBaseline,
 } from '@/modules/lyrics/lyricsFormat'
 import { offsetBucketForSource } from '@/modules/lyrics/lyricOffset'
 import { isEditableTarget } from '@/modules/shortcuts/platform'
@@ -47,6 +48,10 @@ import { playbackSessionTrackKey } from '@/modules/playback/playbackRequest'
 import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { summarizeLogError } from '@/utils/logSanitizer'
+import { neteaseSongArtists } from '@/modules/library/artistNavigation'
+import { splitArtistNames } from '@/modules/library/localArtists'
+import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 
 const log = createLogger('now-playing')
 
@@ -63,6 +68,15 @@ const downloadStore = useDownloadStore()
 const lyricOffsetStore = useLyricOffsetStore()
 const router = useRouter()
 const { t } = useI18n()
+async function showDesktopLyrics() {
+  try {
+    await openDesktopLyricsWindow()
+    hideMoreSheet()
+  } catch (error) {
+    log.warn('desktop lyrics window failed:', summarizeLogError(error))
+    toast.error(t('player.desktop_lyrics_failed'))
+  }
+}
 const playViewMode = ref<'cover' | 'lyrics'>('cover')
 const coverLoadError = ref(false)
 const coverUrl = ref('')
@@ -830,6 +844,29 @@ watch(nowPlayingTrackKey, () => {
 })
 
 let lyricFetchRequestId = 0
+onUnmounted(() => { lyricFetchRequestId++ })
+
+function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
+  const baseline = fetchedLyrics.value
+  if (!settings.advancedLyrics || !getPlaybackSourceKind(track) || hasWordTimedLyrics(baseline)) return
+  if (resolveStoredLyricStateFromPayload(track.syncPayload).kind !== 'absent') return
+  const identity = JSON.stringify([track.id, track.title, track.artist, track.durationMs])
+  void loadLyricsSingleFlight(track, async () => {
+    const lyrics = await invoke<any[]>('fetch_word_timed_lyrics', {
+      title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
+    })
+    return mapBackendLyrics(lyrics)
+  }, 'word-timed').then(lines => {
+    const current = player.currentTrack
+    if (!current || requestId !== lyricFetchRequestId || !settings.advancedLyrics) return
+    if (identity !== JSON.stringify([current.id, current.title, current.artist, current.durationMs])) return
+    if (fetchedLyrics.value !== baseline || !hasWordTimedLyrics(lines)) return
+    if (resolveStoredLyricStateFromPayload(current.syncPayload).kind !== 'absent') return
+    const merged = mergeWordTimedLyricsWithBaseline(baseline, lines)
+    fetchedLyrics.value = merged
+    cacheLyricsForTrack(current, merged)
+  }).catch(error => log.warn('word timed lyric upgrade unavailable:', summarizeLogError(error)))
+}
 
 // 当曲目切换时自动获取歌词
 watch(nowPlayingTrackKey, async (trackKey) => {
@@ -879,13 +916,14 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       return
     }
 
-    // 本地 cache 其次; 有缓存则不再触网/回写云端
+    // 先显示缓存，缺少逐字时间时再后台升级
     if (cachedLyrics?.length) {
       log.info('lyrics from local cache:', {
         requestId,
         trackId: track.id,
         lines: cachedLyrics.length,
       })
+      upgradeWordTimedLyrics(track, requestId)
       return
     }
 
@@ -936,6 +974,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       return
     }
     fetchedLyrics.value = nextLyrics.length > 0 ? nextLyrics : []
+    upgradeWordTimedLyrics(track, requestId)
     log.info('lyrics load committed:', {
       requestId,
       trackId: track.id,
@@ -1038,7 +1077,53 @@ defineExpose({
 })
 
 // 右键菜单（歌曲名/歌手复制 + 封面保存）
-const contextMenu = ref({ show: false, x: 0, y: 0, type: '' as 'title' | 'artist' | 'cover' })
+const contextMenu = ref({ show: false, x: 0, y: 0, type: '' as 'title' | 'artist' | 'cover' | 'artist-page' })
+const artistLinks = ref<Array<{ id: string; name: string; route: { name: string; params: Record<string, string> } }>>([])
+const artistLinkTrackId = ref('')
+const artistLinksLoading = ref(false)
+
+async function openArtistPage(event: MouseEvent) {
+  const track = player.currentTrack
+  if (!track?.artist.trim() || artistLinksLoading.value) return
+  const source = getPlaybackSourceKind(track)
+  if (source && source !== 'netease') {
+    await router.push({ name: 'explore', query: { q: track.artist, platform: source === 'qq' ? 'netease' : source } })
+    emit('collapse')
+    return
+  }
+  artistLinksLoading.value = true
+  try {
+    let links: typeof artistLinks.value
+    if (source === 'netease') {
+      const rawId = track.syncPayload?.audioId ?? track.syncPayload?.audio_id ?? track.id.replace(/^netease:/i, '')
+      const songId = Number(rawId)
+      if (!Number.isSafeInteger(songId) || songId <= 0) return
+      const detail = await invoke('get_netease_song_detail', { songId })
+      links = neteaseSongArtists(detail, songId).map(artist => ({
+        id: String(artist.id), name: artist.name,
+        route: { name: 'netease-artist', params: { id: String(artist.id) } },
+      }))
+    } else {
+      links = splitArtistNames(track.artist).map(name => ({
+        id: name, name, route: { name: 'local-artist', params: { name } },
+      }))
+    }
+    if (player.currentTrack?.id !== track.id) return
+    if (links.length === 1) {
+      await router.push(links[0]!.route)
+      emit('collapse')
+    } else if (links.length > 1) {
+      artistLinks.value = links
+      artistLinkTrackId.value = track.id
+      contextMenu.value = { show: true, x: event.clientX, y: event.clientY, type: 'artist-page' }
+    }
+  } catch (error) {
+    log.warn('failed to open artist page:', error)
+    toast.error(t('player.artist_load_failed'))
+  } finally {
+    artistLinksLoading.value = false
+  }
+}
 
 watch(() => player.hasPlaybackSession, (hasSession) => {
   if (hasSession) return
@@ -1050,6 +1135,9 @@ watch(() => player.hasPlaybackSession, (hasSession) => {
 })
 
 const contextMenuItems = computed(() => {
+  if (contextMenu.value.type === 'artist-page') {
+    return artistLinks.value.map(artist => ({ id: artist.id, label: artist.name, icon: 'person' }))
+  }
   if (contextMenu.value.type === 'title') {
     return [{ id: 'copy-title', label: t('player.copy_title'), icon: 'content_copy' }]
   }
@@ -1079,7 +1167,13 @@ async function copyText(text: string) {
 }
 
 function handleContextMenuClick(item: ContextMenuActionItem) {
-  if (item.id === 'copy-title') {
+  if (contextMenu.value.type === 'artist-page') {
+    const artist = artistLinks.value.find(link => link.id === item.id)
+    if (artist && player.currentTrack?.id === artistLinkTrackId.value) {
+      void router.push(artist.route).then(() => emit('collapse'))
+    }
+    closeContextMenu()
+  } else if (item.id === 'copy-title') {
     void copyText(player.currentTrack?.title || '')
   } else if (item.id === 'copy-artist') {
     void copyText(player.currentTrack?.artist || '')
@@ -2037,7 +2131,7 @@ const sliderActiveColor = computed(() => {
           <transition :name="metaTransitionName">
             <div :key="nowPlayingTrackKey" class="np-meta">
               <h2 class="np-title" @contextmenu="openContextMenu($event, 'title')">{{ player.currentTrack?.title || t('player.not_playing') }}</h2>
-              <p class="np-artist" @contextmenu="openContextMenu($event, 'artist')">{{ player.currentTrack?.artist || '' }}</p>
+              <button type="button" class="np-artist" :disabled="artistLinksLoading || !player.currentTrack?.artist.trim()" :aria-label="t('player.open_artist')" @click="openArtistPage" @contextmenu="openContextMenu($event, 'artist')">{{ player.currentTrack?.artist || '' }}</button>
             </div>
           </transition>
         </div>
@@ -2495,6 +2589,13 @@ const sliderActiveColor = computed(() => {
             </button>
 
             <!-- 分享 -->
+            <button class="np-more-list-item" @click="showDesktopLyrics">
+              <span class="material-symbols-rounded">picture_in_picture_alt</span>
+              <div class="np-more-list-info">
+                <span class="np-more-list-headline">{{ t('player.desktop_lyrics') }}</span>
+              </div>
+            </button>
+
             <button class="np-more-list-item" @click="shareSong">
               <span class="material-symbols-rounded">share</span>
               <div class="np-more-list-info">
@@ -3493,6 +3594,9 @@ const sliderActiveColor = computed(() => {
 }
 
 .np-artist {
+  display: block;
+  cursor: pointer;
+  text-align: left;
   font-size: 14px;
   color: rgba(255,255,255,0.78);
   margin-top: 2px;
@@ -3502,6 +3606,9 @@ const sliderActiveColor = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  &:hover { text-decoration: underline; }
+  &:disabled { cursor: default; }
+  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
 }
 
 /* 进度条区域：固定高度，音质行始终占位 */

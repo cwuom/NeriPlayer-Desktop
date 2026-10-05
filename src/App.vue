@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
 import { installGlobalShortcuts } from '@/modules/shortcuts/globalShortcuts'
+import { installDesktopLyricsBridge } from '@/modules/desktopLyrics/bridge'
 import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
@@ -47,6 +48,7 @@ const isNowPlayingOpen = ref(false)
 // 静音前的音量，取消静音时还原
 let volumeBeforeMute = 0.5
 let uninstallShortcuts: (() => void) | null = null
+let uninstallDesktopLyrics: (() => void) | null = null
 const contentRef = ref<HTMLElement | null>(null)
 const miniPlayerRef = ref<InstanceType<typeof MiniPlayer> | null>(null)
 const nowPlayingRef = ref<InstanceType<typeof NowPlaying> | null>(null)
@@ -311,6 +313,7 @@ watch(
 
 // 启动时初始化：加载同步配置 + 检查登录状态 + 自动同步
 onMounted(async () => {
+  uninstallDesktopLyrics = installDesktopLyricsBridge()
   const syncStore = useSyncStore()
   const authStore = useAuthStore()
   window.addEventListener('beforeunload', handleBeforeUnload)
@@ -414,6 +417,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  uninstallDesktopLyrics?.()
+  uninstallDesktopLyrics = null
   player.flushPlayerState()
   uninstallShortcuts?.()
   uninstallShortcuts = null

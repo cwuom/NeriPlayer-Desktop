@@ -47,7 +47,7 @@ const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
-  crossfade, normalizeVolume,
+  crossfade, normalizeVolume, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, keepPlaybackMode,
@@ -79,6 +79,44 @@ const logLevelOptions = computed<Array<{ value: string; label: string }>>(() => 
   { value: 'debug', label: t('settings.log_level_debug') },
   { value: 'trace', label: t('settings.log_level_trace') },
 ])
+
+const audioOutputDevices = ref<Array<{ name: string; isDefault: boolean }>>([])
+const audioOutputSwitching = ref(false)
+const audioOutputOptions = computed(() => {
+  const devices = audioOutputDevices.value.map(device => ({
+    value: device.name,
+    label: device.name,
+  }))
+  if (audioOutputDevice.value && !devices.some(device => device.value === audioOutputDevice.value)) {
+    devices.unshift({ value: audioOutputDevice.value, label: t('settings.audio_output_unavailable', { name: audioOutputDevice.value }) })
+  }
+  return [{ value: '', label: t('settings.audio_output_default') }, ...devices]
+})
+
+async function loadAudioOutputDevices() {
+  try {
+    audioOutputDevices.value = await invoke('list_audio_output_devices')
+  } catch (error) {
+    log.warn('failed to list audio output devices:', error)
+  }
+}
+
+async function changeAudioOutputDevice(event: Event) {
+  const selected = (event.target as HTMLSelectElement).value
+  if (audioOutputSwitching.value) return
+  audioOutputSwitching.value = true
+  try {
+    await invoke('set_audio_output_device', { name: selected || null })
+    audioOutputDevice.value = selected
+  } catch (error) {
+    log.warn('failed to switch audio output:', error)
+    ;(event.target as HTMLSelectElement).value = audioOutputDevice.value
+    toast.error(t('settings.audio_output_failed'))
+  } finally {
+    audioOutputSwitching.value = false
+    void loadAudioOutputDevices()
+  }
+}
 
 async function openLogDir() {
   try {
@@ -520,6 +558,7 @@ onMounted(() => {
   loadBuildInfo()
   // 加载默认下载目录
   loadDefaultDownloadDir()
+  void loadAudioOutputDevices()
   void restoreSettingsScrollPosition(activeSettingsSection.value)
 })
 
@@ -973,28 +1012,8 @@ async function confirmClearGitHub() {
   await syncStore.disconnectGitHub()
 }
 
-// 切换省流模式前确认，避免用户误解已有云端文件格式
-const showDataSaverConfirm = ref(false)
-const pendingDataSaverValue = ref<boolean | null>(null)
-
-function requestDataSaverChange(event: Event) {
-  const target = event.target as HTMLInputElement | null
-  if (!target || target.checked === syncStore.github.dataSaver) return
-  pendingDataSaverValue.value = target.checked
-  showDataSaverConfirm.value = true
-}
-
-function cancelDataSaverChange() {
-  pendingDataSaverValue.value = null
-  showDataSaverConfirm.value = false
-}
-
-function confirmDataSaverChange() {
-  if (pendingDataSaverValue.value !== null) {
-    syncStore.github.dataSaver = pendingDataSaverValue.value
-  }
-  cancelDataSaverChange()
-}
+const hideProtocolUpgrade = ref(false)
+watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value = false })
 </script>
 
 <template>
@@ -1353,6 +1372,16 @@ function confirmDataSaverChange() {
 
     <!-- 播放 -->
         <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">speaker</span></div>
+      <div class="setting-info">
+        <label class="setting-title" for="audio-output-device">{{ t('settings.audio_output') }}</label>
+        <div class="setting-desc">{{ t('settings.audio_output_desc') }}</div>
+      </div>
+      <select id="audio-output-device" class="audio-output-select" :value="audioOutputDevice" :disabled="audioOutputSwitching" @focus="loadAudioOutputDevices" @change="changeAudioOutputDevice">
+        <option v-for="device in audioOutputOptions" :key="device.value" :value="device.value">{{ device.label }}</option>
+      </select>
+    </div>
     <div class="section-label clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
       <span>{{ t('settings.playback') }}</span>
@@ -2057,16 +2086,6 @@ function confirmDataSaverChange() {
           <span v-else class="sync-action-label">{{ t('settings.sync_action') }}</span>
         </div>
 
-        <!-- 数据节省模式 -->
-        <div class="setting-card sub-card">
-          <div class="setting-icon-wrap"><span class="material-symbols-rounded">download</span></div>
-          <div class="setting-info">
-            <div class="setting-title">{{ t('settings.data_saver') }}</div>
-            <div class="setting-desc">{{ t('settings.data_saver_desc') }}</div>
-          </div>
-          <label class="m3-switch"><input type="checkbox" :checked="syncStore.github.dataSaver" @change="requestDataSaverChange" /><span class="track"><span class="thumb"><span v-if="syncStore.github.dataSaver" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-        </div>
-
         <!-- 静默同步失败 -->
         <div class="setting-card sub-card">
           <div class="setting-icon-wrap"><span class="material-symbols-rounded">error</span></div>
@@ -2381,18 +2400,18 @@ function confirmDataSaverChange() {
       </div>
     </Teleport>
 
-    <!-- 切换省流模式确认 -->
+    <!-- 旧客户端无法读取升级后的归档，写入前需明确确认 -->
     <Teleport to="body">
-      <div v-if="showDataSaverConfirm" class="dialog-overlay" @click.self="cancelDataSaverChange">
+      <div v-if="syncStore.pendingProtocolUpgrade && !hideProtocolUpgrade" class="dialog-overlay" @click.self="hideProtocolUpgrade = true">
         <div class="dialog-card" style="width: 380px">
           <div class="dialog-icon warning">
             <span class="material-symbols-rounded">warning</span>
           </div>
-          <h3 class="dialog-title">{{ t('settings.data_saver_warning_title') }}</h3>
-          <p class="dialog-desc">{{ t('settings.data_saver_warning_message') }}</p>
+          <h3 class="dialog-title">{{ t('settings.sync_upgrade_title') }}</h3>
+          <p class="dialog-desc">{{ t('settings.sync_upgrade_message', { provider: syncStore.pendingProtocolUpgrade.backend === 'github' ? 'GitHub' : 'WebDAV' }) }}</p>
           <div class="dialog-actions">
-            <button class="dialog-btn" @click="cancelDataSaverChange">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn primary" @click="confirmDataSaverChange">{{ t('settings.data_saver_warning_confirm') }}</button>
+            <button class="dialog-btn" :disabled="syncStore.isSyncing" @click="hideProtocolUpgrade = true">{{ t('settings.cancel') }}</button>
+            <button class="dialog-btn primary" :disabled="syncStore.isSyncing" @click="syncStore.approveProtocolUpgrade()">{{ t('settings.sync_upgrade_confirm') }}</button>
           </div>
         </div>
       </div>
@@ -2473,6 +2492,17 @@ function confirmDataSaverChange() {
 </template>
 
 <style scoped lang="scss">
+.audio-output-select {
+  max-width: 45%;
+  min-width: 140px;
+  padding: 10px 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container);
+  color: var(--md-on-surface);
+  font: inherit;
+}
+
 .settings-view {
   width: 100%;
   height: 100%;

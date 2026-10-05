@@ -4,8 +4,10 @@ use neri_player_desktop::audio::analyzer::SharedAudioLevel;
 use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
-    auth_cmd, download_cmd, image_cmd, library_cmd, listen_together_cmd, lyrics_cmd, player_cmd,
-    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, debug_cmd,};
+    auth_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
+    listen_together_cmd, lyrics_cmd, player_cmd, recommend_cmd, search_cmd, settings_cmd,
+    stats_cmd, storage_cmd, sync_cmd,
+};
 use neri_player_desktop::state::AppState;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -384,9 +386,14 @@ fn main() {
             // IPC 脚本，且应用自定义命令不经 ACL 校验。仅放行主窗口调用命令，阻止登录页
             // （music.163.com / passport.bilibili.com / accounts.google.com）上的任意 JS
             // 越权调用 save_file_bytes 等命令写/读任意文件或导出凭据
+            // 桌面歌词窗口只允许读取显示快照，播放和账号命令仍只对主窗口开放
             let app_handler: Box<
                 dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
             > = Box::new(tauri::generate_handler![
+            desktop_lyrics_cmd::open_desktop_lyrics,
+            desktop_lyrics_cmd::close_desktop_lyrics,
+            desktop_lyrics_cmd::publish_desktop_lyrics,
+            desktop_lyrics_cmd::get_desktop_lyrics_snapshot,
             player_cmd::trace_playback_ui,
             player_cmd::begin_playback_request,
             player_cmd::play_file,
@@ -399,6 +406,8 @@ fn main() {
             player_cmd::resume,
             player_cmd::toggle_play_pause,
             player_cmd::set_volume,
+            player_cmd::list_audio_output_devices,
+            player_cmd::set_audio_output_device,
             player_cmd::seek,
             player_cmd::stop,
             player_cmd::set_speed,
@@ -437,6 +446,7 @@ fn main() {
             lyrics_cmd::parse_lrc_content,
             lyrics_cmd::load_lyrics_file,
             lyrics_cmd::fetch_lyrics,
+            lyrics_cmd::fetch_word_timed_lyrics,
             settings_cmd::get_settings,
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
@@ -494,6 +504,7 @@ fn main() {
             sync_cmd::use_existing_github_repo,
             sync_cmd::configure_github_sync,
             sync_cmd::sync_github,
+            sync_cmd::approve_sync_protocol_upgrade,
             sync_cmd::disconnect_github_sync,
             sync_cmd::update_github_sync_settings,
             sync_cmd::update_sync_preferences,
@@ -535,7 +546,7 @@ fn main() {
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();
-                if label != "main" {
+                if !window_command_allowed(&label, invoke.message.command()) {
                     let command = invoke.message.command().to_string();
                     log::warn!(
                         target: "security",
@@ -552,6 +563,19 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } = &event {
+                if label == "main" {
+                    if let Some(window) =
+                        app_handle.get_webview_window(desktop_lyrics_cmd::WINDOW_LABEL)
+                    {
+                        let _ = window.close();
+                    }
+                }
+            }
             // 退出前 flush 一次轮转 Cookie：60s 定时器之外，退出前最后一窗口的
             // Set-Cookie 轮换令牌若不落盘，下次启动会重放旧令牌导致偶发掉登录（AU-05）
             if let tauri::RunEvent::ExitRequested { .. } = event {
@@ -561,9 +585,31 @@ fn main() {
         });
 }
 
+fn window_command_allowed(label: &str, command: &str) -> bool {
+    label == "main"
+        || (label == desktop_lyrics_cmd::WINDOW_LABEL && command == "get_desktop_lyrics_snapshot")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_playback_finish, PlaybackFinishState};
+
+    #[test]
+    fn desktop_lyrics_window_only_reads_its_snapshot() {
+        assert!(super::window_command_allowed(
+            "main", "publish_desktop_lyrics",
+        ));
+        assert!(super::window_command_allowed(
+            "desktop-lyrics", "get_desktop_lyrics_snapshot",
+        ));
+        assert!(!super::window_command_allowed("desktop-lyrics", "play_url"));
+        assert!(!super::window_command_allowed(
+            "desktop-lyrics", "publish_desktop_lyrics",
+        ));
+        assert!(!super::window_command_allowed(
+            "youtube-login", "get_desktop_lyrics_snapshot",
+        ));
+    }
 
     #[test]
     fn unknown_duration_eof_ends_track() {

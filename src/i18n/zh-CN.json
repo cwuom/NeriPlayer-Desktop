@@ -214,6 +214,10 @@
     "dir_fallback": "所选下载目录不可用，已保存到默认位置"
   },
   "player": {
+    "desktop_lyrics": "桌面歌词",
+    "desktop_lyrics_failed": "无法打开桌面歌词窗口",
+    "open_artist": "打开歌手页面",
+    "artist_load_failed": "无法加载歌手信息",
     "not_playing": "未在播放",
     "now_playing": "正在播放",
     "no_lyrics": "暂无歌词",
@@ -382,6 +386,11 @@
     "clear_confirm_btn": "确定清空"
   },
   "settings": {
+    "audio_output": "音频输出设备",
+    "audio_output_default": "跟随系统默认设备",
+    "audio_output_desc": "切换设备时保留播放位置；默认选项自动跟随系统变化",
+    "audio_output_unavailable": "{name}（未连接）",
+    "audio_output_failed": "无法切换音频输出设备",
     "title": "设置",
     "accounts": "账号",
     "nav_accounts_desc": "管理平台登录与授权状态",
@@ -610,6 +619,9 @@
     "data_saver_warning_title": "切换数据节省模式？",
     "data_saver_warning_message": "切换同步文件格式可能导致不同端短暂不一致，请确认继续。",
     "data_saver_warning_confirm": "继续切换",
+    "sync_upgrade_title": "升级云同步格式？",
+    "sync_upgrade_message": "将 {provider} 云端数据升级为 Android 当前使用的同步格式。升级后旧版本客户端可能无法读取，请先更新其他设备。",
+    "sync_upgrade_confirm": "升级并同步",
     "clear_config": "清除配置",
     "clear_config_title": "清除配置",
     "clear_config_msg": "清除同步配置。本地数据不会被删除。",
