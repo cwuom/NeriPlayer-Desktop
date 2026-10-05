@@ -29,6 +29,7 @@ export interface ListenTogetherTrack {
   playlistContextId?: string
   mediaUri?: string
   streamUrl?: string
+  streamUrls?: string[]
   name: string
   artist: string
   album?: string
@@ -87,6 +88,26 @@ export interface ListenTogetherCause {
   type?: string
 }
 
+export interface ListenTogetherQueueReference {
+  stableKey: string
+  occurrence: number
+}
+
+export interface ListenTogetherQueueOperation {
+  type: string
+  target?: ListenTogetherQueueReference | null
+  anchor?: ListenTogetherQueueReference | null
+  placement?: string | null
+  track?: ListenTogetherTrack | null
+  order?: ListenTogetherQueueReference[] | null
+}
+
+export interface ListenTogetherQueueMutation {
+  baseRoomVersion: number
+  operations: ListenTogetherQueueOperation[]
+  targetCurrent?: ListenTogetherQueueReference | null
+}
+
 export interface ListenTogetherEvent {
   type: string
   eventId?: string
@@ -104,11 +125,14 @@ export interface ListenTogetherEvent {
   /** PLAYBACK_MODE / REQUEST_PLAYBACK_MODE */
   repeatMode?: number
   shuffleEnabled?: boolean
+  queueMutation?: ListenTogetherQueueMutation
   requestTrackStableKey?: string
+  forceRefresh?: boolean
   finishedTrackStableKey?: string
 }
 
 export interface ListenTogetherSocketEnvelope {
+  connectionId?: string
   type: string
   sessionId?: string
   userUuid?: string
@@ -150,6 +174,7 @@ export interface ListenTogetherSocketEnvelope {
   stateName?: string
   repeatMode?: number
   shuffleEnabled?: boolean
+  queueMutation?: ListenTogetherQueueMutation
   clientTimeMs?: number
   clientInstanceId?: string
   clientSequence?: number
@@ -165,6 +190,13 @@ export interface ListenTogetherInitialSnapshot {
   positionMs: number
   repeatMode: number
   shuffleEnabled: boolean
+  shuffleRestoreQueue?: ListenTogetherTrack[]
+}
+
+export interface ListenTogetherControlResponse {
+  ok: boolean
+  error?: string
+  applied?: NonNullable<ListenTogetherSocketEnvelope['result']>['applied']
 }
 
 export interface ListenTogetherRoomResponse {

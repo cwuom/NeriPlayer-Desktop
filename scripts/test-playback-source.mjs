@@ -6,11 +6,22 @@ const mockModule = Buffer.from(`
   export const invoke = (command, args) => globalThis.__playbackInvoke(command, args)
 `).toString('base64')
 const mockModuleUrl = `data:text/javascript;base64,${mockModule}`
+function transpileUrl(source) {
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  return `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
+}
+const protocolUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogether/protocol.ts', import.meta.url), 'utf8'))
+const queueUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogether/queue.ts', import.meta.url), 'utf8'))
+const mapperUrl = transpileUrl((await readFile(new URL('../src/stores/listenTogether/mapper.ts', import.meta.url), 'utf8'))
+  .replace("from './protocol'", `from '${protocolUrl}'`)
+  .replace("from './queue'", `from '${queueUrl}'`))
 const sourceUrl = new URL('../src/modules/playback/playbackSource.ts', import.meta.url)
 const source = (await readFile(sourceUrl, 'utf8')).replace(
   "from '@tauri-apps/api/core'",
   `from '${mockModuleUrl}'`,
-)
+).replace("from '@/stores/listenTogether/mapper'", `from '${mapperUrl}'`)
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
@@ -339,6 +350,38 @@ await run('does not retry lower qualities after an unknown response failure', as
 
   assert.equal(resolved, null)
   assert.equal(calls, 1)
+})
+
+await run('retains only trusted room stream candidates associated with the primary URL', async () => {
+  globalThis.__playbackInvoke = async () => { throw new Error('Direct room streams must not resolve again') }
+  const primary = 'https://m801.music.126.net/room-primary'
+  const backup = 'https://m802.music.126.net/room-backup'
+  const roomTrack = {
+    ...track(200), audioUrl: primary,
+    syncPayload: { streamUrls: [primary, 'https://evil.test/audio', backup, backup, 'file:///private.mp3'] },
+  }
+  const resolved = await resolvePlaybackSource(roomTrack, settings)
+  assert.equal(resolved.url, primary)
+  assert.deepEqual(resolved.candidateUrls, [backup])
+  assert.deepEqual(playbackCacheWriteOptions(resolved, 0), {})
+
+  const unrelated = await resolvePlaybackSource({ ...roomTrack,
+    syncPayload: { streamUrls: [backup] },
+  }, settings)
+  assert.deepEqual(unrelated.candidateUrls, [])
+
+  const maliciousPrimary = await resolvePlaybackSource({ ...roomTrack,
+    audioUrl: 'https://evil.test/audio',
+    syncPayload: { streamUrls: ['https://evil.test/audio', backup] },
+  }, settings)
+  assert.deepEqual(maliciousPrimary.candidateUrls, [])
+
+  const bili = await resolvePlaybackSource({ ...roomTrack, id: 'bilibili:BV1room', source: 'bilibili',
+    audioUrl: 'https://a.bilivideo.com/audio',
+    syncPayload: { streamUrls: ['https://a.bilivideo.com/audio',
+      'https://b.mountaintoys.cn/audio', 'https://c.bilivideo.cn/audio'] },
+  }, settings)
+  assert.deepEqual(bili.candidateUrls, ['https://b.mountaintoys.cn/audio'])
 })
 
 console.log('playback source tests passed')

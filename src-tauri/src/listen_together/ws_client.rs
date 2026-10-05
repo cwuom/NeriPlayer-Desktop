@@ -11,7 +11,16 @@ use uuid::Uuid;
 use super::protocol::LtSocketEnvelope;
 
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LtSocketMessage<'a> {
+    connection_id: &'a str,
+    #[serde(flatten)]
+    envelope: &'a LtSocketEnvelope,
+}
 
 /// WebSocket 客户端：管理与一起听服务器的连接
 pub struct LtWsClient {
@@ -26,9 +35,11 @@ pub struct LtWsClient {
 impl LtWsClient {
     /// 建立 WebSocket 连接并启动读写循环
     pub async fn connect(ws_url: &str, app_handle: AppHandle) -> Result<Self, String> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
-            .await
-            .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+        let (ws_stream, _) =
+            tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(ws_url))
+                .await
+                .map_err(|_| "WebSocket connect timed out".to_string())?
+                .map_err(|e| format!("WebSocket connect failed: {e}"))?;
 
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -120,10 +131,16 @@ impl LtWsClient {
                         // 尝试解析为 envelope 并转发给前端
                         match serde_json::from_str::<LtSocketEnvelope>(&text) {
                             Ok(envelope) => {
-                                let _ = handle_r.emit("lt:message", &envelope);
+                                let _ = handle_r.emit(
+                                    "lt:message",
+                                    LtSocketMessage {
+                                        connection_id: &reader_connection_id,
+                                        envelope: &envelope,
+                                    },
+                                );
                             }
                             Err(e) => {
-                                log::warn!(target: "lt-ws", "parse error: {e}, raw: {text}");
+                                log::warn!(target: "lt-ws", "parse error: {e}");
                             }
                         }
                     }
@@ -209,3 +226,32 @@ impl Drop for LtWsClient {
 
 /// 全局 WS 客户端引用（存在 AppState 中）
 pub type SharedWsClient = Arc<TokioMutex<Option<LtWsClient>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn connection_identity_is_added_only_to_local_socket_messages() {
+        let envelope: LtSocketEnvelope = serde_json::from_value(json!({
+            "type": "np_pong",
+            "t": 123,
+            "nowMs": 456
+        }))
+        .unwrap();
+        let payload = serde_json::to_value(LtSocketMessage {
+            connection_id: "connection-1",
+            envelope: &envelope,
+        })
+        .unwrap();
+
+        assert_eq!(payload["connectionId"], "connection-1");
+        assert_eq!(payload["type"], "np_pong");
+        assert_eq!(payload["t"], 123);
+        assert!(serde_json::to_value(envelope)
+            .unwrap()
+            .get("connectionId")
+            .is_none());
+    }
+}

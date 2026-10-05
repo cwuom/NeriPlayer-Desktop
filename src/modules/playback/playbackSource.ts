@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { TrackInfo } from '@/stores/player'
+import { trustedInboundStreamUrls } from '@/stores/listenTogether/mapper'
 
 export type PlaybackSourceKind = 'netease' | 'qq' | 'bilibili' | 'youtube'
 export type PlaybackAudioSource = PlaybackSourceKind | 'local'
@@ -265,6 +266,7 @@ export class PlaybackUrlResolver {
       const directUrl = track.audioUrl.trim()
       return createSuccess(track, adapter.kind, resolvedSettings, {
         url: directUrl,
+        candidateUrls: trustedDirectStreamCandidates(track, adapter.kind, directUrl),
         qualityKey: adapter.qualityKey(resolvedSettings),
         // 直链/一起听 streamUrl 的实际音质未知，不进入本地持久缓存
         cacheKey: `${cacheKey}|direct`,
@@ -330,6 +332,19 @@ export class PlaybackUrlResolver {
   clear(): void {
     this.cache.clear()
   }
+}
+
+function trustedDirectStreamCandidates(
+  track: TrackInfo,
+  kind: PlaybackSourceKind,
+  directUrl: string,
+): string[] {
+  const raw = track.syncPayload?.streamUrls
+  if (!Array.isArray(raw)) return []
+  const channelId = kind === 'youtube' ? 'youtubeMusic' : kind
+  const trusted = trustedInboundStreamUrls(channelId, raw)
+  // 仅关联到本次主直链的候选才能进入播放，旧载荷不能附加无关资源
+  return trusted.includes(directUrl) ? trusted.filter(url => url !== directUrl) : []
 }
 
 export const playbackUrlResolver = new PlaybackUrlResolver()

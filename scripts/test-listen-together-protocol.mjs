@@ -1,28 +1,15 @@
 // Listen-together wire protocol helpers (Android-aligned ExoPlayer ints)
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFile } from 'node:fs/promises'
+import ts from 'typescript'
 
-// protocol.ts is TS; reimplement the pure helpers for unit gate without bundler
-const LtRepeatMode = { OFF: 0, ONE: 1, ALL: 2 }
-
-function desktopRepeatToWire(mode) {
-  switch (mode) {
-    case 'one': return LtRepeatMode.ONE
-    case 'all': return LtRepeatMode.ALL
-    default: return LtRepeatMode.OFF
-  }
-}
-
-function wireRepeatToDesktop(mode) {
-  if (mode === null || mode === undefined || Number.isNaN(mode)) return null
-  if (mode === LtRepeatMode.ONE) return 'one'
-  if (mode === LtRepeatMode.ALL) return 'all'
-  if (mode === LtRepeatMode.OFF) return 'off'
-  return null
-}
+const source = await readFile(new URL('../src/stores/listenTogether/protocol.ts', import.meta.url), 'utf8')
+const compiled = ts.transpileModule(source, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText
+const { desktopRepeatToWire, wireRepeatToDesktop } = await import(
+  `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`,
+)
 
 assert.equal(desktopRepeatToWire('off'), 0)
 assert.equal(desktopRepeatToWire('one'), 1)

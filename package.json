@@ -18,6 +18,10 @@
     "test:lyrics-format": "node scripts/test-lyrics-format.mjs",
     "test:download-cancellation": "node scripts/test-download-cancellation.mjs",
     "test:listen-together-mapper": "node scripts/test-listen-together-mapper.mjs",
+    "test:listen-together-protocol": "node scripts/test-listen-together-protocol.mjs",
+    "test:listen-together-queue": "node scripts/test-listen-together-queue.mjs",
+    "test:listen-together-sync": "node scripts/test-listen-together-sync.mjs",
+    "test:listen-together-store": "node scripts/test-listen-together-store.mjs",
     "test:youtube-playlist-parse": "node scripts/test-youtube-playlist-parse.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },

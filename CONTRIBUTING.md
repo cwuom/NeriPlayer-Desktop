@@ -323,6 +323,15 @@ cargo clippy         # lint（交付要求零警告）
    事件语义）以 Worker 实现为准，不要只改 UI 校验。
 3. 相关测试：`pnpm test:listen-together-mapper` 与
    `node scripts/test-listen-together-protocol.mjs`。
+4. 当前对照 Android `534d6658` 及其 Worker `31d55c60`：
+   schemaVersion >= 2 使用带 `baseRoomVersion` 的队列操作，重复曲目以
+   `stableKey` + `occurrence` 定位；旧服务端回退完整队列。
+   `streamUrls` 按平台白名单过滤，并保留 `streamUrl` 供旧客户端读取。
+5. 播放同步策略在 `playbackSync.ts`，队列操作在 `queue.ts`。
+   修改后执行 `pnpm test:listen-together-queue`、
+   `pnpm test:listen-together-sync`、`pnpm test:listen-together-store`，
+   Rust 侧执行 `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib listen_together`。
+   本地测试不代替 Android 与桌面端实际同房的联调。
 
 ---
 

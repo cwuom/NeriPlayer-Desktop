@@ -20,6 +20,8 @@ import type {
   ListenTogetherEvent,
   ListenTogetherInitialSnapshot,
   ListenTogetherRoomResponse,
+  ListenTogetherStateResponse,
+  ListenTogetherControlResponse,
 } from './protocol'
 import {
   desktopRepeatToWire,
@@ -31,7 +33,9 @@ import {
   resolveLtJoinSecret,
   isValidLtRoomId,
 } from './protocol'
-import { trackInfoToLtTrack, ltTrackToTrackInfo, toShareableQueueSnapshot } from './mapper'
+import { trackInfoToLtTrack, ltTrackToTrackInfo, toShareableQueueSnapshot, trustedInboundStreamUrls } from './mapper'
+import { queueReferences, applyListenTogetherQueueMutation, buildListenTogetherQueueMutationPlan, getLtQueueReference, setLtQueueReference } from './queue'
+import { acceptRoomState, resolveExpectedPosition, resolvePositionSync, resolveSoftSyncRecheckAction, SOFT_SYNC_RECHECK_INTERVAL_MS } from './playbackSync'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('listen-together')
@@ -39,12 +43,6 @@ const log = createLogger('listen-together')
 const LT_UUID_KEY = 'neri:lt-uuid'
 const DEFAULT_BASE_URL = 'https://neriplayer.hancat.work'
 
-// 进度纠偏阈值
-const DRIFT_FORCE_MS = 2500
-const HEARTBEAT_DRIFT_FORCE_MS = 5000
-const PAUSED_DRIFT_FORCE_MS = 800
-const SOFT_SYNC_MIN_MS = 600
-const SOFT_SYNC_FAST_MS = 1500
 const LINK_REQUEST_THROTTLE_MS = 4000
 const CONTROL_EVENT_DEDUP_MS = 350
 const SEEK_EVENT_DEDUP_MS = 800
@@ -53,10 +51,12 @@ const LOCAL_SEEK_REPORT_DEBOUNCE_MS = 450
 
 // 心跳间隔：对齐 Android（播放 22s）, 降低大队列全量上传频率; 控制事件仍即时下发
 const HEARTBEAT_INTERVAL_MS = 22_000
+const PAUSED_HEARTBEAT_INTERVAL_MS = 25_000
 // listener 侧存活探测间隔（房主走 HEARTBEAT，听众用 ping 保活半开连接检测）
-const LISTENER_PING_INTERVAL_MS = 25_000
+const LISTENER_PING_INTERVAL_MS = 20_000
 // 已处理转发请求 eventId 上限（对齐 Android ForwardedRequestDeduper 语义）
-const HANDLED_FORWARDED_EVENT_LIMIT = 100
+const HANDLED_FORWARDED_EVENT_LIMIT = 256
+const HANDLED_FORWARDED_REQUESTER_LIMIT = 64
 
 // 重连配置
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
@@ -104,6 +104,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   // 内部状态
   let _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let _listenerPingTimer: ReturnType<typeof setInterval> | null = null
+  let _softSyncTimer: ReturnType<typeof setInterval> | null = null
+  let _softSyncRate: number | null = null
+  let _watchReleaseTimer: ReturnType<typeof setTimeout> | null = null
+  let _playbackApplySequence = 0
+  const _pendingRemotePlaybackLoads = new Set<number>()
+  let _trackSwitchAt = 0
   let _reconnectAttempt = 0
   let _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   // 会话代际：leaveRoom 后递增，让在途的延迟回调失效，不再操作播放器
@@ -113,6 +119,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   let _clientSequence = 0
   // 已处理的转发请求 eventId -> 处理时间，防重复送达二次执行
   const _handledForwardedEventIds = new Map<string, number>()
+  const _lastForwardedSequence = new Map<string, number>()
+  let _controlRequestChain: Promise<void> = Promise.resolve()
   let _wsUrl: string | null = null
   // 后端为每条 WS 分配代际 ID，迟到的旧连接事件必须丢弃（MK-02）
   let _activeWsConnectionId: string | null = null
@@ -125,6 +133,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   const _recentOutboundEventIds = new Set<string>()
   // 记录最后上报的 track id，避免重复上报
   let _lastReportedTrackId: string | null = null
+  let _lastReportedQueueKeys: string[] = []
+  let _queueEventInFlight: ListenTogetherEvent | null = null
+  let _queueEventSnapshot: ListenTogetherEvent | null = null
+  let _queuedQueueEvent: ListenTogetherEvent | null = null
+  let _queueAckTimer: ReturnType<typeof setTimeout> | null = null
   let _lastReportedIsPlaying: boolean | null = null
   let _lastReportedRepeatMode: number | null = null
   let _lastReportedShuffle: boolean | null = null
@@ -152,6 +165,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const player = usePlayerStore()
     const toast = useToastStore()
     const t = (i18n.global as any).t
+    const generation = _sessionGeneration
 
     try {
       sessionError.value = null
@@ -190,6 +204,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         nickname: nickname.value,
         initialSnapshot: snapshot,
       })
+      if (generation !== _sessionGeneration) return
 
       if (!resp.ok) {
         throw new Error(resp.error || 'Create room failed')
@@ -211,11 +226,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       // 连接 WebSocket
       const wsUrl = resolveWsUrl(resp, createdRoomId)
       await connectWs(wsUrl)
+      if (generation !== _sessionGeneration) return
 
       startHeartbeat()
       setupPlayerWatch()
 
     } catch (e) {
+      if (generation !== _sessionGeneration) return
       const msg = e instanceof Error ? e.message : String(e)
       sessionError.value = msg
       connectionState.value = 'disconnected'
@@ -228,6 +245,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const player = usePlayerStore()
     const toast = useToastStore()
     const t = (i18n.global as any).t
+    const generation = _sessionGeneration
 
     try {
       sessionError.value = null
@@ -248,6 +266,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         nickname: nickname.value,
         joinSecret: normalizeLtJoinSecret(joinSecret),
       })
+      if (generation !== _sessionGeneration) return
 
       if (!resp.ok) {
         throw new Error(resp.error || 'Join room failed')
@@ -267,11 +286,13 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
       const wsUrl = resolveWsUrl(resp, normalizedRoomId)
       await connectWs(wsUrl)
+      if (generation !== _sessionGeneration) return
 
       startListenerPing()
       setupPlayerWatch()
 
     } catch (e) {
+      if (generation !== _sessionGeneration) return
       const msg = e instanceof Error ? e.message : String(e)
       sessionError.value = msg
       connectionState.value = 'disconnected'
@@ -283,16 +304,27 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   async function leaveRoom() {
     // 递增会话代际，让在途的延迟同步回调失效
     _sessionGeneration++
+    _playbackApplySequence++
+    _pendingRemotePlaybackLoads.clear()
     stopHeartbeat()
     stopListenerPing()
     teardownPlayerWatch()
     teardownListeners()
-    usePlayerStore().setListenTogetherSyncPlaybackRate(null)
+    setSyncRate(null)
+    if (_watchReleaseTimer) clearTimeout(_watchReleaseTimer)
+    _watchReleaseTimer = null
+    _suppressPlayerWatch = false
     if (_reconnectTimer) {
       clearTimeout(_reconnectTimer)
       _reconnectTimer = null
     }
 
+    try {
+      const result = await invoke<ListenTogetherControlResponse | null>('lt_leave_room')
+      if (result?.ok === false) log.warn('leave room rejected:', result.error)
+    } catch (error) {
+      log.warn('leave room request failed:', error)
+    }
     try {
       await invoke('lt_disconnect_ws')
     } catch {}
@@ -311,6 +343,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _activeWsConnectionId = null
     _reconnectAttempt = 0
     _lastReportedTrackId = null
+    _lastReportedQueueKeys = []
+    _queueEventInFlight = null
+    _queueEventSnapshot = null
+    _queuedQueueEvent = null
+    if (_queueAckTimer) clearTimeout(_queueAckTimer)
+    _queueAckTimer = null
     _lastReportedIsPlaying = null
     _lastReportedRepeatMode = null
     _lastReportedShuffle = null
@@ -321,6 +359,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     clearPendingSeekReport()
     _recentOutboundEventIds.clear()
     _handledForwardedEventIds.clear()
+    _lastForwardedSequence.clear()
     _serverClockOffsetMs = 0
     _lastRequestedLinkStableKey = null
     _lastRequestedLinkAt = 0
@@ -328,21 +367,27 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   // WebSocket 连接
   async function connectWs(wsUrl: string) {
+    const generation = _sessionGeneration
     _wsUrl = wsUrl
     // 新连接建立期间不接受旧连接的收尾事件
     _activeWsConnectionId = null
-    await setupListeners()
+    if (!await setupListeners(generation) || generation !== _sessionGeneration) return
     await invoke('lt_connect_ws', { wsUrl })
   }
 
-  async function setupListeners() {
+  async function setupListeners(generation: number): Promise<boolean> {
     teardownListeners()
 
-    _unlistenMessage = await listen<ListenTogetherSocketEnvelope>('lt:message', (event) => {
+    const unlistenMessage = await listen<ListenTogetherSocketEnvelope>('lt:message', (event) => {
+      if (generation !== _sessionGeneration) return
+      if (!roomId.value || (event.payload.connectionId && event.payload.connectionId !== _activeWsConnectionId)) return
       handleSocketMessage(event.payload)
     })
+    if (generation !== _sessionGeneration) { unlistenMessage(); return false }
+    _unlistenMessage = unlistenMessage
 
-    _unlistenConnected = await listen<{ connectionId?: string }>('lt:connected', (event) => {
+    const unlistenConnected = await listen<{ connectionId?: string }>('lt:connected', (event) => {
+      if (generation !== _sessionGeneration) return
       _activeWsConnectionId = event.payload.connectionId || null
       const reconnected = _reconnectAttempt > 0
       connectionState.value = 'connected'
@@ -352,14 +397,20 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       }
       _reconnectAttempt = 0
       // 重连后恢复 listener 存活探测
-      if (roomId.value && role.value === 'listener') startListenerPing()
+      if (roomId.value) {
+        startListenerPing()
+        if (isController.value) startHeartbeat()
+      }
     })
+    if (generation !== _sessionGeneration) { unlistenConnected(); return false }
+    _unlistenConnected = unlistenConnected
 
-    _unlistenDisconnected = await listen<{
+    const unlistenDisconnected = await listen<{
       connectionId?: string
       code: number
       reason: string
     }>('lt:disconnected', (event) => {
+      if (generation !== _sessionGeneration) return
       // 新连接已经接管时，旧连接的 close/error 事件不能触发重连风暴。
       // 旧版后端没有 connectionId 时，仅在当前也没有代际信息时兼容接受。
       if (
@@ -371,12 +422,17 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       connectionState.value = 'disconnected'
       _activeWsConnectionId = null
       stopListenerPing()
+      stopHeartbeat()
+      setSyncRate(null)
 
       // 是否需要重连
       if (wasConnected && roomId.value) {
         scheduleReconnect()
       }
     })
+    if (generation !== _sessionGeneration) { unlistenDisconnected(); return false }
+    _unlistenDisconnected = unlistenDisconnected
+    return true
   }
 
   function teardownListeners() {
@@ -390,10 +446,11 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
   // 消息处理
   function handleSocketMessage(envelope: ListenTogetherSocketEnvelope) {
+    if (envelope.state && envelope.state.roomId !== roomId.value) return
     // 用服务端时间戳更新时钟偏移（每条带 nowMs/t 的消息都更新，对齐 Android）
     if (envelope.type !== 'np_pong') {
       const serverNow = envelope.nowMs
-      if (typeof serverNow === 'number' && serverNow > 0) {
+      if (typeof serverNow === 'number' && Number.isFinite(serverNow) && serverNow > 0) {
         _serverClockOffsetMs = serverNow - Date.now()
       }
     }
@@ -408,7 +465,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         handleLinkRequested(envelope)
         break
       case 'member_control_requested':
-        handleMemberControlRequested(envelope)
+        {
+          const generation = _sessionGeneration
+          _controlRequestChain = _controlRequestChain.then(async () => {
+            if (generation === _sessionGeneration) await handleMemberControlRequested(envelope, generation)
+          }).catch((error) => log.warn('member control failed:', error))
+        }
         break
       case 'room_suspended':
         handleRoomSuspended(envelope)
@@ -427,9 +489,12 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         // 避免把网络延迟误判成固定进度漂移
         const sentAt = envelope.t
         const serverNow = envelope.nowMs
-        if (typeof sentAt === 'number' && typeof serverNow === 'number') {
+        if (typeof sentAt === 'number' && typeof serverNow === 'number' && Number.isFinite(serverNow)) {
           const receivedAt = Date.now()
-          _serverClockOffsetMs = serverNow - (sentAt + (receivedAt - sentAt) / 2)
+          const rtt = receivedAt - sentAt
+          if (serverNow > 0 && rtt >= 0 && rtt <= 30_000) {
+            _serverClockOffsetMs = serverNow - (sentAt + rtt / 2)
+          }
         }
         break
       }
@@ -467,46 +532,38 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
     if (rejected) {
       const err = result.error || envelope.message || t('listen_together.control_rejected')
+      if (retryLegacyQueueSnapshot(err)) return
+      if (_queueEventInFlight && (!appliedCause?.eventId || appliedCause.eventId === _queueEventInFlight.eventId)) {
+        completeQueueEvent(_queueEventInFlight.eventId, false)
+      }
       log.warn('control rejected by server:', err)
       useToastStore().error(err)
       // 以服务端状态为准重新对齐，优先用 applied.state，回退 envelope.state
       const rollback = applied?.state || envelope.state
       if (rollback) {
-        roomState.value = rollback
-        _lastAppliedRoomVersion = rollback.version || 0
-        roomSettings.value = rollback.settings || roomSettings.value
-        markSync('EVENT_REJECTED', rollback.updatedAt || Date.now())
-        if (!isController.value) {
-          applyRoomStateToPlayer(
-            rollback,
-            'control_rejected',
-            applied?.expectedPositionMs ?? envelope.expectedPositionMs,
-          )
-        }
+        commitRoomState(rollback, 'EVENT_REJECTED', applied?.expectedPositionMs ?? envelope.expectedPositionMs)
       }
       return
     }
 
     // 仲裁通过：仅当是本端发起的请求且带权威 state 才落地
+    const queueAcknowledged = !!appliedCause?.eventId && appliedCause.eventId === _queueEventInFlight?.eventId
     if (
       applied?.state
-      && appliedCause?.userUuid === userUuid.value
-      && (appliedType === 'UPDATE_SETTINGS' || appliedType?.startsWith('REQUEST_'))
+      && (queueAcknowledged || (appliedCause?.userUuid === userUuid.value
+        && (appliedType === 'UPDATE_SETTINGS' || appliedType?.startsWith('REQUEST_'))))
     ) {
-      roomState.value = applied.state
-      _lastAppliedRoomVersion = applied.state.version || 0
-      roomSettings.value = applied.state.settings || roomSettings.value
-      markSync(appliedType || 'CONTROL_APPLIED', applied.state.updatedAt || Date.now())
-      // 听众侧才需要把权威状态回灌到播放器；房主自身即权威源，跳过避免自激
-      if (!isController.value) {
-        applyRoomStateToPlayer(applied.state, appliedType || 'control_applied', applied.expectedPositionMs)
-      }
+      commitRoomState(applied.state, appliedType || 'CONTROL_APPLIED', applied.expectedPositionMs, !isController.value && !_queuedQueueEvent)
     }
+    if (applied?.state && appliedCause?.eventId && applied.state.roomId === roomId.value
+      && applied.state.version >= _lastAppliedRoomVersion) completeQueueEvent(appliedCause.eventId)
   }
 
   function handleErrorEnvelope(envelope: ListenTogetherSocketEnvelope) {
     const t = (i18n.global as any).t
     const err = envelope.result?.error || envelope.message || t('listen_together.control_rejected')
+    if (retryLegacyQueueSnapshot(err)) return
+    if (_queueEventInFlight) completeQueueEvent(_queueEventInFlight.eventId, false)
     log.warn('server error envelope:', err)
     useToastStore().error(err)
   }
@@ -516,35 +573,51 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       role.value = envelope.role as LtRole
     }
     if (envelope.state) {
-      roomState.value = envelope.state
-      _lastAppliedRoomVersion = envelope.state.version || 0
-      roomSettings.value = envelope.state.settings || roomSettings.value
-      markSync('WELCOME', envelope.state.updatedAt || Date.now())
+      commitRoomState(envelope.state, 'WELCOME', envelope.expectedPositionMs)
     }
+    if (isController.value) startHeartbeat()
+    else stopHeartbeat()
+  }
+
+  function commitRoomState(state: ListenTogetherRoomState, causeType: string, expectedPositionMs?: number, apply = true) {
+    const accepted = acceptRoomState(roomState.value, state, roomId.value, _lastAppliedRoomVersion)
+    if (!accepted) return
+    roomState.value = accepted
+    _lastAppliedRoomVersion = accepted.version
+    roomSettings.value = accepted.settings
+    markSync(causeType, accepted.updatedAt || Date.now())
+    if (apply) applyRoomStateToPlayer(accepted, causeType, expectedPositionMs)
   }
 
   function handleRoomStateUpdated(envelope: ListenTogetherSocketEnvelope) {
     if (!envelope.state) return
     if ((envelope.state.version || 0) < _lastAppliedRoomVersion) return
+    if (_queuedQueueEvent && envelope.causedBy?.eventId === _queueEventInFlight?.eventId) {
+      commitRoomState(envelope.state, envelope.causedBy?.type || 'STATE_SYNC', envelope.expectedPositionMs, false)
+      completeQueueEvent(envelope.causedBy?.eventId)
+      return
+    }
 
     // 回声抑制：REQUEST_*/TRACK_FINISHED 引发的房态由权威方仲裁, 即便携带本端 eventId
     // 也必须应用到播放器（对齐 Android shouldIgnoreListenTogetherIncomingState:
     // REQUEST_ 前缀与 TRACK_FINISHED 永不忽略）, 否则服务端对位置/状态的钳制修正会被
     // 本地乐观值覆盖, 要等下一次心跳才纠正
     const causeType = envelope.causedBy?.type
+    const authoritativeQueueChanged = !_queuedQueueEvent && (causeType === 'SET_QUEUE' || causeType === 'REQUEST_SET_QUEUE')
+      && envelope.state.version > _lastAppliedRoomVersion
+      && (envelope.state.currentIndex !== roomState.value?.currentIndex
+        || envelope.state.queue.map(track => track.stableKey).join('\n') !== roomState.value?.queue.map(track => track.stableKey).join('\n'))
     const causeNeverSuppressed = !!causeType
       && (causeType.startsWith('REQUEST_') || causeType === 'TRACK_FINISHED')
     if (
-      !causeNeverSuppressed
+      !causeNeverSuppressed && !authoritativeQueueChanged
       && envelope.causedBy?.eventId
       && _recentOutboundEventIds.has(envelope.causedBy.eventId)
     ) {
       _recentOutboundEventIds.delete(envelope.causedBy.eventId)
       // 仍然更新 roomState 但不应用到 player
-      roomState.value = envelope.state
-      _lastAppliedRoomVersion = envelope.state.version || 0
-      roomSettings.value = envelope.state.settings || roomSettings.value
-      markSync(causeType || 'STATE_SYNC', envelope.state.updatedAt || Date.now())
+      commitRoomState(envelope.state, causeType || 'STATE_SYNC', envelope.expectedPositionMs, false)
+      completeQueueEvent(envelope.causedBy?.eventId)
       return
     }
     // 已应用的本端 eventId 从抑制集移除, 避免累积
@@ -552,16 +625,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       _recentOutboundEventIds.delete(envelope.causedBy.eventId)
     }
 
-    roomState.value = envelope.state
-    _lastAppliedRoomVersion = envelope.state.version || 0
-    roomSettings.value = envelope.state.settings || roomSettings.value
-    markSync(causeType || 'STATE_SYNC', envelope.state.updatedAt || Date.now())
-
-    applyRoomStateToPlayer(
-      envelope.state,
-      causeType || 'state_update',
-      envelope.expectedPositionMs,
-    )
+    commitRoomState(envelope.state, causeType || 'state_update', envelope.expectedPositionMs)
+    completeQueueEvent(envelope.causedBy?.eventId)
   }
 
   function handleLinkRequested(envelope: ListenTogetherSocketEnvelope) {
@@ -583,6 +648,8 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       player.queueIndex,
       true,
       streamUrl || undefined,
+      false,
+      player.getCurrentStreamUrls(player.currentTrack.id),
     )
     const track = queue[resolvedIndex]
     if (!track || track.stableKey !== currentLt.stableKey || !track.streamUrl) {
@@ -621,7 +688,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     })
   }
 
-  function handleMemberControlRequested(envelope: ListenTogetherSocketEnvelope) {
+  async function handleMemberControlRequested(envelope: ListenTogetherSocketEnvelope, generation: number) {
     // 房主处理听众的控制请求
     if (!isController.value) return
 
@@ -634,7 +701,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
     // 按 causedBy.eventId 去重：重复送达的转发请求不得二次执行
     const causeEventId = envelope.causedBy?.eventId
-    if (causeEventId) {
+    if (envelope.requestSequence != null && envelope.requestSequence > 0) {
+      const requester = envelope.causedBy?.userUuid || '__global__'
+      if (envelope.requestSequence <= (_lastForwardedSequence.get(requester) ?? 0)) return
+      _lastForwardedSequence.delete(requester)
+      _lastForwardedSequence.set(requester, envelope.requestSequence)
+      if (_lastForwardedSequence.size > HANDLED_FORWARDED_REQUESTER_LIMIT) {
+        _lastForwardedSequence.delete(_lastForwardedSequence.keys().next().value!)
+      }
+    } else if (causeEventId) {
       if (_handledForwardedEventIds.has(causeEventId)) return
       _handledForwardedEventIds.set(causeEventId, Date.now())
       while (_handledForwardedEventIds.size > HANDLED_FORWARDED_EVENT_LIMIT) {
@@ -646,31 +721,73 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
 
     const player = usePlayerStore()
     const causeType = envelope.causedBy?.type
+    const currentKey = player.currentTrack ? trackInfoToLtTrack(player.currentTrack).stableKey : null
+    if (causeType && ['REQUEST_PLAY', 'REQUEST_PAUSE', 'REQUEST_SEEK'].includes(causeType)
+      && (!currentKey || (envelope.requestTrackStableKey ?? envelope.track?.stableKey) !== currentKey)) {
+      reportHeartbeat()
+      return
+    }
 
     _suppressPlayerWatch = true
     try {
       switch (causeType) {
         case 'REQUEST_PLAY':
-          if (!player.isPlaying) player.togglePlayPause('local')
+          if (!player.isPlaying) await player.resume('remote_sync')
+          if (generation !== _sessionGeneration) return
           reportPlayEvent()
           break
         case 'REQUEST_PAUSE':
-          if (player.isPlaying) player.togglePlayPause('local')
+          if (player.isPlaying) await player.pause('remote_sync')
+          if (generation !== _sessionGeneration) return
           reportPauseEvent()
           break
         case 'REQUEST_SEEK':
           if (envelope.positionMs != null) {
-            player.seekTo(envelope.positionMs, 'local')
+            await player.seekTo(envelope.positionMs, 'remote_sync')
+            if (generation !== _sessionGeneration) return
             reportSeekEvent(envelope.positionMs)
           }
           break
         case 'REQUEST_SET_TRACK':
           if (envelope.track) {
-            const trackInfo = ltTrackToTrackInfo(envelope.track)
-            player.play(trackInfo, 'local')
-            reportSetTrackEvent(envelope.track, envelope.currentIndex ?? 0)
+            const queue = resolveRequestedQueue(envelope)
+            if (!queue) { reportHeartbeat(); break }
+            const index = 'targetCurrentIndex' in queue && queue.targetCurrentIndex != null && queue.targetCurrentIndex >= 0
+              ? queue.targetCurrentIndex : envelope.currentIndex ?? queue.currentIndex
+            if (!queue.queue[index] || queue.queue[index].stableKey !== envelope.track.stableKey) {
+              reportHeartbeat()
+              break
+            }
+            replacePlayerQueue(queue.queue, index)
+            await player.play(player.queue[index], 'remote_sync', envelope.positionMs ?? 0)
+            if (generation !== _sessionGeneration) return
+            if (envelope.shouldPlay === false) await player.pause('remote_sync')
+            if (generation !== _sessionGeneration) return
+            reportSetTrackEvent(envelope.track, index)
           }
           break
+        case 'REQUEST_SET_QUEUE': {
+          const queue = resolveRequestedQueue(envelope)
+          if (!queue) { reportHeartbeat(); break }
+          replacePlayerQueue(queue.queue, queue.currentIndex)
+          const track = player.queue[queue.currentIndex]
+          const requestedPosition = envelope.positionMs ?? envelope.expectedPositionMs ?? 0
+          const shouldPlay = envelope.stateName === 'playing' || envelope.shouldPlay === true
+            ? true : envelope.stateName === 'paused' || envelope.shouldPlay === false ? false : player.isPlaying
+          if (track && (!player.currentTrack || trackInfoToLtTrack(player.currentTrack).stableKey !== queue.queue[queue.currentIndex].stableKey)) {
+            await player.play(track, 'remote_sync', requestedPosition)
+            if (generation !== _sessionGeneration) return
+          }
+          if (!track || !shouldPlay) await player.pause('remote_sync')
+          else if (!player.isPlaying) await player.resume('remote_sync')
+          if (generation !== _sessionGeneration) return
+          if (track && envelope.positionMs != null && Math.abs(player.positionMs - requestedPosition) > 800) {
+            await player.seekTo(requestedPosition, 'remote_sync')
+            if (generation !== _sessionGeneration) return
+          }
+          reportQueueEvent()
+          break
+        }
         case 'REQUEST_PLAYBACK_MODE': {
           // Align Android: controller commits PLAYBACK_MODE for member request
           const repeatMode = envelope.repeatMode
@@ -688,19 +805,23 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
         }
       }
     } finally {
-      setTimeout(() => { _suppressPlayerWatch = false }, 350)
+      if (generation === _sessionGeneration) releasePlayerWatch(350)
     }
   }
 
-  function handleRoomSuspended(_envelope: ListenTogetherSocketEnvelope) {
+  function handleRoomSuspended(envelope: ListenTogetherSocketEnvelope) {
     const toast = useToastStore()
     const t = (i18n.global as any).t
     markSync('ROOM_SUSPENDED')
+    if (envelope.state) commitRoomState(envelope.state, 'ROOM_SUSPENDED', envelope.expectedPositionMs)
+    else void usePlayerStore().pause('remote_sync')
+    setSyncRate(null)
     toast.error(t('listen_together.controller_offline'))
   }
 
-  function handleRoomResumed(_envelope: ListenTogetherSocketEnvelope) {
+  function handleRoomResumed(envelope: ListenTogetherSocketEnvelope) {
     markSync('ROOM_RESUMED')
+    if (envelope.state) commitRoomState(envelope.state, 'ROOM_RESUMED', envelope.expectedPositionMs)
   }
 
   function handleRoomClosed(_envelope: ListenTogetherSocketEnvelope) {
@@ -710,152 +831,172 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     leaveRoom()
   }
 
-  // 播放器同步
-  function applyRoomStateToPlayer(
-    state: ListenTogetherRoomState,
-    causeType: string,
-    expectedPositionMs?: number,
-  ) {
+  function releasePlayerWatch(delay: number) {
+    if (_watchReleaseTimer) clearTimeout(_watchReleaseTimer)
+    const generation = _sessionGeneration
+    _watchReleaseTimer = setTimeout(() => {
+      _watchReleaseTimer = null
+      if (generation === _sessionGeneration) _suppressPlayerWatch = false
+    }, delay)
+  }
+
+  function playbackIdentity(): string | null {
     const player = usePlayerStore()
-    // track 缺失时只接受合法的共享队列索引。`-1` 表示当前曲不可共享，
-    // 不能把它钳成 0 后误播放队列首项
-    const effectiveLtTrack = state.track
-      ?? (state.currentIndex >= 0 && state.currentIndex < state.queue.length
-        ? state.queue[state.currentIndex]
-        : undefined)
-    if (!effectiveLtTrack) return
+    if (!player.currentTrack) return null
+    const key = trackInfoToLtTrack(player.currentTrack).stableKey
+    const references = queueReferences(player.queue.map(track => trackInfoToLtTrack(track)))
+    const reference = references[player.queueIndex]
+    return JSON.stringify([key, reference?.stableKey === key ? reference.occurrence : 0])
+  }
 
+  function replacePlayerQueue(queue: import('./protocol').ListenTogetherTrack[], currentIndex: number) {
+    const player = usePlayerStore()
+    const references = queueReferences(queue)
+    const tracks = queue.map((track, index) => ({
+      ...ltTrackToTrackInfo(track),
+      playlistKey: JSON.stringify(references[index]),
+    }))
+    player.queue.splice(0, player.queue.length, ...tracks)
+    player.queueIndex = currentIndex >= 0 && currentIndex < tracks.length ? currentIndex : -1
+    _lastReportedQueueKeys = queue.map(track => track.stableKey)
+  }
+
+  function resolveRequestedQueue(envelope: ListenTogetherSocketEnvelope) {
+    if (envelope.queueMutation && roomState.value) {
+      return applyListenTogetherQueueMutation({
+        roomQueue: roomState.value.queue,
+        roomCurrentIndex: roomState.value.currentIndex,
+        roomVersion: roomState.value.version,
+        mutation: envelope.queueMutation,
+        targetCurrentStableKey: envelope.requestTrackStableKey,
+      })
+    }
+    const queue = envelope.queue ?? roomState.value?.queue
+    if (!queue) return null
+    return { queue, currentIndex: envelope.currentIndex ?? roomState.value?.currentIndex ?? -1 }
+  }
+
+  function setSyncRate(rate: number | null) {
+    if (_softSyncRate !== rate) usePlayerStore().setListenTogetherSyncPlaybackRate(rate)
+    _softSyncRate = rate
+    if (rate === null) {
+      if (_softSyncTimer) clearInterval(_softSyncTimer)
+      _softSyncTimer = null
+      return
+    }
+    if (_softSyncTimer) return
+    _softSyncTimer = setInterval(() => {
+      const player = usePlayerStore()
+      const state = roomState.value
+      const expectedPositionMs = state ? resolveExpectedPosition(state, Date.now() + _serverClockOffsetMs) : 0
+      const currentKey = player.currentTrack ? trackInfoToLtTrack(player.currentTrack).stableKey : null
+      const roomKey = state?.track?.stableKey ?? state?.queue[state.currentIndex]?.stableKey
+      const action = resolveSoftSyncRecheckAction({
+        currentRate: _softSyncRate ?? 1,
+        sessionConnected: connectionState.value === 'connected',
+        isController: isController.value,
+        desiredPlaying: state?.playback.state === 'playing',
+        localPlaying: player.isPlaying,
+        currentTrackMatchesRoom: !!currentKey && currentKey === roomKey,
+        expectedPositionMs,
+        localPositionMs: player.positionMs,
+      })
+      if (action === 'reset_rate' || action === 'none') setSyncRate(null)
+      else if (action === 'apply_state' && state) {
+        setSyncRate(null)
+        applyRoomStateToPlayer(state, 'SOFT_SYNC_RECHECK', expectedPositionMs)
+      } else if (state) {
+        setSyncRate(resolvePositionSync({ expectedPositionMs, localPositionMs: player.positionMs,
+          desiredPlaying: true, isController: false, causeType: 'SOFT_SYNC_RECHECK' }).rate)
+      }
+    }, SOFT_SYNC_RECHECK_INTERVAL_MS)
+  }
+
+  // 播放器同步
+  function applyRoomStateToPlayer(state: ListenTogetherRoomState, causeType: string, expectedPositionMs?: number) {
+    if (state.roomId !== roomId.value || state.version < _lastAppliedRoomVersion) return
+    const player = usePlayerStore()
+    const queue = [...state.queue]
+    const index = state.currentIndex
+    if (state.track && index >= 0 && index < queue.length && queue[index].stableKey === state.track.stableKey) {
+      queue[index] = state.track
+    }
+    if (queue.length === 0 && state.track && index >= 0) queue.push(state.track)
+    const targetIndex = queue.length === 1 && state.queue.length === 0 ? 0 : index
+    const effectiveLtTrack = queue[targetIndex]
     _suppressPlayerWatch = true
-
     try {
-      const remoteTrack = ltTrackToTrackInfo(effectiveLtTrack)
-      const remoteIsPlaying = state.playback.state === 'playing'
-
-      if (!isController.value && roomSettings.value.shareAudioLinks && !remoteTrack.audioUrl) {
-        requestLinkForTrack(effectiveLtTrack, state.currentIndex)
-      }
-
-      // 计算期望位置：用服务器时钟（本机时钟 + 偏移）对比服务端 baseTimestampMs，
-      // 否则两端时钟差会被折算成恒定进度偏移并反复纠偏
-      let expectedPos = expectedPositionMs ?? state.playback.basePositionMs
-      if (expectedPositionMs == null && remoteIsPlaying && state.playback.baseTimestampMs > 0) {
-        const serverNow = Date.now() + _serverClockOffsetMs
-        const elapsed = serverNow - state.playback.baseTimestampMs
-        expectedPos = state.playback.basePositionMs + Math.max(0, elapsed) * state.playback.playbackRate
-      }
-      if (remoteTrack.durationMs > 0) {
-        expectedPos = Math.max(0, Math.min(expectedPos, remoteTrack.durationMs))
-      }
-
-      // 对比当前曲目
-      const currentId = player.currentTrack?.id
-      const currentStreamUrl = player.getCurrentStreamUrl(remoteTrack.id)
-      const authoritativeStreamChanged = !!remoteTrack.audioUrl
-        && remoteTrack.audioUrl !== currentStreamUrl
-      if (currentId !== remoteTrack.id || authoritativeStreamChanged) {
-        player.setListenTogetherSyncPlaybackRate(null)
-        // 需要切歌时，同时更新队列
-        if (state.queue.length > 0) {
-          const newQueue = state.queue.map(ltTrackToTrackInfo)
-          player.queue.splice(0, player.queue.length, ...newQueue)
-          const newIndex = newQueue.findIndex((track) =>
-            trackInfoToLtTrack(track).stableKey === effectiveLtTrack.stableKey,
-          )
-          if (newIndex >= 0) player.queueIndex = newIndex
-        }
-        // 使用 remote_sync source 播放
-        player.play(remoteTrack, 'remote_sync')
-        // 播放后对齐进度与播放态；带会话代际 guard，退出房间后不得再操作播放器
-        const generation = _sessionGeneration
-        setTimeout(() => {
-          if (generation !== _sessionGeneration) return
-          if (expectedPos > 1000) {
-            player.seekTo(expectedPos, 'remote_sync')
-          }
-          if (!remoteIsPlaying) {
-            player.pause('remote_sync')
-          }
-        }, 300)
-        _lastReportedTrackId = remoteTrack.id
-        _lastReportedIsPlaying = remoteIsPlaying
-        player.applyListenTogetherPlaybackMode({
-          repeatMode: state.playback.repeatMode,
-          shuffleEnabled: state.playback.shuffleEnabled,
-        })
-        _lastReportedRepeatMode = typeof state.playback.repeatMode === 'number'
-          ? state.playback.repeatMode
-          : desktopRepeatToWire(player.repeatMode)
-        _lastReportedShuffle = typeof state.playback.shuffleEnabled === 'boolean'
-          ? state.playback.shuffleEnabled
-          : !!player.shuffleEnabled
+      if (!effectiveLtTrack) {
+        replacePlayerQueue(queue, -1)
+        setSyncRate(null)
+        if (player.isPlaying) void player.pause('remote_sync')
         return
       }
-
-      // 当前曲未变但队列可能整体增删/重排（HEARTBEAT/SET_TRACK 携带的新 queue）:
-      // 对齐 Android hasSameTrackSequenceAs, 序列不一致即就地重建队列, 不打断当前播放
-      if (state.queue.length > 0) {
-        const remoteKeys = state.queue.map((t) => t.stableKey)
-        const localKeys = player.queue.map((t) => trackInfoToLtTrack(t).stableKey)
-        const sequenceChanged = remoteKeys.length !== localKeys.length
-          || remoteKeys.some((k, i) => k !== localKeys[i])
-        if (sequenceChanged) {
-          const newQueue = state.queue.map(ltTrackToTrackInfo)
-          player.queue.splice(0, player.queue.length, ...newQueue)
-          const currentKey = trackInfoToLtTrack(remoteTrack).stableKey
-          const idx = newQueue.findIndex((t) => trackInfoToLtTrack(t).stableKey === currentKey)
-          if (idx >= 0) player.queueIndex = idx
+      const references = queueReferences(queue)
+      const targetIdentity = JSON.stringify([effectiveLtTrack.stableKey, references[targetIndex].occurrence])
+      const previousIdentity = playbackIdentity()
+      const previousIndex = player.queueIndex
+      const previousKey = player.currentTrack ? trackInfoToLtTrack(player.currentTrack).stableKey : null
+      const queueUpdate = causeType === 'SET_QUEUE' || causeType === 'REQUEST_SET_QUEUE'
+      const playbackContextChanged = previousKey !== effectiveLtTrack.stableKey
+        || (!queueUpdate && previousIdentity !== targetIdentity)
+      const remoteIsPlaying = state.playback.state === 'playing'
+      const expectedPos = resolveExpectedPosition(state, Date.now() + _serverClockOffsetMs, expectedPositionMs)
+      const remoteTrack = ltTrackToTrackInfo(effectiveLtTrack)
+      if (!isController.value && roomSettings.value.shareAudioLinks && !remoteTrack.audioUrl) {
+        requestLinkForTrack(effectiveLtTrack, targetIndex)
+      }
+      const streamChanged = !!remoteTrack.audioUrl
+        && !trustedInboundStreamUrls(effectiveLtTrack.channelId, effectiveLtTrack.streamUrls, effectiveLtTrack.streamUrl)
+          .includes(player.getCurrentStreamUrl(remoteTrack.id) || '')
+      replacePlayerQueue(queue, targetIndex)
+      if (playbackContextChanged || streamChanged) {
+        _trackSwitchAt = Date.now()
+        setSyncRate(null)
+        const generation = _sessionGeneration
+        const applySequence = ++_playbackApplySequence
+        _pendingRemotePlaybackLoads.add(applySequence)
+        // 播放完成后读取最新房态，避免固定延时在慢速解析中暂停错误的会话
+        void player.play(player.queue[targetIndex], 'remote_sync', expectedPos).then(async () => {
+          if (generation !== _sessionGeneration || applySequence !== _playbackApplySequence) return
+          const latest = roomState.value
+          const latestKey = latest?.track?.stableKey ?? latest?.queue[latest.currentIndex]?.stableKey
+          if (!latest || latestKey !== effectiveLtTrack.stableKey) return
+          const latestPosition = resolveExpectedPosition(latest, Date.now() + _serverClockOffsetMs)
+          if (Math.abs(latestPosition - player.positionMs) > 500) {
+            await player.seekTo(latestPosition, 'remote_sync')
+            if (generation !== _sessionGeneration || applySequence !== _playbackApplySequence) return
+          }
+          if (latest.playback.state !== 'playing') await player.pause('remote_sync')
+          else if (!player.isPlaying) await player.resume('remote_sync')
+        }).catch((error) => log.warn('remote playback sync failed:', error)).finally(() => {
+          _pendingRemotePlaybackLoads.delete(applySequence)
+          if (generation === _sessionGeneration) releasePlayerWatch(500)
+        })
+      } else if (!player.isLoadingAudio) {
+        if (player.isPlaying !== remoteIsPlaying) {
+          if (remoteIsPlaying) void player.resume('remote_sync')
+          else void player.pause('remote_sync')
         }
+        const sync = resolvePositionSync({
+          expectedPositionMs: expectedPos,
+          localPositionMs: player.positionMs,
+          desiredPlaying: remoteIsPlaying,
+          isController: isController.value,
+          causeType,
+          targetIndexChanged: !queueUpdate && previousIndex !== targetIndex,
+          trackSwitchGracePeriodActive: Date.now() - _trackSwitchAt < 800,
+        })
+        setSyncRate(sync.rate)
+        if (sync.seekTo !== undefined) void player.seekTo(sync.seekTo, 'remote_sync')
       }
-
-      // 对比播放状态
-      if (player.isPlaying !== remoteIsPlaying) {
-        if (remoteIsPlaying) {
-          player.resume('remote_sync')
-        } else {
-          player.pause('remote_sync')
-        }
-        _lastReportedIsPlaying = remoteIsPlaying
-      }
-
-      // 进度纠偏：暂停态和大漂移直接 seek；播放中的中等漂移临时微调速度，
-      // 让两端逐步汇合，避免每个心跳都硬 seek 造成可听跳变
-      const diff = Math.abs(player.positionMs - expectedPos)
-      const forceThreshold = !remoteIsPlaying
-        ? PAUSED_DRIFT_FORCE_MS
-        : causeType === 'HEARTBEAT'
-          ? HEARTBEAT_DRIFT_FORCE_MS
-          : DRIFT_FORCE_MS
-      const signedDrift = expectedPos - player.positionMs
-      if (diff >= forceThreshold) {
-        player.setListenTogetherSyncPlaybackRate(null)
-        player.seekTo(expectedPos, 'remote_sync')
-      } else if (!isController.value && remoteIsPlaying && diff >= SOFT_SYNC_MIN_MS) {
-        const multiplier = signedDrift >= SOFT_SYNC_FAST_MS
-          ? 1.05
-          : signedDrift > 0
-            ? 1.03
-            : signedDrift <= -SOFT_SYNC_FAST_MS
-              ? 0.95
-              : 0.97
-        player.setListenTogetherSyncPlaybackRate(multiplier)
-      } else {
-        player.setListenTogetherSyncPlaybackRate(null)
-      }
-
-      // Align Android applyListenTogetherPlaybackMode
-      player.applyListenTogetherPlaybackMode({
-        repeatMode: state.playback.repeatMode,
-        shuffleEnabled: state.playback.shuffleEnabled,
-      })
-      _lastReportedRepeatMode = typeof state.playback.repeatMode === 'number'
-        ? state.playback.repeatMode
-        : desktopRepeatToWire(player.repeatMode)
-      _lastReportedShuffle = typeof state.playback.shuffleEnabled === 'boolean'
-        ? state.playback.shuffleEnabled
-        : !!player.shuffleEnabled
+      _lastReportedTrackId = targetIdentity
+      _lastReportedIsPlaying = remoteIsPlaying
+      player.applyListenTogetherPlaybackMode({ repeatMode: state.playback.repeatMode, shuffleEnabled: state.playback.shuffleEnabled })
+      _lastReportedRepeatMode = state.playback.repeatMode ?? desktopRepeatToWire(player.repeatMode)
+      _lastReportedShuffle = state.playback.shuffleEnabled ?? !!player.shuffleEnabled
     } finally {
-      // 延迟恢复 watch，避免同步操作触发上报
-      setTimeout(() => { _suppressPlayerWatch = false }, 500)
+      releasePlayerWatch(500)
     }
   }
 
@@ -866,24 +1007,32 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   function setupPlayerWatch() {
     teardownPlayerWatch()
     const player = usePlayerStore()
+    _lastReportedTrackId = playbackIdentity()
+    _lastReportedQueueKeys = player.queue.map(track => trackInfoToLtTrack(track).stableKey)
+    _lastReportedIsPlaying = player.isPlaying
+    _lastReportedRepeatMode = desktopRepeatToWire(player.repeatMode)
+    _lastReportedShuffle = !!player.shuffleEnabled
 
     _playerWatchStop = watch(
       () => ({
-        trackId: player.currentTrack?.id,
+        trackId: playbackIdentity(),
+        queueKeys: player.queue.map(track => trackInfoToLtTrack(track).stableKey),
         isPlaying: player.isPlaying,
         repeatMode: player.repeatMode,
         shuffleEnabled: player.shuffleEnabled,
       }),
       (newVal) => {
-        if (_suppressPlayerWatch || player.isRemoteSyncGuardActive() || connectionState.value !== 'connected') return
+        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || player.isRemoteSyncGuardActive() || connectionState.value !== 'connected') return
 
         // 曲目变化
+        let trackReported = false
         if (newVal.trackId && newVal.trackId !== _lastReportedTrackId) {
           _lastReportedTrackId = newVal.trackId
           if (player.currentTrack) {
             const ltTrack = trackInfoToLtTrack(player.currentTrack)
             if (isController.value) {
               reportSetTrackEvent(ltTrack, player.queueIndex)
+              trackReported = true
             } else {
               // REQUEST_SET_TRACK 需带完整共享队列与 resolvedIndex（对齐 Android buildRequestSetTrackEvent）
               const { queue: ltQueue, resolvedIndex } = toShareableQueueSnapshot(
@@ -900,8 +1049,15 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
                 requestTrackStableKey: track.stableKey,
                 shouldPlay: player.isPlaying,
               })
+              trackReported = true
             }
           }
+        }
+
+        if (trackReported) _lastReportedQueueKeys = newVal.queueKeys
+        else if (newVal.queueKeys.length !== _lastReportedQueueKeys.length
+          || newVal.queueKeys.some((key, index) => key !== _lastReportedQueueKeys[index])) {
+          reportQueueEvent()
         }
 
         // 播放状态变化
@@ -941,7 +1097,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _seekWatchStop = watch(
       () => player.lastSeekCommand.seq,
       () => {
-        if (_suppressPlayerWatch || connectionState.value !== 'connected') return
+        if (_suppressPlayerWatch || _pendingRemotePlaybackLoads.size > 0 || connectionState.value !== 'connected') return
         const seek = player.lastSeekCommand
         if (seek.source !== 'local') return
         if (player.isRemoteSyncGuardActive()) return
@@ -965,6 +1121,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   }
 
   async function sendEvent(event: ListenTogetherEvent) {
+    if (!roomId.value) return
+    stripUnsharedAudioLinks(event)
+    const generation = _sessionGeneration
     if (!event.eventId) event.eventId = generateEventId()
     if (!event.clientTimeMs) event.clientTimeMs = Date.now()
     // 乱序保护字段（协议已声明、Android 每事件必带）：实例标识 + 单调递增序号
@@ -978,16 +1137,45 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       _recentOutboundEventIds.delete(iter.next().value!)
     }
 
+    let delivered = false
     try {
-      const delivered = await invoke<boolean>('lt_send_event', { event })
-      if (delivered === false) {
-        // WS 不可用（断线重连窗口）: 控制事件未送达, 提示用户而非静默吞掉
-        log.warn('lt_send_event not delivered (ws unavailable):', event.type)
-        const t = (i18n.global as any).t
-        useToastStore().error(t('listen_together.control_not_sent'))
-      }
+      delivered = await invoke<boolean>('lt_send_event', { event })
     } catch (e) {
-      log.error('send event failed:', e)
+      log.warn('WebSocket event send failed:', e)
+    }
+    if (delivered || generation !== _sessionGeneration) return
+    await sendHttpFallback(event, generation)
+  }
+
+  async function sendHttpFallback(event: ListenTogetherEvent, generation: number) {
+    if (generation !== _sessionGeneration) return
+    stripUnsharedAudioLinks(event)
+    if (_queueEventInFlight?.eventId === event.eventId && _queueAckTimer) {
+      clearTimeout(_queueAckTimer)
+      _queueAckTimer = null
+    }
+    try {
+      const result = await invoke<ListenTogetherControlResponse>('lt_send_control', { event })
+      if (generation !== _sessionGeneration) return
+      const queueEvent = _queueEventInFlight?.eventId === event.eventId
+      handleControlResult({ type: 'control_result', result })
+      if (result.ok && result.applied?.state) {
+        if (!queueEvent || _queueEventInFlight?.eventId === event.eventId) {
+          commitRoomState(result.applied.state, result.applied.causedBy?.type || event.type,
+            result.applied.expectedPositionMs, !queueEvent && !_queuedQueueEvent)
+          if (result.applied.state.roomId === roomId.value && result.applied.state.version >= _lastAppliedRoomVersion) {
+            completeQueueEvent(event.eventId)
+          }
+        }
+      } else if (!result.ok) {
+        completeQueueEvent(event.eventId, false)
+      }
+    } catch (error) {
+      if (generation !== _sessionGeneration) return
+      log.warn('HTTP event send failed:', error)
+      const t = (i18n.global as any).t
+      useToastStore().error(t('listen_together.control_not_sent'))
+      completeQueueEvent(event.eventId, false)
     }
   }
 
@@ -1020,6 +1208,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (shouldSkipControlEvent('PLAY')) return
     sendEvent({
       type: 'PLAY',
+      ...buildControlSnapshotFields(),
       positionMs: player.positionMs,
       state: 'playing',
     })
@@ -1030,6 +1219,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (shouldSkipControlEvent('PAUSE')) return
     sendEvent({
       type: 'PAUSE',
+      ...buildControlSnapshotFields(),
       positionMs: player.positionMs,
       state: 'paused',
     })
@@ -1039,6 +1229,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     if (shouldSkipSeekEvent(positionMs)) return
     sendEvent({
       type: 'SEEK',
+      ...buildControlSnapshotFields(),
       positionMs,
     })
   }
@@ -1114,13 +1305,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       player.queue,
       player.queueIndex,
       roomSettings.value.shareAudioLinks,
+      player.getCurrentStreamUrl() || undefined,
+      false,
+      player.getCurrentStreamUrls(),
     )
     const track = ltQueue[resolvedIndex]
     return {
       queue: ltQueue,
       currentIndex: resolvedIndex,
       track,
-      stableKey: track?.stableKey,
+      requestTrackStableKey: track?.stableKey,
     }
   }
 
@@ -1128,13 +1322,144 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const player = usePlayerStore()
     const snap = buildControlSnapshotFields()
     if (!snap.track) return
-    sendEvent({
+    sendQueueEvent({
       type: 'SET_TRACK',
       track: snap.track,
       currentIndex: snap.currentIndex,
       queue: snap.queue,
-      positionMs: 0,
+      positionMs: player.positionMs,
       shouldPlay: player.isPlaying,
+    })
+  }
+
+  function queueEventFields(queue: import('./protocol').ListenTogetherTrack[], index: number) {
+    const state = roomState.value
+    if (state && state.schemaVersion >= 2) {
+      const plan = buildListenTogetherQueueMutationPlan(state, queue, index)
+      if (!plan.requiresSnapshotFallback) return { queueMutation: plan.mutation }
+    }
+    return { queue }
+  }
+
+  function sendQueueEvent(snapshot: ListenTogetherEvent, forceSnapshot = false) {
+    if (_queueEventInFlight) {
+      _queuedQueueEvent = snapshot
+      return
+    }
+    if (!forceSnapshot && roomState.value && snapshot.queue
+      && (snapshot.type === 'SET_TRACK' || snapshot.type === 'REQUEST_SET_TRACK')) {
+      const plan = buildListenTogetherQueueMutationPlan(roomState.value, snapshot.queue, snapshot.currentIndex ?? -1)
+      if (plan.needsCurrentSelectionAfterApply && roomState.value.schemaVersion >= 2) {
+        // 新重复项确认入队后才有可引用的 occurrence，先提交队列再选择该项
+        _queuedQueueEvent = snapshot
+        snapshot = { ...snapshot, type: snapshot.type === 'SET_TRACK' ? 'SET_QUEUE' : 'REQUEST_SET_QUEUE' }
+      }
+    }
+    const event: ListenTogetherEvent = {
+      ...snapshot,
+      queue: undefined,
+      ...(forceSnapshot ? { queue: snapshot.queue } : queueEventFields(snapshot.queue ?? [], snapshot.currentIndex ?? -1)),
+      eventId: generateEventId(),
+    }
+    _queueEventInFlight = event
+    _queueEventSnapshot = snapshot
+    const generation = _sessionGeneration
+    _queueAckTimer = setTimeout(() => {
+      _queueAckTimer = null
+      if (generation === _sessionGeneration && _queueEventInFlight?.eventId === event.eventId) {
+        void sendHttpFallback(event, generation)
+      }
+    }, 3000)
+    void sendEvent(event)
+  }
+
+  function completeQueueEvent(eventId?: string, accepted = true) {
+    if (!eventId || _queueEventInFlight?.eventId !== eventId) return
+    if (_queueAckTimer) clearTimeout(_queueAckTimer)
+    _queueAckTimer = null
+    _queueEventInFlight = null
+    const previousSnapshot = _queueEventSnapshot
+    _queueEventSnapshot = null
+    if (accepted && roomState.value) refreshLocalQueueReferences(previousSnapshot, roomState.value)
+    const queued = _queuedQueueEvent
+    _queuedQueueEvent = null
+    if (accepted && queued && roomState.value) {
+      const references = queueReferences(roomState.value.queue)
+      const queue = queued.queue?.map(track => {
+        const clone = { ...track }
+        const reference = getLtQueueReference(track)
+        const previousIndex = reference ? previousSnapshot?.queue?.findIndex(previous => {
+          const previousReference = getLtQueueReference(previous)
+          return previousReference?.stableKey === reference.stableKey && previousReference.occurrence === reference.occurrence
+        }) ?? -1 : -1
+        if (previousIndex >= 0 && references[previousIndex]?.stableKey === track.stableKey) {
+          setLtQueueReference(clone, references[previousIndex])
+        }
+        return clone
+      })
+      sendQueueEvent({ ...queued, queue, track: queue?.[queued.currentIndex ?? -1] ?? queued.track })
+    }
+  }
+
+  function refreshLocalQueueReferences(snapshot: ListenTogetherEvent | null, state: ListenTogetherRoomState) {
+    const player = usePlayerStore()
+    const references = queueReferences(state.queue)
+    const shareable = player.queue.map(track => ({ track, wire: trackInfoToLtTrack(track) }))
+      .filter(({ wire }) => wire.channelId !== 'local' && wire.channelId !== 'qqMusic')
+    const sameSequence = shareable.length === state.queue.length
+      && shareable.every(({ wire }, index) => wire.stableKey === state.queue[index].stableKey)
+    for (const [index, { track, wire }] of shareable.entries()) {
+      const oldReference = getLtQueueReference(wire)
+      const committedIndex = sameSequence ? index : oldReference ? snapshot?.queue?.findIndex(previous => {
+        const reference = getLtQueueReference(previous)
+        return reference?.stableKey === oldReference.stableKey && reference.occurrence === oldReference.occurrence
+      }) ?? -1 : -1
+      if (committedIndex >= 0 && references[committedIndex]?.stableKey === wire.stableKey) {
+        track.playlistKey = JSON.stringify(references[committedIndex])
+      }
+    }
+  }
+
+  function stripUnsharedAudioLinks(event: ListenTogetherEvent) {
+    if (roomSettings.value.shareAudioLinks) return
+    const strip = (track: import('./protocol').ListenTogetherTrack) => ({ ...track, streamUrl: undefined, streamUrls: [] })
+    if (event.track) event.track = strip(event.track)
+    if (event.queue) event.queue = event.queue.map(strip)
+    if (event.queueMutation) {
+      event.queueMutation = { ...event.queueMutation, operations: event.queueMutation.operations.map(operation =>
+        operation.track ? { ...operation, track: strip(operation.track) } : operation) }
+    }
+  }
+
+  function retryLegacyQueueSnapshot(error: string): boolean {
+    const normalized = error.trim().toLowerCase()
+    const compatibilityError = ['queue mutation is invalid', 'queue mutation base version is ahead',
+      'queue mutation event type unsupported', 'queue update queue required'].some(message => normalized.includes(message))
+    if (!compatibilityError || !_queueEventInFlight?.queueMutation || !_queueEventSnapshot) return false
+    const snapshot = _queueEventSnapshot
+    if (_queueAckTimer) clearTimeout(_queueAckTimer)
+    _queueAckTimer = null
+    _queueEventInFlight = null
+    _queueEventSnapshot = null
+    sendQueueEvent(snapshot, true)
+    return true
+  }
+
+  function reportQueueEvent() {
+    const player = usePlayerStore()
+    const snapshot = buildControlSnapshotFields()
+    _lastReportedQueueKeys = player.queue.map(track => trackInfoToLtTrack(track).stableKey)
+    sendQueueEvent({
+      type: isController.value ? 'SET_QUEUE' : 'REQUEST_SET_QUEUE',
+      queue: snapshot.queue,
+      track: snapshot.track,
+      currentIndex: snapshot.currentIndex,
+      requestTrackStableKey: snapshot.requestTrackStableKey,
+      positionMs: player.positionMs,
+      shouldPlay: player.isPlaying,
+      state: player.isPlaying ? 'playing' : 'paused',
+      repeatMode: desktopRepeatToWire(player.repeatMode),
+      shuffleEnabled: !!player.shuffleEnabled,
     })
   }
 
@@ -1172,53 +1497,54 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       : type === 'REQUEST_PAUSE'
         ? false
         : player.isPlaying
-    sendEvent({
+    const event: ListenTogetherEvent = {
       type,
       positionMs: player.positionMs,
       track: snap.track,
       currentIndex: snap.currentIndex,
       queue: snap.queue,
-      requestTrackStableKey: snap.stableKey,
+      requestTrackStableKey: snap.requestTrackStableKey,
       shouldPlay: isPlaying,
       state: isPlaying ? 'playing' : 'paused',
       repeatMode: desktopRepeatToWire(player.repeatMode),
       shuffleEnabled: !!player.shuffleEnabled,
       ...extra,
-    })
+    }
+    if (type === 'REQUEST_SET_TRACK' || type === 'REQUEST_SET_QUEUE') sendQueueEvent(event)
+    else void sendEvent(event)
   }
 
   // 心跳
+  function reportHeartbeat() {
+    if (!isController.value || !roomId.value) return
+    const player = usePlayerStore()
+    const { queue, resolvedIndex } = toShareableQueueSnapshot(
+      player.queue, player.queueIndex, roomSettings.value.shareAudioLinks,
+      player.currentTrack ? player.getCurrentStreamUrl(player.currentTrack.id) || undefined : undefined,
+      false, player.getCurrentStreamUrls(),
+    )
+    void sendEvent({
+      type: 'HEARTBEAT',
+      positionMs: player.positionMs,
+      state: player.isPlaying ? 'playing' : 'paused',
+      queue: (roomState.value?.schemaVersion ?? 1) < 2 ? queue : undefined,
+      currentIndex: resolvedIndex,
+      track: queue[resolvedIndex],
+      repeatMode: desktopRepeatToWire(player.repeatMode),
+      shuffleEnabled: !!player.shuffleEnabled,
+    })
+  }
+
   function startHeartbeat() {
     stopHeartbeat()
-    if (!isController.value) return
-
-    _heartbeatTimer = setInterval(() => {
-      if (connectionState.value !== 'connected') return
-
-      const player = usePlayerStore()
-      const currentStreamUrl = player.currentTrack
-        ? player.getCurrentStreamUrl(player.currentTrack.id) || undefined
-        : undefined
-      const { queue: ltQueue, resolvedIndex } = toShareableQueueSnapshot(
-        player.queue,
-        player.queueIndex,
-        roomSettings.value.shareAudioLinks,
-        currentStreamUrl,
-      )
-      const track = ltQueue[resolvedIndex]
-      if (!track) return
-
-      sendEvent({
-        type: 'HEARTBEAT',
-        positionMs: player.positionMs,
-        state: player.isPlaying ? 'playing' : 'paused',
-        queue: ltQueue,
-        currentIndex: resolvedIndex,
-        track,
-        repeatMode: desktopRepeatToWire(player.repeatMode),
-        shuffleEnabled: !!player.shuffleEnabled,
-      })
-    }, HEARTBEAT_INTERVAL_MS)
+    if (!isController.value || !roomId.value) return
+    const generation = _sessionGeneration
+    const tick = () => {
+      if (generation !== _sessionGeneration || !isController.value || !roomId.value) return
+      if (connectionState.value === 'connected') reportHeartbeat()
+      _heartbeatTimer = setTimeout(tick, usePlayerStore().isPlaying ? HEARTBEAT_INTERVAL_MS : PAUSED_HEARTBEAT_INTERVAL_MS)
+    }
+    _heartbeatTimer = setTimeout(tick, usePlayerStore().isPlaying ? HEARTBEAT_INTERVAL_MS : PAUSED_HEARTBEAT_INTERVAL_MS)
   }
 
   function stopHeartbeat() {
@@ -1228,10 +1554,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     }
   }
 
-  // listener 侧存活探测：定期 ping 服务端，让 TCP 半开连接尽快暴露为断开
+  // 定期 ping 也用于估计时钟偏移，房主和听众都需要保持探测
   function startListenerPing() {
     stopListenerPing()
-    if (isController.value) return
     _listenerPingTimer = setInterval(() => {
       if (connectionState.value !== 'connected') return
       void invoke('lt_send_ping', { t: Date.now() }).catch(() => {})
@@ -1255,15 +1580,18 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _reconnectTimer = setTimeout(async () => {
       _reconnectTimer = null
       if (!_wsUrl || !roomId.value) return
+      const generation = _sessionGeneration
 
       connectionState.value = 'connecting'
       try {
         await invoke('lt_connect_ws', { wsUrl: _wsUrl })
+        if (generation !== _sessionGeneration) return
         // 重连后拉取最新 state
-        const stateResp = await invoke<any>('lt_get_room_state', {
+        const stateResp = await invoke<ListenTogetherStateResponse>('lt_get_room_state', {
           baseUrl: baseUrl.value,
           roomId: roomId.value,
         })
+        if (generation !== _sessionGeneration) return
         if (stateResp.ok === false) {
           // 房间不存在/已关闭属终态: 不再无限重连, 直接离房并提示
           const t = (i18n.global as any).t
@@ -1272,12 +1600,14 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
           return
         }
         if (stateResp.ok && stateResp.state) {
-          roomState.value = stateResp.state
-          _lastAppliedRoomVersion = stateResp.state.version || 0
-          applyRoomStateToPlayer(stateResp.state, 'reconnect', stateResp.expectedPositionMs)
+          if (stateResp.serverNowMs && Number.isFinite(stateResp.serverNowMs)) {
+            _serverClockOffsetMs = stateResp.serverNowMs - Date.now()
+          }
+          commitRoomState(stateResp.state, 'reconnect', stateResp.expectedPositionMs)
         }
         if (isController.value) startHeartbeat()
       } catch {
+        if (generation !== _sessionGeneration) return
         // 反复失败且非房主时, 尝试用新 token/wsUrl 重新入房恢复成员资格
         if (!isController.value && _reconnectAttempt >= RECONNECT_DELAYS.length && roomId.value) {
           const targetRoomId = roomId.value
@@ -1287,7 +1617,9 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
               roomId: targetRoomId,
               userUuid: userUuid.value,
               nickname: nickname.value,
+              joinSecret: _joinSecret || undefined,
             })
+            if (generation !== _sessionGeneration) return
             if (resp.ok) {
               _reconnectAttempt = 0
               updateJoinSecret(resp.joinSecret, _joinSecret)
@@ -1295,9 +1627,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
               await connectWs(newWsUrl)
               startListenerPing()
               if (resp.state) {
-                roomState.value = resp.state
-                _lastAppliedRoomVersion = resp.state.version || 0
-                applyRoomStateToPlayer(resp.state, 'reconnect')
+                commitRoomState(resp.state, 'reconnect')
               }
               return
             }

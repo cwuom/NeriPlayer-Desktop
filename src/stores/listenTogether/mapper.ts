@@ -4,6 +4,7 @@
  */
 import type { TrackInfo } from '@/stores/player'
 import { LtChannels, type ListenTogetherTrack } from './protocol'
+import { setLtQueueReference } from './queue'
 
 type PayloadRecord = Record<string, unknown>
 
@@ -100,6 +101,8 @@ export function isTrustedInboundStreamUrl(url?: string, channelId?: string): boo
         || host.endsWith('.bilivideo.cn')
         || host === 'hdslb.com'
         || host.endsWith('.hdslb.com')
+        || host === 'mountaintoys.cn'
+        || host.endsWith('.mountaintoys.cn')
     case LtChannels.YOUTUBE_MUSIC:
       return host === 'googlevideo.com'
         || host.endsWith('.googlevideo.com')
@@ -112,6 +115,21 @@ export function isTrustedInboundStreamUrl(url?: string, channelId?: string): boo
   }
 }
 
+export function trustedInboundStreamUrls(
+  channelId: string,
+  streamUrls?: readonly string[] | null,
+  legacyStreamUrl?: string | null,
+): string[] {
+  const limit = channelId === LtChannels.BILIBILI ? 2
+    : channelId === LtChannels.YOUTUBE_MUSIC ? 1 : 3
+  const candidates = [...(streamUrls || []), legacyStreamUrl]
+  const trusted = candidates
+    .filter((url): url is string => typeof url === 'string')
+    .map(url => url.trim())
+    .filter(url => isTrustedInboundStreamUrl(url, channelId))
+  return [...new Set(trusted)].slice(0, limit)
+}
+
 /**
  * TrackInfo -> ListenTogetherTrack
  * 解析 track.id / syncPayload -> 填充 channelId/audioId/subAudioId/playlistContextId
@@ -119,6 +137,7 @@ export function isTrustedInboundStreamUrl(url?: string, channelId?: string): boo
 export function trackInfoToLtTrack(
   track: TrackInfo,
   streamUrl?: string,
+  streamUrls?: readonly string[],
 ): ListenTogetherTrack {
   const payload = (track.syncPayload || null) as PayloadRecord | null
   const payloadChannel = readPayloadString(payload, 'channelId', 'channel_id')
@@ -186,23 +205,31 @@ export function trackInfoToLtTrack(
   }
 
   const stableKey = buildStableKey(channelId, audioId, subAudioId, playlistContextId)
+  const trustedStreamUrls = trustedInboundStreamUrls(channelId, streamUrls, streamUrl)
 
-  return {
+  const ltTrack: ListenTogetherTrack = {
     stableKey,
     channelId,
     audioId,
     subAudioId,
     playlistContextId,
     mediaUri,
-    streamUrl: isTrustedInboundStreamUrl(streamUrl, channelId)
-      ? streamUrl?.trim()
-      : undefined,
+    streamUrl: trustedStreamUrls[0],
+    streamUrls: trustedStreamUrls,
     name: track.title,
     artist: track.artist,
     album: track.album || undefined,
     durationMs: track.durationMs,
     coverUrl: track.coverUrl || undefined,
   }
+  if (track.playlistKey) {
+    try {
+      setLtQueueReference(ltTrack, JSON.parse(track.playlistKey))
+    } catch {
+      // 本地歌单的旧 playlistKey 并非房间引用，保留默认匹配路径
+    }
+  }
+  return ltTrack
 }
 
 /**
@@ -254,9 +281,8 @@ export function ltTrackToTrackInfo(lt: ListenTogetherTrack): TrackInfo {
 
   // 入站 streamUrl 必须过白名单再用作 audioUrl，未通过则回落到本地解析（audioUrl 置空）;
   // mediaUri 仅作身份/回落，不作为可信直链
-  const trustedStreamUrl = isTrustedInboundStreamUrl(lt.streamUrl, lt.channelId)
-    ? lt.streamUrl
-    : undefined
+  const trustedStreamUrls = trustedInboundStreamUrls(lt.channelId, lt.streamUrls, lt.streamUrl)
+  if (trustedStreamUrls.length) syncPayload.streamUrls = trustedStreamUrls
 
   return {
     id,
@@ -266,7 +292,7 @@ export function ltTrackToTrackInfo(lt: ListenTogetherTrack): TrackInfo {
     durationMs: lt.durationMs,
     coverUrl: lt.coverUrl || '',
     // 播放优先可信 streamUrl; 不可信则留空由播放层自行按平台重新解析
-    audioUrl: trustedStreamUrl || '',
+    audioUrl: trustedStreamUrls[0] || '',
     source,
     syncPayload,
   }
@@ -297,6 +323,14 @@ export function buildStableKey(
   return `${channelId}:${audioId}`
 }
 
+export function hasSameLtTrackSequence(
+  first: readonly ListenTogetherTrack[],
+  second: readonly ListenTogetherTrack[],
+): boolean {
+  return first.length === second.length
+    && first.every((track, index) => !!track.stableKey && track.stableKey === second[index].stableKey)
+}
+
 /**
  * 将当前播放队列映射为可分享的 ListenTogetherTrack 数组
  * 默认排除 local 曲目, 对齐 Android includeLocal=false
@@ -307,14 +341,11 @@ export function toShareableQueueSnapshot(
   shareAudioLinks: boolean = true,
   currentStreamUrl?: string,
   includeLocal: boolean = false,
+  currentStreamUrls?: readonly string[],
 ): { queue: ListenTogetherTrack[]; resolvedIndex: number } {
   const result: ListenTogetherTrack[] = []
   // 当前曲被 QQ/local 过滤时没有合法共享索引，绝不能回退到首项
   let resolvedIndex = -1
-  const currentTrack = queue[currentIndex]
-  const currentStableKey = currentTrack
-    ? trackInfoToLtTrack(currentTrack).stableKey
-    : null
 
   for (let i = 0; i < queue.length; i++) {
     const track = queue[i]
@@ -322,6 +353,7 @@ export function toShareableQueueSnapshot(
     const ltTrack = trackInfoToLtTrack(
       track,
       isCurrentTrack && shareAudioLinks ? currentStreamUrl : undefined,
+      isCurrentTrack && shareAudioLinks ? currentStreamUrls : undefined,
     )
     // QQ Music 没有 Android 对应频道，不能让 Android 把它改写成 netease
     // 后再参与 currentIndex/stableKey 仲裁；跨端房间统一排除这类曲目
@@ -331,13 +363,9 @@ export function toShareableQueueSnapshot(
     ) {
       continue
     }
+    // 当前项的原始位置能区分重复曲目，并保留过滤后的队列顺序
+    if (isCurrentTrack) resolvedIndex = result.length
     result.push(ltTrack)
-  }
-
-  // 找到 currentStableKey 在结果中的位置
-  if (currentStableKey) {
-    const idx = result.findIndex(t => t.stableKey === currentStableKey)
-    if (idx >= 0) resolvedIndex = idx
   }
 
   // 队列上限：以当前曲为中心截窗（对齐 Android boundedAroundStableKey），
@@ -346,7 +374,10 @@ export function toShareableQueueSnapshot(
     const half = Math.floor(MAX_SHAREABLE_QUEUE_SIZE / 2)
     const end = Math.min(result.length, Math.max(resolvedIndex - half, 0) + MAX_SHAREABLE_QUEUE_SIZE)
     const start = Math.max(0, end - MAX_SHAREABLE_QUEUE_SIZE)
-    return { queue: result.slice(start, end), resolvedIndex: resolvedIndex - start }
+    return {
+      queue: result.slice(start, end),
+      resolvedIndex: resolvedIndex < 0 ? -1 : resolvedIndex - start,
+    }
   }
 
   return { queue: result, resolvedIndex }

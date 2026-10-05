@@ -1068,6 +1068,7 @@ export const usePlayerStore = defineStore('player', () => {
     currentStreamUrl.value = !forceResolve && isDirectStreamUrl(track.audioUrl)
       ? track.audioUrl.trim()
       : null
+    currentResolvedStreamUrls = currentStreamUrl.value ? [currentStreamUrl.value] : []
     const wasPlayingBeforeSwitch = isPlaying.value
     const hadPlaybackSessionBeforeRequest = hasPlaybackSession.value
     const isSwitchingTrack = !!previousTrack && previousTrack.id !== track.id
@@ -1368,7 +1369,10 @@ export const usePlayerStore = defineStore('player', () => {
                   cacheWrite.cacheKey,
                   cacheWrite.expectedContentLength,
                   )
-                  if (token === playbackRequestToken) currentStreamUrl.value = candidateUrl
+                  if (token === playbackRequestToken) {
+                    currentStreamUrl.value = candidateUrl
+                    currentResolvedStreamUrls = candidates.slice(candidateIndex)
+                  }
                   markLoadStartApplied(startPlan)
                   tracePlaybackUi(
                     'backend_stream_ready',
@@ -2122,6 +2126,7 @@ export const usePlayerStore = defineStore('player', () => {
   // 播放速度
   const playbackSpeed = ref(settings.playbackSpeed)
   const currentStreamUrl = ref<string | null>(null)
+  let currentResolvedStreamUrls: string[] = []
   let listenTogetherSyncRateMultiplier: number | null = null
 
   function effectivePlaybackSpeed(): number {
@@ -2149,6 +2154,11 @@ export const usePlayerStore = defineStore('player', () => {
   function getCurrentStreamUrl(trackId?: string): string | null {
     if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return null
     return currentStreamUrl.value
+  }
+
+  function getCurrentStreamUrls(trackId?: string): string[] {
+    if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return []
+    return [...currentResolvedStreamUrls]
   }
 
   async function setSpeed(spd: number) {
@@ -2454,7 +2464,7 @@ export const usePlayerStore = defineStore('player', () => {
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode,
-    playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl,
+    playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl, getCurrentStreamUrls,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
     applyPersistedSettings,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
