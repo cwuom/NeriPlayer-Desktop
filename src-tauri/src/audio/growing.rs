@@ -1,3 +1,4 @@
+use crate::audio::remote::RemoteReadCancellation;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -35,6 +36,7 @@ pub struct GrowingAudioReader {
     // prepare 路径注入的外部取消标志：symphonia probe 阻塞等数据时，
     // 播放请求超时可通过它打断 read，避免音频控制线程无限期卡死
     cancel: Option<Arc<AtomicBool>>,
+    read_cancellation: Option<RemoteReadCancellation>,
 }
 
 impl Default for GrowingAudioBuffer {
@@ -68,6 +70,7 @@ impl GrowingAudioBuffer {
             inner: self.inner.clone(),
             pos: 0,
             cancel: None,
+            read_cancellation: None,
         }
     }
 
@@ -218,10 +221,18 @@ impl GrowingAudioReader {
         self.cancel = Some(cancel);
     }
 
+    pub(crate) fn set_read_cancellation(&mut self, cancellation: RemoteReadCancellation) {
+        self.read_cancellation = Some(cancellation);
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancel
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))
+            || self
+                .read_cancellation
+                .as_ref()
+                .is_some_and(RemoteReadCancellation::is_cancelled)
     }
 
     fn known_byte_len(&self) -> Option<u64> {

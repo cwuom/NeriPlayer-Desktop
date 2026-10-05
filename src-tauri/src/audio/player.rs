@@ -41,6 +41,7 @@ const SEEK_SUPERSEDED: &str = "Seek request superseded";
 // request_seek 里递增代际与发送命令之间只隔几条语句，正常几微秒内可达；
 // 宽限只兜发送线程被调度延迟的极端情况，超时则回滚旧位置，绝不悬空
 const SEEK_ADOPT_GRACE: Duration = Duration::from_millis(200);
+const OUTPUT_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct GenerationToken {
@@ -54,35 +55,43 @@ impl GenerationToken {
     }
 }
 
+struct GrowingSourceLifetime(GrowingAudioReader);
+
+impl Drop for GrowingSourceLifetime {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Clone)]
 enum AudioSource {
     Bytes(Arc<[u8]>, u64),
     File(String, u64),
-    Growing(GrowingAudioReader, u64),
+    Growing(GrowingAudioReader, u64, Arc<GrowingSourceLifetime>),
     Remote(RemoteAudioSource, u64),
 }
 
 impl AudioSource {
+    fn growing(reader: GrowingAudioReader, hint: u64) -> Self {
+        // seek 重建会共享下载缓冲，只有最后一个源释放时才停止生产者
+        let lifetime = Arc::new(GrowingSourceLifetime(reader.clone()));
+        Self::Growing(reader, hint, lifetime)
+    }
+
     fn duration_hint_ms(&self) -> u64 {
         match self {
             Self::Bytes(_, hint)
             | Self::File(_, hint)
-            | Self::Growing(_, hint)
+            | Self::Growing(_, hint, _)
             | Self::Remote(_, hint) => *hint,
         }
     }
 
     fn prebuffer_duration(&self) -> Duration {
         match self {
-            Self::Growing(_, _) => GROWING_PREBUFFER,
+            Self::Growing(_, _, _) => GROWING_PREBUFFER,
             Self::Remote(_, _) => REMOTE_PREBUFFER,
             Self::Bytes(_, _) | Self::File(_, _) => LOCAL_PREBUFFER,
-        }
-    }
-
-    fn abort_if_stream(&self) {
-        if let Self::Growing(reader, _) = self {
-            reader.abort();
         }
     }
 
@@ -90,7 +99,7 @@ impl AudioSource {
         match self {
             Self::Bytes(_, _) => "bytes",
             Self::File(_, _) => "file",
-            Self::Growing(_, _) => "growing",
+            Self::Growing(_, _, _) => "growing",
             Self::Remote(_, _) => "remote",
         }
     }
@@ -101,6 +110,11 @@ impl AudioSource {
         read_cancellation: RemoteReadCancellation,
     ) -> Self {
         match self {
+            Self::Growing(reader, hint, lifetime) => {
+                let mut reader = reader.clone();
+                reader.set_read_cancellation(read_cancellation);
+                Self::Growing(reader, *hint, Arc::clone(lifetime))
+            }
             Self::Remote(reader, hint) => {
                 let reader = if position_ms == 0 {
                     reader.clone()
@@ -139,6 +153,11 @@ enum AudioCmd {
     Resume,
     Stop,
     SetVolume(f32),
+    SetOutputDevice {
+        name: Option<String>,
+        cancel: Arc<AtomicBool>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     SetSpeed(f32),
     Seek {
         position_ms: u64,
@@ -161,7 +180,10 @@ enum AudioCmd {
     },
     /// 输出设备失效（拔掉耳机/蓝牙断连等，由 cpal 流错误回调上报）。
     /// 控制线程收到后丢弃缓存的设备档案并以当前默认设备原地重建会话
-    DeviceLost { playback_generation: u64 },
+    DeviceLost {
+        playback_generation: u64,
+        session_cancelled: Arc<AtomicBool>,
+    },
 }
 
 
@@ -299,6 +321,19 @@ impl OutputDeviceProfile {
         let device = host
             .default_output_device()
             .ok_or_else(|| "No default audio output device".to_string())?;
+        Self::from_device(device)
+    }
+
+    fn open_named(name: &str) -> Result<Self, String> {
+        let device = cpal::default_host()
+            .output_devices()
+            .map_err(|error| format!("Could not list audio output devices: {error}"))?
+            .find(|device| device.name().is_ok_and(|candidate| candidate == name))
+            .ok_or_else(|| "Selected audio output device is unavailable".to_string())?;
+        Self::from_device(device)
+    }
+
+    fn from_device(device: Device) -> Result<Self, String> {
         let name = device
             .name()
             .unwrap_or_else(|_| "default output".to_string());
@@ -314,6 +349,74 @@ impl OutputDeviceProfile {
             name,
         })
     }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioOutputDevice {
+    pub name: String,
+    pub is_default: bool,
+}
+
+pub struct OutputDeviceChangeRequest {
+    receiver: mpsc::Receiver<Result<(), String>>,
+    cancel: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl OutputDeviceChangeRequest {
+    pub fn wait(mut self) -> AppResult<()> {
+        let result = self.receiver.recv_timeout(COMMAND_TIMEOUT);
+        self.completed = result.is_ok();
+        result.map_err(|error| AppError::Audio(error.to_string()))?.map_err(AppError::Audio)
+    }
+}
+
+impl Drop for OutputDeviceChangeRequest {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
+pub fn list_audio_output_devices() -> AppResult<Vec<AudioOutputDevice>> {
+    let host = cpal::default_host();
+    let default_name = host.default_output_device().and_then(|device| device.name().ok());
+    let devices = host.output_devices().map_err(|error| AppError::Audio(error.to_string()))?;
+    let mut result = Vec::new();
+    for device in devices {
+        let Ok(name) = device.name() else { continue };
+        if !result.iter().any(|item: &AudioOutputDevice| item.name == name) {
+            result.push(AudioOutputDevice {
+                is_default: default_name.as_deref() == Some(name.as_str()),
+                name,
+            });
+        }
+    }
+    Ok(result)
+}
+
+struct OutputDeviceState {
+    preferred_name: Option<String>,
+    profile: Option<OutputDeviceProfile>,
+}
+
+fn effective_output_name<'a>(
+    preferred: Option<&'a str>,
+    available: &[&str],
+    default: Option<&'a str>,
+) -> Option<&'a str> {
+    preferred.filter(|name| available.contains(name)).or(default)
+}
+
+fn matches_output_session(
+    current_generation: u64,
+    current_cancel: &Arc<AtomicBool>,
+    reported_generation: u64,
+    reported_cancel: &Arc<AtomicBool>,
+) -> bool {
+    current_generation == reported_generation && Arc::ptr_eq(current_cancel, reported_cancel)
 }
 
 /// 全局收尸线程：接管 stop 时尚未退出的解码 worker 句柄，在后台 join。
@@ -358,7 +461,6 @@ impl PlaybackSession {
     }
 
     fn stop(&mut self) {
-        self.source.abort_if_stream();
         self.shared.cancelled.store(true, Ordering::Release);
         self.shared.wake.notify_all();
         let _ = self.stream.pause();
@@ -586,7 +688,7 @@ impl PlayerEngine {
         let transition_generation =
             self.transition_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let prepare_cancel = Arc::new(AtomicBool::new(false));
-        let is_remote = matches!(source, AudioSource::Remote(_, _) | AudioSource::Growing(_, _));
+        let is_remote = matches!(source, AudioSource::Remote(_, _) | AudioSource::Growing(_, _, _));
         let (reply_tx, reply_rx) = mpsc::channel();
         self.cmd_tx
             .send(AudioCmd::Play {
@@ -724,7 +826,7 @@ impl PlayerEngine {
         generation: u64,
     ) -> AppResult<u64> {
         self.start_source(
-            AudioSource::Growing(reader, duration_hint_ms),
+            AudioSource::growing(reader, duration_hint_ms),
             start_position_ms,
             PlayTransition::Replace,
             generation,
@@ -789,6 +891,17 @@ impl PlayerEngine {
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
         let _ = self.cmd_tx.send(AudioCmd::SetVolume(self.volume));
+    }
+
+    pub fn request_output_device(
+        &self,
+        name: Option<String>,
+    ) -> AppResult<OutputDeviceChangeRequest> {
+        let (reply, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cmd_tx.send(AudioCmd::SetOutputDevice { name, cancel: Arc::clone(&cancel), reply })
+            .map_err(|error| AppError::Audio(error.to_string()))?;
+        Ok(OutputDeviceChangeRequest { receiver, cancel, completed: false })
     }
 
     pub fn set_speed(&mut self, speed: f32) {
@@ -1028,7 +1141,7 @@ impl PlayerEngine {
         generation: u64,
     ) -> AppResult<u64> {
         self.start_source(
-            AudioSource::Growing(reader, duration_hint_ms),
+            AudioSource::growing(reader, duration_hint_ms),
             0,
             PlayTransition::Crossfade {
                 fade_out_ms,
@@ -1109,7 +1222,7 @@ impl PlayerEngine {
         generation: u64,
     ) -> AppResult<PlayRequest> {
         self.request_start_source(
-            AudioSource::Growing(reader, duration_hint_ms),
+            AudioSource::growing(reader, duration_hint_ms),
             start_position_ms,
             PlayTransition::Replace,
             generation,
@@ -1176,7 +1289,7 @@ impl PlayerEngine {
         generation: u64,
     ) -> AppResult<PlayRequest> {
         self.request_start_source(
-            AudioSource::Growing(reader, duration_hint_ms),
+            AudioSource::growing(reader, duration_hint_ms),
             0,
             PlayTransition::Crossfade { fade_out_ms, fade_in_ms },
             generation,
@@ -1252,7 +1365,7 @@ fn audio_control_loop(
     // 被 seek 折叠/接管路径暂存的命令队列：必须保序回放，
     // 单槽 Option 会让 ticker 的 QueryEmpty 直接打断 seek 接管等待
     let mut deferred: VecDeque<AudioCmd> = VecDeque::new();
-    let mut output_profile = match OutputDeviceProfile::open_default() {
+    let profile = match OutputDeviceProfile::open_default() {
         Ok(profile) => {
             log::info!(
                 target: "cpal-output",
@@ -1269,14 +1382,40 @@ fn audio_control_loop(
         }
     };
 
+    let mut output_profile = OutputDeviceState { preferred_name: None, profile };
+    let mut last_output_poll = Instant::now();
     loop {
         let command = match deferred.pop_front() {
-            Some(command) => command,
-            None => match receiver.recv() {
-                Ok(command) => command,
-                Err(_) => break,
+            Some(command) => Some(command),
+            None => match receiver.recv_timeout(OUTPUT_DEVICE_POLL_INTERVAL) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };
+        if last_output_poll.elapsed() >= OUTPUT_DEVICE_POLL_INTERVAL {
+            last_output_poll = Instant::now();
+            if let Ok(devices) = list_audio_output_devices() {
+                let available: Vec<&str> = devices.iter().map(|device| device.name.as_str()).collect();
+                let default = devices.iter().find(|device| device.is_default).map(|device| device.name.as_str());
+                let target = effective_output_name(output_profile.preferred_name.as_deref(), &available, default).map(str::to_string);
+                if let Some(name) = target {
+                    if output_profile.profile.as_ref().is_none_or(|profile| profile.name != name) {
+                        let result = OutputDeviceProfile::open_named(&name).and_then(|candidate| {
+                            switch_output_device_in_place(
+                                &mut current, candidate, &mut output_profile, volume, speed,
+                                &shared_level, &effects_params, &playback_generation, &loopback_tx,
+                                Arc::new(AtomicBool::new(false)),
+                            )
+                        });
+                        if let Err(error) = result {
+                            log::warn!(target: "cpal-output", "output device change deferred: {error}");
+                        }
+                    }
+                }
+            }
+        }
+        let Some(command) = command else { continue };
         match command {
             AudioCmd::Play {
                 source,
@@ -1326,7 +1465,7 @@ fn audio_control_loop(
                     .as_ref()
                     .is_err_and(|error| error.starts_with("Could not build audio output"))
                 {
-                    output_profile = None;
+                    output_profile.profile = None;
                 }
                 let next = match prepared {
                     Ok(next) => next,
@@ -1440,6 +1579,34 @@ fn audio_control_loop(
                 if let Some(session) = &current {
                     session.shared.volume.store(volume);
                 }
+            }
+            AudioCmd::SetOutputDevice { name, cancel, reply } => {
+                if cancel.load(Ordering::Acquire) {
+                    let _ = reply.send(Err("Audio output change cancelled".into()));
+                    continue;
+                }
+                let name = name.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+                let result = match name.as_deref() {
+                    Some(name) => OutputDeviceProfile::open_named(name),
+                    None => OutputDeviceProfile::open_default(),
+                }.and_then(|candidate| {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("Audio output change cancelled".into());
+                    }
+                    if output_profile.profile.as_ref().is_some_and(|profile| profile.name == candidate.name) {
+                        Ok(())
+                    } else {
+                        switch_output_device_in_place(
+                            &mut current, candidate, &mut output_profile, volume, speed,
+                            &shared_level, &effects_params, &playback_generation, &loopback_tx,
+                            cancel,
+                        )
+                    }
+                });
+                if result.is_ok() {
+                    output_profile.preferred_name = name;
+                }
+                let _ = reply.send(result);
             }
             AudioCmd::SetSpeed(next_speed) => {
                 speed = next_speed.clamp(0.25, 3.0);
@@ -1591,7 +1758,7 @@ fn audio_control_loop(
                         .as_ref()
                         .is_err_and(|error| error.starts_with("Could not build audio output"))
                     {
-                        output_profile = None;
+                        output_profile.profile = None;
                     }
                     match prepared {
                         Ok(next) => {
@@ -1748,12 +1915,16 @@ fn audio_control_loop(
             }
             AudioCmd::DeviceLost {
                 playback_generation: lost_generation,
+                session_cancelled,
             } => {
                 // 只处理当前会话的失效上报：会话切换后旧流的错误回调
                 // 可能还会补发一条陈旧的 DeviceLost
                 let matches_current = current
                     .as_ref()
-                    .is_some_and(|session| session.playback_generation == lost_generation);
+                    .is_some_and(|session| matches_output_session(
+                        session.playback_generation, &session.shared.cancelled,
+                        lost_generation, &session_cancelled,
+                    ));
                 if !matches_current {
                     log::info!(
                         target: "cpal-output",
@@ -1766,7 +1937,7 @@ fn audio_control_loop(
                     "output device lost generation={lost_generation}, rebuilding on default device",
                 );
                 // 丢弃缓存的设备档案，强制按当前系统默认设备重开
-                output_profile = None;
+                output_profile.profile = None;
                 rebuild_session_in_place(
                     &mut current,
                     volume,
@@ -1794,6 +1965,63 @@ fn audio_control_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn switch_output_device_in_place(
+    current: &mut Option<PlaybackSession>,
+    candidate: OutputDeviceProfile,
+    output: &mut OutputDeviceState,
+    volume: f32,
+    speed: f32,
+    shared_level: &Arc<Mutex<SharedAudioLevel>>,
+    effects_params: &Arc<Mutex<AudioEffectsParams>>,
+    playback_generation: &Arc<AtomicU64>,
+    loopback_tx: &mpsc::Sender<AudioCmd>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("Audio output change cancelled".into());
+    }
+    let Some(previous) = current.as_ref() else {
+        output.profile = Some(candidate);
+        return Ok(());
+    };
+    ensure_generation(playback_generation, previous.playback_generation)?;
+    let paused = previous.shared.paused.load(Ordering::Acquire);
+    previous.pause();
+    // 保留旧流和源，目标设备准备失败时还能回到原位置
+    let prepared = prepare_session(
+        previous.source.clone(), previous.shared.clock.position_ms(), volume, speed,
+        Arc::clone(shared_level), Arc::clone(effects_params), Arc::clone(playback_generation),
+        previous.playback_generation, None, Some(Arc::clone(&previous.shared.clock)),
+        &candidate, Arc::clone(&cancel), loopback_tx,
+    ).and_then(|next| {
+        if cancel.load(Ordering::Acquire) {
+            return Err("Audio output change cancelled".into());
+        }
+        if paused { next.pause(); } else { next.play()?; }
+        ensure_generation(playback_generation, previous.playback_generation)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err("Audio output change cancelled".into());
+        }
+        Ok(next)
+    });
+    match prepared {
+        Ok(next) => {
+            if let Some(mut previous) = current.replace(next) {
+                previous.stop();
+            }
+            output.profile = Some(candidate);
+            Ok(())
+        }
+        Err(error) => {
+            if !paused && ensure_generation(playback_generation, previous.playback_generation).is_ok() {
+                let _ = previous.play();
+            }
+            Err(error)
+        }
+    }
+}
+
 /// EQ/响度/速度变化时按当前位置原地重建会话
 ///
 /// 这些参数都固化在 ring 的输出帧里，改参数只有两种选择：跳过已缓冲的
@@ -1808,7 +2036,7 @@ fn rebuild_session_in_place(
     shared_level: &Arc<Mutex<SharedAudioLevel>>,
     effects_params: &Arc<Mutex<AudioEffectsParams>>,
     playback_generation: &Arc<AtomicU64>,
-    output_profile: &mut Option<OutputDeviceProfile>,
+    output_profile: &mut OutputDeviceState,
     loopback_tx: &mpsc::Sender<AudioCmd>,
 ) {
     let Some(session) = current.as_ref() else {
@@ -1877,12 +2105,18 @@ fn rebuild_session_in_place(
 }
 
 fn ensure_output_profile(
-    output_profile: &mut Option<OutputDeviceProfile>,
+    output_profile: &mut OutputDeviceState,
 ) -> Result<&OutputDeviceProfile, String> {
-    if output_profile.is_none() {
-        *output_profile = Some(OutputDeviceProfile::open_default()?);
+    if output_profile.profile.is_none() {
+        let selected = output_profile.preferred_name.as_deref()
+            .map(OutputDeviceProfile::open_named);
+        output_profile.profile = Some(match selected {
+            Some(Ok(profile)) => profile,
+            _ => OutputDeviceProfile::open_default()?,
+        });
     }
     output_profile
+        .profile
         .as_ref()
         .ok_or_else(|| "No default audio output device".to_string())
 }
@@ -1903,7 +2137,7 @@ fn rebuild_after_failed_seek(
     playback_generation: &Arc<AtomicU64>,
     expected_generation: u64,
     clock: &Arc<PlaybackClock>,
-    output_profile: &mut Option<OutputDeviceProfile>,
+    output_profile: &mut OutputDeviceState,
     loopback_tx: &mpsc::Sender<AudioCmd>,
 ) -> Option<PlaybackSession> {
     clock.store_ms(rollback_position_ms);
@@ -1999,13 +2233,8 @@ fn prepare_session(
     // 必须先 clone/升级 access_mode，再判断 virtual-body：
     // LongFormProgressive 源在 clone 前也要能选中该路径（prefers 已兼容），
     // 但最终以 decoder_source 上的状态为准，避免误走 format.seek。
-    let mut decoder_source =
+    let decoder_source =
         source.decoder_source_for_position(start_position_ms, read_cancellation);
-    // Growing 源的 probe 需要足够缓冲数据，网络停滞时会在 read 里阻塞；
-    // 注入外部取消标志使播放等待超时能打断 probe（Remote 源已有同类机制）
-    if let AudioSource::Growing(reader, _) = &mut decoder_source {
-        reader.set_prepare_cancel(Arc::clone(&prepare_cancel));
-    }
     let use_byte_seek =
         start_position_ms > 0 && decoder_source.prefers_remote_virtual_body_seek();
     if start_position_ms > 0 {
@@ -2090,7 +2319,7 @@ fn prepare_session(
         shared_level,
         Arc::clone(&playback_generation),
         expected_generation,
-        operation_generation.clone(),
+        operation_guard.clone(),
     )?;
     let output_started = Instant::now();
     let stream = match build_output_stream(
@@ -2164,14 +2393,9 @@ fn make_decoder_for_position(
         .map(|decoder| Box::new(decoder) as Box<dyn PcmSource>),
         AudioSource::File(path, _) => SymphoniaAudioDecoder::new_file(Path::new(path))
             .map(|decoder| Box::new(decoder) as Box<dyn PcmSource>),
-        AudioSource::Growing(reader, _) => {
+        AudioSource::Growing(reader, _, _) => {
             SymphoniaAudioDecoder::new(Box::new(reader.clone()), None)
                 .map(|decoder| Box::new(decoder) as Box<dyn PcmSource>)
-                .inspect_err(|_| {
-                    // probe 失败即宣告本流报废：唤醒其余阻塞读者、
-                    // 让 feed 循环尽早停止继续下载
-                    reader.abort();
-                })
         }
         AudioSource::Remote(reader, _) => {
             if use_byte_seek && start_position_ms > 0 {
@@ -2196,7 +2420,7 @@ fn spawn_decode_worker(
     shared_level: Arc<Mutex<SharedAudioLevel>>,
     playback_generation: Arc<AtomicU64>,
     expected_generation: u64,
-    operation_generation: Option<GenerationToken>,
+    read_cancellation: RemoteReadCancellation,
 ) -> Result<JoinHandle<()>, String> {
     thread::Builder::new()
         .name("audio-decode".into())
@@ -2211,9 +2435,7 @@ fn spawn_decode_worker(
             let mut exit_reason = "source_eof";
             while !shared.cancelled.load(Ordering::Acquire)
                 && playback_generation.load(Ordering::Acquire) == expected_generation
-                && operation_generation
-                    .as_ref()
-                    .is_none_or(GenerationToken::is_current)
+                && !read_cancellation.is_cancelled()
             {
                 if shared.ring.writable_samples() < shared.channels {
                     if shared.paused.load(Ordering::Acquire) {
@@ -2259,10 +2481,7 @@ fn spawn_decode_worker(
                 exit_reason = "cancelled";
             } else if playback_generation.load(Ordering::Acquire) != expected_generation {
                 exit_reason = "generation_changed";
-            } else if operation_generation
-                .as_ref()
-                .is_some_and(|token| !token.is_current())
-            {
+            } else if read_cancellation.is_cancelled() {
                 exit_reason = "operation_superseded";
             }
             log::info!(
@@ -2414,6 +2633,7 @@ where
                 if !shared.device_lost.swap(true, Ordering::AcqRel) {
                     let _ = loopback_tx.send(AudioCmd::DeviceLost {
                         playback_generation,
+                        session_cancelled: Arc::clone(&shared.cancelled),
                     });
                 }
             },
@@ -2656,16 +2876,157 @@ fn duration_to_frames(duration: Duration, sample_rate: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_alignment_stale_device_error_does_not_match_a_rebuilt_session() {
+        let previous = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let current = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(!super::matches_output_session(7, &current, 7, &previous));
+        assert!(super::matches_output_session(7, &current, 7, &current.clone()));
+        assert!(!super::matches_output_session(8, &current, 7, &current));
+    }
+
+    #[test]
+    fn android_alignment_abandoned_output_change_is_cancelled() {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        drop(super::OutputDeviceChangeRequest { receiver, cancel: cancel.clone(), completed: false });
+        assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn android_alignment_output_selection_follows_default_changes() {
+        assert_eq!(super::effective_output_name(None, &["speaker", "headphones"], Some("headphones")), Some("headphones"));
+        assert_eq!(super::effective_output_name(None, &["speaker", "headphones"], Some("speaker")), Some("speaker"));
+    }
+
+    #[test]
+    fn android_alignment_output_selection_preserves_an_available_preference() {
+        assert_eq!(super::effective_output_name(Some("speaker"), &["speaker", "headphones"], Some("headphones")), Some("speaker"));
+    }
+
+    #[test]
+    fn android_alignment_output_selection_falls_back_and_recovers_after_disconnect() {
+        assert_eq!(super::effective_output_name(Some("headphones"), &["speaker"], Some("speaker")), Some("speaker"));
+        assert_eq!(super::effective_output_name(Some("headphones"), &["speaker", "headphones"], Some("speaker")), Some("headphones"));
+        assert_eq!(super::effective_output_name(Some("headphones"), &[], None), None);
+    }
+
     use super::{
         channel_sample, clamp_position, duration_to_frames, ensure_generation,
         ensure_preparation_current, take_latest_seek, wait_for_newer_seek, AudioCmd,
-        GenerationToken, PlaybackClock, SEEK_SUPERSEDED,
+        make_decoder_for_position, AudioSource, GenerationToken, PlaybackClock, SEEK_SUPERSEDED,
     };
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn android_alignment_growing_seek_retains_buffer_until_last_source_releases() {
+        let buffer = crate::audio::growing::GrowingAudioBuffer::new();
+        buffer.append(include_bytes!("fixtures/hls-silence.aac"));
+        buffer.finish();
+        let previous = AudioSource::growing(buffer.reader(), 192);
+        let seek_source = previous.clone();
+        drop(previous);
+        assert!(!buffer.is_aborted());
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = crate::audio::remote::RemoteReadCancellation::new(Arc::clone(&cancelled), None);
+        let old_decoder_source = seek_source.decoder_source_for_position(0, cancellation);
+        let mut old_decoder = make_decoder_for_position(&old_decoder_source, 0, false).unwrap();
+        cancelled.store(true, Ordering::Release);
+        let _ = old_decoder.next();
+        drop(old_decoder);
+        drop(old_decoder_source);
+        assert!(!buffer.is_aborted());
+        let mut next_decoder = make_decoder_for_position(&seek_source, 0, false).unwrap();
+        assert!(next_decoder.next().is_some());
+        drop(next_decoder);
+        drop(seek_source);
+        assert!(buffer.is_aborted());
+    }
+
+    #[test]
+    fn android_alignment_cancelled_growing_prepare_does_not_abort_rollback_source() {
+        let buffer = crate::audio::growing::GrowingAudioBuffer::new();
+        buffer.append(include_bytes!("fixtures/hls-silence.aac"));
+        buffer.finish();
+        let rollback = AudioSource::growing(buffer.reader(), 192);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let failed = rollback.decoder_source_for_position(0, crate::audio::remote::RemoteReadCancellation::new(cancelled, None));
+        assert!(make_decoder_for_position(&failed, 0, false).is_err());
+        drop(failed);
+        assert!(!buffer.is_aborted());
+        assert!(make_decoder_for_position(&rollback, 0, false).unwrap().next().is_some());
+        drop(rollback);
+        assert!(buffer.is_aborted());
+    }
+
+    #[test]
+    fn android_alignment_growing_reader_uses_session_and_disarmed_prepare_cancellation() {
+        use std::io::Read;
+        let buffer = crate::audio::growing::GrowingAudioBuffer::new();
+        buffer.append(b"abc");
+        buffer.finish();
+        let source = AudioSource::growing(buffer.reader(), 0);
+        let session = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prepare = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = crate::audio::remote::RemoteReadCancellation::new(Arc::clone(&session), None).with_external_cancel(Arc::clone(&prepare));
+        let guard = cancellation.clone();
+        let AudioSource::Growing(mut reader, _, _) = source.decoder_source_for_position(0, cancellation) else { panic!("expected growing source") };
+        guard.disarm_operation_guard();
+        prepare.store(true, Ordering::Release);
+        assert_eq!(reader.read(&mut [0; 1]).unwrap(), 1);
+        session.store(true, Ordering::Release);
+        assert!(reader.read(&mut [0; 1]).is_err());
+        assert!(!buffer.is_aborted());
+    }
+
+    #[test]
+    fn android_alignment_committed_decode_worker_survives_the_next_seek_generation() {
+        let generation = Arc::new(AtomicU64::new(7));
+        let seek = Arc::new(AtomicU64::new(1));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation = crate::audio::remote::RemoteReadCancellation::new(
+            Arc::clone(&cancelled), Some((Arc::clone(&seek), 1)),
+        );
+        let shared = Arc::new(super::PlaybackShared {
+            ring: Arc::new(crate::audio::buffered::PcmRing::new(8)),
+            channels: 1, sample_rate: 48_000,
+            paused: std::sync::atomic::AtomicBool::new(false),
+            buffering: std::sync::atomic::AtomicBool::new(true),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            cancelled,
+            volume: super::AtomicF32::new(1.0), fade_gain: super::AtomicF32::new(1.0),
+            speed: super::AtomicF32::new(1.0),
+            buffer_target_frames: std::sync::atomic::AtomicUsize::new(1),
+            clock: Arc::new(PlaybackClock::new(0)),
+            wake_lock: std::sync::Mutex::new(()), wake: std::sync::Condvar::new(),
+            device_lost: std::sync::atomic::AtomicBool::new(false),
+        });
+        let decoder = crate::audio::remote::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())), Some("aac"),
+        ).unwrap();
+        let worker = super::spawn_decode_worker(
+            Box::new(decoder), Arc::clone(&shared),
+            crate::audio::analyzer::SharedAudioLevel::new(),
+            generation, 7, cancellation.clone(),
+        ).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while shared.ring.readable_samples() < 8 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(shared.ring.readable_samples(), 8);
+        cancellation.disarm_operation_guard();
+        seek.store(2, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(40));
+        let kept_running = !shared.finished.load(Ordering::Acquire);
+        shared.cancelled.store(true, Ordering::Release);
+        shared.wake.notify_all();
+        worker.join().unwrap();
+        assert!(kept_running, "a submitted worker must stop through its session token");
+    }
 
     #[test]
     fn duration_to_frames_matches_android_buffer_thresholds() {

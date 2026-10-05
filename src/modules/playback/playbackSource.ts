@@ -35,9 +35,12 @@ export interface ResolvedPlaybackSource {
   type: 'success'
   url: string
   candidateUrls: string[]
+  candidateDetails?: PlaybackCandidateDetails[]
+  streamType?: 'direct' | 'hls'
   durationMs?: number
   mimeType?: string
   expectedContentLength?: number
+  expectedContentMd5?: string
   isPreview?: boolean
   audioInfo?: PlaybackAudioInfo
   cacheKeyOverride?: string
@@ -59,6 +62,7 @@ export type PlaybackResolution =
 
 export interface PlaybackResolveOptions {
   forceRefresh?: boolean
+  avoidDirect?: boolean
   qualityOverride?: string
   requestGeneration?: number
 }
@@ -66,6 +70,7 @@ export interface PlaybackResolveOptions {
 export interface PlaybackCacheWriteOptions {
   cacheKey?: string
   expectedContentLength?: number
+  expectedContentMd5?: string
 }
 
 export interface PlaybackCacheReadCandidate {
@@ -112,7 +117,41 @@ const YOUTUBE_QUALITY_OPTIONS = ['low', 'medium', 'high', 'very_high']
   .map(key => ({ key, label: key }))
 
 const RESOLUTION_TTL_MS = 90_000
-const MAX_RESOLUTION_CACHE_ENTRIES = 256
+const YOUTUBE_RESOLUTION_TTL_MS = 8 * 60_000
+const SIGNED_URL_EXPIRY_MARGIN_MS = 90_000
+const MAX_RESOLUTION_CACHE_ENTRIES = 64
+
+export function playbackResolutionExpiresAt(result: ResolvedPlaybackSource, cachedAt = Date.now(), ttlMs?: number): number {
+  const ttl = ttlMs ?? (result.source === 'youtube' ? YOUTUBE_RESOLUTION_TTL_MS : RESOLUTION_TTL_MS)
+  let expiresAt = cachedAt + Math.max(0, ttl)
+  if (result.source !== 'youtube') return expiresAt
+  for (const url of [result.url, ...result.candidateUrls]) {
+    try {
+      const parsed = new URL(url)
+      const pathExpiry = parsed.pathname.match(/\/expire\/(\d+)(?:\/|$)/)?.[1]
+      for (const value of [parsed.searchParams.get('expire'), pathExpiry]) {
+        const seconds = Number(value)
+        if (Number.isFinite(seconds) && seconds > 0 && Number.isSafeInteger(seconds * 1000)) {
+          expiresAt = Math.min(expiresAt, Math.max(cachedAt, seconds * 1000 - SIGNED_URL_EXPIRY_MARGIN_MS))
+        }
+      }
+    } catch { /* 过期判断失败时沿用有界 TTL */ }
+  }
+  return expiresAt
+}
+
+export interface PlaybackCandidateDetails {
+  url: string
+  qualityKey: string
+  cacheKey: string
+  audioInfo: PlaybackAudioInfo
+  mimeType?: string
+  bitrate?: number
+  codec?: string
+  format?: string
+  expectedContentLength?: number
+  streamType?: 'direct' | 'hls'
+}
 
 export function getPlaybackSourceKind(track: TrackInfo): PlaybackSourceKind | null {
   const idPrefix = track.id.split(':', 1)[0]?.toLowerCase()
@@ -219,11 +258,11 @@ export function playbackCacheReadCandidates(
   const qualities = adapter.kind === 'netease'
     ? neteaseQualityFallbacks(preferred)
     : [preferred]
-  return qualities.map(qualityKey => ({
-    cacheKey: stablePlaybackCacheKey(track, adapter.kind, qualityKey),
-    source: adapter.kind,
-    qualityKey,
-  }))
+  return qualities.flatMap(qualityKey => {
+    const cacheKey = stablePlaybackCacheKey(track, adapter.kind, qualityKey)
+    const keys = adapter.kind === 'youtube' ? [cacheKey, `${cacheKey}-hls`] : [cacheKey]
+    return keys.map(key => ({ cacheKey: key, source: adapter.kind, qualityKey }))
+  })
 }
 
 export function playbackPrefetchCacheId(
@@ -238,7 +277,7 @@ export class PlaybackUrlResolver {
     result: ResolvedPlaybackSource
     expiresAt: number
   }>()
-  private readonly inFlight = new Map<string, Promise<PlaybackResolution>>()
+  private readonly inFlight = new Map<string, { promise: Promise<PlaybackResolution>; requestGeneration?: number }>()
 
   async resolve(
     track: TrackInfo,
@@ -260,24 +299,27 @@ export class PlaybackUrlResolver {
       adapter.kind,
       options.qualityOverride,
     )
-    const cacheKey = playbackPrefetchCacheId(track, resolvedSettings)
+    const cacheKey = playbackPrefetchCacheId(track, resolvedSettings) + (options.avoidDirect ? '|hls' : '')
+    if (options.forceRefresh) this.cache.delete(cacheKey)
 
-    if (!options.forceRefresh && isDirectStreamUrl(track.audioUrl)) {
+    if (!options.forceRefresh && !options.avoidDirect && isDirectStreamUrl(track.audioUrl)) {
       const directUrl = track.audioUrl.trim()
+      const candidates = trustedDirectStreamCandidates(track, adapter.kind, directUrl)
+      const qualityKey = adapter.qualityKey(resolvedSettings)
+      const audioInfo = createAudioInfo(adapter.kind, qualityKey)
       return createSuccess(track, adapter.kind, resolvedSettings, {
         url: directUrl,
-        candidateUrls: trustedDirectStreamCandidates(track, adapter.kind, directUrl),
-        qualityKey: adapter.qualityKey(resolvedSettings),
+        streamType: sharedStreamType(adapter.kind, directUrl),
+        candidateUrls: candidates,
+        candidateDetails: candidates.map(url => ({
+          url, streamType: sharedStreamType(adapter.kind, url), qualityKey,
+          cacheKey: `${cacheKey}|direct`, audioInfo,
+        })),
+        qualityKey,
         // 直链/一起听 streamUrl 的实际音质未知，不进入本地持久缓存
         cacheKey: `${cacheKey}|direct`,
         isPreview: true,
-        audioInfo: createAudioInfo(
-          adapter.kind,
-          adapter.qualityKey(resolvedSettings),
-          undefined,
-          undefined,
-          undefined,
-        ),
+        audioInfo,
       })
     }
 
@@ -288,7 +330,9 @@ export class PlaybackUrlResolver {
         this.cache.delete(cacheKey)
       }
       const existing = this.inFlight.get(cacheKey)
-      if (existing) return existing
+      if (existing && (existing.requestGeneration == null || existing.requestGeneration === options.requestGeneration)) {
+        return existing.promise
+      }
     }
 
     const pending = adapter.resolve(track, resolvedSettings, options)
@@ -299,23 +343,24 @@ export class PlaybackUrlResolver {
       })
       .catch(error => classifyPlaybackError(error))
       .then(result => {
-        if (result.type === 'success') {
+        if (result.type === 'success' && this.inFlight.get(cacheKey)?.promise === pending) {
           if (!this.cache.has(cacheKey) && this.cache.size >= MAX_RESOLUTION_CACHE_ENTRIES) {
             const oldest = this.cache.keys().next().value
             if (oldest !== undefined) this.cache.delete(oldest)
           }
+          this.cache.delete(cacheKey)
           this.cache.set(cacheKey, {
             result,
-            expiresAt: Date.now() + RESOLUTION_TTL_MS,
+            expiresAt: playbackResolutionExpiresAt(result),
           })
         }
         return result
       })
       .finally(() => {
-        if (this.inFlight.get(cacheKey) === pending) this.inFlight.delete(cacheKey)
+        if (this.inFlight.get(cacheKey)?.promise === pending) this.inFlight.delete(cacheKey)
       })
 
-    this.inFlight.set(cacheKey, pending)
+    this.inFlight.set(cacheKey, { promise: pending, requestGeneration: options.requestGeneration })
     return pending
   }
 
@@ -326,11 +371,16 @@ export class PlaybackUrlResolver {
   }
 
   invalidate(track: TrackInfo, settings: PlaybackSourceSettings): void {
-    this.cache.delete(playbackPrefetchCacheId(track, settings))
+    const key = playbackPrefetchCacheId(track, settings)
+    for (const variant of [key, `${key}|hls`]) {
+      this.cache.delete(variant)
+      this.inFlight.delete(variant)
+    }
   }
 
   clear(): void {
     this.cache.clear()
+    this.inFlight.clear()
   }
 }
 
@@ -365,11 +415,28 @@ export async function resolvePlaybackSource(
   return result.type === 'success' ? result : null
 }
 
+export async function resolveDownloadSource(track: TrackInfo, settings: PlaybackSourceSettings): Promise<ResolvedPlaybackSource> {
+  const result = await resolvePlaybackResult(track, settings, { forceRefresh: true })
+  if (result.type !== 'success') {
+    throw new Error('message' in result ? result.message || 'No downloadable stream' : 'No downloadable stream')
+  }
+  if (result.isPreview) throw new Error('Preview audio cannot be saved as a full download')
+  const candidates = uniqueUrls([result.url, ...result.candidateUrls])
+    .map((_, index) => selectPlaybackCandidate(result, index))
+  const playable = candidates.find(candidate => !unsupportedDesktopCodec(candidate.codec ?? candidate.audioInfo?.codecLabel))
+  if (!playable) throw new Error('No downloadable stream has a supported audio codec')
+  return playable
+}
+
 export function playbackCacheWriteOptions(
   resolved: ResolvedPlaybackSource,
   candidateIndex: number,
 ): PlaybackCacheWriteOptions {
   if (resolved.isPreview) return {}
+  const selected = selectPlaybackCandidate(resolved, candidateIndex)
+  if (candidateIndex !== 0 && selected !== resolved) {
+    return { cacheKey: selected.cacheKey, expectedContentLength: selected.expectedContentLength }
+  }
   const primaryCacheKey = resolved.cacheKeyOverride || resolved.cacheKey
   if (candidateIndex !== 0) {
     return {
@@ -381,6 +448,22 @@ export function playbackCacheWriteOptions(
   return {
     cacheKey: primaryCacheKey,
     expectedContentLength: resolved.expectedContentLength,
+    ...(resolved.expectedContentMd5 ? { expectedContentMd5: resolved.expectedContentMd5 } : {}),
+  }
+}
+
+export function selectPlaybackCandidate(resolved: ResolvedPlaybackSource, candidateIndex: number): ResolvedPlaybackSource {
+  if (candidateIndex === 0) return resolved
+  const url = uniqueUrls([resolved.url, ...resolved.candidateUrls])[candidateIndex]
+  const candidate = resolved.candidateDetails?.find(item => item.url === url)
+  if (!candidate) return resolved
+  return {
+    ...resolved,
+    ...candidate,
+    cacheKeyOverride: undefined,
+    expectedContentMd5: undefined,
+    candidateUrls: [],
+    candidateDetails: undefined,
   }
 }
 
@@ -449,6 +532,22 @@ function stablePlaybackCacheKey(
   return cid ? `${base}-${cid}-${normalizedQuality}` : `${base}-${normalizedQuality}`
 }
 
+function sharedStreamType(kind: PlaybackSourceKind, value: string): 'direct' | 'hls' {
+  if (kind !== 'youtube') return 'direct'
+  try {
+    const url = new URL(value)
+    const trustedHost = url.hostname === 'googlevideo.com' || url.hostname.endsWith('.googlevideo.com')
+    return url.protocol === 'https:' && trustedHost && (!url.port || url.port === '443')
+      && (/\/manifest\/hls(?:_|\/)/i.test(url.pathname) || /\.m3u8$/i.test(url.pathname))
+      ? 'hls' : 'direct'
+  } catch { return 'direct' }
+}
+
+function youtubeStreamCacheKey(track: TrackInfo, quality: string, streamType?: 'direct' | 'hls'): string {
+  const key = stablePlaybackCacheKey(track, 'youtube', quality)
+  return streamType === 'hls' ? `${key}-hls` : key
+}
+
 function bilibiliCid(track: TrackInfo): string | undefined {
   const payloadCid = syncPayloadString(track, 'subAudioId', 'sub_audio_id')
   if (payloadCid) return payloadCid
@@ -462,9 +561,12 @@ function createSuccess(
   values: {
     url: string
     candidateUrls?: string[]
+    candidateDetails?: PlaybackCandidateDetails[]
+    streamType?: 'direct' | 'hls'
     durationMs?: number
     mimeType?: string
     expectedContentLength?: number
+    expectedContentMd5?: string
     isPreview?: boolean
     audioInfo?: PlaybackAudioInfo
     qualityKey?: string
@@ -491,9 +593,12 @@ function createSuccess(
     type: 'success',
     url: values.url,
     candidateUrls: uniqueUrls(values.candidateUrls),
+    candidateDetails: values.candidateDetails,
+    streamType: values.streamType,
     durationMs: values.durationMs,
     mimeType: values.mimeType,
     expectedContentLength: values.expectedContentLength,
+    expectedContentMd5: values.expectedContentMd5,
     isPreview: values.isPreview,
     audioInfo,
     cacheKeyOverride: values.cacheKeyOverride,
@@ -555,6 +660,10 @@ function resolveNetease(
           bitrate: number
           format: string
           expected_content_length?: number | null
+          expected_content_md5?: string | null
+          duration_ms?: number | null
+          level?: string | null
+          song_id?: number | null
           is_preview?: boolean
           unavailable_reason?: 'requires_login' | 'no_permission' | 'no_play_url' | 'unknown' | null
         }>(
@@ -566,11 +675,13 @@ function resolveNetease(
         }
         if (result.unavailable_reason === 'unknown') break
         if (!result.url) continue
+        if (result.song_id != null && result.song_id !== songId) throw new Error('Playback source song identity mismatch')
+        const actualQuality = result.level?.trim().toLowerCase() || quality
         const mimeType = normalizeMimeType(result.format)
         const codec = deriveCodecLabel(mimeType) ?? normalizeCodecName(result.format)
         const audioInfo = createAudioInfo(
           'netease',
-          quality,
+          actualQuality,
           codec,
           mimeType,
           result.bitrate,
@@ -583,9 +694,11 @@ function resolveNetease(
           format: result.format,
           mimeType,
           expectedContentLength: result.expected_content_length ?? undefined,
+          expectedContentMd5: result.expected_content_md5 ?? undefined,
+          durationMs: result.duration_ms ?? undefined,
           isPreview: result.is_preview === true,
-          qualityKey: quality,
-          cacheKey: stablePlaybackCacheKey(track, 'netease', quality),
+          qualityKey: actualQuality,
+          cacheKey: stablePlaybackCacheKey(track, 'netease', actualQuality),
           audioInfo,
         })
         if (resolved.isPreview) {
@@ -594,7 +707,7 @@ function resolveNetease(
         }
         return resolved
       } catch (error) {
-        if (/requires login/i.test(error instanceof Error ? error.message : String(error))) {
+        if (/requires login|song identity mismatch/i.test(error instanceof Error ? error.message : String(error))) {
           throw error
         }
         lastError = error
@@ -638,6 +751,8 @@ interface BiliAudioCandidate {
   url: string
   bandwidth: number
   codecs: string
+  quality_key?: string
+  mime_type?: string
 }
 
 function resolveBilibili(
@@ -654,6 +769,8 @@ function resolveBilibili(
     url: string
     bandwidth: number
     codecs: string
+    quality_key?: string
+    mime_type?: string
     candidates?: BiliAudioCandidate[]
   }>('get_bili_audio_url', {
     bvid: isAvid ? '' : biliId,
@@ -666,23 +783,34 @@ function resolveBilibili(
     const candidates = (result.candidates ?? [])
       .filter(candidate => isDirectStreamUrl(candidate.url))
       .map(candidate => candidate.url)
-    const mimeType = mimeTypeForCodec(result.codecs)
+    const actualQuality = result.quality_key || quality
+    const mimeType = normalizeMimeType(result.mime_type) || mimeTypeForCodec(result.codecs)
     const codec = normalizeCodecName(result.codecs)
     const availableQualityKeys = [quality, ...(result.candidates ?? [])
-      .map(candidate => inferBiliQualityKey(candidate.bandwidth, candidate.codecs))
+      .map(candidate => candidate.quality_key || inferBiliQualityKey(candidate.bandwidth, candidate.codecs))
     ].filter((key, index, values) => values.indexOf(key) === index)
     return createSuccess(track, 'bilibili', settings, {
       url: result.url,
       candidateUrls: candidates.filter(url => url !== result.url),
+      candidateDetails: (result.candidates ?? []).filter(candidate => isDirectStreamUrl(candidate.url)).map(candidate => {
+        const key = candidate.quality_key || inferBiliQualityKey(candidate.bandwidth, candidate.codecs)
+        const candidateMime = normalizeMimeType(candidate.mime_type) || mimeTypeForCodec(candidate.codecs)
+        const candidateCodec = normalizeCodecName(candidate.codecs)
+        return {
+          url: candidate.url, qualityKey: key, cacheKey: stablePlaybackCacheKey(track, 'bilibili', key),
+          bitrate: candidate.bandwidth, codec: candidateCodec, mimeType: candidateMime,
+          audioInfo: createAudioInfo('bilibili', key, candidateCodec, candidateMime, candidate.bandwidth),
+        }
+      }),
       bitrate: result.bandwidth,
       codec,
       mimeType,
-      qualityKey: quality,
-      cacheKey: stablePlaybackCacheKey(track, 'bilibili', quality),
+      qualityKey: actualQuality,
+      cacheKey: stablePlaybackCacheKey(track, 'bilibili', actualQuality),
       audioInfo: {
         source: 'bilibili',
-        qualityKey: quality,
-        qualityLabel: quality,
+        qualityKey: actualQuality,
+        qualityLabel: actualQuality,
         qualityOptions: availableQualityKeys.map(key => ({ key, label: key })),
         codecLabel: codec,
         mimeType,
@@ -700,6 +828,7 @@ interface YoutubeAudioStream {
   bitrate: number
   mime_type: string
   content_length?: number
+  stream_type?: 'direct' | 'hls'
 }
 
 function resolveYoutube(
@@ -711,6 +840,8 @@ function resolveYoutube(
   const quality = settings.youtubeQuality
   return invoke<YoutubeAudioStream[]>('get_youtube_audio_url', {
     videoId,
+    forceRefresh: options.forceRefresh ?? false,
+    avoidDirect: options.avoidDirect ?? false,
     requestGeneration: options.requestGeneration,
   })
     .then(streams => {
@@ -722,14 +853,22 @@ function resolveYoutube(
       const bitrateKbps = normalizeBitrateKbps(primary.bitrate)
       return createSuccess(track, 'youtube', settings, {
         url: primary.url,
+        streamType: primary.stream_type ?? 'direct',
         candidateUrls: ordered.slice(1).map(stream => stream.url),
+        candidateDetails: ordered.slice(1).map(stream => ({
+          url: stream.url, qualityKey: quality, cacheKey: youtubeStreamCacheKey(track, quality, stream.stream_type),
+          streamType: stream.stream_type ?? 'direct',
+          bitrate: stream.bitrate, codec: deriveCodecLabel(stream.mime_type), format: stream.mime_type,
+          mimeType: normalizeMimeType(stream.mime_type), expectedContentLength: stream.content_length,
+          audioInfo: createAudioInfo('youtube', quality, deriveCodecLabel(stream.mime_type), normalizeMimeType(stream.mime_type), stream.bitrate),
+        })),
         bitrate: primary.bitrate,
         codec,
         format: primary.mime_type,
         mimeType,
         expectedContentLength: primary.content_length,
         qualityKey: quality,
-        cacheKey: stablePlaybackCacheKey(track, 'youtube', quality),
+        cacheKey: youtubeStreamCacheKey(track, quality, primary.stream_type),
         audioInfo: {
           source: 'youtube',
           qualityKey: quality,
@@ -748,38 +887,24 @@ function orderYoutubeStreams(
   streams: YoutubeAudioStream[],
   quality: string,
 ): YoutubeAudioStream[] {
-  // 桌面 rodio/symphonia 当前未启用 opus, 始终优先 audio/mp4(AAC)
-  // quality 只在同 mime 档内调节码率, 不能把 webm/opus 抬到 m4a 前面
+  // 首选可解码容器，再按 Android 音质阈值和候选流类型选择
+  const minimumBitrate = ({ low: 0, standard: 0, medium: 96_000, high: 128_000, higher: 128_000 } as Record<string, number>)[quality] ?? 160_000
   const sorted = streams
     .filter(stream => isDirectStreamUrl(stream.url))
     .sort((a, b) => {
       const scoreDiff = youtubeMimeScore(b.mime_type) - youtubeMimeScore(a.mime_type)
       if (scoreDiff !== 0) return scoreDiff
+      const qualityDiff = Number(b.bitrate >= minimumBitrate) - Number(a.bitrate >= minimumBitrate)
+      if (qualityDiff !== 0) return qualityDiff
+      const directDiff = Number((b.stream_type ?? 'direct') === 'direct') - Number((a.stream_type ?? 'direct') === 'direct')
+      if (directDiff !== 0) return directDiff
       return b.bitrate - a.bitrate
     })
-  if (sorted.length <= 1) return sorted
-
-  const preferredScore = youtubeMimeScore(sorted[0].mime_type)
-  const preferred = sorted.filter(stream => youtubeMimeScore(stream.mime_type) === preferredScore)
-  const rest = sorted.filter(stream => youtubeMimeScore(stream.mime_type) !== preferredScore)
-
-  // 仅在首选 mime 档内按 quality 挑主候选
-  const primaryIndex = quality === 'low'
-    ? preferred.length - 1
-    : quality === 'medium'
-      ? Math.floor((preferred.length - 1) / 2)
-      : quality === 'high'
-        ? Math.min(1, preferred.length - 1)
-        : 0
-  const primary = preferred[primaryIndex]
-  return [
-    primary,
-    ...preferred.filter((_, index) => index !== primaryIndex),
-    ...rest,
-  ]
+  return sorted
 }
 
 function youtubeMimeScore(mimeType?: string): number {
+  if (unsupportedDesktopCodec(deriveCodecLabel(mimeType))) return 0
   const base = mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? ''
   if (base.startsWith('audio/mp4') || base === 'audio/m4a' || base === 'audio/aac') return 3
   if (base.startsWith('audio/')) return 2
@@ -826,12 +951,10 @@ function mimeTypeForCodec(codec?: string): string | undefined {
 }
 
 function deriveCodecLabel(mimeType?: string): string | undefined {
+  const declaredCodec = mimeType?.match(/codecs\s*=\s*["']?([^;"',]+)/i)?.[1]
+  if (declaredCodec) return normalizeCodecName(declaredCodec)
   const normalized = mimeType?.split(';', 1)[0]?.trim().toLowerCase()
   if (!normalized) return undefined
-  if (normalized.includes('codecs=')) {
-    const raw = normalized.match(/codecs=["']?([^;"']+)/)?.[1]?.split('.', 1)[0]
-    if (raw) return normalizeCodecName(raw)
-  }
   const codecByMime: Record<string, string> = {
     'audio/flac': 'FLAC',
     'audio/eac3': 'E-AC-3',
@@ -844,6 +967,10 @@ function deriveCodecLabel(mimeType?: string): string | undefined {
     'audio/ogg': 'Vorbis',
   }
   return codecByMime[normalized] ?? normalized.split('/').pop()?.toUpperCase()
+}
+
+function unsupportedDesktopCodec(codec?: string): boolean {
+  return /^(opus|e-?ac-?3|ec-3|ac-?3|alac|dts)$/i.test(codec?.trim() ?? '')
 }
 
 function normalizeCodecName(codec?: string): string | undefined {

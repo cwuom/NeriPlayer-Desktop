@@ -5,6 +5,8 @@ import { useToastStore } from './toast'
 import { useRecommendStore } from './recommend'
 import i18n from '@/i18n'
 import { createLogger } from '@/utils/logger'
+import { playbackUrlResolver } from '@/modules/playback/playbackSource'
+import { playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 
 /// 登录态变化事件：库页等已挂载页面据此重新拉取平台数据
 export const AUTH_CHANGED_EVENT = 'neri:auth-changed'
@@ -106,6 +108,8 @@ export const useAuthStore = defineStore('auth', () => {
   /// 不广播的话，库页在 onMounted 时才判断是否需要拉数据，
   /// 用户在设置页登录完切回去看到的仍然是空列表。
   function notifyAuthChanged(platform: string) {
+    playbackUrlResolver.clear()
+    playbackPrefetchManager.clear()
     useRecommendStore().invalidatePlatform(platform)
     window.dispatchEvent(new CustomEvent(AUTH_CHANGED_EVENT, { detail: { platform } }))
   }

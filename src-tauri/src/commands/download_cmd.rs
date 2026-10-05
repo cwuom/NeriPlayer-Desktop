@@ -1,3 +1,5 @@
+use crate::api::transport::FallbackHttp;
+use crate::api::youtube::client::YtStreamType;
 use crate::error::{AppError, AppResult};
 use crate::lyrics::manager::LyricsManager;
 use crate::lyrics::parser::LyricLine;
@@ -11,6 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::AsyncWriteExt;
+
+#[path = "download_recovery.rs"]
+mod recovery;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadedTrack {
@@ -37,6 +42,104 @@ pub struct DownloadManifestValidation {
 /// 半开 TCP 下 `stream.next()` 会永久阻塞——任务卡死且因注册表判
 /// "downloading" 无法重试，必须有兜底
 const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct DownloadArtifacts {
+    part: Option<PathBuf>,
+    reservations: Vec<PathBuf>,
+    uncommitted_audio: Option<PathBuf>,
+}
+
+impl Drop for DownloadArtifacts {
+    fn drop(&mut self) {
+        // 取消会直接丢弃 transfer future，清理不能依赖下一次网络回调
+        if let Some(part) = &self.part {
+            let _ = std::fs::remove_file(part);
+        }
+        for reservation in &self.reservations {
+            let _ = std::fs::remove_file(reservation);
+        }
+        if let Some(audio) = &self.uncommitted_audio {
+            remove_download_artifacts(&audio.to_string_lossy());
+        }
+    }
+}
+
+fn register_download_task(
+    registry: &parking_lot::Mutex<
+        std::collections::HashMap<String, crate::state::DownloadTaskControl>,
+    >,
+    track_id: String,
+    launch: impl FnOnce() -> crate::state::DownloadTaskControl,
+) -> AppResult<()> {
+    let mut tasks = registry.lock();
+    if tasks
+        .get(&track_id)
+        .is_some_and(|task| !task.handle.is_finished())
+    {
+        return Err(AppError::Other("Track is already downloading".into()));
+    }
+    tasks.retain(|_, control| !control.handle.is_finished());
+    // 检查和启动登记共用一把锁，第二个同曲目请求不能覆盖第一个取消句柄
+    tasks.insert(track_id, launch());
+    Ok(())
+}
+
+fn finish_download_task(
+    registry: &parking_lot::Mutex<
+        std::collections::HashMap<String, crate::state::DownloadTaskControl>,
+    >,
+    track_id: &str,
+    identity: &Arc<AtomicBool>,
+) -> Option<crate::state::DownloadTaskControl> {
+    let mut tasks = registry.lock();
+    if tasks
+        .get(track_id)
+        .is_some_and(|task| Arc::ptr_eq(&task.cancel_flag, identity))
+    {
+        tasks.remove(track_id)
+    } else {
+        None
+    }
+}
+
+async fn refresh_youtube_download_source(
+    app: AppHandle,
+    video_id: String,
+    quality: String,
+    avoid_direct: bool,
+) -> AppResult<recovery::Source> {
+    let auth = app.state::<AppState>().auth.lock().youtube.clone();
+    let mut last_error = None;
+    for (force_refresh, require_direct) in recovery::resolve_plan(true, avoid_direct) {
+        let result = tokio::time::timeout(
+            Duration::from_secs(18),
+            crate::api::youtube::playback::resolve_audio_streams_with_strategy(
+                &video_id,
+                auth.as_ref().filter(|auth| auth.has_login()),
+                Some(&app),
+                force_refresh,
+                avoid_direct,
+            ),
+        )
+        .await;
+        match result {
+            Ok(Ok(streams)) => {
+                if let Some(stream) = recovery::select_stream(streams, &quality, require_direct) {
+                    return Ok(stream);
+                }
+            }
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(AppError::Other(
+                    "YouTube download source resolution timed out".into(),
+                ))
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| AppError::NotFound("No supported YouTube download source".into())))
+}
 
 /// 文件名 stem 的最大字节数（UTF-8）：为扩展名与 " (n)" 后缀留余量，
 /// 避免超出各文件系统 255 字节单文件名 / Windows MAX_PATH 限制
@@ -139,16 +242,16 @@ fn collapse_empty_name_separators(s: &str) -> String {
     // 移除空的 []/() 及其内部空白
     for _ in 0..3 {
         out = out.replace("[]", "").replace("()", "");
-        out = out
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        out = out.split_whitespace().collect::<Vec<_>>().join(" ");
     }
     // 折叠连续 " - " 分隔符并去首尾分隔符/空白
     while out.contains("-  -") || out.contains("- -") {
         out = out.replace("-  -", "-").replace("- -", "-");
     }
-    out.trim().trim_matches(|c| c == '-' || c == ' ').trim().to_string()
+    out.trim()
+        .trim_matches(|c| c == '-' || c == ' ')
+        .trim()
+        .to_string()
 }
 fn ext_from_content_type(content_type: &str) -> &str {
     if content_type.contains("mp4") || content_type.contains("m4a") || content_type.contains("aac")
@@ -253,7 +356,9 @@ async fn write_download_sidecars(
 
     // 歌词 sidecar
     let lyrics_manager = LyricsManager::new(client);
-    let youtube_video_id = track_id.strip_prefix("youtube:").filter(|id| !id.is_empty());
+    let youtube_video_id = track_id
+        .strip_prefix("youtube:")
+        .filter(|id| !id.is_empty());
     let lyrics = lyrics_manager
         .fetch_lyrics(
             title,
@@ -436,6 +541,90 @@ fn has_download_size_mismatch(expected: u64, actual: u64) -> bool {
     expected > 0 && expected != actual
 }
 
+fn validate_download_audio(
+    path: &std::path::Path,
+    expected_length: Option<u64>,
+    expected_md5: Option<&str>,
+    expected_duration_ms: u64,
+    cancelled: &AtomicBool,
+) -> AppResult<u64> {
+    use lofty::file::AudioFile;
+    use md5::{Digest, Md5};
+    use std::io::Read;
+
+    let before = std::fs::metadata(path)?.len();
+    if before == 0
+        || expected_length
+            .filter(|length| *length > 0)
+            .is_some_and(|length| length != before)
+    {
+        return Err(AppError::Audio(
+            "Download length does not match the resolved source".into(),
+        ));
+    }
+    if let Some(expected) = expected_md5 {
+        if expected.len() != 32 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AppError::Audio("Invalid download source MD5".into()));
+        }
+        let mut digest = Md5::new();
+        let mut file = std::fs::File::open(path)?;
+        let mut bytes = [0; 64 * 1024];
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err(AppError::Other("Download cancelled".into()));
+            }
+            let read = file.read(&mut bytes)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&bytes[..read]);
+        }
+        if !hex::encode(digest.finalize()).eq_ignore_ascii_case(expected) {
+            return Err(AppError::Audio(
+                "Download MD5 does not match the resolved source".into(),
+            ));
+        }
+    }
+    // 临时文件后缀是 .part，必须根据实际内容识别容器
+    let tagged = lofty::probe::Probe::open(path)
+        .map_err(|error| AppError::Audio(format!("Downloaded audio is unreadable: {error}")))?
+        .guess_file_type()?
+        .read()
+        .map_err(|error| AppError::Audio(format!("Downloaded audio is unreadable: {error}")))?;
+    let actual_duration_ms = tagged.properties().duration().as_millis() as u64;
+    if actual_duration_ms == 0 && (expected_duration_ms > 0 || expected_md5.is_some()) {
+        return Err(AppError::Audio(
+            "Cannot verify downloaded audio duration".into(),
+        ));
+    }
+    let tolerance_ms = (expected_duration_ms / 200).clamp(1000, 2000);
+    if expected_md5.is_none()
+        && expected_duration_ms > 0
+        && actual_duration_ms > 0
+        && actual_duration_ms.abs_diff(expected_duration_ms) > tolerance_ms
+    {
+        return Err(AppError::Audio(
+            "Downloaded audio duration does not match the resolved source".into(),
+        ));
+    }
+    let mut decoder =
+        crate::audio::remote::SymphoniaAudioDecoder::new_file(path).map_err(AppError::Audio)?;
+    if decoder.next().is_none() {
+        return Err(AppError::Audio(
+            "Downloaded file contains no decodable audio".into(),
+        ));
+    }
+    if std::fs::metadata(path)?.len() != before {
+        return Err(AppError::Audio(
+            "Downloaded audio changed during validation".into(),
+        ));
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(AppError::Other("Download cancelled".into()));
+    }
+    Ok(actual_duration_ms)
+}
+
 fn reserve_download_path(
     dir: &std::path::Path,
     base_name: &str,
@@ -546,10 +735,15 @@ fn has_ambiguous_legacy_sidecar(audio_path: &std::path::Path) -> bool {
         path != audio_path
             && path.is_file()
             && path.file_stem() == Some(stem)
-            && path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-                let lower = ext.to_ascii_lowercase();
-                !DOWNLOAD_SIDECAR_SUFFIXES.iter().any(|suffix| *suffix == lower)
-            })
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    let lower = ext.to_ascii_lowercase();
+                    !DOWNLOAD_SIDECAR_SUFFIXES
+                        .iter()
+                        .any(|suffix| *suffix == lower)
+                })
     })
 }
 
@@ -633,7 +827,8 @@ fn sweep_stale_download_markers(dirs: impl IntoIterator<Item = PathBuf>) -> usiz
             let stale = marker_is_stale(&path, STALE_AFTER);
             // reservation 只在任务启动时写入，长下载中自身会超过阈值。
             // 只要同名 part 仍在持续写入，就不能把 reservation 当成崩溃残留删掉
-            let active_reservation = path.extension().and_then(|ext| ext.to_str()) == Some("reserve")
+            let active_reservation = path.extension().and_then(|ext| ext.to_str())
+                == Some("reserve")
                 && reserve_has_fresh_part(&path, STALE_AFTER);
             if stale && !active_reservation && std::fs::remove_file(&path).is_ok() {
                 removed += 1;
@@ -749,6 +944,10 @@ async fn perform_download(
     source: String,
     download_dir: Option<String>,
     name_template: Option<String>,
+    stream_type: YtStreamType,
+    hls_http: FallbackHttp,
+    expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
 ) -> AppResult<DownloadedTrack> {
     if cancel_flag.load(Ordering::Relaxed) {
         return Err(AppError::Other("Download cancelled".into()));
@@ -782,34 +981,39 @@ async fn perform_download(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     };
 
-    let resp = client
-        .get(&url)
-        .header("Referer", referer)
-        .header("User-Agent", user_agent)
-        .send()
-        .await?;
+    let resp = if stream_type == YtStreamType::Hls {
+        None
+    } else {
+        Some(recovery::request(&client, &url, referer, user_agent).await?)
+    };
 
     if cancel_flag.load(Ordering::Relaxed) {
         return Err(AppError::Other("Download cancelled".into()));
     }
 
-    if !resp.status().is_success() {
-        return Err(AppError::Api(format!("HTTP {}", resp.status())));
-    }
-
     // 从 Content-Type 推断扩展名
     let content_type = resp
-        .headers()
-        .get("content-type")
+        .as_ref()
+        .and_then(|response| response.headers().get("content-type"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("audio/mpeg")
         .to_string();
-    let total_bytes = resp.content_length();
-    let ext = ext_from_content_type(&content_type);
+    let total_bytes = resp.as_ref().and_then(reqwest::Response::content_length);
+    let ext = if stream_type == YtStreamType::Hls {
+        "m4a"
+    } else {
+        ext_from_content_type(&content_type)
+    };
 
     // 构造文件名：使用模板
-    let base_name =
-        render_download_filename(&title, &artist, &album, &source, &track_id, name_template.as_deref());
+    let base_name = render_download_filename(
+        &title,
+        &artist,
+        &album,
+        &source,
+        &track_id,
+        name_template.as_deref(),
+    );
 
     let dir = downloads_dir(&app, download_dir.as_deref())?;
     // 每次下载开始顺带清扫目标目录的崩溃遗留 .part 和 .reserve: validate 的 sweep
@@ -822,7 +1026,12 @@ async fn perform_download(
     // 存在则必属于其它曲目或历史遗留。用独立 .reserve 文件做原子保留，
     // 避免两个渲染名相同的并发任务选到同一最终名后互相覆盖或争用同一 .part
     // .reserve 不会成为 rename 目标，兼容 Windows 对目标已存在的限制
-    let (file_path, reserve_path) = reserve_download_path(&dir, &base_name, ext)?;
+    let (mut file_path, mut reserve_path) = reserve_download_path(&dir, &base_name, ext)?;
+    let mut artifacts = DownloadArtifacts {
+        reservations: vec![reserve_path.clone()],
+        part: None,
+        uncommitted_audio: None,
+    };
     // 先写 `<final>.part` 临时文件，完整收尾后才 rename 为最终名：
     // 失败/取消/崩溃只会留下可识别清扫的 .part，不会产生半截"成品"文件
     let part_path = {
@@ -833,15 +1042,28 @@ async fn perform_download(
         name.push(".part");
         file_path.with_file_name(name)
     };
-    let mut file = match tokio::fs::File::create(&part_path).await {
-        Ok(file) => file,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&reserve_path).await;
-            return Err(AppError::Io(error));
-        }
+    let mut file = if stream_type == YtStreamType::Hls {
+        None
+    } else {
+        Some(
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&part_path)
+            {
+                Ok(file) => {
+                    artifacts.part = Some(part_path.clone());
+                    tokio::fs::File::from_std(file)
+                }
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&reserve_path).await;
+                    return Err(AppError::Io(error));
+                }
+            },
+        )
     };
 
-    let mut stream = resp.bytes_stream();
+    let mut stream = resp.map(reqwest::Response::bytes_stream);
     emit_download_progress(
         &app,
         &track_id,
@@ -852,81 +1074,157 @@ async fn perform_download(
         total_bytes,
     );
     // 集中收敛写入阶段的所有失败出口，统一在块外清理 .part
-    let stream_outcome: AppResult<u64> = async {
-        let mut file_size = 0_u64;
-        let mut last_emit_at = Instant::now() - Duration::from_millis(500);
-        let mut last_emitted_bytes = 0_u64;
-        loop {
-            // 空闲超时兜底：半开 TCP 下 next() 会永久挂起（见 STREAM_STALL_TIMEOUT）
-            let next = match tokio::time::timeout(STREAM_STALL_TIMEOUT, stream.next()).await {
-                Ok(item) => item,
-                Err(_) => {
-                    return Err(AppError::Other(
-                        "Download stalled: no data received for 30s".into(),
-                    ));
+    let stream_outcome: AppResult<u64> = if stream_type == YtStreamType::Hls {
+        drop(file);
+        crate::audio::hls::download_hls_to_file(
+            hls_http,
+            url.clone(),
+            part_path.clone(),
+            cancel_flag.clone(),
+        )
+        .await
+    } else {
+        async {
+            let mut file_size = 0_u64;
+            let mut last_emit_at = Instant::now() - Duration::from_millis(500);
+            let mut last_emitted_bytes = 0_u64;
+            loop {
+                // 空闲超时兜底：半开 TCP 下 next() 会永久挂起（见 STREAM_STALL_TIMEOUT）
+                let next = match tokio::time::timeout(
+                    STREAM_STALL_TIMEOUT,
+                    stream.as_mut().expect("direct download stream").next(),
+                )
+                .await
+                {
+                    Ok(item) => item,
+                    Err(_) => {
+                        return Err(AppError::Other(
+                            "Download stalled: no data received for 30s".into(),
+                        ));
+                    }
+                };
+                let Some(chunk) = next else { break };
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err(AppError::Other("Download cancelled".into()));
                 }
-            };
-            let Some(chunk) = next else { break };
+                let chunk = chunk.map_err(|error| AppError::Network(error.without_url()))?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                file.as_mut()
+                    .expect("direct download file")
+                    .write_all(&chunk)
+                    .await?;
+                file_size += chunk.len() as u64;
+
+                let should_emit = total_bytes.map(|total| file_size >= total).unwrap_or(false)
+                    || file_size.saturating_sub(last_emitted_bytes) >= 256 * 1024
+                    || last_emit_at.elapsed() >= Duration::from_millis(200);
+
+                if should_emit {
+                    emit_download_progress(
+                        &app,
+                        &track_id,
+                        "downloading",
+                        None,
+                        None,
+                        Some(file_size),
+                        total_bytes,
+                    );
+                    last_emit_at = Instant::now();
+                    last_emitted_bytes = file_size;
+                }
+            }
+            file.as_mut().expect("direct download file").flush().await?;
+
             if cancel_flag.load(Ordering::Relaxed) {
                 return Err(AppError::Other("Download cancelled".into()));
             }
-            let chunk = chunk?;
-            if chunk.is_empty() {
-                continue;
+            if file_size == 0 {
+                return Err(AppError::Audio("Empty audio data received".into()));
             }
-            file.write_all(&chunk).await?;
-            file_size += chunk.len() as u64;
-
-            let should_emit = total_bytes.map(|total| file_size >= total).unwrap_or(false)
-                || file_size.saturating_sub(last_emitted_bytes) >= 256 * 1024
-                || last_emit_at.elapsed() >= Duration::from_millis(200);
-
-            if should_emit {
-                emit_download_progress(
-                    &app,
-                    &track_id,
-                    "downloading",
-                    None,
-                    None,
-                    Some(file_size),
-                    total_bytes,
-                );
-                last_emit_at = Instant::now();
-                last_emitted_bytes = file_size;
+            // Content-Length 已知且实际字节数不足 => 截断流（HTTP/2 半关、代理提前 EOF、
+            // CDN 改写 CL 等）。删 .part 报错, 不 rename 成品, 对齐 Android isTransferSizeComplete
+            // （DL-1）。音频直链不启用压缩, 正常情况 file_size 应等于 total
+            if let Some(total) = total_bytes {
+                if total > 0 && file_size != total {
+                    return Err(AppError::Audio(format!(
+                        "下载文件不完整: 期望 {total} 字节, 实际 {file_size} 字节"
+                    )));
+                }
             }
+            Ok(file_size)
         }
-        file.flush().await?;
-
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Err(AppError::Other("Download cancelled".into()));
-        }
-        if file_size == 0 {
-            return Err(AppError::Audio("Empty audio data received".into()));
-        }
-        // Content-Length 已知且实际字节数不足 => 截断流（HTTP/2 半关、代理提前 EOF、
-        // CDN 改写 CL 等）。删 .part 报错, 不 rename 成品, 对齐 Android isTransferSizeComplete
-        // （DL-1）。音频直链不启用压缩, 正常情况 file_size 应等于 total
-        if let Some(total) = total_bytes {
-            if total > 0 && file_size != total {
-                return Err(AppError::Audio(format!(
-                    "下载文件不完整: 期望 {total} 字节, 实际 {file_size} 字节"
-                )));
-            }
-        }
-        Ok(file_size)
-    }
-    .await;
-
-    // rename 前必须关句柄（Windows 上打开中的文件无法作为 rename 目标源）
-    drop(file);
+        .await
+        .inspect(|_| {
+            drop(file);
+        })
+    };
     let file_size = match stream_outcome {
-        Ok(size) => size,
+        Ok(size) => {
+            artifacts.part = Some(part_path.clone());
+            size
+        }
+        Err(error) => {
+            return Err(error);
+        }
+    };
+    let validation_path = part_path.clone();
+    let validation_cancel = cancel_flag.clone();
+    let source_length = if stream_type == YtStreamType::Direct {
+        expected_content_length
+    } else {
+        None
+    };
+    let validation = tokio::task::spawn_blocking(move || {
+        validate_download_audio(
+            &validation_path,
+            source_length,
+            expected_content_md5.as_deref(),
+            duration_ms,
+            &validation_cancel,
+        )
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))
+    .and_then(|result| result);
+    let verified_duration_ms = match validation {
+        Ok(duration) => duration,
         Err(error) => {
             let _ = tokio::fs::remove_file(&part_path).await;
             let _ = tokio::fs::remove_file(&reserve_path).await;
             return Err(error);
         }
     };
+    let duration_ms = if verified_duration_ms > 0 {
+        verified_duration_ms
+    } else {
+        duration_ms
+    };
+    if stream_type == YtStreamType::Hls {
+        let final_target =
+            crate::audio::hls::detect_hls_audio_extension(&part_path).and_then(|actual_ext| {
+                if actual_ext == ext {
+                    Ok(None)
+                } else {
+                    reserve_download_path(&dir, &base_name, actual_ext).map(Some)
+                }
+            });
+        match final_target {
+            Ok(Some((actual_path, actual_reserve))) => {
+                artifacts.reservations.push(actual_reserve.clone());
+                let _ = tokio::fs::remove_file(&reserve_path).await;
+                file_path = actual_path;
+                reserve_path = actual_reserve;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                let _ = tokio::fs::remove_file(&reserve_path).await;
+                return Err(error);
+            }
+        }
+    }
     if cancel_flag.load(Ordering::Relaxed) {
         let _ = tokio::fs::remove_file(&part_path).await;
         let _ = tokio::fs::remove_file(&reserve_path).await;
@@ -938,11 +1236,13 @@ async fn perform_download(
         return Err(AppError::Other("下载文件名在传输期间发生冲突".into()));
     }
     // 目标文件尚未存在，rename 只提交完整的 .part，不覆盖其它曲目的成品
-    if let Err(error) = tokio::fs::rename(&part_path, &file_path).await {
+    if let Err(error) = std::fs::rename(&part_path, &file_path) {
         let _ = tokio::fs::remove_file(&part_path).await;
         let _ = tokio::fs::remove_file(&reserve_path).await;
         return Err(AppError::Io(error));
     }
+    artifacts.part = None;
+    artifacts.uncommitted_audio = Some(file_path.clone());
     let _ = tokio::fs::remove_file(&reserve_path).await;
 
     if cancel_flag.load(Ordering::Relaxed) {
@@ -1005,6 +1305,7 @@ async fn perform_download(
         return Err(AppError::Other("Download cancelled".into()));
     }
     write_manifest(&app, &manifest)?;
+    artifacts.uncommitted_audio = None;
 
     emit_download_progress(
         &app,
@@ -1035,87 +1336,120 @@ pub async fn download_track(
     source: String,
     download_dir: Option<String>,
     name_template: Option<String>,
+    stream_type: Option<YtStreamType>,
+    expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
+    youtube_video_id: Option<String>,
+    youtube_quality: Option<String>,
 ) -> AppResult<()> {
-    {
-        let mut tasks = state.download_tasks.lock();
-        if let Some(existing) = tasks.get(&track_id) {
-            if !existing.handle.is_finished() {
-                return Err(AppError::Other("Track is already downloading".into()));
-            }
-        }
-        tasks.retain(|_, control| !control.handle.is_finished());
-    }
-
-    emit_download_progress(&app, &track_id, "start", None, None, None, None);
-
     let app_handle = app.clone();
     let task_track_id = track_id.clone();
     let client = state.http();
+    let hls_http = state.hls_transport();
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let task_cancel_flag = cancel_flag.clone();
-    let handle = tokio::spawn(async move {
-        // 全局并发上限（对齐 Android MAX_DOWNLOAD_PARALLELISM=8）：批量下载时其余任务
-        // 在此排队，避免数百并发流打崩带宽 / 触发平台风控（DL-8）
-        let _permit = download_semaphore().acquire().await;
-        let result = perform_download(
-            app_handle.clone(),
-            client,
-            task_cancel_flag,
-            url,
-            task_track_id.clone(),
-            title,
-            artist,
-            album,
-            duration_ms,
-            cover_url,
-            source,
-            download_dir,
-            name_template,
-        )
-        .await;
-
-        if let Err(err) = result {
-            let message = err.to_string();
-            if message.to_lowercase().contains("cancelled")
-                || message.to_lowercase().contains("canceled")
-            {
-                emit_download_progress(
-                    &app_handle,
-                    &task_track_id,
-                    "cancelled",
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-            } else if !message.contains("Track already downloaded") {
-                emit_download_progress(
-                    &app_handle,
-                    &task_track_id,
-                    "error",
-                    Some(&message),
-                    None,
-                    None,
-                    None,
-                );
+    register_download_task(&state.download_tasks, track_id, || {
+        emit_download_progress(&app, &task_track_id, "start", None, None, None, None);
+        let task_identity = task_cancel_flag.clone();
+        let handle = tokio::spawn(async move {
+            // 全局并发上限（对齐 Android MAX_DOWNLOAD_PARALLELISM=8）：批量下载时其余任务
+            // 在此排队，避免数百并发流打崩带宽 / 触发平台风控（DL-8）
+            let initial = recovery::Source {
+                url,
+                stream_type: stream_type.unwrap_or_default(),
+                content_length: expected_content_length,
+                content_md5: expected_content_md5,
+            };
+            let result = async {
+                let _permit = recovery::cancellable(&task_cancel_flag, async {
+                    download_semaphore()
+                        .acquire()
+                        .await
+                        .map_err(|error| AppError::Other(error.to_string()))
+                })
+                .await?;
+                let transfer = |candidate: recovery::Source| {
+                    perform_download(
+                        app_handle.clone(),
+                        client.clone(),
+                        task_cancel_flag.clone(),
+                        candidate.url,
+                        task_track_id.clone(),
+                        title.clone(),
+                        artist.clone(),
+                        album.clone(),
+                        duration_ms,
+                        cover_url.clone(),
+                        source.clone(),
+                        download_dir.clone(),
+                        name_template.clone(),
+                        candidate.stream_type,
+                        hls_http.clone(),
+                        candidate.content_length,
+                        candidate.content_md5,
+                    )
+                };
+                if let Some(video_id) = youtube_video_id.filter(|_| source == "youtube") {
+                    let quality = youtube_quality.unwrap_or_else(|| "high".into());
+                    recovery::run(
+                        initial,
+                        task_cancel_flag.clone(),
+                        Duration::from_secs(1),
+                        |avoid_direct| {
+                            refresh_youtube_download_source(
+                                app_handle.clone(),
+                                video_id.clone(),
+                                quality.clone(),
+                                avoid_direct,
+                            )
+                        },
+                        transfer,
+                    )
+                    .await
+                } else {
+                    recovery::cancellable(&task_cancel_flag, transfer(initial)).await
+                }
             }
-        }
+            .await;
 
-        app_handle
-            .state::<AppState>()
-            .download_tasks
-            .lock()
-            .remove(&task_track_id);
-    });
+            if let Err(err) = result {
+                let message = err.to_string();
+                if message.to_lowercase().contains("cancelled")
+                    || message.to_lowercase().contains("canceled")
+                {
+                    emit_download_progress(
+                        &app_handle,
+                        &task_track_id,
+                        "cancelled",
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                } else if !message.contains("Track already downloaded") {
+                    emit_download_progress(
+                        &app_handle,
+                        &task_track_id,
+                        "error",
+                        Some(&message),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
 
-    state.download_tasks.lock().insert(
-        track_id,
+            let _ = finish_download_task(
+                &app_handle.state::<AppState>().download_tasks,
+                &task_track_id,
+                &task_identity,
+            );
+        });
         crate::state::DownloadTaskControl {
             cancel_flag,
             handle,
-        },
-    );
-    Ok(())
+        }
+    })
 }
 
 /// 列出所有已下载的曲目
@@ -1217,12 +1551,260 @@ pub async fn reveal_file(path: String) -> AppResult<()> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn concurrent_download_registration_starts_only_one_job() {
+        let registry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let launched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = tokio::runtime::Handle::current();
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let registry = registry.clone();
+            let ready = ready.clone();
+            let launched = launched.clone();
+            let runtime = runtime.clone();
+            threads.push(std::thread::spawn(move || {
+                ready.wait();
+                register_download_task(&registry, "youtube:same".into(), || {
+                    launched.fetch_add(1, Ordering::AcqRel);
+                    crate::state::DownloadTaskControl {
+                        cancel_flag: Arc::new(AtomicBool::new(false)),
+                        handle: runtime.spawn(std::future::pending()),
+                    }
+                })
+            }));
+        }
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(launched.load(Ordering::Acquire), 1);
+        assert_eq!(registry.lock().len(), 1);
+        let controls = std::mem::take(&mut *registry.lock());
+        for control in controls.into_values() {
+            control.handle.abort();
+            let _ = control.handle.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_download_completion_cannot_remove_a_replacement_operation() {
+        let registry = parking_lot::Mutex::new(std::collections::HashMap::new());
+        let previous = Arc::new(AtomicBool::new(false));
+        let replacement = Arc::new(AtomicBool::new(false));
+        let handle = tokio::spawn(std::future::pending());
+        registry.lock().insert(
+            "youtube:same".into(),
+            crate::state::DownloadTaskControl {
+                cancel_flag: replacement.clone(),
+                handle,
+            },
+        );
+        assert!(finish_download_task(&registry, "youtube:same", &previous).is_none());
+        assert!(Arc::ptr_eq(
+            &registry.lock().get("youtube:same").unwrap().cancel_flag,
+            &replacement
+        ));
+        let current = finish_download_task(&registry, "youtube:same", &replacement).unwrap();
+        assert!(registry.lock().is_empty());
+        current.handle.abort();
+        let _ = current.handle.await;
+    }
+
+    #[tokio::test]
+    async fn ranged_hls_http_errors_keep_their_download_recovery_policy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let serve = tokio::spawn(async move {
+            for status in ["403 Forbidden", "410 Gone"] {
+                let (mut socket, _) = server.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut chunk = [0u8; 1024];
+                    let length = socket.read(&mut chunk).await.unwrap();
+                    assert!(length > 0 && request.len() + length <= 8192);
+                    request.extend_from_slice(&chunk[..length]);
+                }
+                assert!(String::from_utf8(request)
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("range: bytes=0-7"));
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for policy in [recovery::Retry::Playable, recovery::Retry::Refresh] {
+            let response = client
+                .get(format!("http://{address}/fragment"))
+                .header(reqwest::header::RANGE, "bytes=0-7")
+                .send()
+                .await
+                .unwrap();
+            let error =
+                crate::audio::hls::validate_response_status(response.status(), true).unwrap_err();
+            assert_eq!(recovery::retry(&error), policy);
+        }
+        serve.await.unwrap();
+        assert!(crate::audio::hls::validate_response_status(
+            reqwest::StatusCode::PARTIAL_CONTENT,
+            true
+        )
+        .is_ok());
+        assert!(
+            crate::audio::hls::validate_response_status(reqwest::StatusCode::OK, true)
+                .unwrap_err()
+                .to_string()
+                .contains("server ignored byte range")
+        );
+    }
+
+    #[tokio::test]
+    async fn youtube_download_cancel_drops_inflight_transfer_and_owned_markers() {
+        let root = tempfile::tempdir().unwrap();
+        let part = root.path().join("cancel.aac.part");
+        let reservation = root.path().join("cancel.aac.reserve");
+        let other = root.path().join("unrelated.aac.part");
+        std::fs::write(&other, b"keep").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let stop = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            flag.store(true, Ordering::Release);
+        });
+        let part_for_transfer = part.clone();
+        let reserve_for_transfer = reservation.clone();
+        let result: AppResult<()> = recovery::run(
+            recovery::Source {
+                url: "fixture:waiting".into(),
+                stream_type: YtStreamType::Direct,
+                content_length: None,
+                content_md5: None,
+            },
+            cancel,
+            Duration::ZERO,
+            |_| async { panic!("cancelled transfer must not resolve") },
+            move |_| {
+                let part = part_for_transfer.clone();
+                let reservation = reserve_for_transfer.clone();
+                async move {
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&part)
+                        .unwrap();
+                    std::fs::write(&reservation, b"").unwrap();
+                    let artifacts = DownloadArtifacts {
+                        part: Some(part),
+                        reservations: vec![reservation],
+                        uncommitted_audio: None,
+                    };
+                    let _: () = std::future::pending().await;
+                    drop(file);
+                    drop(artifacts);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        stop.await.unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(!part.exists());
+        assert!(!reservation.exists());
+        assert_eq!(std::fs::read(other).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn youtube_download_uncommitted_audio_is_removed_but_completed_file_survives() {
+        let root = tempfile::tempdir().unwrap();
+        let failed = root.path().join("failed.aac");
+        let completed = root.path().join("completed.aac");
+        std::fs::write(&failed, b"aac").unwrap();
+        std::fs::write(&completed, b"aac").unwrap();
+        {
+            let _owned = DownloadArtifacts {
+                uncommitted_audio: Some(failed.clone()),
+                part: None,
+                reservations: vec![],
+            };
+        }
+        {
+            let mut owned = DownloadArtifacts {
+                uncommitted_audio: Some(completed.clone()),
+                part: None,
+                reservations: vec![],
+            };
+            owned.uncommitted_audio = None;
+        }
+        assert!(!failed.exists());
+        assert!(completed.exists());
+    }
+
+    #[test]
+    fn android_alignment_download_checks_source_md5_and_duration() {
+        use md5::{Digest, Md5};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audio.part");
+        let bytes = include_bytes!("../audio/fixtures/hls-silence.aac");
+        std::fs::write(&path, bytes).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let checksum = hex::encode(Md5::digest(bytes));
+        assert!(
+            validate_download_audio(
+                &path,
+                Some(bytes.len() as u64),
+                Some(&checksum),
+                275_000,
+                &cancelled
+            )
+            .unwrap()
+                > 0
+        );
+        assert!(
+            validate_download_audio(&path, None, Some(&"00".repeat(16)), 0, &cancelled).is_err()
+        );
+        assert!(validate_download_audio(&path, None, None, 275_000, &cancelled).is_err());
+        assert!(
+            validate_download_audio(&path, Some(bytes.len() as u64 + 1), None, 0, &cancelled)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn android_alignment_download_rejects_error_bodies_and_cancelled_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audio.part");
+        std::fs::write(&path, b"<html>Access denied</html>").unwrap();
+        assert!(validate_download_audio(&path, None, None, 0, &AtomicBool::new(false)).is_err());
+        let bytes = include_bytes!("../audio/fixtures/hls-silence.aac");
+        std::fs::write(&path, bytes).unwrap();
+        assert!(validate_download_audio(&path, None, None, 0, &AtomicBool::new(true)).is_err());
+    }
+
     /// 非法字符、控制字符替换为下划线，键盘可见字符原样保留
     #[test]
     fn sanitize_replaces_illegal_and_control_chars() {
-        assert_eq!(sanitize_filename("a/b\\c:d*e?f\"g<h>i|j"), "a_b_c_d_e_f_g_h_i_j");
-        assert_eq!(sanitize_filename("bad\u{0}name\u{1f}\ttail"), "bad_name__tail");
-        assert_eq!(sanitize_filename("正常 - 歌名 (Live)"), "正常 - 歌名 (Live)");
+        assert_eq!(
+            sanitize_filename("a/b\\c:d*e?f\"g<h>i|j"),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        assert_eq!(
+            sanitize_filename("bad\u{0}name\u{1f}\ttail"),
+            "bad_name__tail"
+        );
+        assert_eq!(
+            sanitize_filename("正常 - 歌名 (Live)"),
+            "正常 - 歌名 (Live)"
+        );
     }
 
     /// Windows 不允许结尾的点与空格
@@ -1249,7 +1831,10 @@ mod tests {
     #[test]
     fn sanitize_truncates_stem_to_180_bytes_at_char_boundary() {
         let long_ascii = "a".repeat(400);
-        assert_eq!(sanitize_filename(&long_ascii).len(), MAX_FILENAME_STEM_BYTES);
+        assert_eq!(
+            sanitize_filename(&long_ascii).len(),
+            MAX_FILENAME_STEM_BYTES
+        );
 
         // 中文 3 字节/字：180/3=60 字整除；用 61+ 字验证边界处理
         let long_cjk = "歌".repeat(100);
@@ -1285,7 +1870,10 @@ mod tests {
         std::fs::write(&audio, b"x").unwrap();
         // 把 stale 的 mtime 拨回 2 小时前
         let old_time = std::time::SystemTime::now() - Duration::from_secs(7_200);
-        let file = std::fs::OpenOptions::new().write(true).open(&stale).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap();
         file.set_modified(old_time).unwrap();
         drop(file);
         let file = std::fs::OpenOptions::new()

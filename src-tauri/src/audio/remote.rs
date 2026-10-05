@@ -117,6 +117,7 @@ pub struct RemoteAudioCache {
     staging: Arc<Mutex<CacheStaging>>,
     ready_path: PathBuf,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     expected_duration_ms: Option<u64>,
     max_cache_bytes: u64,
     published_path: Arc<Mutex<Option<PathBuf>>>,
@@ -185,7 +186,7 @@ impl RemoteReadCancellation {
         self
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         if self.session_cancelled.load(Ordering::Acquire) {
             return true;
         }
@@ -1476,11 +1477,38 @@ impl RemoteAudioCache {
             staging: Arc::new(Mutex::new(CacheStaging { path: None })),
             ready_path: dir.join(format!("{}.ready", digest)),
             expected_content_length: expected_content_length.filter(|length| *length > 0),
+            expected_content_md5: None,
             expected_duration_ms: (expected_duration_ms > 0).then_some(expected_duration_ms),
             max_cache_bytes,
             published_path: Arc::new(Mutex::new(None)),
             bypass_ready: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn with_expected_md5(mut self, value: Option<&str>) -> AppResult<Self> {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(AppError::Api("Playback source checksum is invalid".into()));
+            }
+            self.expected_content_md5 = Some(value.to_ascii_lowercase());
+        }
+        Ok(self)
+    }
+
+    fn validate_expected_md5(&self, path: &Path) -> io::Result<()> {
+        let Some(expected) = self.expected_content_md5.as_deref() else { return Ok(()) };
+        let mut file = File::open(path)?;
+        let mut digest = md5::Md5::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break }
+            digest.update(&buffer[..count]);
+        }
+        if hex::encode(digest.finalize()) != expected {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "cache MD5 does not match playback source"));
+        }
+        Ok(())
     }
 
     pub fn ready_path(&self) -> Option<PathBuf> {
@@ -1561,6 +1589,10 @@ impl RemoteAudioCache {
             return None;
         }
 
+        if self.validate_expected_md5(&path).is_err() {
+            log::warn!(target: "remote-cache", "lookup miss digest={} reason=source_checksum", digest_prefix);
+            return None;
+        }
         if let Ok(mut published) = self.published_path.lock() {
             *published = Some(path.clone());
         }
@@ -1590,6 +1622,7 @@ impl RemoteAudioCache {
             staging: Arc::new(Mutex::new(CacheStaging { path: None })),
             ready_path: self.ready_path.clone(),
             expected_content_length: self.expected_content_length,
+            expected_content_md5: self.expected_content_md5.clone(),
             expected_duration_ms: self.expected_duration_ms,
             max_cache_bytes: self.max_cache_bytes,
             published_path: Arc::new(Mutex::new(None)),
@@ -1725,6 +1758,7 @@ impl RemoteAudioCache {
             return Ok(());
         }
         let staging_path = self.staging_path()?;
+        self.validate_expected_md5(&staging_path)?;
         let validated = validate_cache_file(
             &staging_path,
             std::fs::metadata(&staging_path)?.len(),
@@ -1733,7 +1767,8 @@ impl RemoteAudioCache {
             None,
         )
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        File::open(&staging_path)?.sync_all()?;
+        // Windows 的 FlushFileBuffers 需要可写句柄
+        std::fs::OpenOptions::new().read(true).write(true).open(&staging_path)?.sync_all()?;
 
         let staging_stem = staging_path
             .file_stem()
@@ -1924,10 +1959,12 @@ fn validate_published_cache_file(
     )
     .is_none()
     {
-        // 文件名已包含 SHA-256，长度也与 marker 一致
-        // 完整性已由下载流程保证，跳过昂贵的 symphonia
-        // probe that reopens and parses the entire container (very slow for large
-        // ISO-MP4 files in debug builds).
+        // 冷启动或文件已变化时重新检查内容，文件名不能证明文件仍然完整
+        // 校验摘要即可，无需再次解析整个音频容器
+        let actual = sha256_file(path).map_err(|err| format!("cache hash failed: {err}"))?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err("cache SHA-256 mismatch".into());
+        }
     }
     let validated = ValidatedCacheFile {
         content_length,
@@ -2247,6 +2284,7 @@ pub struct SymphoniaAudioDecoder {
     total_duration: Option<Time>,
     buffer: SampleBuffer<f32>,
     spec: SignalSpec,
+    retry_virtual_body_edges: bool,
 }
 
 impl SymphoniaAudioDecoder {
@@ -2419,6 +2457,7 @@ impl SymphoniaAudioDecoder {
             total_duration,
             buffer,
             spec,
+            retry_virtual_body_edges: false,
         })
     }
 
@@ -2520,6 +2559,7 @@ impl SymphoniaAudioDecoder {
             total_duration,
             buffer,
             spec,
+            retry_virtual_body_edges: enable_seek_after_probe.is_some(),
         })
     }
 
@@ -2645,6 +2685,7 @@ impl SymphoniaAudioDecoder {
             total_duration,
             buffer,
             spec,
+            retry_virtual_body_edges: true,
         })
     }
 
@@ -2745,7 +2786,8 @@ impl Iterator for SymphoniaAudioDecoder {
                         continue;
                     }
                     Err(SymphoniaError::IoError(err))
-                        if consecutive_io < MAX_VIRTUAL_BODY_SKIP_PACKETS
+                        if self.retry_virtual_body_edges
+                            && consecutive_io < MAX_VIRTUAL_BODY_SKIP_PACKETS
                             // Interrupted 一律是取消令牌（superseded/停会话），对本次
                             // 操作是永久态：重试 3 次只是把新 seek 的接管拖慢 60ms，
                             // 还会在日志里刷出误导性的 retry 噪音
@@ -2766,6 +2808,8 @@ impl Iterator for SymphoniaAudioDecoder {
                         std::thread::sleep(Duration::from_millis(20));
                         continue;
                     }
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == io::ErrorKind::UnexpectedEof => return None,
                     Err(err) => {
                         log::warn!(
                             target: "remote-audio",
@@ -4208,6 +4252,17 @@ fn seek_error(message: String) -> PcmSeekError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_alignment_completed_aac_reaches_eof_without_virtual_body_waits() {
+        let started = std::time::Instant::now();
+        let decoder = super::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())),
+            Some("aac"),
+        ).unwrap();
+        assert_eq!(decoder.count(), 9216);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "normal EOF must not retry for 5.12 seconds");
+    }
+
     use super::{
         adaptive_block_bytes, cache_duration_is_suspicious, ewma_bps_after_failure,
         ewma_bps_after_success, format_cache_marker, halved_fetch_len, is_fragmented_mp4_url,
@@ -6124,6 +6179,49 @@ mod tests {
             Some(&sha256),
         )
         .is_none());
+    }
+
+    #[test]
+    fn android_alignment_published_cache_rejects_same_length_corruption_without_a_stamp() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().expect("temporary cache");
+        let original = b"abcdefgh";
+        let hash = hex::encode(Sha256::digest(original));
+        let name = format!("cached.{hash}.audio");
+        let path = root.path().join(&name);
+        std::fs::write(&path, b"ABCDEFGH").expect("corrupted file");
+        assert!(super::validate_published_cache_file(&path, 8, Some(8), None, &hash, &name).is_err());
+    }
+
+    #[test]
+    fn android_alignment_published_cache_accepts_a_verified_cold_file_without_reprobing_audio() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().expect("temporary cache");
+        let bytes = b"abcdefgh";
+        let hash = hex::encode(Sha256::digest(bytes));
+        let name = format!("cached.{hash}.audio");
+        let path = root.path().join(&name);
+        std::fs::write(&path, bytes).expect("published file");
+        assert!(super::validate_published_cache_file(&path, 8, Some(8), None, &hash, &name).is_ok());
+    }
+
+    #[test]
+    fn android_alignment_source_md5_is_checked_before_publication_and_reuse() {
+        use sha2::Digest;
+        let root = tempfile::tempdir().expect("temporary cache");
+        let wav = pcm_wav(800);
+        let checksum = hex::encode(md5::Md5::digest(&wav));
+        let cache = RemoteAudioCache::new(root.path().to_path_buf(), "md5-source", 1024 * 1024, Some(wav.len() as u64), 100)
+            .unwrap().with_expected_md5(Some(&checksum)).unwrap();
+        cache.publish_complete_bytes(&wav).unwrap();
+        assert!(cache.ready_path().is_some());
+        let wrong = "00".repeat(16);
+        assert!(cache.clone().with_expected_md5(Some(&wrong)).unwrap().ready_path().is_none());
+        let bad = RemoteAudioCache::new(root.path().to_path_buf(), "md5-mismatch", 1024 * 1024, Some(wav.len() as u64), 100)
+            .unwrap().with_expected_md5(Some(&wrong)).unwrap();
+        assert!(bad.publish_complete_bytes(&wav).is_err());
+        assert!(!bad.ready_path.exists());
+        assert!(cache.with_expected_md5(Some("invalid")).is_err());
     }
 
     #[test]

@@ -78,7 +78,7 @@ impl FallbackHttp {
     ) -> Result<Response, reqwest::Error> {
         let error = match build(&self.primary).send().await {
             Ok(response) => return Ok(response),
-            Err(error) => error,
+            Err(error) => error.without_url(),
         };
         let Some(fallback) = self.fallback.as_ref().filter(|_| retryable(&error)) else {
             return Err(error);
@@ -89,7 +89,10 @@ impl FallbackHttp {
             self.target,
             error,
         );
-        build(fallback).send().await
+        build(fallback)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
     }
 }
 
@@ -110,7 +113,9 @@ pub async fn parse_json_response<T: serde::de::DeserializeOwned>(
     let body = response
         .text()
         .await
-        .map_err(|error| AppError::Api(format!("{context}: failed to read body: {error}")))?;
+        .map_err(|error| {
+            AppError::Api(format!("{context}: failed to read body: {}", error.without_url()))
+        })?;
 
     if !status.is_success() {
         return Err(AppError::Api(format!(
@@ -147,7 +152,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpSocket};
 
     /// 测试必须绕开系统代理：mock server 监听回环地址
     fn client() -> Client {
@@ -179,12 +184,12 @@ mod tests {
         (format!("http://{address}"), hits)
     }
 
-    /// 关掉监听后端口立刻拒绝连接，用来模拟「代理配错，主路不通」
-    async fn dead_address() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{address}")
+    // 保留未监听的端口，避免并行测试的服务复用它并把失败请求接走
+    fn dead_address() -> (String, TcpSocket) {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = socket.local_addr().unwrap();
+        (format!("http://{address}"), socket)
     }
 
     #[tokio::test]
@@ -205,9 +210,9 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_retries_once_on_the_fallback() {
-        let dead = dead_address().await;
+        let (dead, _reservation) = dead_address();
         let (live_url, live_hits) = mock_server("200 OK").await;
-        // 用 URL 区分两条路：主路指向已关闭端口，兜底指向存活服务
+        // 保留未监听端口，避免并行测试复用端口后误判主路成功
         let transport = FallbackHttp::with_fallback(&client(), &client(), "test");
         let attempt = AtomicUsize::new(0);
 
@@ -285,8 +290,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_errors_preserve_failure_kind_without_signed_urls() {
+        let (address, _reservation) = dead_address();
+        let dead = format!("{address}?pot=private-fixture-token");
+        for transport in [
+            FallbackHttp::new(&client(), "test"),
+            FallbackHttp::with_fallback(&client(), &client(), "test"),
+        ] {
+            let error = transport.send(|client| client.get(&dead)).await.unwrap_err();
+            assert!(is_transport_failure(&error));
+            assert!(error.url().is_none());
+            assert!(!error.to_string().contains("private-fixture-token"));
+        }
+    }
+
+    #[tokio::test]
     async fn without_a_fallback_the_original_error_is_returned() {
-        let dead = dead_address().await;
+        let (dead, reservation) = dead_address();
+        assert!(TcpListener::bind(reservation.local_addr().unwrap()).await.is_err());
         let transport = FallbackHttp::new(&client(), "test");
 
         let error = transport.send(|client| client.get(&dead)).await.unwrap_err();

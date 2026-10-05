@@ -19,6 +19,7 @@ import {
   normalizeBitrateKbps,
   playbackCacheReadCandidates,
   playbackCacheWriteOptions,
+  selectPlaybackCandidate,
   playbackPrefetchCacheId,
   playbackUrlResolver,
   resolvePlaybackResult,
@@ -29,7 +30,7 @@ import {
   type PlaybackResolution,
   type ResolvedPlaybackSource,
 } from '@/modules/playback/playbackSource'
-import { PlaybackPrefetchManager } from '@/modules/playback/playbackPrefetch'
+import { playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 import {
   PlaybackStartupWatchdog,
   resolvePlaybackFailureAdvanceAction,
@@ -299,7 +300,6 @@ let lastTrackEndedId: string | null = null
 let lastTrackEndedTime = 0
 
 // 播放抽象层：解析缓存、预热仲裁、启动看门狗
-const playbackPrefetchManager = new PlaybackPrefetchManager()
 const playbackStartupWatchdog = new PlaybackStartupWatchdog()
 let startupRecoveryAttempts = 0
 const MAX_STARTUP_RECOVERY_ATTEMPTS = 2
@@ -702,10 +702,12 @@ export const usePlayerStore = defineStore('player', () => {
     track: TrackInfo,
     forceRefresh = false,
     qualityOverride?: string,
+    avoidDirect = false,
   ): Promise<PlaybackResolution> {
     return resolvePlaybackResult(track, playbackSourceSettings(), {
       forceRefresh,
       qualityOverride,
+      avoidDirect,
       requestGeneration: playbackRequestToken,
     })
   }
@@ -1351,6 +1353,7 @@ export const usePlayerStore = defineStore('player', () => {
               const candidateStarted = performance.now()
               try {
                 const cacheWrite = playbackCacheWriteOptions(resolved, candidateIndex)
+                const selected = selectPlaybackCandidate(resolved, candidateIndex)
                   const startPlan = currentLoadStartPlan()
                   tracePlaybackUi(
                     'backend_stream_start',
@@ -1360,7 +1363,7 @@ export const usePlayerStore = defineStore('player', () => {
                   )
                   const duration = await playRemoteUrl(
                   candidateUrl,
-                  track.durationMs,
+                  resolved.durationMs || track.durationMs,
                   startPlan.useCrossfade,
                   transitionFadeOutMs,
                   transitionFadeInMs,
@@ -1368,10 +1371,13 @@ export const usePlayerStore = defineStore('player', () => {
                   startPlan.positionMs,
                   cacheWrite.cacheKey,
                   cacheWrite.expectedContentLength,
+                  cacheWrite.expectedContentMd5,
+                  selected.streamType,
                   )
                   if (token === playbackRequestToken) {
                     currentStreamUrl.value = candidateUrl
                     currentResolvedStreamUrls = candidates.slice(candidateIndex)
+                    result = selectPlaybackCandidate(resolved, candidateIndex)
                   }
                   markLoadStartApplied(startPlan)
                   tracePlaybackUi(
@@ -1407,7 +1413,16 @@ export const usePlayerStore = defineStore('player', () => {
             )
             if (refreshed.type !== 'success') throw firstError
             result = refreshed
-            dur = await playResolvedSource(result)
+            try {
+              dur = await playResolvedSource(result)
+            } catch (refreshError) {
+              if (token !== playbackRequestToken) return
+              if (getPlaybackSourceKind(track) !== 'youtube' || result.streamType === 'hls') throw refreshError
+              const hls = await resolvePlaybackUrl(track, true, undefined, true)
+              if (hls.type !== 'success') throw refreshError
+              result = hls
+              dur = await playResolvedSource(result)
+            }
           }
           if (token !== playbackRequestToken) return
           {
@@ -2260,6 +2275,8 @@ export const usePlayerStore = defineStore('player', () => {
 
     await Promise.allSettled([
       invoke('set_volume', { level: volume.value }),
+      invoke('set_audio_output_device', { name: settings.audioOutputDevice || null })
+        .catch(() => invoke('set_audio_output_device', { name: null })),
       invoke('set_speed', { speed: effectivePlaybackSpeed() }),
       invoke('set_loudness_gain', { gainMb: loudnessGainMb.value }),
       invoke('set_normalize_volume', { enabled: settings.normalizeVolume }),
@@ -2511,6 +2528,8 @@ async function playRemoteUrl(
   startPositionMs = 0,
   cacheKey?: string,
   expectedContentLength?: number,
+  expectedContentMd5?: string,
+  streamType: 'direct' | 'hls' = 'direct',
 ): Promise<number> {
   const safeStartMs = Math.max(0, Math.round(startPositionMs))
   const cacheLimitBytes = playbackCacheLimitBytes()
@@ -2524,6 +2543,8 @@ async function playRemoteUrl(
         cacheKey,
         cacheLimitBytes,
         expectedContentLength,
+        expectedContentMd5,
+        streamType,
         requestGeneration,
       })
     } catch (streamError) {
@@ -2540,6 +2561,8 @@ async function playRemoteUrl(
         cacheKey,
         cacheLimitBytes,
         expectedContentLength,
+        expectedContentMd5,
+        streamType,
         requestGeneration,
       })
     }
@@ -2553,6 +2576,8 @@ async function playRemoteUrl(
       cacheKey,
       cacheLimitBytes,
       expectedContentLength,
+      expectedContentMd5,
+      streamType,
       requestGeneration,
     })
   } catch (streamError) {
@@ -2568,6 +2593,8 @@ async function playRemoteUrl(
       cacheKey,
       cacheLimitBytes,
       expectedContentLength,
+      expectedContentMd5,
+      streamType,
       requestGeneration,
     })
   }

@@ -2,6 +2,7 @@ import type { TrackInfo } from '@/stores/player'
 import {
   isRemotePlaybackTrack,
   playbackPrefetchCacheId,
+  playbackResolutionExpiresAt,
   type PlaybackSourceSettings,
   type PlaybackUrlResolver,
   type ResolvedPlaybackSource,
@@ -105,7 +106,7 @@ export class PlaybackPrefetchManager {
     }
     this.entries.set(cacheKey, {
       result,
-      expiresAt: Date.now() + this.ttlMs,
+      expiresAt: playbackResolutionExpiresAt(result, Date.now(), this.ttlMs),
     })
   }
 
@@ -116,3 +117,5 @@ export class PlaybackPrefetchManager {
     }
   }
 }
+
+export const playbackPrefetchManager = new PlaybackPrefetchManager()

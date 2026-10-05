@@ -1,4 +1,5 @@
 use crate::audio::growing::GrowingAudioBuffer;
+use crate::api::youtube::client::YtStreamType;
 use crate::audio::player::{
     receive_fade_result, wait_for_play_result, wait_for_seek_result, PlayRequest, PlayerEngine,
 };
@@ -660,16 +661,22 @@ pub async fn play_url(
 #[tauri::command]
 pub async fn play_url_fast(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     start_position_ms: Option<u64>,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, start_position_ms.unwrap_or(0), None, &state, request_generation, cache).await;
+    }
     log::info!(
         target: "play_url_fast",
         "start: url_len={}, hint={}ms",
@@ -683,6 +690,7 @@ pub async fn play_url_fast(
         expected_content_length,
         duration_hint_ms,
     );
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     let path = match cache {
         Some(cache) => download_url_to_playback_cache(
             &url,
@@ -715,11 +723,13 @@ pub async fn play_url_fast(
 #[tauri::command]
 pub async fn play_url_streaming(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     start_position_ms: Option<u64>,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
@@ -727,6 +737,10 @@ pub async fn play_url_streaming(
     let command_started = std::time::Instant::now();
     let host = playback_url_host(&url);
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, start_position_ms.unwrap_or(0), None, &state, request_generation, cache).await;
+    }
     log::info!(
         target: "play_url_streaming",
         "start generation={}, host={}, url_len={}, hint_ms={}, start_ms={}, cache={}",
@@ -746,6 +760,7 @@ pub async fn play_url_streaming(
         duration_hint_ms,
     );
 
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     if let Some(path) = lookup_ready_playback_cache(cache.as_ref(), request_generation).await? {
         log::info!(
             target: "play_url_streaming",
@@ -867,6 +882,111 @@ pub async fn play_url_streaming(
     .await
 }
 
+async fn play_hls_url(
+    url: String,
+    duration_hint_ms: u64,
+    start_position_ms: u64,
+    fade: Option<(u32, u32)>,
+    state: &State<'_, AppState>,
+    request_generation: u64,
+    cache: Option<RemoteAudioCache>,
+) -> AppResult<u64> {
+    if let Some(path) = lookup_ready_playback_cache(cache.as_ref(), request_generation).await? {
+        ensure_playback_request(state, request_generation)?;
+        let path = path.to_string_lossy().to_string();
+        let result = run_player_play(Arc::clone(&state.player), move |player| {
+            if let Some((fade_out_ms, fade_in_ms)) = fade {
+                player.request_crossfade_file_with_hint(
+                    &path,
+                    duration_hint_ms,
+                    fade_out_ms,
+                    fade_in_ms,
+                    request_generation,
+                )
+            } else {
+                player.request_play_file_at_with_hint(
+                    &path,
+                    duration_hint_ms,
+                    start_position_ms,
+                    request_generation,
+                )
+            }
+        })
+        .await;
+        match result {
+            Ok(duration) => {
+                return Ok(if duration > 0 {
+                    duration
+                } else {
+                    duration_hint_ms
+                })
+            }
+            Err(_) => {
+                ensure_playback_request(state, request_generation)?;
+                if let Some(cache) = &cache {
+                    cache.bypass_ready_for_session();
+                }
+            }
+        }
+    }
+    let stream = crate::audio::hls::start_hls_stream(
+        state.hls_transport(),
+        url,
+        Arc::clone(&state.playback_generation),
+        request_generation,
+        cache,
+    )
+    .await?;
+    let startup = stream.buffer.clone();
+    let ready =
+        tokio::task::spawn_blocking(move || startup.wait_for_buffer(1, STREAM_START_TIMEOUT))
+            .await
+            .map_err(|error| AppError::Other(error.to_string()))
+            .and_then(|result| result.map_err(AppError::Audio));
+    if let Err(error) = ready {
+        stream.buffer.abort();
+        return Err(error);
+    }
+    if let Err(error) = ensure_playback_request(state, request_generation) {
+        stream.buffer.abort();
+        return Err(error);
+    }
+    let reader = stream.buffer.reader();
+    let result = run_player_play(Arc::clone(&state.player), move |player| {
+        if let Some((fade_out_ms, fade_in_ms)) = fade {
+            player.request_crossfade_stream(
+                reader,
+                duration_hint_ms,
+                fade_out_ms,
+                fade_in_ms,
+                request_generation,
+            )
+        } else {
+            player.request_play_stream_at(
+                reader,
+                duration_hint_ms,
+                start_position_ms,
+                request_generation,
+            )
+        }
+    })
+    .await;
+    match result {
+        Ok(duration) => {
+            stream.commit();
+            Ok(if duration > 0 {
+                duration
+            } else {
+                duration_hint_ms
+            })
+        }
+        Err(error) => {
+            stream.buffer.abort();
+            Err(error)
+        }
+    }
+}
+
 async fn play_url_streaming_fallback(
     url: &str,
     duration_hint_ms: u64,
@@ -986,6 +1106,20 @@ pub async fn toggle_play_pause(state: State<'_, AppState>) -> AppResult<bool> {
 pub async fn set_volume(level: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_volume(level);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_audio_output_devices() -> AppResult<Vec<crate::audio::player::AudioOutputDevice>> {
+    tokio::task::spawn_blocking(crate::audio::player::list_audio_output_devices)
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_audio_output_device(name: Option<String>, state: State<'_, AppState>) -> AppResult<()> {
+    let request = state.player.lock().request_output_device(name)?;
+    tokio::task::spawn_blocking(move || request.wait())
+        .await.map_err(|error| AppError::Other(error.to_string()))?
 }
 
 #[tauri::command]
@@ -1115,17 +1249,23 @@ pub async fn crossfade_url(
 #[tauri::command]
 pub async fn crossfade_url_fast(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     fade_out_ms: u32,
     fade_in_ms: u32,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, 0, Some((fade_out_ms, fade_in_ms)), &state, request_generation, cache).await;
+    }
     let cache = playback_cache(
         &app,
         cache_key.as_deref(),
@@ -1133,6 +1273,7 @@ pub async fn crossfade_url_fast(
         expected_content_length,
         duration_hint_ms,
     );
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     let path = match cache {
         Some(cache) => download_url_to_playback_cache(
             &url,
@@ -1164,17 +1305,23 @@ pub async fn crossfade_url_fast(
 #[tauri::command]
 pub async fn crossfade_url_streaming(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     fade_out_ms: u32,
     fade_in_ms: u32,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, 0, Some((fade_out_ms, fade_in_ms)), &state, request_generation, cache).await;
+    }
     log::info!(
         target: "crossfade_url_streaming",
         "start: url_len={}, hint={}ms",
@@ -1189,6 +1336,7 @@ pub async fn crossfade_url_streaming(
         duration_hint_ms,
     );
 
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     if let Some(path) = lookup_ready_playback_cache(cache.as_ref(), request_generation).await? {
         log::info!(
             target: "crossfade_url_streaming",

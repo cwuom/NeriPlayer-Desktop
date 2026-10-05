@@ -62,6 +62,7 @@ export interface AppSettings {
   ltAutoPauseOnMemberChange: boolean
   ltShareAudioLinks: boolean
   volume: number
+  audioOutputDevice: string
   playbackSpeed: number
   loudnessGainMb: number
   equalizerEnabled: boolean
@@ -140,6 +141,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   ltAutoPauseOnMemberChange: true,
   ltShareAudioLinks: true,
   volume: 1,
+  audioOutputDevice: '',
   playbackSpeed: 1,
   loudnessGainMb: 0,
   equalizerEnabled: false,
@@ -302,6 +304,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
     MAX_MEDIA_CACHE_SIZE_MB,
   )
   result.volume = clamp(result.volume, 0, 1)
+  result.audioOutputDevice = result.audioOutputDevice.trim()
   result.playbackSpeed = clamp(result.playbackSpeed, 0.25, 3)
   result.loudnessGainMb = clamp(Math.round(result.loudnessGainMb), 0, 1500)
   result.equalizerBands = result.equalizerBands.slice(0, 5).map(value => clamp(Math.round(value), -1500, 1500))
@@ -381,6 +384,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const ltAutoPauseOnMemberChange = ref(initial.ltAutoPauseOnMemberChange)
   const ltShareAudioLinks = ref(initial.ltShareAudioLinks)
   const volume = ref(initial.volume)
+  const audioOutputDevice = ref(initial.audioOutputDevice)
   const playbackSpeed = ref(initial.playbackSpeed)
   const loudnessGainMb = ref(initial.loudnessGainMb)
   const equalizerEnabled = ref(initial.equalizerEnabled)
@@ -400,7 +404,7 @@ export const useSettingsStore = defineStore('settings', () => {
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
     logToFile, logLevel,
     maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
-    ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume,
+    ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
     playbackSpeed, loudnessGainMb, equalizerEnabled, equalizerPresetId,
     equalizerBands,
   }
@@ -485,7 +489,7 @@ export const useSettingsStore = defineStore('settings', () => {
     internationalizationEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
-    ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, playbackSpeed,
+    ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands,
   }
 })

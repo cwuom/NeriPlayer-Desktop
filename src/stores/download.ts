@@ -7,6 +7,7 @@ import { useSettingsStore } from './settings'
 import { useToastStore } from './toast'
 import i18n from '@/i18n'
 import { createLogger } from '@/utils/logger'
+import { resolveDownloadSource } from '@/modules/playback/playbackSource'
 import {
   consumeResolvingCancellation,
   markResolvingTasksCancelled,
@@ -293,43 +294,7 @@ export const useDownloadStore = defineStore('download', () => {
     toast.success((i18n.global as any).t('download.downloading'))
 
     try {
-      let audioUrl = ''
-
-      if (track.id.startsWith('netease:')) {
-        const settings = useSettingsStore()
-        const songId = parseInt(track.id.replace('netease:', ''))
-        const result = await invoke<{ url: string | null }>('get_netease_song_url', {
-          songId,
-          quality: settings.neteaseQuality,
-        })
-        if (!result.url) throw new Error('No URL')
-        audioUrl = result.url
-      } else if (track.id.startsWith('qq:')) {
-        const settings = useSettingsStore()
-        const songMid = track.id.replace('qq:', '')
-        const result = await invoke<{ url: string | null }>('get_qq_song_url', {
-          songMid,
-          quality: settings.qqMusicQuality,
-        })
-        if (!result.url) throw new Error('No QQ Music URL')
-        audioUrl = result.url
-      } else if (track.id.startsWith('bilibili:')) {
-        const biliId = track.id.replace('bilibili:', '')
-        const isAvid = /^\d+$/.test(biliId)
-        const cidMatch = track.album?.match(/^Bilibili\|(\d+)/)
-        const cid = cidMatch ? parseInt(cidMatch[1]) : undefined
-        const result = await invoke<{ url: string }>('get_bili_audio_url', {
-          bvid: isAvid ? '' : biliId,
-          avid: isAvid ? parseInt(biliId) : null,
-          cid: cid || null,
-        })
-        audioUrl = result.url
-      } else if (track.id.startsWith('youtube:')) {
-        const videoId = track.id.replace('youtube:', '')
-        const streams = await invoke<{ url: string }[]>('get_youtube_audio_url', { videoId })
-        if (!streams?.[0]?.url) throw new Error('No YouTube stream')
-        audioUrl = streams[0].url
-      } else {
+      if (source === 'local') {
         // 本地文件无需下载
         toast.error((i18n.global as any).t('player.not_available'))
         if (resolvingRequestTokens.get(track.id) === requestToken) {
@@ -340,6 +305,15 @@ export const useDownloadStore = defineStore('download', () => {
         downloading.value = new Map(downloading.value)
         return
       }
+
+      const settings = useSettingsStore()
+      const youtubeQuality = settings.youtubeQuality
+      const resolved = await resolveDownloadSource(track, {
+        neteaseQuality: settings.neteaseQuality,
+        qqMusicQuality: settings.qqMusicQuality,
+        biliQuality: settings.biliQuality,
+        youtubeQuality,
+      })
 
       // 解析期间被取消则不再启动后端下载（DL-7）
       if (consumeResolvingCancellation(resolvingCancelled, requestToken)) {
@@ -353,12 +327,17 @@ export const useDownloadStore = defineStore('download', () => {
 
       // 确定来源
       await invoke('download_track', {
-        url: audioUrl,
+        url: resolved.url,
+        streamType: resolved.streamType ?? 'direct',
+        expectedContentLength: resolved.expectedContentLength,
+        expectedContentMd5: resolved.expectedContentMd5,
+        youtubeVideoId: source === 'youtube' ? track.id.slice('youtube:'.length) : null,
+        youtubeQuality: source === 'youtube' ? youtubeQuality : null,
         trackId: track.id,
         title: track.title,
         artist: track.artist,
         album: track.album || '',
-        durationMs: track.durationMs,
+        durationMs: resolved.durationMs || track.durationMs,
         coverUrl: track.coverUrl || null,
         source,
         downloadDir: useSettingsStore().downloadDir || null,

@@ -79,6 +79,7 @@ pub struct AppSettings {
     pub lt_auto_pause_on_member_change: bool,
     pub lt_share_audio_links: bool,
     pub volume: f32,
+    pub audio_output_device: String,
     pub playback_speed: f32,
     pub loudness_gain_mb: i32,
     pub equalizer_enabled: bool,
@@ -145,6 +146,7 @@ impl Default for AppSettings {
             lt_auto_pause_on_member_change: true,
             lt_share_audio_links: true,
             volume: 1.0,
+            audio_output_device: String::new(),
             playback_speed: 1.0,
             loudness_gain_mb: 0,
             equalizer_enabled: false,
@@ -237,6 +239,7 @@ impl AppSettings {
             DEFAULT_DOWNLOAD_NAME_TEMPLATE,
         );
         self.download_dir = self.download_dir.trim().into();
+        self.audio_output_device = self.audio_output_device.trim().into();
         self.lt_server_url = self.lt_server_url.trim().trim_end_matches('/').into();
         self.lt_nickname = self.lt_nickname.trim().into();
 
@@ -381,6 +384,17 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_alignment_output_device_settings_are_backward_compatible() {
+        let mut settings: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert_eq!(settings.audio_output_device, "");
+        settings.audio_output_device = "  Headphones  ".into();
+        settings.normalize();
+        assert_eq!(settings.audio_output_device, "Headphones");
+        let json = serde_json::to_value(&settings).expect("settings");
+        assert_eq!(json["audioOutputDevice"], "Headphones");
+    }
+
     use super::{AppSettings, MAX_MEDIA_CACHE_SIZE_MB, MIN_MEDIA_CACHE_SIZE_MB};
 
     #[test]
