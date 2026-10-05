@@ -169,6 +169,25 @@ fn upsert_shard(
     });
 }
 
+fn snapshot_shards(
+    provenance: &[SyncPlaybackCounterShard],
+    own: &[SyncPlaybackCounterShard],
+) -> Vec<SyncPlaybackCounterShard> {
+    let mut merged = std::collections::BTreeMap::<(String, i64), SyncPlaybackCounterShard>::new();
+    for shard in provenance.iter().chain(own) {
+        merged
+            .entry((shard.device_id.clone(), shard.epoch_started_at))
+            .and_modify(|current| {
+                current.total_listen_ms = current.total_listen_ms.max(shard.total_listen_ms);
+                current.play_count = current.play_count.max(shard.play_count);
+                current.first_played_at = min_positive(current.first_played_at, shard.first_played_at);
+                current.last_played_at = current.last_played_at.max(shard.last_played_at);
+            })
+            .or_insert_with(|| shard.clone());
+    }
+    merged.into_values().collect()
+}
+
 impl StatsStore {
     /// 按天保留窗口修剪：丢弃超出窗口的 `buckets` 与 `daily_shards`
     ///
@@ -216,6 +235,32 @@ impl StatsStore {
         }
         let epoch = self.cleared_at.max(0);
         let day = day_start_at(played_at);
+        let daily_key = daily_shard_key(day, &session.identity_key);
+        // 旧投影恢复后本机来源可能尚未进入增量表，先续接原计数再记录
+        if let Some(stat) = self.stats.iter().find(|stat| stat.identity_key == session.identity_key) {
+            let provenance = retain_own_shards(&stat.counter_shards, device_id);
+            if !provenance.is_empty() {
+                let own = self.track_shards.entry(session.identity_key.clone()).or_default();
+                *own = snapshot_shards(&provenance, own);
+            }
+        }
+        if let Some(bucket) = self.buckets.iter().find(|bucket| {
+            bucket.day_start_at == day && bucket.identity_key == session.identity_key
+        }) {
+            let provenance = retain_own_shards(&bucket.counter_shards, device_id);
+            if !provenance.is_empty() {
+                let own = self.daily_shards.entry(daily_key.clone()).or_default();
+                *own = snapshot_shards(&provenance, own);
+            }
+        }
+        let has_track_shards = self
+            .track_shards
+            .get(&session.identity_key)
+            .is_some_and(|shards| !shards.is_empty());
+        let has_daily_shards = self
+            .daily_shards
+            .get(&daily_key)
+            .is_some_and(|shards| !shards.is_empty());
 
         // 聚合
         if let Some(stat) = self
@@ -223,6 +268,15 @@ impl StatsStore {
             .iter_mut()
             .find(|stat| stat.identity_key == session.identity_key)
         {
+            // 无来源的旧累计值先固化为 base，新建本机分片后仍能保留这段历史
+            if stat.counter_shards.is_empty() && !has_track_shards {
+                if stat.counter_base_listen_ms == 0 {
+                    stat.counter_base_listen_ms = stat.total_listen_ms.max(0);
+                }
+                if stat.counter_base_play_count == 0 {
+                    stat.counter_base_play_count = stat.play_count.max(0);
+                }
+            }
             stat.total_listen_ms = stat.total_listen_ms.saturating_add(listened);
             stat.play_count = stat.play_count.saturating_add(increment);
             stat.last_played_at = stat.last_played_at.max(played_at);
@@ -247,6 +301,14 @@ impl StatsStore {
             .iter_mut()
             .find(|bucket| bucket.day_start_at == day && bucket.identity_key == session.identity_key)
         {
+            if bucket.counter_shards.is_empty() && !has_daily_shards {
+                if bucket.counter_base_listen_ms == 0 {
+                    bucket.counter_base_listen_ms = bucket.total_listen_ms.max(0);
+                }
+                if bucket.counter_base_play_count == 0 {
+                    bucket.counter_base_play_count = bucket.play_count.max(0);
+                }
+            }
             bucket.total_listen_ms = bucket.total_listen_ms.saturating_add(listened);
             bucket.play_count = bucket.play_count.saturating_add(increment);
             bucket.last_played_at = bucket.last_played_at.max(played_at);
@@ -277,7 +339,7 @@ impl StatsStore {
         );
         upsert_shard(
             self.daily_shards
-                .entry(daily_shard_key(day, &session.identity_key))
+                .entry(daily_key)
                 .or_default(),
             device_id,
             epoch,
@@ -287,18 +349,17 @@ impl StatsStore {
         );
     }
 
-    /// 上传用快照：把本地分片挂到统计条目上
+    /// 上传用快照：保留已同步来源，并以本机最新分片更新对应计数
     pub fn sync_snapshot(&self) -> (Vec<SyncTrackStat>, Vec<SyncPlaybackStatBucket>, i64) {
         let stats = self
             .stats
             .iter()
             .map(|stat| {
                 let mut out = stat.clone();
-                out.counter_shards = self
-                    .track_shards
-                    .get(&stat.identity_key)
-                    .cloned()
-                    .unwrap_or_default();
+                out.counter_shards = snapshot_shards(
+                    &stat.counter_shards,
+                    self.track_shards.get(&stat.identity_key).map(Vec::as_slice).unwrap_or(&[]),
+                );
                 out
             })
             .collect();
@@ -307,11 +368,13 @@ impl StatsStore {
             .iter()
             .map(|bucket| {
                 let mut out = bucket.clone();
-                out.counter_shards = self
-                    .daily_shards
-                    .get(&daily_shard_key(bucket.day_start_at, &bucket.identity_key))
-                    .cloned()
-                    .unwrap_or_default();
+                out.counter_shards = snapshot_shards(
+                    &bucket.counter_shards,
+                    self.daily_shards
+                        .get(&daily_shard_key(bucket.day_start_at, &bucket.identity_key))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                );
                 out
             })
             .collect();
@@ -365,12 +428,6 @@ impl StatsStore {
             })
             .filter(|(_, shards)| !shards.is_empty())
             .collect();
-        for stat in &mut self.stats {
-            stat.counter_shards.clear();
-        }
-        for bucket in &mut self.buckets {
-            bucket.counter_shards.clear();
-        }
     }
 
     pub fn clear(&mut self, now_ms: i64) {
@@ -574,9 +631,71 @@ pub fn stats_path() -> PathBuf {
     path
 }
 
+fn restore_saved_stats_provenance(
+    store: &mut StatsStore,
+    provenance: &crate::sync::manager::SyncStatsPayload,
+) {
+    if store.cleared_at != provenance.cleared_at {
+        return;
+    }
+
+    let mut track_counts = HashMap::new();
+    for stat in &store.stats {
+        *track_counts.entry(stat.identity_key.clone()).or_insert(0_usize) += 1;
+    }
+    let mut track_sources: HashMap<&str, Option<&SyncTrackStat>> = HashMap::new();
+    for stat in &provenance.stats {
+        track_sources.entry(&stat.identity_key)
+            .and_modify(|source| *source = None)
+            .or_insert(Some(stat));
+    }
+    for stat in &mut store.stats {
+        if stat.identity_key.is_empty() || !stat.counter_shards.is_empty()
+            || track_counts.get(&stat.identity_key) != Some(&1) {
+            continue;
+        }
+        let Some(Some(source)) = track_sources.get(stat.identity_key.as_str()) else { continue };
+        if !source.counter_shards.is_empty()
+            && (stat.total_listen_ms, stat.play_count, stat.counter_base_listen_ms,
+                stat.counter_base_play_count, stat.first_played_at, stat.last_played_at)
+                == (source.total_listen_ms, source.play_count, source.counter_base_listen_ms,
+                    source.counter_base_play_count, source.first_played_at, source.last_played_at) {
+            stat.counter_shards = source.counter_shards.clone();
+        }
+    }
+
+    let mut bucket_counts = HashMap::new();
+    for bucket in &store.buckets {
+        *bucket_counts.entry((bucket.day_start_at, bucket.identity_key.clone())).or_insert(0_usize) += 1;
+    }
+    let mut bucket_sources: HashMap<(i64, &str), Option<&SyncPlaybackStatBucket>> = HashMap::new();
+    for bucket in &provenance.buckets {
+        bucket_sources.entry((bucket.day_start_at, &bucket.identity_key))
+            .and_modify(|source| *source = None)
+            .or_insert(Some(bucket));
+    }
+    for bucket in &mut store.buckets {
+        if bucket.identity_key.is_empty() || !bucket.counter_shards.is_empty()
+            || bucket_counts.get(&(bucket.day_start_at, bucket.identity_key.clone())) != Some(&1) {
+            continue;
+        }
+        let Some(Some(source)) = bucket_sources.get(&(bucket.day_start_at, bucket.identity_key.as_str())) else { continue };
+        if !source.counter_shards.is_empty()
+            && (bucket.total_listen_ms, bucket.play_count, bucket.counter_base_listen_ms,
+                bucket.counter_base_play_count, bucket.first_played_at, bucket.last_played_at)
+                == (source.total_listen_ms, source.play_count, source.counter_base_listen_ms,
+                    source.counter_base_play_count, source.first_played_at, source.last_played_at) {
+            bucket.counter_shards = source.counter_shards.clone();
+        }
+    }
+}
+
 pub fn load() -> StatsStore {
-    let path = stats_path();
-    let Ok(content) = std::fs::read_to_string(&path) else {
+    load_at(&stats_path(), &crate::sync::manager::sync_extensions_path())
+}
+
+fn load_at(path: &std::path::Path, metadata_path: &std::path::Path) -> StatsStore {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return StatsStore::default();
     };
     let mut store: StatsStore = match serde_json::from_str(&content) {
@@ -584,7 +703,7 @@ pub fn load() -> StatsStore {
         Err(error) => {
             // 统计可容忍从空重建（分片会随同步找回），但必须保留现场：
             // 静默清空 + 后续覆盖写会让损坏原因永远无法排查
-            let quarantined = crate::fsutil::quarantine_corrupt_file(&path);
+            let quarantined = crate::fsutil::quarantine_corrupt_file(path);
             log::warn!(
                 target: "stats",
                 "playback-stats.json 解析失败, 现场已隔离到 {:?}, 从空统计重建: {}",
@@ -594,24 +713,53 @@ pub fn load() -> StatsStore {
             return StatsStore::default();
         }
     };
+    match crate::sync::manager::load_saved_stats_provenance(metadata_path) {
+        Ok(provenance) => restore_saved_stats_provenance(&mut store, &provenance),
+        Err(error) => log::warn!(target: "stats", "统计来源侧车读取失败，保留本地累计值: {error}"),
+    }
     // 启动即修剪保留窗口，避免历史膨胀文件一直原样滚动
     store.prune_retention(chrono::Utc::now().timestamp_millis());
     store
 }
 
 pub fn save(store: &StatsStore) {
-    let path = stats_path();
-    if let Ok(content) = serde_json::to_string(store) {
-        // 原子写：崩溃/断电不能留下半截 JSON（半截会被 load 判损坏隔离）
-        if let Err(error) = crate::fsutil::atomic_write(&path, content) {
-            log::warn!(target: "stats", "playback-stats.json 写入失败: {error}");
-        }
+    if let Err(error) = save_checked(store) {
+        log::warn!(target: "stats", "playback-stats.json 写入失败: {error}");
     }
+}
+
+pub(crate) fn save_checked(store: &StatsStore) -> crate::error::AppResult<()> {
+    save_checked_at(&stats_path(), store)
+}
+
+fn save_checked_at(path: &std::path::Path, store: &StatsStore) -> crate::error::AppResult<()> {
+    // 同步提交需要知道落盘结果，失败时保留进度供下一轮重试
+    crate::fsutil::atomic_write(path, serde_json::to_vec(store)?)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_stats_save_reports_failure_and_preserves_retry_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked = directory.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("k", 30_000, 1), "desktop", now);
+        assert!(save_checked_at(&blocked, &store).is_err());
+        let path = directory.path().join("playback-stats.json");
+        save_checked_at(&path, &store).unwrap();
+        let persisted: StatsStore = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.stats[0].play_count, 1);
+        assert_eq!(persisted.stats[0].total_listen_ms, 30_000);
+        let first = std::fs::read(&path).unwrap();
+        save_checked_at(&path, &store).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+    }
 
     fn session(identity: &str, listened_ms: i64, increment: i32) -> PlaybackSession {
         PlaybackSession {
@@ -743,6 +891,327 @@ mod tests {
         assert_eq!(store.buckets[0].identity_key, "new");
         assert_eq!(store.track_shards["new"][0].epoch_started_at, cleared);
         assert!(store.daily_shards.values().all(|shards| shards[0].epoch_started_at == cleared));
+    }
+
+    #[test]
+    fn android_alignment_stats_foreign_provenance_repeated_apply_is_idempotent() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let mut android = StatsStore::default();
+        android.record(&session("k", 30_000, 1), "android", now);
+        let (stats, buckets, cleared_at) = android.sync_snapshot();
+        let mut store = StatsStore::default();
+
+        for _ in 0..3 {
+            store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+            assert_eq!(store.stats[0].play_count, 1);
+            assert_eq!(store.stats[0].total_listen_ms, 30_000);
+            assert_eq!(store.buckets[0].play_count, 1);
+            assert_eq!(store.buckets[0].total_listen_ms, 30_000);
+            assert!(store.track_shards.is_empty());
+            assert!(store.daily_shards.is_empty());
+        }
+        let (snapshot, daily, _) = store.sync_snapshot();
+        assert_eq!(snapshot[0].counter_shards, stats[0].counter_shards);
+        assert_eq!(daily[0].counter_shards, buckets[0].counter_shards);
+        assert_eq!(snapshot[0].counter_base_play_count, 0);
+    }
+
+    #[test]
+    fn android_alignment_stats_foreign_provenance_survives_save_and_reload() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let mut android = StatsStore::default();
+        android.record(&session("k", 30_000, 1), "android", now);
+        let (stats, buckets, cleared_at) = android.sync_snapshot();
+        let mut store = StatsStore::default();
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("playback-stats.json");
+        save_checked_at(&path, &store).unwrap();
+        let mut restored: StatsStore =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        restored.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        assert_eq!(restored.stats[0].play_count, 1);
+        assert_eq!(restored.stats[0].total_listen_ms, 30_000);
+        assert_eq!(restored.buckets[0].play_count, 1);
+        assert_eq!(restored.buckets[0].total_listen_ms, 30_000);
+        let (snapshot, daily, _) = restored.sync_snapshot();
+        assert_eq!(snapshot[0].counter_shards, stats[0].counter_shards);
+        assert_eq!(daily[0].counter_shards, buckets[0].counter_shards);
+    }
+
+    #[test]
+    fn android_alignment_stats_foreign_provenance_retains_new_own_records() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let mut store = StatsStore::default();
+        store.record(&session("k", 30_000, 1), "desktop", now);
+        let (local_stats, local_buckets, _) = store.sync_snapshot();
+        let mut android = StatsStore::default();
+        android.record(&session("k", 45_000, 2), "android", now);
+        let (stats, buckets, _) = android.sync_snapshot();
+        let merged = crate::sync::merge::three_way_merge(
+            &SyncData { playback_stats: local_stats, playback_stat_buckets: local_buckets, ..Default::default() },
+            &SyncData { playback_stats: stats, playback_stat_buckets: buckets, ..Default::default() },
+            0,
+            &HashMap::new(),
+        );
+        store.apply_merged(&merged.playback_stats, &merged.playback_stat_buckets, 0, "desktop");
+        store.record(&session("k", 30_000, 1), "desktop", now + 1_000);
+        store.apply_merged(&merged.playback_stats, &merged.playback_stat_buckets, 0, "desktop");
+        let (snapshot, daily, _) = store.sync_snapshot();
+        assert_eq!(snapshot[0].play_count, 4);
+        assert_eq!(snapshot[0].total_listen_ms, 105_000);
+        assert_eq!(daily[0].play_count, 4);
+        assert_eq!(daily[0].total_listen_ms, 105_000);
+        for shards in [&snapshot[0].counter_shards, &daily[0].counter_shards] {
+            assert_eq!(shards.len(), 2);
+            assert_eq!(shards.iter().find(|shard| shard.device_id == "desktop").unwrap().play_count, 2);
+            assert_eq!(shards.iter().find(|shard| shard.device_id == "android").unwrap().play_count, 2);
+        }
+        assert_eq!(store.track_shards["k"].len(), 1);
+        assert_eq!(store.track_shards["k"][0].play_count, 2);
+        store.apply_merged(&merged.playback_stats, &merged.playback_stat_buckets, 0, "desktop");
+        assert_eq!(store.stats[0].play_count, 4);
+        store.record(&session("k", 30_000, 1), "desktop", now + 2_000);
+        store.apply_merged(&merged.playback_stats, &merged.playback_stat_buckets, 0, "desktop");
+        assert_eq!(store.stats[0].play_count, 5);
+        assert_eq!(store.stats[0].total_listen_ms, 135_000);
+    }
+
+    #[test]
+    fn android_alignment_stats_foreign_provenance_preserves_legacy_before_first_record() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let legacy = serde_json::json!({
+            "stats": [{ "identityKey": "k", "playCount": 5, "totalListenMs": 100_000,
+                "firstPlayedAt": now, "lastPlayedAt": now }],
+            "buckets": [{ "identityKey": "k", "dayStartAt": day_start_at(now), "playCount": 5,
+                "totalListenMs": 100_000, "firstPlayedAt": now, "lastPlayedAt": now }],
+        });
+        let mut store: StatsStore = serde_json::from_value(legacy).unwrap();
+        let (legacy_stats, legacy_buckets, _) = store.sync_snapshot();
+        assert!(legacy_stats[0].counter_shards.is_empty());
+        assert!(legacy_buckets[0].counter_shards.is_empty());
+        assert_eq!(legacy_stats[0].play_count, 5);
+        store.record(&session("k", 30_000, 1), "desktop", now + 1_000);
+        let mut android = StatsStore::default();
+        android.record(&session("k", 40_000, 1), "android", now + 2_000);
+        let (stats, buckets, _) = android.sync_snapshot();
+
+        for _ in 0..3 {
+            store.apply_merged(&stats, &buckets, 0, "desktop");
+            assert_eq!(store.stats[0].play_count, 7);
+            assert_eq!(store.stats[0].total_listen_ms, 170_000);
+            assert_eq!(store.buckets[0].play_count, 7);
+            assert_eq!(store.buckets[0].total_listen_ms, 170_000);
+            assert_eq!(store.stats[0].counter_base_play_count, 5);
+            assert_eq!(store.buckets[0].counter_base_play_count, 5);
+        }
+    }
+
+    #[test]
+    fn android_alignment_stats_foreign_provenance_clear_keeps_only_the_new_epoch() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let mut android = StatsStore::default();
+        android.record(&session("k", 30_000, 1), "android", now);
+        let (stats, buckets, cleared_at) = android.sync_snapshot();
+        let mut store = StatsStore::default();
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        store.clear(now + 1_000);
+        store.record(&session("k", 40_000, 1), "desktop", now + 2_000);
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        let (snapshot, daily, cleared) = store.sync_snapshot();
+        assert_eq!(cleared, now + 1_000);
+        for shards in [&snapshot[0].counter_shards, &daily[0].counter_shards] {
+            assert_eq!(shards.len(), 1);
+            assert_eq!(shards[0].device_id, "desktop");
+            assert_eq!(shards[0].epoch_started_at, cleared);
+        }
+        assert_eq!(snapshot[0].play_count, 1);
+        assert_eq!(snapshot[0].total_listen_ms, 40_000);
+        assert_eq!(daily[0].play_count, 1);
+        assert_eq!(daily[0].total_listen_ms, 40_000);
+    }
+
+    fn old_stats_projection(
+        device_id: &str,
+        count: i32,
+        listened_ms: i64,
+        now: i64,
+    ) -> (StatsStore, crate::sync::manager::SyncStatsPayload) {
+        let mut source = StatsStore::default();
+        source.record(&session("k", listened_ms, count), device_id, now);
+        let (stats, buckets, cleared_at) = source.sync_snapshot();
+        let payload = crate::sync::manager::SyncStatsPayload { stats, buckets, cleared_at };
+        let mut projection = StatsStore {
+            stats: payload.stats.clone(),
+            buckets: payload.buckets.clone(),
+            cleared_at,
+            ..Default::default()
+        };
+        for stat in &mut projection.stats { stat.counter_shards.clear(); }
+        for bucket in &mut projection.buckets { bucket.counter_shards.clear(); }
+        (projection, payload)
+    }
+
+    fn write_old_stats_projection(
+        directory: &std::path::Path,
+        store: &StatsStore,
+        provenance: &crate::sync::manager::SyncStatsPayload,
+    ) -> (PathBuf, PathBuf) {
+        let stats_path = directory.join("playback-stats.json");
+        let metadata_path = directory.join("sync-android-metadata.json");
+        save_checked_at(&stats_path, store).unwrap();
+        std::fs::write(&metadata_path, serde_json::to_vec(&serde_json::json!({
+            "playbackStats": provenance.stats,
+            "playbackStatBuckets": provenance.buckets,
+            "playbackStatsClearedAt": provenance.cleared_at,
+        })).unwrap()).unwrap();
+        (stats_path, metadata_path)
+    }
+
+    #[test]
+    fn android_alignment_stats_sidecar_projection_restores_before_repeated_apply() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (projection, payload) = old_stats_projection("android", 1, 30_000, now);
+        let directory = tempfile::tempdir().unwrap();
+        let (path, metadata) = write_old_stats_projection(directory.path(), &projection, &payload);
+        let mut store = load_at(&path, &metadata);
+        for _ in 0..2 {
+            store.apply_merged(&payload.stats, &payload.buckets, payload.cleared_at, "desktop");
+            assert_eq!(store.stats[0].play_count, 1);
+            assert_eq!(store.stats[0].total_listen_ms, 30_000);
+            assert_eq!(store.buckets[0].play_count, 1);
+            assert_eq!(store.buckets[0].total_listen_ms, 30_000);
+            assert_eq!(store.stats[0].counter_base_play_count, 0);
+        }
+        save_checked_at(&path, &store).unwrap();
+        let restored = load_at(&path, &metadata);
+        assert_eq!(restored.sync_snapshot().0[0].counter_shards, payload.stats[0].counter_shards);
+    }
+
+    #[test]
+    fn android_alignment_stats_sidecar_projection_keeps_true_legacy_base() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (mut projection, mut payload) = old_stats_projection("android", 1, 30_000, now);
+        for stat in [&mut projection.stats[0], &mut payload.stats[0]] {
+            stat.counter_base_play_count = 5;
+            stat.counter_base_listen_ms = 100_000;
+            stat.play_count = 6;
+            stat.total_listen_ms = 130_000;
+        }
+        for bucket in [&mut projection.buckets[0], &mut payload.buckets[0]] {
+            bucket.counter_base_play_count = 5;
+            bucket.counter_base_listen_ms = 100_000;
+            bucket.play_count = 6;
+            bucket.total_listen_ms = 130_000;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (path, metadata) = write_old_stats_projection(directory.path(), &projection, &payload);
+        let mut store = load_at(&path, &metadata);
+        assert_eq!(store.stats[0].counter_shards, payload.stats[0].counter_shards);
+        assert_eq!(store.buckets[0].counter_shards, payload.buckets[0].counter_shards);
+        for _ in 0..2 {
+            store.apply_merged(&payload.stats, &payload.buckets, 0, "desktop");
+            assert_eq!(store.stats[0].play_count, 6);
+            assert_eq!(store.buckets[0].play_count, 6);
+            assert_eq!(store.stats[0].counter_base_play_count, 5);
+            assert_eq!(store.stats[0].counter_base_listen_ms, 100_000);
+        }
+        let mut genuine_legacy = projection;
+        genuine_legacy.stats[0].counter_base_play_count = 6;
+        genuine_legacy.buckets[0].counter_base_play_count = 6;
+        let (path, metadata) = write_old_stats_projection(directory.path(), &genuine_legacy, &payload);
+        let unchanged = load_at(&path, &metadata);
+        assert!(unchanged.stats[0].counter_shards.is_empty());
+        assert!(unchanged.buckets[0].counter_shards.is_empty());
+        assert_eq!(unchanged.stats[0].counter_base_play_count, 6);
+    }
+
+    #[test]
+    fn android_alignment_stats_sidecar_projection_rejects_changed_counters() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (projection, payload) = old_stats_projection("android", 1, 30_000, now);
+        for field in 0..6 {
+            let mut changed = payload.clone();
+            match field {
+                0 => { changed.stats[0].play_count += 1; changed.buckets[0].play_count += 1; }
+                1 => { changed.stats[0].total_listen_ms += 1; changed.buckets[0].total_listen_ms += 1; }
+                2 => { changed.stats[0].counter_base_play_count += 1; changed.buckets[0].counter_base_play_count += 1; }
+                3 => { changed.stats[0].counter_base_listen_ms += 1; changed.buckets[0].counter_base_listen_ms += 1; }
+                4 => { changed.stats[0].first_played_at += 1; changed.buckets[0].first_played_at += 1; }
+                _ => { changed.stats[0].last_played_at += 1; changed.buckets[0].last_played_at += 1; }
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let (path, metadata) = write_old_stats_projection(directory.path(), &projection, &changed);
+            let store = load_at(&path, &metadata);
+            assert!(store.stats[0].counter_shards.is_empty(), "field {field}");
+            assert!(store.buckets[0].counter_shards.is_empty(), "field {field}");
+            assert_eq!(store.stats[0].play_count, 1);
+            assert_eq!(store.buckets[0].total_listen_ms, 30_000);
+        }
+    }
+
+    #[test]
+    fn android_alignment_stats_sidecar_projection_rejects_different_clear_and_duplicates() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (projection, payload) = old_stats_projection("android", 1, 30_000, now);
+        for scenario in 0..3 {
+            let mut changed = payload.clone();
+            let mut local = projection.clone();
+            match scenario {
+                0 => changed.cleared_at = now,
+                1 => {
+                    changed.stats.push(changed.stats[0].clone());
+                    changed.buckets.push(changed.buckets[0].clone());
+                }
+                _ => {
+                    local.stats.push(local.stats[0].clone());
+                    local.buckets.push(local.buckets[0].clone());
+                }
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let (path, metadata) = write_old_stats_projection(directory.path(), &local, &changed);
+            let store = load_at(&path, &metadata);
+            assert!(store.stats.iter().all(|stat| stat.counter_shards.is_empty()));
+            assert!(store.buckets.iter().all(|bucket| bucket.counter_shards.is_empty()));
+            assert_eq!(store.cleared_at, local.cleared_at);
+        }
+    }
+
+    #[test]
+    fn android_alignment_stats_sidecar_projection_preserves_data_on_metadata_io_failure() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (projection, payload) = old_stats_projection("android", 1, 30_000, now);
+        let directory = tempfile::tempdir().unwrap();
+        let (path, metadata) = write_old_stats_projection(directory.path(), &projection, &payload);
+        std::fs::remove_file(&metadata).unwrap();
+        std::fs::create_dir(&metadata).unwrap();
+        let store = load_at(&path, &metadata);
+        assert_eq!(store.stats[0].play_count, 1);
+        assert_eq!(store.stats[0].total_listen_ms, 30_000);
+        assert!(store.stats[0].counter_shards.is_empty());
+        assert!(store.buckets[0].counter_shards.is_empty());
+    }
+
+    #[test]
+    fn android_alignment_stats_sidecar_projection_seeds_missing_own_maps_before_record() {
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        let (projection, payload) = old_stats_projection("desktop", 5, 150_000, now);
+        let directory = tempfile::tempdir().unwrap();
+        let (path, metadata) = write_old_stats_projection(directory.path(), &projection, &payload);
+        let mut store = load_at(&path, &metadata);
+        assert!(store.track_shards.is_empty());
+        assert!(store.daily_shards.is_empty());
+        store.record(&session("k", 30_000, 1), "desktop", now + 1_000);
+        let (stats, buckets, _) = store.sync_snapshot();
+        for shards in [&stats[0].counter_shards, &buckets[0].counter_shards] {
+            assert_eq!(shards.len(), 1);
+            assert_eq!(shards[0].device_id, "desktop");
+            assert_eq!(shards[0].play_count, 6);
+            assert_eq!(shards[0].total_listen_ms, 180_000);
+        }
+        assert_eq!(store.track_shards["k"].len(), 1);
+        assert_eq!(store.track_shards["k"][0].play_count, 6);
     }
 
     #[test]

@@ -1591,8 +1591,8 @@ fn merge_counter_values(local: CounterSide<'_>, remote: CounterSide<'_>) -> Merg
     let base_count = local
         .effective_base_play_count()
         .max(remote.effective_base_play_count());
-    let sharded_total = base_total.saturating_add(shards.iter().map(|shard| shard.total_listen_ms).sum::<i64>());
-    let sharded_count = base_count.saturating_add(shards.iter().map(|shard| shard.play_count).sum::<i32>());
+    let sharded_total = shards.iter().fold(base_total, |total, shard| total.saturating_add(shard.total_listen_ms));
+    let sharded_count = shards.iter().fold(base_count, |total, shard| total.saturating_add(shard.play_count));
     MergedCounters {
         total_listen_ms: sharded_total
             .max(local.total_listen_ms)
@@ -2757,6 +2757,42 @@ mod tests {
         let pruned = prune_playlist_song_deletions(&[deletion], &[playlist(vec![readded])]);
 
         assert!(pruned.is_empty(), "带 token 且 added_at 更晚才算真正重新添加");
+    }
+
+    #[test]
+    fn counter_shard_totals_saturate_before_overflow() {
+        for (listen, count) in [(i64::MAX, 1), (1, i32::MAX)] {
+            let local = SyncTrackStat {
+                identity_key: "k".into(),
+                total_listen_ms: listen,
+                play_count: count,
+                first_played_at: 100,
+                last_played_at: 100,
+                counter_shards: vec![SyncPlaybackCounterShard {
+                    device_id: "desktop".into(),
+                    total_listen_ms: listen,
+                    play_count: count,
+                    first_played_at: 100,
+                    last_played_at: 100,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut remote = local.clone();
+            remote.counter_shards[0].device_id = "android".into();
+            let stats = merge_playback_stats(std::slice::from_ref(&local), std::slice::from_ref(&remote), 0);
+            let buckets = merge_stat_buckets(&[bucket_from_clear_stat(&local)], &[bucket_from_clear_stat(&remote)], 0);
+            let expected_listen = listen.saturating_add(listen);
+            let expected_count = count.saturating_add(count);
+            assert_eq!(stats[0].total_listen_ms, expected_listen);
+            assert_eq!(stats[0].play_count, expected_count);
+            assert_eq!(buckets[0].total_listen_ms, expected_listen);
+            assert_eq!(buckets[0].play_count, expected_count);
+            assert_eq!(stats[0].counter_shards.len(), 2);
+            let again = merge_playback_stats(&stats, &stats, 0);
+            assert_eq!(again[0].total_listen_ms, expected_listen);
+            assert_eq!(again[0].play_count, expected_count);
+        }
     }
 
     /// Y3 回归：合并后分片为空时 counter_base 必须归零（对齐 Android），

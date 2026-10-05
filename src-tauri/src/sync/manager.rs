@@ -186,7 +186,7 @@ pub(crate) fn complete_cloud_sync(
     })
 }
 
-fn sync_extensions_path() -> std::path::PathBuf {
+pub(crate) fn sync_extensions_path() -> std::path::PathBuf {
     dirs_next::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("NeriPlayer").join("sync-android-metadata.json")
 }
 
@@ -197,6 +197,16 @@ struct PersistedArchiveMetadata {
     #[serde(default)] playback_stats: Vec<SyncTrackStat>,
     #[serde(default)] playback_stat_buckets: Vec<SyncPlaybackStatBucket>,
     #[serde(default)] playback_stats_cleared_at: i64,
+}
+
+pub(crate) fn load_saved_stats_provenance(path: &std::path::Path) -> AppResult<SyncStatsPayload> {
+    let metadata: PersistedArchiveMetadata =
+        read_optional_json(path, "Android sync metadata")?.unwrap_or_default();
+    Ok(SyncStatsPayload {
+        stats: metadata.playback_stats,
+        buckets: metadata.playback_stat_buckets,
+        cleared_at: metadata.playback_stats_cleared_at,
+    })
 }
 
 fn save_archive_metadata(data: &SyncData) -> AppResult<()> {

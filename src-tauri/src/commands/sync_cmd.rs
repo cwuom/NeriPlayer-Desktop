@@ -19,13 +19,162 @@ const SYNC_STORE: &str = "sync-config.json";
 const CONFIG_FILE_KIND: &str = "moe.ouom.neriplayer.config";
 const CONFIG_FILE_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Copy)]
+enum ConfigProvider {
+    GitHub,
+    WebDav,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConfigRequestToken {
+    provider: ConfigProvider,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct ConfigRequestGenerations {
+    github: u64,
+    webdav: u64,
+    github_preferences: GitHubPreferenceRevisions,
+    webdav_preferences: WebDavPreferenceRevisions,
+    sync_preferences_revision: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GitHubPreferenceRevisions {
+    auto_sync: u64,
+    data_saver: u64,
+    silent_failures: u64,
+    history_update_mode: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct WebDavPreferenceRevisions {
+    auto_sync: u64,
+    data_saver: u64,
+}
+
+fn advance_preference_revision(revision: &mut u64) -> AppResult<()> {
+    *revision = revision
+        .checked_add(1)
+        .ok_or_else(|| AppError::Other("Sync preference revision exhausted".into()))?;
+    Ok(())
+}
+
+impl ConfigRequestGenerations {
+    fn snapshot(&self, provider: ConfigProvider) -> ConfigRequestToken {
+        ConfigRequestToken {
+            provider,
+            generation: match provider {
+                ConfigProvider::GitHub => self.github,
+                ConfigProvider::WebDav => self.webdav,
+            },
+        }
+    }
+
+    fn begin(&mut self, provider: ConfigProvider) -> AppResult<ConfigRequestToken> {
+        let generation = match provider {
+            ConfigProvider::GitHub => &mut self.github,
+            ConfigProvider::WebDav => &mut self.webdav,
+        };
+        *generation = generation
+            .checked_add(1)
+            .ok_or_else(|| AppError::Other("Sync configuration generation exhausted".into()))?;
+        Ok(self.snapshot(provider))
+    }
+
+    fn invalidate(&mut self, provider: ConfigProvider) -> AppResult<()> {
+        self.begin(provider).map(|_| ())
+    }
+
+    fn is_current(&self, token: ConfigRequestToken) -> bool {
+        self.snapshot(token.provider).generation == token.generation
+    }
+
+    fn complete<R>(
+        &self,
+        token: ConfigRequestToken,
+        apply: impl FnOnce() -> AppResult<R>,
+    ) -> AppResult<R> {
+        if !self.is_current(token) {
+            return Err(AppError::Other(
+                "Sync configuration request superseded by a newer action".into(),
+            ));
+        }
+        apply()
+    }
+}
+
 fn with_sync_config<R>(operation: impl FnOnce() -> R) -> R {
+    with_config_generations(|_| operation())
+}
+
+fn with_config_generations<R>(operation: impl FnOnce(&mut ConfigRequestGenerations) -> R) -> R {
     // 配置变更和本地同步提交共用临界区，网络请求始终在锁外执行
-    static CONFIG_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = CONFIG_LOCK
-        .get_or_init(|| parking_lot::Mutex::new(()))
+    static CONFIG_LOCK: std::sync::OnceLock<parking_lot::Mutex<ConfigRequestGenerations>> =
+        std::sync::OnceLock::new();
+    let mut guard = CONFIG_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(ConfigRequestGenerations::default()))
         .lock();
-    operation()
+    operation(&mut guard)
+}
+
+fn github_connection_preferences(
+    started: GitHubPreferenceRevisions,
+    latest: GitHubPreferenceRevisions,
+    current: &GitHubSyncConfig,
+    mut proposed: GitHubSyncConfig,
+) -> GitHubSyncConfig {
+    if latest.auto_sync != started.auto_sync {
+        proposed.auto_sync = current.auto_sync;
+    }
+    if latest.data_saver != started.data_saver {
+        proposed.data_saver = current.data_saver;
+    }
+    if latest.silent_failures != started.silent_failures {
+        proposed.silent_failures = current.silent_failures;
+    }
+    if latest.history_update_mode != started.history_update_mode {
+        proposed.history_update_mode = current.history_update_mode.clone();
+    }
+    proposed
+}
+
+fn webdav_connection_preferences(
+    started: WebDavPreferenceRevisions,
+    latest: WebDavPreferenceRevisions,
+    current: &WebDavSyncConfig,
+    mut proposed: WebDavSyncConfig,
+) -> WebDavSyncConfig {
+    if latest.auto_sync != started.auto_sync {
+        proposed.auto_sync = current.auto_sync;
+    }
+    if latest.data_saver != started.data_saver {
+        proposed.data_saver = current.data_saver;
+    }
+    proposed
+}
+
+fn validated_github_identity(
+    mut config: GitHubSyncConfig,
+    token: String,
+    owner: String,
+) -> GitHubSyncConfig {
+    if config.token != token || config.owner != owner {
+        config.repo.clear();
+        config.last_remote_sha.clear();
+        config.last_sync_time = 0;
+        config.auto_sync = false;
+    }
+    config.token = token;
+    config.owner = owner;
+    config
+}
+
+fn github_sync_configured(config: &GitHubSyncConfig) -> bool {
+    !config.token.trim().is_empty()
+        && !config.owner.trim().is_empty()
+        && !config.repo.trim().is_empty()
 }
 
 fn same_github_target(current: &GitHubSyncConfig, requested: &GitHubSyncConfig) -> bool {
@@ -294,10 +443,6 @@ fn load_github_config_unlocked(app: &AppHandle) -> GitHubSyncConfig {
     config
 }
 
-fn save_github_config(app: &AppHandle, config: &GitHubSyncConfig) {
-    with_sync_config(|| save_github_config_unlocked(app, config))
-}
-
 fn save_github_config_unlocked(app: &AppHandle, config: &GitHubSyncConfig) {
     if config.token.is_empty() {
         let _ = security::delete_secret(security::GITHUB_TOKEN_KEY);
@@ -346,10 +491,6 @@ fn load_webdav_config_unlocked(app: &AppHandle) -> WebDavSyncConfig {
         save_webdav_config_unlocked(app, &config);
     }
     config
-}
-
-fn save_webdav_config(app: &AppHandle, config: &WebDavSyncConfig) {
-    with_sync_config(|| save_webdav_config_unlocked(app, config))
 }
 
 fn save_webdav_config_unlocked(app: &AppHandle, config: &WebDavSyncConfig) {
@@ -434,7 +575,7 @@ pub async fn get_github_sync_config(app: AppHandle) -> AppResult<Value> {
     let config = load_github_config(&app);
     let preferences = load_sync_preferences(&app);
     Ok(serde_json::json!({
-        "configured": !config.token.is_empty(),
+        "configured": github_sync_configured(&config),
         "owner": config.owner,
         "repo": config.repo,
         "autoSync": config.auto_sync,
@@ -460,14 +601,15 @@ pub async fn update_sync_preferences(
     app: AppHandle,
     history_update_mode: Option<String>,
 ) -> AppResult<()> {
-    with_sync_config(|| {
+    with_config_generations(|generations| {
         let mut preferences = load_sync_preferences_unlocked(&app);
         if let Some(mode) = history_update_mode {
+            advance_preference_revision(&mut generations.sync_preferences_revision)?;
             preferences.history_update_mode = normalize_history_update_mode(&mode);
         }
         save_sync_preferences_unlocked(&app, &preferences);
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 /// 验证 GitHub token，返回用户名
@@ -477,16 +619,22 @@ pub async fn validate_github_token(
     state: State<'_, AppState>,
     token: String,
 ) -> AppResult<Value> {
+    let request = with_config_generations(|generations| generations.begin(ConfigProvider::GitHub))?;
     let api = crate::sync::github_api::GitHubApiClient::new(&state.sync_http(), &token);
     let username = api.validate_token().await?;
 
     // 暂存 token（还没配置完，只保存 token 和 owner）
-    with_sync_config(|| {
-        let mut config = load_github_config_unlocked(&app);
-        config.token = token;
-        config.owner = username.clone();
-        save_github_config_unlocked(&app, &config);
-    });
+    with_config_generations(|generations| {
+        generations.complete(request, || {
+            let config = validated_github_identity(
+                load_github_config_unlocked(&app),
+                token,
+                username.clone(),
+            );
+            save_github_config_unlocked(&app, &config);
+            Ok(())
+        })
+    })?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -501,7 +649,14 @@ pub async fn create_github_repo(
     state: State<'_, AppState>,
     repo_name: String,
 ) -> AppResult<Value> {
-    let config = load_github_config(&app);
+    let (config, request, preferences) = with_config_generations(|generations| {
+        let request = generations.begin(ConfigProvider::GitHub)?;
+        Ok::<_, AppError>((
+            load_github_config_unlocked(&app),
+            request,
+            generations.github_preferences,
+        ))
+    })?;
     if config.token.is_empty() {
         return Err(AppError::Api("Token not validated yet".into()));
     }
@@ -510,14 +665,26 @@ pub async fn create_github_repo(
     api.create_repository(&repo_name).await?;
 
     let updated = GitHubSyncConfig {
-        token: config.token,
+        token: config.token.clone(),
         owner: config.owner.clone(),
         repo: repo_name.clone(),
         auto_sync: true,
-        data_saver: true,  // 默认开启省流
+        data_saver: true, // 默认开启省流
         ..Default::default()
     };
-    save_github_config(&app, &updated);
+    with_config_generations(|generations| {
+        generations.complete(request, || {
+            let current = load_github_config_unlocked(&app);
+            let updated = github_connection_preferences(
+                preferences,
+                generations.github_preferences,
+                &current,
+                updated,
+            );
+            save_github_config_unlocked(&app, &updated);
+            Ok(())
+        })
+    })?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -534,7 +701,14 @@ pub async fn use_existing_github_repo(
     owner: String,
     repo: String,
 ) -> AppResult<Value> {
-    let config = load_github_config(&app);
+    let (config, request, preferences) = with_config_generations(|generations| {
+        let request = generations.begin(ConfigProvider::GitHub)?;
+        Ok::<_, AppError>((
+            load_github_config_unlocked(&app),
+            request,
+            generations.github_preferences,
+        ))
+    })?;
     if config.token.is_empty() {
         return Err(AppError::Api("Token not validated yet".into()));
     }
@@ -543,14 +717,26 @@ pub async fn use_existing_github_repo(
     let _branch = api.check_repository(&owner, &repo).await?;
 
     let updated = GitHubSyncConfig {
-        token: config.token,
+        token: config.token.clone(),
         owner: owner.clone(),
         repo: repo.clone(),
         auto_sync: true,
-        data_saver: true,  // 默认开启省流
+        data_saver: true, // 默认开启省流
         ..Default::default()
     };
-    save_github_config(&app, &updated);
+    with_config_generations(|generations| {
+        generations.complete(request, || {
+            let current = load_github_config_unlocked(&app);
+            let updated = github_connection_preferences(
+                preferences,
+                generations.github_preferences,
+                &current,
+                updated,
+            );
+            save_github_config_unlocked(&app, &updated);
+            Ok(())
+        })
+    })?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -567,6 +753,10 @@ pub async fn configure_github_sync(
     token: String,
     repo: String,
 ) -> AppResult<Value> {
+    let (request, preferences) = with_config_generations(|generations| {
+        let request = generations.begin(ConfigProvider::GitHub)?;
+        Ok::<_, AppError>((request, generations.github_preferences))
+    })?;
     let api = crate::sync::github_api::GitHubApiClient::new(&state.sync_http(), &token);
     let owner = api.validate_token().await?;
 
@@ -581,10 +771,22 @@ pub async fn configure_github_sync(
         owner: owner.clone(),
         repo: repo.clone(),
         auto_sync: true,
-        data_saver: true,  // 默认开启省流
+        data_saver: true, // 默认开启省流
         ..Default::default()
     };
-    save_github_config(&app, &config);
+    with_config_generations(|generations| {
+        generations.complete(request, || {
+            let current = load_github_config_unlocked(&app);
+            let config = github_connection_preferences(
+                preferences,
+                generations.github_preferences,
+                &current,
+                config,
+            );
+            save_github_config_unlocked(&app, &config);
+            Ok(())
+        })
+    })?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -618,8 +820,12 @@ fn build_local_sync_snapshot(
     Ok((local_data, playlist::io_epoch()))
 }
 
-/// 把合并后的统计写回本地，并只保留本机分片，避免下轮上传重复累加他机增量
-fn apply_merged_stats(app: &AppHandle, state: &State<'_, AppState>, merged: &SyncData) {
+/// 写回完整统计来源，本机增量由 StatsStore 单独维护
+fn apply_merged_stats(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    merged: &SyncData,
+) -> AppResult<()> {
     let device_id = manager::get_or_create_device_id_pub(app);
     let mut store = state.stats.lock();
     store.apply_merged(
@@ -628,7 +834,7 @@ fn apply_merged_stats(app: &AppHandle, state: &State<'_, AppState>, merged: &Syn
         merged.playback_stats_cleared_at,
         &device_id,
     );
-    crate::stats::save(&store);
+    crate::stats::save_checked(&store)
 }
 
 /// 执行 GitHub 同步
@@ -638,12 +844,38 @@ pub async fn approve_sync_protocol_upgrade(
     state: State<'_, AppState>,
     challenge: crate::sync::archive::approval::SyncProtocolUpgrade,
 ) -> AppResult<()> {
-    let current = match challenge.backend.as_str() {
-        "github" => crate::sync::cloud::inspect_github_upgrade(&state.sync_http(), &load_github_config(&app)).await?,
-        "webdav" => crate::sync::cloud::inspect_webdav_upgrade(&state.sync_http(), &load_webdav_config(&app)).await?,
+    let (current, request) = match challenge.backend.as_str() {
+        "github" => {
+            let (config, request) = with_config_generations(|generations| {
+                (
+                    load_github_config_unlocked(&app),
+                    generations.snapshot(ConfigProvider::GitHub),
+                )
+            });
+            (
+                crate::sync::cloud::inspect_github_upgrade(&state.sync_http(), &config).await?,
+                request,
+            )
+        }
+        "webdav" => {
+            let (config, request) = with_config_generations(|generations| {
+                (
+                    load_webdav_config_unlocked(&app),
+                    generations.snapshot(ConfigProvider::WebDav),
+                )
+            });
+            (
+                crate::sync::cloud::inspect_webdav_upgrade(&state.sync_http(), &config).await?,
+                request,
+            )
+        }
         _ => return Err(AppError::Other("Invalid sync upgrade provider".into())),
     };
-    crate::sync::archive::approval::approve_verified(&challenge, &current)
+    with_config_generations(|generations| {
+        generations.complete(request, || {
+            crate::sync::archive::approval::approve_verified(&challenge, &current)
+        })
+    })
 }
 
 #[tauri::command]
@@ -653,8 +885,13 @@ pub async fn sync_github(
     history_entries: Option<Vec<manager::SyncHistoryEntry>>,
     history_deletions: Option<Vec<manager::SyncHistoryDeletion>>,
 ) -> AppResult<SyncResult> {
-    let config = load_github_config(&app);
-    if config.token.is_empty() {
+    let (config, request) = with_config_generations(|generations| {
+        (
+            load_github_config_unlocked(&app),
+            generations.snapshot(ConfigProvider::GitHub),
+        )
+    });
+    if !github_sync_configured(&config) {
         return Err(AppError::Api("GitHub sync not configured".into()));
     }
 
@@ -670,25 +907,30 @@ pub async fn sync_github(
         &local_data,
         playlist_epoch,
         |completed| {
-            with_sync_config(|| {
-                let mut current = load_github_config_unlocked(&app);
-                let outcome = complete_for_current_target(
-                    &mut current,
-                    &config,
-                    same_github_target,
-                    || {
-                        let outcome =
-                            manager::complete_cloud_sync(&completed, &local_data, playlist_epoch)?;
-                        apply_merged_stats(&app, &state, &outcome.merged);
-                        Ok(outcome)
-                    },
-                    |current| {
-                        current.last_remote_sha = completed.version.clone();
-                        current.last_sync_time = chrono::Utc::now().timestamp_millis();
-                    },
-                )?;
-                save_github_config_unlocked(&app, &current);
-                Ok(outcome)
+            with_config_generations(|generations| {
+                generations.complete(request, || {
+                    let mut current = load_github_config_unlocked(&app);
+                    let outcome = complete_for_current_target(
+                        &mut current,
+                        &config,
+                        same_github_target,
+                        || {
+                            let outcome = manager::complete_cloud_sync(
+                                &completed,
+                                &local_data,
+                                playlist_epoch,
+                            )?;
+                            apply_merged_stats(&app, &state, &outcome.merged)?;
+                            Ok(outcome)
+                        },
+                        |current| {
+                            current.last_remote_sha = completed.version.clone();
+                            current.last_sync_time = chrono::Utc::now().timestamp_millis();
+                        },
+                    )?;
+                    save_github_config_unlocked(&app, &current);
+                    Ok(outcome)
+                })
             })
         },
     )
@@ -706,8 +948,11 @@ pub async fn sync_github(
 /// 断开 GitHub 同步
 #[tauri::command]
 pub async fn disconnect_github_sync(app: AppHandle) -> AppResult<()> {
-    save_github_config(&app, &GitHubSyncConfig::default());
-    Ok(())
+    with_config_generations(|generations| {
+        generations.invalidate(ConfigProvider::GitHub)?;
+        save_github_config_unlocked(&app, &GitHubSyncConfig::default());
+        Ok(())
+    })
 }
 
 /// 获取 WebDAV 同步配置
@@ -735,6 +980,10 @@ pub async fn configure_webdav_sync(
     password: String,
     base_path: Option<String>,
 ) -> AppResult<Value> {
+    let (request, preferences) = with_config_generations(|generations| {
+        let request = generations.begin(ConfigProvider::WebDav)?;
+        Ok::<_, AppError>((request, generations.webdav_preferences))
+    })?;
     let bp = base_path.unwrap_or_default();
     let config = WebDavSyncConfig {
         server_url: server_url.clone(),
@@ -744,8 +993,22 @@ pub async fn configure_webdav_sync(
         auto_sync: true,
         ..Default::default()
     };
-    crate::sync::webdav_archive::WebDavArchiveClient::new(&state.sync_http(),&config)?.validate_connection().await?;
-    save_webdav_config(&app, &config);
+    crate::sync::webdav_archive::WebDavArchiveClient::new(&state.sync_http(), &config)?
+        .validate_connection()
+        .await?;
+    with_config_generations(|generations| {
+        generations.complete(request, || {
+            let current = load_webdav_config_unlocked(&app);
+            let config = webdav_connection_preferences(
+                preferences,
+                generations.webdav_preferences,
+                &current,
+                config,
+            );
+            save_webdav_config_unlocked(&app, &config);
+            Ok(())
+        })
+    })?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -761,7 +1024,12 @@ pub async fn sync_webdav(
     history_entries: Option<Vec<manager::SyncHistoryEntry>>,
     history_deletions: Option<Vec<manager::SyncHistoryDeletion>>,
 ) -> AppResult<SyncResult> {
-    let config = load_webdav_config(&app);
+    let (config, request) = with_config_generations(|generations| {
+        (
+            load_webdav_config_unlocked(&app),
+            generations.snapshot(ConfigProvider::WebDav),
+        )
+    });
     if config.server_url.is_empty() {
         return Err(AppError::Api("WebDAV sync not configured".into()));
     }
@@ -778,25 +1046,30 @@ pub async fn sync_webdav(
         &local_data,
         playlist_epoch,
         |completed| {
-            with_sync_config(|| {
-                let mut current = load_webdav_config_unlocked(&app);
-                let outcome = complete_for_current_target(
-                    &mut current,
-                    &config,
-                    same_webdav_target,
-                    || {
-                        let outcome =
-                            manager::complete_cloud_sync(&completed, &local_data, playlist_epoch)?;
-                        apply_merged_stats(&app, &state, &outcome.merged);
-                        Ok(outcome)
-                    },
-                    |current| {
-                        current.last_remote_fingerprint = completed.version.clone();
-                        current.last_sync_time = chrono::Utc::now().timestamp_millis();
-                    },
-                )?;
-                save_webdav_config_unlocked(&app, &current);
-                Ok(outcome)
+            with_config_generations(|generations| {
+                generations.complete(request, || {
+                    let mut current = load_webdav_config_unlocked(&app);
+                    let outcome = complete_for_current_target(
+                        &mut current,
+                        &config,
+                        same_webdav_target,
+                        || {
+                            let outcome = manager::complete_cloud_sync(
+                                &completed,
+                                &local_data,
+                                playlist_epoch,
+                            )?;
+                            apply_merged_stats(&app, &state, &outcome.merged)?;
+                            Ok(outcome)
+                        },
+                        |current| {
+                            current.last_remote_fingerprint = completed.version.clone();
+                            current.last_sync_time = chrono::Utc::now().timestamp_millis();
+                        },
+                    )?;
+                    save_webdav_config_unlocked(&app, &current);
+                    Ok(outcome)
+                })
             })
         },
     )
@@ -818,21 +1091,26 @@ pub async fn update_github_sync_settings(
     silent_failures: Option<bool>,
     history_update_mode: Option<String>,
 ) -> AppResult<()> {
-    with_sync_config(|| {
+    with_config_generations(|generations| {
         let mut config = load_github_config_unlocked(&app);
         if config.token.is_empty() {
             return Err(AppError::Api("GitHub sync not configured".into()));
         }
         if let Some(v) = auto_sync {
+            advance_preference_revision(&mut generations.github_preferences.auto_sync)?;
             config.auto_sync = v;
         }
         if let Some(v) = data_saver {
+            advance_preference_revision(&mut generations.github_preferences.data_saver)?;
             config.data_saver = v;
         }
         if let Some(v) = silent_failures {
+            advance_preference_revision(&mut generations.github_preferences.silent_failures)?;
             config.silent_failures = v;
         }
         if let Some(v) = history_update_mode {
+            advance_preference_revision(&mut generations.github_preferences.history_update_mode)?;
+            advance_preference_revision(&mut generations.sync_preferences_revision)?;
             let normalized = normalize_history_update_mode(&v);
             config.history_update_mode = normalized.clone();
             save_sync_preferences_unlocked(
@@ -850,12 +1128,13 @@ pub async fn update_github_sync_settings(
 /// 更新 WebDAV 同步子设置
 #[tauri::command]
 pub async fn update_webdav_sync_settings(app: AppHandle, auto_sync: Option<bool>) -> AppResult<()> {
-    with_sync_config(|| {
+    with_config_generations(|generations| {
         let mut config = load_webdav_config_unlocked(&app);
         if config.server_url.is_empty() {
             return Err(AppError::Api("WebDAV sync not configured".into()));
         }
         if let Some(v) = auto_sync {
+            advance_preference_revision(&mut generations.webdav_preferences.auto_sync)?;
             config.auto_sync = v;
         }
         save_webdav_config_unlocked(&app, &config);
@@ -1168,6 +1447,22 @@ pub async fn export_config(
 /// 导入 PC 配置文件并恢复设置、登录状态和同步配置
 #[tauri::command]
 pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppResult<Value> {
+    let (
+        github_request,
+        webdav_request,
+        github_preferences,
+        webdav_preferences,
+        sync_preferences_revision,
+    ) = with_config_generations(|generations| {
+        advance_preference_revision(&mut generations.sync_preferences_revision)?;
+        Ok::<_, AppError>((
+            generations.begin(ConfigProvider::GitHub)?,
+            generations.begin(ConfigProvider::WebDav)?,
+            generations.github_preferences,
+            generations.webdav_preferences,
+            generations.sync_preferences_revision,
+        ))
+    })?;
     let Some(file_path) = pick_file_path(&app, None).await? else {
         return Ok(dialog_cancelled());
     };
@@ -1227,22 +1522,42 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
         .github_sync
         .as_ref()
         .map(|github| github.history_update_mode.clone());
-    with_sync_config(|| {
-        if let Some(preferences) = payload.sync_preferences {
-            save_sync_preferences_unlocked(&app, &preferences.into_config());
-        } else if let Some(mode) = legacy_history_mode {
-            save_sync_preferences_unlocked(
-                &app,
-                &SyncPreferencesConfig {
-                    history_update_mode: normalize_history_update_mode(&mode),
-                },
-            );
+    with_config_generations(|generations| {
+        if generations.sync_preferences_revision == sync_preferences_revision {
+            if let Some(preferences) = payload.sync_preferences {
+                save_sync_preferences_unlocked(&app, &preferences.into_config());
+            } else if let Some(mode) = legacy_history_mode {
+                save_sync_preferences_unlocked(
+                    &app,
+                    &SyncPreferencesConfig {
+                        history_update_mode: normalize_history_update_mode(&mode),
+                    },
+                );
+            }
         }
-        if let Some(github) = payload.github_sync {
-            save_github_config_unlocked(&app, &github.into_config());
+        if generations.is_current(github_request) {
+            if let Some(github) = payload.github_sync {
+                let current = load_github_config_unlocked(&app);
+                let github = github_connection_preferences(
+                    github_preferences,
+                    generations.github_preferences,
+                    &current,
+                    github.into_config(),
+                );
+                save_github_config_unlocked(&app, &github);
+            }
         }
-        if let Some(webdav) = payload.webdav_sync {
-            save_webdav_config_unlocked(&app, &webdav.into_config());
+        if generations.is_current(webdav_request) {
+            if let Some(webdav) = payload.webdav_sync {
+                let current = load_webdav_config_unlocked(&app);
+                let webdav = webdav_connection_preferences(
+                    webdav_preferences,
+                    generations.webdav_preferences,
+                    &current,
+                    webdav.into_config(),
+                );
+                save_webdav_config_unlocked(&app, &webdav);
+            }
         }
     });
 
@@ -1259,8 +1574,11 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
 /// 断开 WebDAV 同步
 #[tauri::command]
 pub async fn disconnect_webdav_sync(app: AppHandle) -> AppResult<()> {
-    save_webdav_config(&app, &WebDavSyncConfig::default());
-    Ok(())
+    with_config_generations(|generations| {
+        generations.invalidate(ConfigProvider::WebDav)?;
+        save_webdav_config_unlocked(&app, &WebDavSyncConfig::default());
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -1273,6 +1591,351 @@ mod tests {
     use crate::auth::state::AuthState;
     use crate::settings::store::AppSettings;
     use crate::sync::models::{GitHubSyncConfig, SyncPreferencesConfig, WebDavSyncConfig};
+
+    #[test]
+    fn validated_token_without_a_repository_is_not_a_configured_sync_target() {
+        let mut config = GitHubSyncConfig::default();
+        assert!(!super::github_sync_configured(&config));
+        config.token = "fixture-token".into();
+        config.owner = "owner".into();
+        assert!(!super::github_sync_configured(&config));
+        config.repo = "repo".into();
+        assert!(super::github_sync_configured(&config));
+        config.owner = " ".into();
+        assert!(!super::github_sync_configured(&config));
+    }
+
+    #[test]
+    fn connection_preference_aba_preserves_last_user_choice() {
+        let mut generations = super::ConfigRequestGenerations::default();
+        let started = generations.github_preferences;
+        let request = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        let mut current = GitHubSyncConfig {
+            auto_sync: false,
+            ..Default::default()
+        };
+        super::advance_preference_revision(&mut generations.github_preferences.auto_sync).unwrap();
+        current.auto_sync = true;
+        super::advance_preference_revision(&mut generations.github_preferences.auto_sync).unwrap();
+        current.auto_sync = false;
+        let proposed = GitHubSyncConfig {
+            auto_sync: true,
+            data_saver: true,
+            ..Default::default()
+        };
+        let result = super::github_connection_preferences(
+            started,
+            generations.github_preferences,
+            &current,
+            proposed,
+        );
+        assert!(!result.auto_sync);
+        generations.complete(request, || Ok(())).unwrap();
+        let started = generations.webdav_preferences;
+        let request = generations.begin(super::ConfigProvider::WebDav).unwrap();
+        let mut current = WebDavSyncConfig {
+            auto_sync: false,
+            ..Default::default()
+        };
+        super::advance_preference_revision(&mut generations.webdav_preferences.auto_sync).unwrap();
+        current.auto_sync = true;
+        super::advance_preference_revision(&mut generations.webdav_preferences.auto_sync).unwrap();
+        current.auto_sync = false;
+        let proposed = WebDavSyncConfig {
+            auto_sync: true,
+            ..Default::default()
+        };
+        let result = super::webdav_connection_preferences(
+            started,
+            generations.webdav_preferences,
+            &current,
+            proposed,
+        );
+        assert!(!result.auto_sync);
+        generations.complete(request, || Ok(())).unwrap();
+    }
+
+    #[test]
+    fn token_validation_clears_previous_target_only_when_identity_changes() {
+        let original = GitHubSyncConfig {
+            token: "old token".into(),
+            owner: "old owner".into(),
+            repo: "old repo".into(),
+            last_remote_sha: "old sha".into(),
+            last_sync_time: 42,
+            auto_sync: true,
+            data_saver: true,
+            silent_failures: true,
+            history_update_mode: "every_15_minutes".into(),
+        };
+        for (token, owner, changed) in [
+            ("old token", "old owner", false),
+            ("new token", "old owner", true),
+            ("old token", "new owner", true),
+        ] {
+            let validated =
+                super::validated_github_identity(original.clone(), token.into(), owner.into());
+            assert_eq!(validated.token, token);
+            assert_eq!(validated.owner, owner);
+            assert_eq!(validated.repo, if changed { "" } else { "old repo" });
+            assert_eq!(
+                validated.last_remote_sha,
+                if changed { "" } else { "old sha" }
+            );
+            assert_eq!(validated.last_sync_time, if changed { 0 } else { 42 });
+            assert_eq!(validated.auto_sync, !changed);
+            assert!(validated.data_saver);
+            assert!(validated.silent_failures);
+            assert_eq!(validated.history_update_mode, "every_15_minutes");
+        }
+    }
+
+    #[test]
+    fn new_connection_defaults_are_preserved_without_preference_changes() {
+        let started = GitHubSyncConfig::default();
+        let proposed = GitHubSyncConfig {
+            token: "new".into(),
+            owner: "new".into(),
+            repo: "new".into(),
+            auto_sync: true,
+            data_saver: true,
+            ..Default::default()
+        };
+        let result = super::github_connection_preferences(
+            super::GitHubPreferenceRevisions::default(),
+            super::GitHubPreferenceRevisions::default(),
+            &started,
+            proposed,
+        );
+        assert!(result.auto_sync);
+        assert!(result.data_saver);
+        let started = WebDavSyncConfig::default();
+        let proposed = WebDavSyncConfig {
+            server_url: "https://new.invalid/".into(),
+            auto_sync: true,
+            ..Default::default()
+        };
+        let result = super::webdav_connection_preferences(
+            super::WebDavPreferenceRevisions::default(),
+            super::WebDavPreferenceRevisions::default(),
+            &started,
+            proposed,
+        );
+        assert!(result.auto_sync);
+        assert!(!result.data_saver);
+    }
+
+    #[test]
+    fn connection_completion_preserves_changed_preferences_and_new_identity() {
+        let started = GitHubSyncConfig {
+            auto_sync: true,
+            data_saver: true,
+            history_update_mode: "immediate".into(),
+            ..Default::default()
+        };
+        let current = GitHubSyncConfig {
+            auto_sync: false,
+            data_saver: false,
+            silent_failures: true,
+            history_update_mode: "every_15_minutes".into(),
+            ..started.clone()
+        };
+        let proposed = GitHubSyncConfig {
+            token: "new".into(),
+            owner: "new owner".into(),
+            repo: "new repo".into(),
+            auto_sync: true,
+            data_saver: true,
+            ..Default::default()
+        };
+        let revisions = super::GitHubPreferenceRevisions {
+            auto_sync: 1,
+            data_saver: 1,
+            silent_failures: 1,
+            history_update_mode: 1,
+        };
+        let result = super::github_connection_preferences(
+            super::GitHubPreferenceRevisions::default(),
+            revisions,
+            &current,
+            proposed,
+        );
+        assert!(!result.auto_sync);
+        assert!(!result.data_saver);
+        assert!(result.silent_failures);
+        assert_eq!(result.history_update_mode, "every_15_minutes");
+        assert_eq!(result.token, "new");
+        assert_eq!(result.owner, "new owner");
+        assert_eq!(result.repo, "new repo");
+        let started = WebDavSyncConfig {
+            auto_sync: true,
+            ..Default::default()
+        };
+        let current = WebDavSyncConfig {
+            auto_sync: false,
+            data_saver: true,
+            ..started.clone()
+        };
+        let proposed = WebDavSyncConfig {
+            server_url: "https://new.invalid/".into(),
+            username: "new".into(),
+            password: "new".into(),
+            auto_sync: true,
+            ..Default::default()
+        };
+        let revisions = super::WebDavPreferenceRevisions {
+            auto_sync: 1,
+            data_saver: 1,
+        };
+        let result = super::webdav_connection_preferences(
+            super::WebDavPreferenceRevisions::default(),
+            revisions,
+            &current,
+            proposed,
+        );
+        assert!(!result.auto_sync);
+        assert!(result.data_saver);
+        assert_eq!(result.server_url, "https://new.invalid/");
+        assert_eq!(result.username, "new");
+        assert_eq!(result.password, "new");
+    }
+
+    #[test]
+    fn config_requests_reverse_completion_rejects_old_save() {
+        let mut generations = super::ConfigRequestGenerations::default();
+        let old = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        let new = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        let mut stored = "initial";
+        generations
+            .complete(new, || {
+                stored = "new";
+                Ok(())
+            })
+            .unwrap();
+        assert!(generations
+            .complete(old, || {
+                stored = "old";
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(stored, "new");
+    }
+
+    #[test]
+    fn config_request_after_disconnect_cannot_restore_identity() {
+        for provider in [super::ConfigProvider::GitHub, super::ConfigProvider::WebDav] {
+            let mut generations = super::ConfigRequestGenerations::default();
+            let pending = generations.begin(provider).unwrap();
+            generations.invalidate(provider).unwrap();
+            let mut stored = None;
+            assert!(generations
+                .complete(pending, || {
+                    stored = Some("old credential");
+                    Ok(())
+                })
+                .is_err());
+            assert!(stored.is_none());
+        }
+    }
+
+    #[test]
+    fn config_import_invalidates_both_and_preserves_newer_provider_intent() {
+        let mut generations = super::ConfigRequestGenerations::default();
+        let pending_github = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        let pending_webdav = generations.begin(super::ConfigProvider::WebDav).unwrap();
+        let import_github = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        let import_webdav = generations.begin(super::ConfigProvider::WebDav).unwrap();
+        let mut github = "old";
+        let mut webdav = "old";
+        assert!(generations
+            .complete(pending_github, || {
+                github = "pending";
+                Ok(())
+            })
+            .is_err());
+        assert!(generations
+            .complete(pending_webdav, || {
+                webdav = "pending";
+                Ok(())
+            })
+            .is_err());
+        let newer = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        generations
+            .complete(newer, || {
+                github = "newer";
+                Ok(())
+            })
+            .unwrap();
+        assert!(generations
+            .complete(import_github, || {
+                github = "imported";
+                Ok(())
+            })
+            .is_err());
+        generations
+            .complete(import_webdav, || {
+                webdav = "imported";
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(github, "newer");
+        assert_eq!(webdav, "imported");
+    }
+
+    #[test]
+    fn config_providers_are_independent_and_preferences_do_not_invalidate_requests() {
+        let mut generations = super::ConfigRequestGenerations::default();
+        let github = generations.begin(super::ConfigProvider::GitHub).unwrap();
+        let webdav = generations.begin(super::ConfigProvider::WebDav).unwrap();
+        let github_read = generations.snapshot(super::ConfigProvider::GitHub);
+        let webdav_read = generations.snapshot(super::ConfigProvider::WebDav);
+        let auto_sync = false;
+        super::advance_preference_revision(&mut generations.sync_preferences_revision).unwrap();
+        assert_eq!(generations.sync_preferences_revision, 1);
+        generations
+            .complete(github, || {
+                assert!(!auto_sync);
+                Ok(())
+            })
+            .unwrap();
+        generations
+            .complete(webdav, || {
+                assert!(!auto_sync);
+                Ok(())
+            })
+            .unwrap();
+        generations.complete(github_read, || Ok(())).unwrap();
+        generations.complete(webdav_read, || Ok(())).unwrap();
+    }
+
+    #[test]
+    fn config_sync_and_upgrade_tickets_reject_disconnect_reconnect_aba() {
+        for provider in [super::ConfigProvider::GitHub, super::ConfigProvider::WebDav] {
+            let mut generations = super::ConfigRequestGenerations::default();
+            let sync = generations.snapshot(provider);
+            let upgrade = generations.snapshot(provider);
+            generations.invalidate(provider).unwrap();
+            let reconnect = generations.begin(provider).unwrap();
+            let mut identity = "same target and credential";
+            generations
+                .complete(reconnect, || {
+                    identity = "same target and credential";
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(identity, "same target and credential");
+            assert!(generations
+                .complete(sync, || -> crate::error::AppResult<()> {
+                    panic!("ABA sync must not apply local data")
+                })
+                .is_err());
+            assert!(generations
+                .complete(upgrade, || -> crate::error::AppResult<()> {
+                    panic!("ABA upgrade must not authorize old target")
+                })
+                .is_err());
+        }
+    }
 
     #[test]
     fn completion_preserves_preferences_changed_during_network_request() {
