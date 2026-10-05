@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
 import { createLogger } from '@/utils/logger'
-import { parseYouTubeLibraryPlaylists as parseYouTubeLibraryPlaylistsShared } from '@/modules/youtube/youtubePlaylistParse'
+import { parseYouTubeLibraryPlaylists as parseYouTubeLibraryPlaylistsShared, parseYouTubeHomeFeed } from '@/modules/youtube/youtubePlaylistParse'
 
 const log = createLogger('recommend')
 
@@ -416,35 +416,3 @@ export const useRecommendStore = defineStore('recommend', () => {
     fetchBiliFavoriteItems, validateAuth,
   }
 })
-
-// YouTube InnerTube 响应解析
-function parseYouTubeHomeFeed(data: any): HomeFeedShelf[] {
-  const shelves: HomeFeedShelf[] = []
-  try {
-    const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs || []
-    const contents = tabs[0]?.tabRenderer?.content?.sectionListRenderer?.contents || []
-    for (const section of contents) {
-      const shelf = section?.musicCarouselShelfRenderer
-      if (!shelf) continue
-      const title = shelf?.header?.musicCarouselShelfBasicHeaderRenderer?.title?.runs?.[0]?.text || ''
-      const items: HomeFeedItem[] = []
-      for (const item of (shelf?.contents || [])) {
-        const renderer = item?.musicTwoRowItemRenderer || item?.musicResponsiveListItemRenderer
-        if (!renderer) continue
-        items.push({
-          title: renderer?.title?.runs?.[0]?.text || '',
-          subtitle: renderer?.subtitle?.runs?.map((r: any) => r.text).join('') || '',
-          coverUrl: renderer?.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails?.slice(-1)?.[0]?.url || '',
-          browseId: renderer?.navigationEndpoint?.browseEndpoint?.browseId,
-          videoId: renderer?.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId,
-        })
-      }
-      if (title && items.length > 0) {
-        shelves.push({ title, items })
-      }
-    }
-  } catch {
-    // 解析失败返回空
-  }
-  return shelves
-}

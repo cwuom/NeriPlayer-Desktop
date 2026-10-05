@@ -19,6 +19,43 @@ export interface YoutubeLibraryPlaylist {
   description?: string
 }
 
+export interface YoutubeHomeFeedShelf {
+  title: string
+  items: Array<{ title: string; subtitle: string; coverUrl: string; browseId?: string; videoId?: string }>
+}
+
+export function parseYouTubeHomeFeed(data: any): YoutubeHomeFeedShelf[] {
+  const shelves: YoutubeHomeFeedShelf[] = []
+  const layout = data?.contents?.singleColumnBrowseResultsRenderer || data?.contents?.twoColumnBrowseResultsRenderer
+  const contents = layout?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents
+    || data?.contents?.sectionListRenderer?.contents || []
+  for (const section of (Array.isArray(contents) ? contents : [])) {
+    const shelf = section?.musicCarouselShelfRenderer
+    if (!shelf) continue
+    const title = extractText(shelf?.header?.musicCarouselShelfBasicHeaderRenderer?.title)
+    const items = (Array.isArray(shelf.contents) ? shelf.contents : []).flatMap((item: any) => {
+      const renderer = item?.musicTwoRowItemRenderer || item?.musicResponsiveListItemRenderer
+      if (!renderer) return []
+      const responsive = !!item.musicResponsiveListItemRenderer
+      const itemTitle = responsive
+        ? extractColumnText(renderer.flexColumns, 0, 'musicResponsiveListItemFlexColumnRenderer')
+        : extractText(renderer.title)
+      if (!itemTitle) return []
+      return [{
+        title: itemTitle,
+        subtitle: responsive
+          ? extractColumnText(renderer.flexColumns, 1, 'musicResponsiveListItemFlexColumnRenderer')
+          : extractText(renderer.subtitle),
+        coverUrl: extractMusicThumbnailUrl(renderer.thumbnailRenderer || renderer.thumbnail),
+        browseId: renderer.navigationEndpoint?.browseEndpoint?.browseId,
+        videoId: extractTrackVideoId(renderer) || undefined,
+      }]
+    })
+    if (title && items.length) shelves.push({ title, items })
+  }
+  return shelves
+}
+
 function joinRuns(runs: any[] | undefined | null): string {
   if (!Array.isArray(runs)) return ''
   return runs.map((r: any) => r?.text || '').join('')
@@ -380,7 +417,6 @@ export function parseYouTubeLibraryPlaylists(data: any): YoutubeLibraryPlaylist[
       tryPush(parseLockupViewModel(item?.lockupViewModel), false)
     }
   }
-  if (playlists.length > 0) return playlists
 
   // 回退：全量 twoRow + shelf
   for (const item of collectGridItems(data)) {
@@ -389,7 +425,6 @@ export function parseYouTubeLibraryPlaylists(data: any): YoutubeLibraryPlaylist[
       true,
     )
   }
-  if (playlists.length > 0) return playlists
 
   // 最后回退：深搜 lockupViewModel
   // 新架构下 grid/shelf 的外层容器也换了名字，按类型深搜才不会漏

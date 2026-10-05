@@ -1,11 +1,11 @@
 // YouTube Music InnerTube API 客户端
+use parking_lot::Mutex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use parking_lot::Mutex;
 
-use crate::error::{AppError, AppResult};
 use crate::api::transport::FallbackHttp;
+use crate::error::{AppError, AppResult};
 
 pub use super::account::YouTubeAccountProfile;
 
@@ -14,7 +14,7 @@ pub(super) const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) A
 
 // 默认 API key（可能随时变化，需要从页面 bootstrap 获取）
 const DEFAULT_API_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
-const DEFAULT_CLIENT_VERSION: &str = "1.20250415.01.00";
+const DEFAULT_CLIENT_VERSION: &str = "1.20260403.09.00";
 
 pub struct YouTubeClient {
     http: FallbackHttp,
@@ -38,6 +38,44 @@ pub struct YtAudioStream {
     pub bitrate: u64,
     pub mime_type: String,
     pub content_length: u64,
+    #[serde(default)]
+    pub stream_type: YtStreamType,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum YtStreamType {
+    #[default]
+    Direct,
+    Hls,
+}
+
+fn is_lyrics_browse_id(browse_id: &str) -> bool {
+    browse_id.starts_with("MPLYt")
+}
+
+fn parse_description_lyrics(root: &Value) -> Option<String> {
+    root["contents"]["sectionListRenderer"]["contents"]
+        .as_array()?
+        .iter()
+        .find_map(|section| {
+            let description = &section["musicDescriptionShelfRenderer"]["description"];
+            let value = description["runs"]
+                .as_array()
+                .map(|runs| {
+                    runs.iter()
+                        .filter_map(|run| run["text"].as_str())
+                        .collect::<String>()
+                })
+                .unwrap_or_else(|| {
+                    description["simpleText"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                });
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        })
 }
 
 impl YouTubeClient {
@@ -77,9 +115,18 @@ impl YouTubeClient {
     }
 
     /// InnerTube POST 请求
-    async fn innertube_post(&self, endpoint: &str, body: &Value) -> AppResult<Value> {
-        let api_key = self.api_key.lock().clone();
-        let url = format!("{}/{}?prettyPrint=false&key={}", INNERTUBE_URL, endpoint, api_key);
+    pub(super) async fn innertube_post(&self, endpoint: &str, body: &Value) -> AppResult<Value> {
+        let bootstrap = super::bootstrap::fetch(&self.http, None, true, false).await?;
+        *self.api_key.lock() = bootstrap.api_key.clone();
+        *self.client_version.lock() = bootstrap.client_version.clone();
+        let api_key = bootstrap.api_key;
+        let url = format!(
+            "{}/{}?prettyPrint=false&key={}",
+            INNERTUBE_URL, endpoint, api_key
+        );
+        let mut body = body.clone();
+        body["context"] = self.build_context();
+        body["context"]["client"]["visitorData"] = json!(bootstrap.visitor_data);
 
         let resp = self
             .http
@@ -91,7 +138,9 @@ impl YouTubeClient {
                     .header("Origin", "https://music.youtube.com")
                     .header("Referer", "https://music.youtube.com/")
                     .header("X-YouTube-Client-Name", "67")
-                    .json(body)
+                    .header("X-YouTube-Client-Version", &bootstrap.client_version)
+                    .header("X-Goog-Visitor-Id", &bootstrap.visitor_data)
+                    .json(&body)
             })
             .await?;
 
@@ -103,10 +152,14 @@ impl YouTubeClient {
         let body = json!({
             "context": self.build_context(),
             "query": query,
-            "params": "EgWKAQIIAWoMEA4QChADEAQQCRAF"  // 搜索歌曲过滤器
+            "params": "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
         });
 
         self.innertube_post("search", &body).await
+    }
+
+    pub async fn search_tracks(&self, query: &str) -> AppResult<Vec<YtSearchResult>> {
+        super::search::search_tracks(self, query).await
     }
 
     /// 获取音频流 (兼容入口: 委托 playback; 无 auth 时仅 guest 路径)
@@ -127,25 +180,22 @@ impl YouTubeClient {
         let resp = self.innertube_post("next", &body).await?;
 
         // 歌词在 tabs 中
-        let tabs = resp["contents"]["singleColumnMusicWatchNextResultsRenderer"]
-            ["tabbedRenderer"]["watchNextTabbedResultsRenderer"]["tabs"]
+        let tabs = resp["contents"]["singleColumnMusicWatchNextResultsRenderer"]["tabbedRenderer"]
+            ["watchNextTabbedResultsRenderer"]["tabs"]
             .as_array();
 
         if let Some(tabs) = tabs {
             for tab in tabs {
                 let endpoint = &tab["tabRenderer"]["endpoint"];
                 if let Some(browse_id) = endpoint["browseEndpoint"]["browseId"].as_str() {
-                    if browse_id.starts_with("MPLYt_") {
+                    if is_lyrics_browse_id(browse_id) {
                         // 获取歌词内容
                         let lyrics_body = json!({
                             "context": self.build_context(),
                             "browseId": browse_id
                         });
                         let lyrics_resp = self.innertube_post("browse", &lyrics_body).await?;
-                        let text = lyrics_resp["contents"]["sectionListRenderer"]["contents"]
-                            [0]["musicDescriptionShelfRenderer"]["description"]["runs"]
-                            [0]["text"].as_str();
-                        return Ok(text.map(String::from));
+                        return Ok(parse_description_lyrics(&lyrics_resp));
                     }
                 }
             }
@@ -162,7 +212,9 @@ impl YouTubeClient {
         body: &Value,
         auth: &crate::auth::state::YouTubeAuth,
     ) -> AppResult<Value> {
-        let (data, _) = self.innertube_post_auth_with_session(endpoint, body, auth).await?;
+        let (data, _) = self
+            .innertube_post_auth_with_session(endpoint, body, auth)
+            .await?;
         Ok(data)
     }
 
@@ -205,10 +257,7 @@ impl YouTubeClient {
     }
 
     /// YouTube Music 首页信息流（需登录）
-    pub async fn get_home_feed(
-        &self,
-        auth: &crate::auth::state::YouTubeAuth,
-    ) -> AppResult<Value> {
+    pub async fn get_home_feed(&self, auth: &crate::auth::state::YouTubeAuth) -> AppResult<Value> {
         let body = json!({
             "context": self.build_context(),
             "browseId": "FEmusic_home"
@@ -225,7 +274,39 @@ impl YouTubeClient {
             "context": self.build_context(),
             "browseId": "FEmusic_liked_playlists"
         });
-        let data = self.innertube_post_auth("browse", &body, auth).await?;
+        let (mut data, updated_auth) = self
+            .innertube_post_auth_with_session("browse", &body, auth)
+            .await?;
+        let mut current_auth = updated_auth.unwrap_or_else(|| auth.clone());
+        let mut continuation = super::playlist::extract_continuation_token(&data);
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut pages = Vec::new();
+        while pages.len() < 79 {
+            let Some(token) = continuation.take() else {
+                break;
+            };
+            if !seen_tokens.insert(token.clone()) {
+                break;
+            }
+            let body = json!({"context": self.build_context(), "continuation": token});
+            let (page, updated_auth) = match self
+                .innertube_post_auth_with_session("browse", &body, &current_auth)
+                .await
+            {
+                Ok(value) => value,
+                Err(_) => {
+                    break;
+                }
+            };
+            if let Some(updated_auth) = updated_auth {
+                current_auth = updated_auth;
+            }
+            continuation = super::playlist::extract_continuation_token(&page);
+            pages.push(page);
+        }
+        if !pages.is_empty() {
+            data["_neriLibraryContinuationPages"] = json!(pages);
+        }
         // 诊断用：区分「请求没发出」「返回了但目录为空」「返回有内容但前端解析不出」
         log::info!(
             target: "youtube",
@@ -327,7 +408,11 @@ impl YouTubeClient {
             );
             return Err(AppError::Api(format!(
                 "YouTube request failed: HTTP {status}{}",
-                if detail.is_empty() { String::new() } else { format!(" - {detail}") }
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {detail}")
+                }
             )));
         }
         let data: Value = serde_json::from_str(&body).map_err(|error| {
@@ -370,7 +455,8 @@ impl YouTubeClient {
             "context": self.build_context(),
             "browseId": browse_id
         });
-        self.innertube_post_auth_with_session("browse", &body, auth).await
+        self.innertube_post_auth_with_session("browse", &body, auth)
+            .await
     }
 
     /// 歌单分页 continuation(携带会话刷新)
@@ -383,7 +469,8 @@ impl YouTubeClient {
             "context": self.build_context(),
             "continuation": continuation
         });
-        self.innertube_post_auth_with_session("browse", &body, auth).await
+        self.innertube_post_auth_with_session("browse", &body, auth)
+            .await
     }
 }
 
@@ -489,7 +576,6 @@ fn summarize_node_types(data: &Value) -> String {
         .join(", ")
 }
 
-
 /// 抽取 messageRenderer / messageSubtextRenderer 里的可读文案
 fn extract_message_renderer_text(data: &Value) -> Option<String> {
     fn collect_text(node: &Value, out: &mut Vec<String>) {
@@ -556,6 +642,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_lyrics_match_android_browse_prefix_and_join_all_text_runs() {
+        assert!(is_lyrics_browse_id("MPLYt-no-underscore"));
+        assert!(!is_lyrics_browse_id("MPLA-album"));
+        let fixture = json!({"contents": {"sectionListRenderer": {"contents": [
+            {"musicDescriptionShelfRenderer": {"description": {"runs": [{"text":" "}]}}},
+            {"musicDescriptionShelfRenderer": {"description": {"runs": [{"text":"第一行\n"}, {"text":"第二行"}]}}}
+        ]}}});
+        assert_eq!(
+            parse_description_lyrics(&fixture).as_deref(),
+            Some("第一行\n第二行")
+        );
+        assert_eq!(parse_description_lyrics(&json!({"contents": {"sectionListRenderer": {"contents": [{"musicDescriptionShelfRenderer": {"description": {"simpleText":"plain text"}}}]}}})).as_deref(), Some("plain text"));
+        assert!(parse_description_lyrics(&json!({})).is_none());
+    }
+
     /// 回归：同名 cookie 在 google.com 与 youtube.com 下的值并不相同
     ///
     /// 不做域过滤时 Cookie 头会出现重名，服务端只认一个，取到 google 那份
@@ -578,8 +680,14 @@ mod tests {
 
         let selected = YouTubeClient::music_cookies(&auth);
 
-        assert_eq!(selected.get("HSID").map(String::as_str), Some("youtube-value"));
-        assert_eq!(selected.get("SSID").map(String::as_str), Some("youtube-ssid"));
+        assert_eq!(
+            selected.get("HSID").map(String::as_str),
+            Some("youtube-value")
+        );
+        assert_eq!(
+            selected.get("SSID").map(String::as_str),
+            Some("youtube-ssid")
+        );
         assert_eq!(selected.get("SAPISID").map(String::as_str), Some("shared"));
         // 其它域的 cookie 不得混入
         assert!(!selected.contains_key("__Host-GAPS"));
@@ -593,6 +701,10 @@ mod tests {
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(names.len(), unique.len(), "duplicate cookie names: {header}");
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "duplicate cookie names: {header}"
+        );
     }
 }

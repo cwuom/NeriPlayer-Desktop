@@ -186,86 +186,28 @@ async fn search_bilibili(query: &str, state: &State<'_, AppState>) -> AppResult<
     Ok(results)
 }
 
-async fn search_youtube(_query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {
+async fn search_youtube(query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {
     let client = state.youtube();
-    let resp = client.search(_query).await?;
-
-    // InnerTube 搜索结果解析
-    let mut results = Vec::new();
-    if let Some(contents) = resp["contents"]["tabbedSearchResultsRenderer"]["tabs"]
-        .get(0)
-        .and_then(|t| t["tabRenderer"]["content"]["sectionListRenderer"]["contents"].as_array())
-    {
-        for section in contents {
-            if let Some(items) = section["musicShelfRenderer"]["contents"].as_array() {
-                for item in items {
-                    let renderer = &item["musicResponsiveListItemRenderer"];
-                    // 提取 videoId
-                    let video_id = renderer["overlay"]["musicItemThumbnailOverlayRenderer"]
-                        ["content"]["musicPlayButtonRenderer"]["playNavigationEndpoint"]
-                        ["watchEndpoint"]["videoId"]
-                        .as_str()
-                        .or_else(|| {
-                            renderer["flexColumns"].get(0).and_then(|c| {
-                                c["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
-                                    .get(0)
-                                    .and_then(|r| {
-                                        r["navigationEndpoint"]["watchEndpoint"]["videoId"].as_str()
-                                    })
-                            })
-                        });
-
-                    if let Some(vid) = video_id {
-                        let title = renderer["flexColumns"]
-                            .get(0)
-                            .and_then(|c| {
-                                c["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
-                                    .get(0)
-                                    .and_then(|r| r["text"].as_str())
-                            })
-                            .unwrap_or("")
-                            .to_string();
-
-                        let artist = renderer["flexColumns"]
-                            .get(1)
-                            .and_then(|c| {
-                                c["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
-                                    .get(0)
-                                    .and_then(|r| r["text"].as_str())
-                            })
-                            .unwrap_or("")
-                            .to_string();
-
-                        let thumbnail = renderer["thumbnail"]["musicThumbnailRenderer"]
-                            ["thumbnail"]["thumbnails"]
-                            .as_array()
-                            .and_then(|arr| arr.last())
-                            .and_then(|t| t["url"].as_str())
-                            .map(upgrade_youtube_thumbnail_url);
-
-                        // 多路径解析时长(fixedColumns/flexColumns runs/lengthText)，失败回退 0
-                        let duration_ms =
-                            crate::api::youtube::duration::extract_track_duration_ms(renderer);
-
-                        results.push(SearchResult {
-                            id: format!("youtube:{}", vid),
-                            title,
-                            artist,
-                            album: String::new(),
-                            duration_ms,
-                            source: "youtube".into(),
-                            cover_url: thumbnail,
-                            synced_lyrics: None,
-                            plain_lyrics: None,
-                            translated_lyrics: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(results)
+    Ok(client
+        .search_tracks(query)
+        .await?
+        .into_iter()
+        .map(|row| SearchResult {
+            id: format!("youtube:{}", row.video_id),
+            title: row.title,
+            artist: row.artist,
+            album: row.album,
+            duration_ms: row.duration_ms,
+            source: "youtube".into(),
+            cover_url: row
+                .thumbnail_url
+                .as_deref()
+                .map(upgrade_youtube_thumbnail_url),
+            synced_lyrics: None,
+            plain_lyrics: None,
+            translated_lyrics: None,
+        })
+        .collect())
 }
 
 async fn search_lrclib(query: &str, state: &State<'_, AppState>) -> AppResult<Vec<SearchResult>> {

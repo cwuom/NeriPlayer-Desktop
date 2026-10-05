@@ -32,7 +32,32 @@ const {
   parseYouTubeLibraryPlaylists,
   parseYouTubePlaylistTracks,
   parseYouTubePlaylistMeta,
+  parseYouTubeHomeFeed,
 } = await import(moduleUrl)
+
+const quickPicks = parseYouTubeHomeFeed({ contents: { singleColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{
+  musicCarouselShelfRenderer: {
+    header: { musicCarouselShelfBasicHeaderRenderer: { title: { runs: [{ text: 'Quick picks' }] } } },
+    contents: [{ musicResponsiveListItemRenderer: {
+      playlistItemData: { videoId: 'responsive-video' },
+      flexColumns: [
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: 'First ' }, { text: 'song' }] } } },
+        { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: 'Artist' }, { text: ' • Album' }] } } },
+      ],
+      thumbnail: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: 'https://lh3.googleusercontent.com/quick=w60-h60' }] } } },
+    } }, { musicTwoRowItemRenderer: {
+      title: { runs: [{ text: 'Playlist' }] }, subtitle: { simpleText: 'Two row' },
+      navigationEndpoint: { browseEndpoint: { browseId: 'VL-home' } },
+      thumbnailRenderer: { musicThumbnailRenderer: { thumbnail: { thumbnails: [{ url: 'https://i.ytimg.com/cover.jpg' }] } } },
+    } }],
+  },
+}] } } } }] } } })
+assert.equal(quickPicks[0].items[0].title, 'First song')
+assert.equal(quickPicks[0].items[0].subtitle, 'Artist • Album')
+assert.equal(quickPicks[0].items[0].coverUrl, 'https://lh3.googleusercontent.com/quick=w1200-h1200')
+assert.equal(quickPicks[0].items[0].videoId, 'responsive-video')
+assert.equal(quickPicks[0].items[1].browseId, 'VL-home')
+assert.equal(quickPicks[0].items[1].coverUrl, 'https://i.ytimg.com/cover.jpg')
 
 // videoId 多路径提取
 assert.equal(
@@ -107,6 +132,24 @@ assert.equal(playlists[0].id, 'VLplaylist1')
 assert.equal(playlists[0].name, 'My Playlist')
 assert.equal(playlists[0].trackCount, 12)
 assert.equal(playlists[0].coverUrl, 'https://img/cover.jpg')
+
+const continuedLibrary = structuredClone(libraryRoot)
+continuedLibrary._neriLibraryContinuationPages = [{
+  continuationContents: {
+    gridContinuation: {
+      items: [{
+        musicTwoRowItemRenderer: {
+          title: { simpleText: 'Continuation Playlist' },
+          navigationEndpoint: { browseEndpoint: { browseId: 'VLplaylist2' } },
+        },
+      }],
+    },
+  },
+}]
+assert.deepEqual(
+  parseYouTubeLibraryPlaylists(continuedLibrary).map(item => item.id),
+  ['VLplaylist1', 'VLplaylist2'],
+)
 
 // 歌单详情：secondaryContents + playlistItemData videoId
 const detailRoot = {

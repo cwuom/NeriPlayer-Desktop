@@ -372,7 +372,7 @@ pub async fn get_netease_artist_songs(
 }
 
 /// 单次歌单详情最多展开的 continuation 页数
-const YOUTUBE_PLAYLIST_MAX_PAGES: usize = 20;
+const YOUTUBE_PLAYLIST_MAX_PAGES: usize = 80;
 
 /// 获取 YouTube Music 歌单详情(自动展开 continuation 分页 + 会话刷新)
 #[tauri::command]

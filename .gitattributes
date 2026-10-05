@@ -1,0 +1,2 @@
+# 保留 Android challenge 资源原始 CRLF 字节和记录的校验摘要
+src-tauri/src/api/youtube/assets/yt.solver.*.min.js -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

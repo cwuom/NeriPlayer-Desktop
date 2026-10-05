@@ -357,12 +357,16 @@ pub struct YtAudioResult {
     pub bitrate: u64,
     pub mime_type: String,
     pub content_length: u64,
+    pub stream_type: crate::api::youtube::client::YtStreamType,
 }
 
 #[tauri::command]
 pub async fn get_youtube_audio_url(
     video_id: String,
+    force_refresh: Option<bool>,
+    avoid_direct: Option<bool>,
     request_generation: Option<u64>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<YtAudioResult>> {
     // 快速切歌时丢弃过期解析, 与网易云/QQ/B站一致
@@ -371,16 +375,17 @@ pub async fn get_youtube_audio_url(
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
-    // player 请求在已登录时附带 Cookie (不附 SAPISID*HASH; mobile+hash 会 400);
-    // 客户端仍用 IOS/ANDROID/ANDROID_MUSIC/TVHTML5 (非 WEB_REMIX 完整浏览器), 降低互踢
-    // googlevideo CDN 拉流不附带登录 Cookie (对齐 Android stream headers)
+    // 平台取流层按客户端隔离匿名与登录请求，CDN 拉流不附带登录 Cookie
     let yt_auth = {
         let auth = state.auth.lock();
         auth.youtube.clone()
     };
-    let streams = crate::api::youtube::playback::resolve_audio_streams(
+    let streams = crate::api::youtube::playback::resolve_audio_streams_with_strategy(
         &video_id,
         yt_auth.as_ref().filter(|a| a.has_login()),
+        Some(&app),
+        force_refresh.unwrap_or(false),
+        avoid_direct.unwrap_or(false),
     )
     .await?;
     if let Some(gen) = request_generation {
@@ -395,6 +400,7 @@ pub async fn get_youtube_audio_url(
             bitrate: s.bitrate,
             mime_type: s.mime_type,
             content_length: s.content_length,
+            stream_type: s.stream_type,
         })
         .collect())
 }
