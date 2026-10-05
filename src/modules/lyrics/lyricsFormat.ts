@@ -139,6 +139,25 @@ export function mergeParsedLyricsWithTranslations(
   }))
 }
 
+export function mergeWordTimedLyricsWithBaseline(
+  baseline: LyricLine[],
+  upgrade: LyricLine[],
+): LyricLine[] {
+  const translations = mergeParsedLyricsWithTranslations(upgrade, baseline.map(line => ({
+    ...line, text: line.translation || '',
+  })))
+  const roman = mergeParsedLyricsWithTranslations(
+    upgrade.map(line => ({ ...line, translation: line.roman })),
+    baseline.map(line => ({ ...line, text: line.roman || '' })),
+  )
+  // 只补时间轴匹配的缺失字段，外源自身的翻译和音译优先
+  return upgrade.map((line, index) => ({
+    ...line,
+    translation: line.translation || translations[index].translation,
+    roman: line.roman || roman[index].translation,
+  }))
+}
+
 /**
  * 本地歌词覆盖状态, 对齐 Android LocalLyricOverrideState
  * - absent: 无本地词, 允许在线拉取

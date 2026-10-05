@@ -23,6 +23,7 @@ const {
   withUpdatedLyricsPayload,
   resolveStoredLyricText,
   resolveStoredLyricStateFromPayload,
+  mergeWordTimedLyricsWithBaseline,
 } = await loadTsModule('../src/modules/lyrics/lyricsFormat.ts')
 
 const wordLine = {
@@ -101,5 +102,25 @@ assert.equal(
   resolveStoredLyricStateFromPayload({ originalLyric: '[00:01.00]a' }).kind,
   'present',
 )
+
+const baselineAnnotations = [
+  { startMs: 1000, durationMs: 1000, text: 'Hello', words: [], translation: '你好', roman: 'halo' },
+  { startMs: 3000, durationMs: 1000, text: 'World', words: [], translation: '世界', roman: 'world' },
+]
+const upgradedWords = [
+  { startMs: 1100, durationMs: 1000, text: 'Hello', words: [{ startMs: 1100, durationMs: 600, text: 'Hello' }] },
+  { startMs: 1700, durationMs: 500, text: 'other', words: [] },
+  { startMs: 3100, durationMs: 1000, text: 'World', words: [], translation: '外源翻译', roman: 'external' },
+]
+const mergedUpgrade = mergeWordTimedLyricsWithBaseline(baselineAnnotations, upgradedWords)
+assert.equal(mergedUpgrade[0].translation, '你好')
+assert.equal(mergedUpgrade[0].roman, 'halo')
+assert.equal(mergedUpgrade[1].translation, undefined)
+assert.equal(mergedUpgrade[1].roman, undefined)
+assert.equal(mergedUpgrade[2].translation, '外源翻译')
+assert.equal(mergedUpgrade[2].roman, 'external')
+assert.deepEqual(mergedUpgrade[0].words, upgradedWords[0].words)
+assert.equal(upgradedWords[0].translation, undefined)
+assert.equal(baselineAnnotations[0].translation, '你好')
 
 console.log('lyrics format tests passed')

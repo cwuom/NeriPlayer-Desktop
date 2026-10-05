@@ -15,6 +15,7 @@ const {
   hasLyricsRequestInFlight,
   lyricsIdentity,
   loadLyricsSingleFlight,
+  hasWordTimedLyrics,
 } = await import(moduleUrl)
 
 const track = {
@@ -48,6 +49,21 @@ await loadLyricsSingleFlight(track, async () => {
   return []
 })
 assert.equal(calls, 2)
+
+let resolveBaseline
+let resolveWords
+const baseline = loadLyricsSingleFlight(track, () => new Promise(resolve => { resolveBaseline = resolve }))
+const words = loadLyricsSingleFlight(track, () => new Promise(resolve => { resolveWords = resolve }), 'word-timed')
+assert.notStrictEqual(baseline, words, 'word upgrades must not reuse the baseline result')
+assert.strictEqual(words, loadLyricsSingleFlight(track, () => { throw new Error('duplicate request') }, 'word-timed'))
+const otherDuration = loadLyricsSingleFlight({ ...track, durationMs: track.durationMs + 1_000 }, async () => [], 'word-timed')
+assert.notStrictEqual(words, otherDuration, 'different duration must not share an external match')
+resolveBaseline([])
+resolveWords([{ startMs: 0, durationMs: 1_000, words: [{ startMs: 0, durationMs: 500, text: 'word' }], text: 'word' }])
+assert.equal(hasWordTimedLyrics(await words), true)
+assert.equal(hasWordTimedLyrics(await baseline), false)
+assert.equal(hasWordTimedLyrics([{ words: [{ durationMs: 0, text: 'plain' }] }]), false)
+await otherDuration
 
 await assert.rejects(
   loadLyricsSingleFlight({ ...track, id: 'netease:failed' }, async () => {

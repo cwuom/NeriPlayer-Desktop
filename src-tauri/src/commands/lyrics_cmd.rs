@@ -12,6 +12,20 @@ pub async fn parse_lrc_content(content: String) -> AppResult<Vec<LyricLine>> {
 }
 
 #[tauri::command]
+pub async fn fetch_word_timed_lyrics(
+    title: String,
+    artist: String,
+    duration_ms: u64,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<LyricLine>> {
+    let manager = LyricsManager::with_transport(
+        state.transport("lyrics"),
+        crate::auth::cookies::read_netease_csrf(&state.cookie_jar),
+    );
+    manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await
+}
+
+#[tauri::command]
 pub async fn load_lyrics_file(path: String) -> AppResult<Vec<LyricLine>> {
     let content = tokio::fs::read_to_string(&path)
         .await

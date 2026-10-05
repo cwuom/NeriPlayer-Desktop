@@ -10,8 +10,11 @@ export function lyricsIdentity(track: TrackInfo): string {
 export function loadLyricsSingleFlight(
   track: TrackInfo,
   loader: () => Promise<LyricLine[]>,
+  mode: 'baseline' | 'word-timed' = 'baseline',
 ): Promise<LyricLine[]> {
-  const key = lyricsIdentity(track)
+  const key = mode === 'baseline'
+    ? lyricsIdentity(track)
+    : JSON.stringify([mode, lyricsIdentity(track), track.title, track.artist, track.durationMs])
   const current = inFlightLyrics.get(key)
   if (current) return current
 
@@ -29,6 +32,10 @@ export function loadLyricsSingleFlight(
   }
   request.then(release, release)
   return request
+}
+
+export function hasWordTimedLyrics(lines: readonly LyricLine[]): boolean {
+  return lines.some(line => line.words.some(word => word.text.trim() && word.durationMs > 0))
 }
 
 export function hasLyricsRequestInFlight(track: TrackInfo): boolean {

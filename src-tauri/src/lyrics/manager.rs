@@ -16,6 +16,19 @@ pub struct LyricsManager {
 }
 
 impl LyricsManager {
+    pub async fn fetch_word_timed_lyrics(
+        &self,
+        track_title: &str,
+        track_artist: &str,
+        duration_ms: u64,
+    ) -> AppResult<Vec<LyricLine>> {
+        Ok(
+            super::external::ExternalLyricsClient::new(self.transport.clone())
+                .fetch(track_title, track_artist, duration_ms, true)
+                .await,
+        )
+    }
+
     pub fn new(http: &reqwest::Client) -> Self {
         Self {
             transport: FallbackHttp::new(http, "lyrics"),
@@ -186,6 +199,13 @@ impl LyricsManager {
             {
                 return Ok(lines);
             }
+        }
+
+        let external = super::external::ExternalLyricsClient::new(self.transport.clone())
+            .fetch(track_title, track_artist, target_duration_ms, false)
+            .await;
+        if !external.is_empty() {
+            return Ok(external);
         }
 
         log::info!(
@@ -794,12 +814,13 @@ fn normalize_artists(value: &str) -> std::collections::HashSet<String> {
 
 fn load_local_sidecar_lyrics(audio_path: &str) -> Option<Vec<LyricLine>> {
     let path = Path::new(audio_path);
-    let lyric_path = find_nearby_lyric(path)?;
-    let content = std::fs::read_to_string(&lyric_path).ok()?;
-    let mut lines = parse_sidecar_lyrics_text(&content);
-    if lines.is_empty() {
-        return None;
-    }
+    let primary = find_nearby_lyric(path);
+    let fallback = find_nearby_lyric_with_suffixes(path, &["lrc", "txt"]);
+    let mut lines = [primary, fallback].into_iter().flatten().find_map(|lyric_path| {
+        let content = std::fs::read_to_string(&lyric_path).ok()?;
+        let lines = parse_sidecar_lyrics_text(&content);
+        (!lines.is_empty()).then_some(lines)
+    })?;
 
     if let Some(translation_path) = find_nearby_translation(path) {
         if let Ok(translation) = std::fs::read_to_string(&translation_path) {
@@ -814,6 +835,10 @@ fn parse_sidecar_lyrics_text(content: &str) -> Vec<LyricLine> {
     let parsed = parser::parse_auto(content);
     if !parsed.is_empty() {
         return parsed;
+    }
+
+    if super::ttml::looks_like(content) {
+        return Vec::new();
     }
 
     content
@@ -833,26 +858,30 @@ fn parse_sidecar_lyrics_text(content: &str) -> Vec<LyricLine> {
 }
 
 fn find_nearby_lyric(audio_path: &Path) -> Option<PathBuf> {
+    find_nearby_lyric_with_suffixes(audio_path, &["ttml", "lrc", "txt"])
+}
+
+fn find_nearby_lyric_with_suffixes(audio_path: &Path, suffixes: &[&str]) -> Option<PathBuf> {
     let parent = audio_path.parent()?;
     let file_name = audio_path.file_name()?;
     let stem = audio_path.file_stem()?.to_str()?;
 
     // 下载器新写入的 sidecar 带完整音频名，例如 Song.m4a.lrc。
     // 先查这一形式，避免 Song.m4a 和 Song.flac 共用旧 Song.lrc 时串词
-    if let Some(path) = find_audio_scoped_sidecar(parent, file_name, &["lrc", "txt"]) {
+    if let Some(path) = find_audio_scoped_sidecar(parent, file_name, suffixes) {
         return Some(path);
     }
 
     let lyrics_dir = parent.join("Lyrics");
-    if let Some(path) = find_audio_scoped_sidecar(&lyrics_dir, file_name, &["lrc", "txt"]) {
+    if let Some(path) = find_audio_scoped_sidecar(&lyrics_dir, file_name, suffixes) {
         return Some(path);
     }
 
     // 保留旧版 stem 命名兼容，已有本地歌词无需迁移
-    if let Some(path) = find_stem_sidecar(parent, stem, &["lrc", "txt"]) {
+    if let Some(path) = find_stem_sidecar(parent, stem, suffixes) {
         return Some(path);
     }
-    if let Some(path) = find_stem_sidecar(&lyrics_dir, stem, &["lrc", "txt"]) {
+    if let Some(path) = find_stem_sidecar(&lyrics_dir, stem, suffixes) {
         return Some(path);
     }
 
@@ -1037,5 +1066,15 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_ttml_sidecar_keeps_valid_existing_lrc() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("Song.m4a");
+        std::fs::write(dir.path().join("Song.m4a.ttml"), "<tt><body>unfinished").unwrap();
+        std::fs::write(dir.path().join("Song.m4a.lrc"), "[00:01.00]valid baseline").unwrap();
+        let lines = super::load_local_sidecar_lyrics(audio.to_str().unwrap()).unwrap();
+        assert_eq!(lines[0].text, "valid baseline");
     }
 }
