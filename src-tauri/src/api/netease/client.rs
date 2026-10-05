@@ -1,5 +1,8 @@
 // 网易云音乐 API 客户端
-use reqwest::{cookie::Jar, Client};
+use reqwest::{
+    cookie::{CookieStore, Jar},
+    Client,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -9,8 +12,11 @@ use super::crypto;
 use crate::api::transport::{parse_json_response, FallbackHttp};
 
 const BASE_URL: &str = "https://music.163.com";
+const SONG_URL_PATH: &str = "/eapi/song/enhance/player/url/v1";
+const EAPI_BASE_URL: &str = "https://interface.music.163.com";
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const EAPI_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 10; NeriPlayer) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 
 pub struct NeteaseClient {
     http: FallbackHttp,
@@ -38,6 +44,10 @@ pub struct NeteaseSongUrl {
     pub r#type: String,
     pub is_preview: bool,
     pub unavailable_reason: Option<NeteasePlaybackUnavailableReason>,
+    pub level: Option<String>,
+    pub content_md5: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub song_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,8 +92,44 @@ impl NeteaseClient {
     }
 
     pub fn with_cookie_jar(mut self, cookie_jar: Arc<Jar>) -> Self {
+        let url = BASE_URL.parse().expect("valid netease URL");
+        let existing = cookie_jar.cookies(&url);
+        let existing = existing
+            .as_ref()
+            .and_then(|header| header.to_str().ok())
+            .unwrap_or("");
+        let context = [
+            ("os", "pc".to_string()),
+            ("appver", "8.10.35".to_string()),
+            ("__remember_me", "true".to_string()),
+            ("NMTID", random_session_cookie()),
+            ("_ntes_nuid", random_session_cookie()),
+        ];
+        for (name, value) in context {
+            if !cookie_header_has_value(existing, name) {
+                cookie_jar.add_cookie_str(
+                    &format!("{name}={value}; Domain=music.163.com; Path=/"),
+                    &url,
+                );
+            }
+        }
         self.cookie_jar = Some(cookie_jar);
         self
+    }
+
+    fn has_login(&self) -> bool {
+        let Some(jar) = self.cookie_jar.as_ref() else {
+            return false;
+        };
+        let url = BASE_URL.parse().expect("valid netease URL");
+        jar.cookies(&url)
+            .and_then(|header| {
+                header
+                    .to_str()
+                    .ok()
+                    .map(|value| cookie_header_has_value(value, "MUSIC_U"))
+            })
+            .unwrap_or(false)
     }
 
     fn csrf_token(&self) -> String {
@@ -133,6 +179,14 @@ impl NeteaseClient {
 
     /// WEAPI POST 公共实现；`idempotent` 决定传输层是否允许超时重试
     async fn weapi_request(&self, url: &str, params: &Value, idempotent: bool) -> AppResult<Value> {
+        if self.has_login() && self.csrf_token().is_empty() {
+            self.ensure_weapi_session().await;
+            if self.csrf_token().is_empty() {
+                return Err(AppError::Api(
+                    "NetEase session preheat did not provide __csrf".into(),
+                ));
+            }
+        }
         let json_str = serde_json::to_string(params)?;
         let (encrypted_params, enc_sec_key) = crypto::weapi_encrypt(&json_str);
         let csrf = self.csrf_token();
@@ -191,7 +245,7 @@ impl NeteaseClient {
         Ok(results)
     }
 
-    /// 获取歌曲播放 URL（WEAPI，稳定可靠）
+    /// 与 Android 使用同一 EAPI 取流入口
     pub async fn get_song_url(&self, song_id: u64, quality: &str) -> AppResult<NeteaseSongUrl> {
         let level = match quality {
             "standard" => "standard",
@@ -208,36 +262,43 @@ impl NeteaseClient {
         let params = json!({
             "ids": format!("[{}]", song_id),
             "level": level,
-            "encodeType": "flac",
-            "csrf_token": ""
+            "encodeType": "flac"
         });
 
         log::debug!(target: "netease", "get_song_url: id={}, level={}", song_id, level);
 
-        let mut body = self.weapi_post(
-            &format!("{}/weapi/song/enhance/player/url/v1", BASE_URL),
-            &params,
-        ).await?;
+        let mut body = self.song_url_eapi_post(&params).await?;
 
         log::debug!(target: "netease", "song url response code: {:?}", body["code"]);
 
         // code==301 多见于登录态 __csrf 会话失效；预热首页后重试一次，对齐 Android getSongDownloadUrl
-        if body["code"].as_i64() == Some(301) {
+        if json_i64(&body["code"]) == Some(301) && self.has_login() {
             log::debug!(target: "netease", "song url code 301, warming session then retrying once");
             self.ensure_weapi_session().await;
-            body = self
-                .weapi_post(
-                    &format!("{}/weapi/song/enhance/player/url/v1", BASE_URL),
-                    &params,
-                )
-                .await?;
+            body = self.song_url_eapi_post(&params).await?;
             log::debug!(target: "netease", "song url retry response code: {:?}", body["code"]);
         }
 
         let result = parse_song_url_response(&body);
-        log::debug!(target: "netease", "song url result: url={}, br={}",
-            result.url.as_deref().unwrap_or("null"), result.br);
+        log::debug!(target: "netease", "song url result: has_url={}, br={}", result.url.is_some(), result.br);
         Ok(result)
+    }
+
+    fn build_song_url_eapi_request(client: &Client, encrypted: &str) -> reqwest::RequestBuilder {
+        client
+            .post(format!("{EAPI_BASE_URL}{SONG_URL_PATH}"))
+            .header("User-Agent", EAPI_USER_AGENT)
+            .header("Referer", BASE_URL)
+            .form(&[("params", encrypted)])
+    }
+
+    async fn song_url_eapi_post(&self, params: &Value) -> AppResult<Value> {
+        let body = serde_json::to_string(params)?;
+        let encrypted = crypto::eapi_encrypt(SONG_URL_PATH, &body);
+        let response = self
+            .send_with_fallback(|client| Self::build_song_url_eapi_request(client, &encrypted))
+            .await?;
+        parse_json_response(response, "netease eapi playback").await
     }
 
     /// 获取歌词（plain API，无需加密，最可靠）
@@ -401,39 +462,9 @@ impl NeteaseClient {
         ).await
     }
 
-    /// 获取歌曲下载 URL（WEAPI）
+    /// 下载和在线播放使用同一个 EAPI 入口
     pub async fn get_song_download_url(&self, song_id: u64, quality: &str) -> AppResult<NeteaseSongUrl> {
-        let br = match quality {
-            "standard" => 128000,
-            "high" | "higher" => 192000,
-            "exhigh" => 320000,
-            "lossless" => 999000,
-            "hires" => 1999000,
-            _ => 320000,
-        };
-
-        let params = json!({
-            "id": song_id.to_string(),
-            "br": br.to_string(),
-            "csrf_token": ""
-        });
-
-        let body = self.weapi_post(
-            &format!("{}/weapi/song/enhance/download/url", BASE_URL),
-            &params,
-        ).await?;
-        let data = &body["data"];
-
-        Ok(NeteaseSongUrl {
-            url: clean_json_string(&data["url"]),
-            br: json_u64(&data["br"]),
-            size: json_u64(&data["size"]),
-            r#type: clean_json_string(&data["type"]).unwrap_or_else(|| "mp3".into()),
-            is_preview: data
-                .get("freeTrialInfo")
-                .is_some_and(|value| !value.is_null()),
-            unavailable_reason: None,
-        })
+        self.get_song_url(song_id, quality).await
     }
 
     /// 歌手头部信息 (对齐 Android getArtistDetail: /api/artist/head/info/get)
@@ -532,7 +563,7 @@ impl NeteaseClient {
 }
 
 fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
-    let root_code = body["code"].as_i64().unwrap_or(-1);
+    let root_code = json_i64(&body["code"]).unwrap_or(-1);
     if root_code == 301 {
         return unavailable_song_url(NeteasePlaybackUnavailableReason::RequiresLogin);
     }
@@ -551,7 +582,7 @@ fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
 
     let url = clean_json_string(&data["url"]);
     let unavailable_reason = if url.is_none() {
-        let data_code = data["code"].as_i64().unwrap_or(-1);
+        let data_code = json_i64(&data["code"]).unwrap_or(-1);
         let cannot_listen_reason = data["freeTrialPrivilege"]["cannotListenReason"]
             .as_i64()
             .or_else(|| {
@@ -559,7 +590,7 @@ fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
                     .as_str()
                     .and_then(|value| value.parse::<i64>().ok())
             });
-        let fee = data["fee"].as_i64().unwrap_or(0);
+        let fee = json_i64(&data["fee"]).unwrap_or(0);
         Some(
             if data_code == 404 || cannot_listen_reason == Some(1) || fee > 0 {
                 NeteasePlaybackUnavailableReason::NoPermission
@@ -573,13 +604,24 @@ fn parse_song_url_response(body: &Value) -> NeteaseSongUrl {
 
     NeteaseSongUrl {
         url,
-        br: json_u64(&data["br"]),
+        br: ["br", "bitrate", "bitrateKbps"]
+            .iter()
+            .map(|field| json_u64(&data[*field]))
+            .find(|value| *value > 0)
+            .map(|value| if value < 10_000 { value * 1_000 } else { value })
+            .unwrap_or(0),
         size: json_u64(&data["size"]),
         r#type: clean_json_string(&data["type"]).unwrap_or_else(|| "mp3".into()),
         is_preview: data
             .get("freeTrialInfo")
             .is_some_and(|value| !value.is_null()),
         unavailable_reason,
+        level: clean_json_string(&data["level"]),
+        content_md5: clean_json_string(&data["md5"])
+            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(|value| value.to_lowercase()),
+        duration_ms: positive_json_u64(&data["time"]),
+        song_id: positive_json_u64(&data["id"]),
     }
 }
 
@@ -591,6 +633,10 @@ fn unavailable_song_url(reason: NeteasePlaybackUnavailableReason) -> NeteaseSong
         r#type: "mp3".into(),
         is_preview: false,
         unavailable_reason: Some(reason),
+        level: None,
+        content_md5: None,
+        duration_ms: None,
+        song_id: None,
     }
 }
 
@@ -608,9 +654,7 @@ fn json_u64(value: &Value) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_song_url_response, NeteaseClient, NeteasePlaybackUnavailableReason,
-    };
+    use super::{parse_song_url_response, NeteaseClient, NeteasePlaybackUnavailableReason};
     use crate::api::transport::FallbackHttp;
     use reqwest::cookie::Jar;
     use serde_json::json;
@@ -707,4 +751,131 @@ mod tests {
             Some(NeteasePlaybackUnavailableReason::NoPlayUrl)
         );
     }
+
+    #[test]
+    fn android_alignment_playback_accepts_numeric_strings_and_bitrate_aliases() {
+        let result = parse_song_url_response(&json!({
+            "code": "200",
+            "data": { "url": "https://m801.music.126.net/full.flac", "bitrateKbps": "192" }
+        }));
+        assert_eq!(
+            result.url.as_deref(),
+            Some("https://m801.music.126.net/full.flac")
+        );
+        assert_eq!(result.br, 192_000);
+    }
+
+    #[test]
+    fn android_alignment_playback_classifies_numeric_string_fee() {
+        let result = parse_song_url_response(&json!({
+            "code": 200,
+            "data": { "url": null, "fee": "1" }
+        }));
+        assert_eq!(
+            result.unavailable_reason,
+            Some(NeteasePlaybackUnavailableReason::NoPermission)
+        );
+    }
+
+    #[test]
+    fn android_alignment_eapi_request_matches_playback_endpoint_and_encryption() {
+        let params = json!({ "ids": "[42]", "level": "hires", "encodeType": "flac" });
+        let encrypted = super::crypto::eapi_encrypt(super::SONG_URL_PATH, &params.to_string());
+        let request =
+            NeteaseClient::build_song_url_eapi_request(&reqwest::Client::new(), &encrypted)
+                .build()
+                .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://interface.music.163.com/eapi/song/enhance/player/url/v1"
+        );
+        assert_eq!(request.method(), reqwest::Method::POST);
+        let form = request.body().unwrap().as_bytes().unwrap();
+        let values: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(form).into_owned().collect();
+        assert_eq!(values.len(), 1);
+        let decrypted =
+            super::crypto::eapi_decrypt(&hex::decode(&values["params"]).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&decrypted).unwrap(),
+            json!({ "ids": "[42]", "level": "hires", "encodeType": "flac" })
+        );
+    }
+
+    #[test]
+    fn android_alignment_response_preserves_actual_quality_and_cache_integrity() {
+        let result = parse_song_url_response(&json!({
+            "code": 200,
+            "data": [{ "url": "https://m801.music.126.net/full.flac", "level": "lossless", "br": "1411000", "size": "7000000", "id": "42", "time": "180000", "md5": "0123456789ABCDEF0123456789ABCDEF" }]
+        }));
+        assert_eq!(result.level.as_deref(), Some("lossless"));
+        assert_eq!(result.br, 1_411_000);
+        assert_eq!(result.song_id, Some(42));
+        assert_eq!(result.duration_ms, Some(180_000));
+        assert_eq!(
+            result.content_md5.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        let invalid = parse_song_url_response(
+            &json!({ "code": 200, "data": [{ "url": "https://m801.music.126.net/full.flac", "md5": "invalid", "id": 0, "time": -1 }] }),
+        );
+        assert_eq!(invalid.content_md5, None);
+        assert_eq!(invalid.duration_ms, None);
+        assert_eq!(invalid.song_id, None);
+    }
+
+    #[test]
+    fn android_alignment_cookie_context_preserves_login_and_is_stable() {
+        use reqwest::cookie::CookieStore;
+        let jar = Arc::new(Jar::default());
+        let url = "https://music.163.com/".parse().unwrap();
+        jar.add_cookie_str("MUSIC_U=fixture-login; Domain=music.163.com; Path=/", &url);
+        jar.add_cookie_str("appver=fixture-version; Domain=music.163.com; Path=/", &url);
+        let http = reqwest::Client::builder()
+            .cookie_provider(jar.clone())
+            .build()
+            .unwrap();
+        let client = NeteaseClient::new(&http).with_cookie_jar(jar.clone());
+        assert!(client.has_login());
+        let before = jar.cookies(&url).unwrap().to_str().unwrap().to_string();
+        NeteaseClient::new(&http).with_cookie_jar(jar.clone());
+        let after = jar.cookies(&url).unwrap().to_str().unwrap().to_string();
+        assert_eq!(before, after);
+        assert!(after.contains("MUSIC_U=fixture-login"));
+        assert!(after.contains("appver=fixture-version"));
+        assert!(after.contains("os=pc"));
+        assert!(after.contains("NMTID="));
+        let eapi_url = "https://interface.music.163.com/".parse().unwrap();
+        assert!(jar
+            .cookies(&eapi_url)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("MUSIC_U=fixture-login"));
+    }
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+}
+
+fn positive_json_u64(value: &Value) -> Option<u64> {
+    let value = json_u64(value);
+    (value > 0).then_some(value)
+}
+
+fn random_session_cookie() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn cookie_header_has_value(header: &str, name: &str) -> bool {
+    header
+        .split(';')
+        .filter_map(|item| item.trim().split_once('='))
+        .any(|(key, value)| key == name && !value.trim().is_empty())
 }

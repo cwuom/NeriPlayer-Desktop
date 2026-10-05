@@ -1,4 +1,6 @@
-use crate::api::bilibili::client::{BiliAudioStream, BiliClient};
+use crate::api::bilibili::client::{
+    bili_quality_key, is_lossless_stream, BiliAudioStream, BiliClient,
+};
 use crate::api::netease::client::NeteasePlaybackUnavailableReason;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -81,6 +83,10 @@ pub struct SongUrlResult {
     pub expected_content_length: Option<u64>,
     pub is_preview: bool,
     pub unavailable_reason: Option<NeteasePlaybackUnavailableReason>,
+    pub level: Option<String>,
+    pub expected_content_md5: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub song_id: Option<u64>,
 }
 
 #[tauri::command]
@@ -105,6 +111,10 @@ pub async fn get_netease_song_url(
         expected_content_length: (result.size > 0).then_some(result.size),
         is_preview: result.is_preview,
         unavailable_reason: result.unavailable_reason,
+        level: result.level,
+        expected_content_md5: result.content_md5,
+        duration_ms: result.duration_ms,
+        song_id: result.song_id,
     })
 }
 
@@ -129,6 +139,10 @@ pub async fn get_qq_song_url(
         expected_content_length: None,
         is_preview: false,
         unavailable_reason: None,
+        level: None,
+        expected_content_md5: None,
+        duration_ms: None,
+        song_id: None,
     })
 }
 
@@ -139,6 +153,8 @@ pub struct BiliAudioResult {
     pub bandwidth: u64,
     pub codecs: String,
     pub candidates: Vec<BiliAudioCandidate>,
+    pub quality_key: String,
+    pub mime_type: String,
 }
 
 #[derive(Serialize)]
@@ -146,6 +162,8 @@ pub struct BiliAudioCandidate {
     pub url: String,
     pub bandwidth: u64,
     pub codecs: String,
+    pub quality_key: String,
+    pub mime_type: String,
 }
 
 const LEGACY_BILI_ID_MULTIPLIER: u64 = 10_000;
@@ -177,19 +195,29 @@ pub async fn get_bili_audio_url(
         resolve_bili_numeric_source(&client, aid, cid).await?
     } else {
         let info = client.get_video_info(&bvid).await?;
+        if let Some(cid) = cid {
+            if !info.pages.iter().any(|page| page.cid == cid) {
+                return Err(AppError::Api("Requested Bilibili part does not belong to this video".into()));
+            }
+        }
         let c = cid.unwrap_or(info.cid);
         (bvid, c)
     };
 
     let streams = client.get_audio_url(&real_bvid, real_cid).await?;
-    let candidates = build_bili_audio_candidates(&streams);
-    let best = select_bili_audio_stream(streams, quality.as_deref())
+    let best = select_bili_audio_stream(streams.clone(), quality.as_deref())
         .ok_or_else(|| AppError::Api("No audio stream found".into()))?;
+    let mut fallback_streams = vec![best.clone()];
+    fallback_streams.extend(streams.into_iter().filter(|stream| stream.url != best.url));
+    let candidates = build_bili_audio_candidates(&fallback_streams);
+    let quality_key = bili_quality_key(&best).to_string();
     Ok(BiliAudioResult {
         url: best.url,
         bandwidth: best.bandwidth,
         codecs: best.codecs,
         candidates,
+        quality_key,
+        mime_type: best.mime_type,
     })
 }
 
@@ -199,7 +227,22 @@ async fn resolve_bili_numeric_source(
     cid: Option<u64>,
 ) -> AppResult<(String, u64)> {
     match client.get_video_info_by_avid(aid).await {
-        Ok(info) => Ok((info.bvid, cid.unwrap_or(info.cid))),
+        Ok(info) if cid.is_none_or(|cid| info.pages.iter().any(|page| page.cid == cid)) => {
+            Ok((info.bvid, cid.unwrap_or(info.cid)))
+        }
+        Ok(_) => {
+            let legacy = split_legacy_bili_song_id(aid).ok_or_else(|| {
+                AppError::Api("Requested Bilibili part does not belong to this video".into())
+            })?;
+            let info = client.get_video_info_by_avid(legacy.avid).await?;
+            let preferred_cid = cid.expect("explicit cid was checked");
+            if !info.pages.iter().any(|page| page.cid == preferred_cid) {
+                return Err(AppError::Api(
+                    "Requested Bilibili part does not belong to this video".into(),
+                ));
+            }
+            Ok((info.bvid, preferred_cid))
+        }
         Err(direct_error) => {
             let Some(legacy) = split_legacy_bili_song_id(aid) else {
                 return Err(direct_error);
@@ -208,7 +251,8 @@ async fn resolve_bili_numeric_source(
                 return Err(direct_error);
             };
             let resolved_cid = match cid {
-                Some(value) => value,
+                Some(value) if info.pages.iter().any(|page| page.cid == value) => value,
+                Some(_) => return Err(direct_error),
                 None => match client.get_video_page_cid(&info.bvid, legacy.page).await {
                     Ok(Some(value)) => value,
                     _ => return Err(direct_error),
@@ -230,42 +274,80 @@ fn select_bili_audio_stream(
     quality: Option<&str>,
 ) -> Option<BiliAudioStream> {
     streams.sort_by_key(|stream| std::cmp::Reverse(stream.bandwidth));
-    let fallback = streams.first().cloned();
-
-    let is_dolby = |stream: &BiliAudioStream| {
-        stream.quality_id == 30250 || stream.codecs.eq_ignore_ascii_case("ec-3")
-    };
-    let is_lossless = |stream: &BiliAudioStream| {
-        stream.quality_id == 30251 || stream.codecs.eq_ignore_ascii_case("flac")
-    };
-    let normal_streams = || streams.iter().filter(|stream| !is_dolby(stream) && !is_lossless(stream));
-
-    match quality.unwrap_or("high") {
-        "dolby" => streams.iter().find(|stream| is_dolby(stream)).cloned(),
-        "lossless" | "hires" => streams.iter().find(|stream| is_lossless(stream)).cloned(),
-        "low" => normal_streams().next_back().cloned(),
-        "medium" => {
-            let normal: Vec<_> = normal_streams().cloned().collect();
-            if normal.is_empty() {
-                None
-            } else {
-                normal.get((normal.len() - 1) / 2).cloned()
-            }
+    let regular: Vec<_> = streams
+        .iter()
+        .filter(|stream| stream.quality_tag.is_none())
+        .collect();
+    let ordered: Vec<_> = regular
+        .iter()
+        .copied()
+        .chain(streams.iter().filter(|stream| stream.quality_tag.is_some()))
+        .collect();
+    let qualities = ["dolby", "hires", "lossless", "high", "medium", "low"];
+    let preferred = quality.unwrap_or("high").trim().to_ascii_lowercase();
+    let start = qualities
+        .iter()
+        .position(|key| *key == preferred)
+        .unwrap_or(3);
+    for key in &qualities[start..] {
+        let selected = match *key {
+            "dolby" => ordered
+                .iter()
+                .copied()
+                .find(|stream| stream.quality_tag.as_deref() == Some("dolby")),
+            "hires" => ordered
+                .iter()
+                .copied()
+                .find(|stream| stream.quality_tag.as_deref() == Some("hires")),
+            "lossless" => ordered
+                .iter()
+                .copied()
+                .find(|stream| is_lossless_stream(stream))
+                .or_else(|| {
+                    regular
+                        .iter()
+                        .copied()
+                        .find(|stream| (500_000..1_000_000).contains(&stream.bandwidth))
+                }),
+            "high" => regular
+                .iter()
+                .copied()
+                .find(|stream| (180_000..500_000).contains(&stream.bandwidth)),
+            "medium" => regular
+                .iter()
+                .copied()
+                .find(|stream| (120_000..180_000).contains(&stream.bandwidth)),
+            _ => regular
+                .iter()
+                .copied()
+                .find(|stream| (60_000..120_000).contains(&stream.bandwidth)),
+        };
+        if let Some(stream) = selected {
+            return Some(stream.clone());
         }
-        _ => normal_streams().next().cloned(),
     }
-    .or(fallback)
+    ordered.first().map(|stream| (**stream).clone())
 }
 
 fn build_bili_audio_candidates(streams: &[BiliAudioStream]) -> Vec<BiliAudioCandidate> {
-    streams
-        .iter()
-        .map(|stream| BiliAudioCandidate {
-            url: stream.url.clone(),
-            bandwidth: stream.bandwidth,
-            codecs: stream.codecs.clone(),
-        })
-        .collect()
+    let mut candidates = Vec::new();
+    for stream in streams {
+        for url in std::iter::once(&stream.url).chain(stream.candidate_urls.iter()) {
+            if !candidates
+                .iter()
+                .any(|candidate: &BiliAudioCandidate| candidate.url == *url)
+            {
+                candidates.push(BiliAudioCandidate {
+                    url: url.clone(),
+                    bandwidth: stream.bandwidth,
+                    codecs: stream.codecs.clone(),
+                    quality_key: bili_quality_key(stream).into(),
+                    mime_type: stream.mime_type.clone(),
+                });
+            }
+        }
+    }
+    candidates
 }
 
 /// 获取 YouTube 音频流 URL
@@ -355,9 +437,7 @@ pub async fn get_build_info() -> AppResult<BuildInfo> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bili_audio_candidates,
-        select_bili_audio_stream,
-        split_legacy_bili_song_id,
+        build_bili_audio_candidates, select_bili_audio_stream, split_legacy_bili_song_id,
         LegacyBiliSongId,
     };
     use crate::api::bilibili::client::BiliAudioStream;
@@ -368,6 +448,18 @@ mod tests {
             bandwidth,
             codecs: codecs.to_string(),
             quality_id,
+            mime_type: if codecs == "flac" {
+                "audio/flac"
+            } else {
+                "audio/mp4"
+            }
+            .into(),
+            quality_tag: match quality_id {
+                30251 => Some("hires".into()),
+                30250 => Some("dolby".into()),
+                _ => None,
+            },
+            candidate_urls: vec![url.to_string()],
         }
     }
 
@@ -389,7 +481,10 @@ mod tests {
         let streams = vec![stream("https://audio/high", 320_000, "flac", 30251)];
 
         let selected = select_bili_audio_stream(streams, Some("dolby"));
-        assert_eq!(selected.map(|stream| stream.url), Some("https://audio/high".into()));
+        assert_eq!(
+            selected.map(|stream| stream.url),
+            Some("https://audio/high".into())
+        );
     }
 
     #[test]
@@ -402,5 +497,75 @@ mod tests {
             })
         );
         assert_eq!(split_legacy_bili_song_id(123_450_000), None);
+    }
+
+    #[test]
+    fn android_alignment_bili_medium_uses_bitrate_band_instead_of_list_midpoint() {
+        let streams = vec![
+            stream("https://audio/high", 192_000, "mp4a.40.2", 30280),
+            stream("https://audio/medium", 132_000, "mp4a.40.2", 30232),
+            stream("https://audio/medium-low", 125_000, "mp4a.40.2", 30232),
+            stream("https://audio/low", 64_000, "mp4a.40.2", 30216),
+            stream("https://audio/lowest", 32_000, "mp4a.40.2", 30216),
+        ];
+        assert_eq!(
+            select_bili_audio_stream(streams, Some("medium"))
+                .unwrap()
+                .url,
+            "https://audio/medium"
+        );
+    }
+
+    #[test]
+    fn android_alignment_bili_dolby_missing_degrades_to_hires_before_regular_highest_bitrate() {
+        let streams = vec![
+            stream("https://audio/regular", 1_500_000, "mp4a.40.2", 30280),
+            stream("https://audio/hires", 1_000_000, "flac", 30251),
+        ];
+        assert_eq!(
+            select_bili_audio_stream(streams, Some("dolby"))
+                .unwrap()
+                .url,
+            "https://audio/hires"
+        );
+    }
+
+    #[test]
+    fn android_alignment_bili_realistic_bitrates_follow_android_low_band() {
+        let streams = vec![
+            stream("https://audio/lowest", 48_000, "mp4a.40.2", 30216),
+            stream("https://audio/medium", 92_000, "mp4a.40.2", 30232),
+            stream("https://audio/high", 200_000, "mp4a.40.2", 30280),
+        ];
+        assert_eq!(
+            select_bili_audio_stream(streams.clone(), Some("high"))
+                .unwrap()
+                .url,
+            "https://audio/high"
+        );
+        assert_eq!(
+            select_bili_audio_stream(streams.clone(), Some("medium"))
+                .unwrap()
+                .url,
+            "https://audio/medium"
+        );
+        assert_eq!(
+            select_bili_audio_stream(streams, Some("low")).unwrap().url,
+            "https://audio/medium"
+        );
+    }
+
+    #[test]
+    fn android_alignment_bili_candidates_preserve_selected_cdn_metadata() {
+        let mut selected = stream("https://audio/medium", 132_000, "mp4a.40.2", 30232);
+        selected.candidate_urls.push("https://backup/medium".into());
+        let lower = stream("https://audio/low", 64_000, "mp4a.40.2", 30216);
+        let candidates = build_bili_audio_candidates(&[selected, lower]);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[1].url, "https://backup/medium");
+        assert_eq!(candidates[1].quality_key, "medium");
+        assert_eq!(candidates[1].bandwidth, 132_000);
+        assert_eq!(candidates[2].quality_key, "low");
+        assert_eq!(candidates[2].mime_type, "audio/mp4");
     }
 }

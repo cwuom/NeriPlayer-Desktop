@@ -169,6 +169,7 @@ impl AppState {
 
     pub fn bilibili(&self) -> crate::api::bilibili::client::BiliClient {
         crate::api::bilibili::client::BiliClient::with_transport(self.transport("bilibili"))
+            .with_cookie_jar(self.cookie_jar.clone())
     }
 
     pub fn qq(&self) -> crate::api::qq::client::QqMusicClient {
