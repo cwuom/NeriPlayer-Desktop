@@ -896,7 +896,7 @@ const githubNewRepoName = ref('neriplayer-backup')
 const githubExistingRepo = ref('') // owner/repo 格式
 const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
-const PROJECT_REPOSITORY_URL = 'https://github.com/nicepkg/NeriPlayer'
+const PROJECT_REPOSITORY_URL = 'https://github.com/cwuom/NeriPlayer-Desktop'
 
 function openGitHubSetup() {
   githubPhase.value = 1
