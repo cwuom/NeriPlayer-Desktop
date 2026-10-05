@@ -31,6 +31,7 @@
     "test:youtube-playlist-parse": "node scripts/test-youtube-playlist-parse.mjs",
     "test:youtube-challenge": "node scripts/test-youtube-challenge.mjs",
     "test:sync-protocol-upgrade": "node scripts/test-sync-protocol-upgrade.mjs",
+    "test:history-sync": "node scripts/test-history-sync.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },
   "dependencies": {

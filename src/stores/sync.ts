@@ -130,25 +130,92 @@ export const useSyncStore = defineStore('sync', () => {
     protocolUpgrades.value = protocolUpgrades.value.filter(item => item.backend !== backend)
   }
 
-  // 防止 loadConfigs 触发 watch 保存
+  const configurationGeneration = { github: 0, webdav: 0 }
+  const configurationReads = { github: 0, webdav: 0 }
+  const githubPreferenceRevision = { autoSync: 0, dataSaver: 0, silentFailures: 0 }
+  let webdavPreferenceRevision = 0
+  let dialogOwner: SyncProtocolUpgrade['backend'] | null = null
+  let preferenceGeneration = 0
+  let preferenceRead = 0
+
+  function invalidateConfiguration(backend: SyncProtocolUpgrade['backend']) {
+    clearProtocolUpgrade(backend)
+    if (dialogOwner === backend) {
+      dialogOwner = null
+      dialogError.value = null
+    }
+    return ++configurationGeneration[backend]
+  }
+
+  function beginConfiguration(backend: SyncProtocolUpgrade['backend']) {
+    const generation = invalidateConfiguration(backend)
+    dialogOwner = backend
+    dialogError.value = null
+    return generation
+  }
+
+  function isCurrentConfiguration(backend: SyncProtocolUpgrade['backend'], generation: number) {
+    return configurationGeneration[backend] === generation
+  }
+
+  function configurationFailed(backend: SyncProtocolUpgrade['backend'], generation: number, error: unknown, fallback: string) {
+    if (isCurrentConfiguration(backend, generation) && dialogOwner === backend) {
+      dialogError.value = String(error || fallback)
+    }
+  }
+
+  function githubPreferencesAfterRequest(
+    started: typeof githubPreferenceRevision,
+    proposed = { autoSync: true, dataSaver: true, silentFailures: false },
+  ) {
+    const current = github.value
+    return {
+      autoSync: githubPreferenceRevision.autoSync !== started.autoSync ? current.autoSync : proposed.autoSync,
+      dataSaver: githubPreferenceRevision.dataSaver !== started.dataSaver ? current.dataSaver : proposed.dataSaver,
+      silentFailures: githubPreferenceRevision.silentFailures !== started.silentFailures ? current.silentFailures : proposed.silentFailures,
+    }
+  }
+
+  // 只在读取结果赋值时抑制保存，网络等待不应吞掉用户修改
   let _loading = false
+  function applyLoadedConfig(apply: () => void) {
+    _loading = true
+    try {
+      apply()
+    } finally {
+      _loading = false
+    }
+  }
 
   /** 加载同步配置 */
-  async function loadConfigs() {
-    _loading = true
-    let legacyFrequency: SyncFrequency = 'immediate'
+  async function loadConfigs(generations = { ...configurationGeneration }) {
+    const startedGithub = { ...githubPreferenceRevision }
+    const startedWebdav = webdavPreferenceRevision
+    const reads = {
+      github: isCurrentConfiguration('github', generations.github) ? ++configurationReads.github : null,
+      webdav: isCurrentConfiguration('webdav', generations.webdav) ? ++configurationReads.webdav : null,
+    }
+    const currentPreferenceRead = ++preferenceRead
+    const currentPreferenceGeneration = preferenceGeneration
+    let legacyFrequency: SyncFrequency | undefined
     try {
       const gh = await invoke<any>('get_github_sync_config')
-      legacyFrequency = normalizeSyncFrequency(gh.historyUpdateMode)
-      github.value = {
-        configured: gh.configured ?? false,
-        owner: gh.owner ?? '',
-        repo: gh.repo ?? '',
-        autoSync: gh.autoSync ?? false,
-        lastSyncTime: gh.lastSyncTime ?? 0,
-        dataSaver: gh.dataSaver ?? true,
-        silentFailures: gh.silentFailures ?? false,
-        historyUpdateMode: legacyFrequency,
+      if (isCurrentConfiguration('github', generations.github) && reads.github === configurationReads.github) {
+        legacyFrequency = normalizeSyncFrequency(gh.historyUpdateMode)
+        applyLoadedConfig(() => {
+          github.value = {
+            configured: gh.configured ?? false,
+            owner: gh.owner ?? '',
+            repo: gh.repo ?? '',
+            lastSyncTime: gh.lastSyncTime ?? 0,
+            ...githubPreferencesAfterRequest(startedGithub, {
+              autoSync: gh.autoSync ?? false,
+              dataSaver: gh.dataSaver ?? true,
+              silentFailures: gh.silentFailures ?? false,
+            }),
+            historyUpdateMode: syncFrequency.value,
+          }
+        })
       }
     } catch (e) {
       log.error('loadGitHubConfig:', e)
@@ -156,12 +223,16 @@ export const useSyncStore = defineStore('sync', () => {
 
     try {
       const wd = await invoke<any>('get_webdav_sync_config')
-      webdav.value = {
-        configured: wd.configured ?? false,
-        serverUrl: wd.serverUrl ?? '',
-        basePath: wd.basePath ?? '',
-        autoSync: wd.autoSync ?? false,
-        lastSyncTime: wd.lastSyncTime ?? 0,
+      if (isCurrentConfiguration('webdav', generations.webdav) && reads.webdav === configurationReads.webdav) {
+        applyLoadedConfig(() => {
+          webdav.value = {
+            configured: wd.configured ?? false,
+            serverUrl: wd.serverUrl ?? '',
+            basePath: wd.basePath ?? '',
+            autoSync: webdavPreferenceRevision !== startedWebdav ? webdav.value.autoSync : wd.autoSync ?? false,
+            lastSyncTime: wd.lastSyncTime ?? 0,
+          }
+        })
       }
     } catch (e) {
       log.error('loadWebDavConfig:', e)
@@ -169,13 +240,23 @@ export const useSyncStore = defineStore('sync', () => {
 
     try {
       const preferences = await invoke<any>('get_sync_preferences')
-      syncFrequency.value = normalizeSyncFrequency(preferences.historyUpdateMode)
+      if (currentPreferenceRead === preferenceRead && currentPreferenceGeneration === preferenceGeneration) {
+        applyLoadedConfig(() => {
+          syncFrequency.value = normalizeSyncFrequency(preferences.historyUpdateMode)
+          github.value.historyUpdateMode = syncFrequency.value
+        })
+      }
     } catch (e) {
       // 兼容浏览器开发模式和未升级的后端，回退到旧 GitHub 字段
-      syncFrequency.value = legacyFrequency
+      if (legacyFrequency !== undefined && currentPreferenceRead === preferenceRead
+        && currentPreferenceGeneration === preferenceGeneration) {
+        const frequency = legacyFrequency
+        applyLoadedConfig(() => {
+          syncFrequency.value = frequency
+          github.value.historyUpdateMode = syncFrequency.value
+        })
+      }
     }
-    github.value.historyUpdateMode = syncFrequency.value
-    _loading = false
   }
 
   // 播放历史频率是跨 GitHub/WebDAV 的全局偏好
@@ -184,12 +265,14 @@ export const useSyncStore = defineStore('sync', () => {
     async (value) => {
       github.value.historyUpdateMode = value
       if (_loading) return
+      preferenceGeneration++
       try {
         await invoke('update_sync_preferences', { historyUpdateMode: value })
       } catch (e) {
         log.error('Failed to save sync frequency:', e)
       }
     },
+    { flush: 'sync' },
   )
 
   // 监听 GitHub 子设置变化，自动保存到后端
@@ -199,96 +282,118 @@ export const useSyncStore = defineStore('sync', () => {
       dataSaver: github.value.dataSaver,
       silentFailures: github.value.silentFailures,
     }),
-    async (val) => {
-      if (_loading || !github.value.configured) return
+    async (val, previous) => {
+      if (_loading) return
+      if (val.autoSync !== previous.autoSync) githubPreferenceRevision.autoSync++
+      if (val.dataSaver !== previous.dataSaver) githubPreferenceRevision.dataSaver++
+      if (val.silentFailures !== previous.silentFailures) githubPreferenceRevision.silentFailures++
+      if (!github.value.configured) return
       try {
         await invoke('update_github_sync_settings', {
-          autoSync: val.autoSync,
-          dataSaver: val.dataSaver,
-          silentFailures: val.silentFailures,
+          ...(val.autoSync !== previous.autoSync ? { autoSync: val.autoSync } : {}),
+          ...(val.dataSaver !== previous.dataSaver ? { dataSaver: val.dataSaver } : {}),
+          ...(val.silentFailures !== previous.silentFailures ? { silentFailures: val.silentFailures } : {}),
         })
       } catch (e) {
         log.error('Failed to save GitHub sync settings:', e)
       }
     },
-    { deep: true },
+    { deep: true, flush: 'sync' },
   )
 
   // 监听 WebDAV autoSync 变化
   watch(
     () => webdav.value.autoSync,
-    async (val) => {
-      if (_loading || !webdav.value.configured) return
+    async (val, previous) => {
+      if (_loading) return
+      if (val !== previous) webdavPreferenceRevision++
+      if (!webdav.value.configured) return
       try {
         await invoke('update_webdav_sync_settings', { autoSync: val })
       } catch (e) {
         log.error('Failed to save WebDAV sync settings:', e)
       }
     },
+    { flush: 'sync' },
   )
 
   /** 验证 GitHub token */
   async function validateGitHubToken(token: string): Promise<string | null> {
-    dialogError.value = null
+    const generation = beginConfiguration('github')
     try {
       const result = await invoke<any>('validate_github_token', { token })
+      if (!isCurrentConfiguration('github', generation)) return null
+      await loadConfigs({ github: generation, webdav: configurationGeneration.webdav })
+      if (!isCurrentConfiguration('github', generation)) return null
       return result.username as string
     } catch (e: any) {
-      dialogError.value = e?.toString() || 'Token validation failed'
+      configurationFailed('github', generation, e, 'Token validation failed')
       return null
     }
   }
 
   /** 创建新仓库 */
   async function createGitHubRepo(repoName: string): Promise<boolean> {
-    dialogError.value = null
+    const started = { ...githubPreferenceRevision }
+    const generation = beginConfiguration('github')
     try {
       const result = await invoke<any>('create_github_repo', { repoName })
+      if (!isCurrentConfiguration('github', generation)) return false
       clearProtocolUpgrade('github')
-      github.value = {
-        configured: true, owner: result.owner, repo: result.repo,
-        autoSync: true, lastSyncTime: 0,
-        dataSaver: true, silentFailures: false, historyUpdateMode: syncFrequency.value,
-      }
+      applyLoadedConfig(() => {
+        github.value = {
+          configured: true, owner: result.owner, repo: result.repo,
+          ...githubPreferencesAfterRequest(started), lastSyncTime: 0,
+          historyUpdateMode: syncFrequency.value,
+        }
+      })
       return true
     } catch (e: any) {
-      dialogError.value = e?.toString() || 'Failed to create repository'
+      configurationFailed('github', generation, e, 'Failed to create repository')
       return false
     }
   }
 
   /** 使用已有仓库 */
   async function useExistingGitHubRepo(owner: string, repo: string): Promise<boolean> {
-    dialogError.value = null
+    const started = { ...githubPreferenceRevision }
+    const generation = beginConfiguration('github')
     try {
       const result = await invoke<any>('use_existing_github_repo', { owner, repo })
+      if (!isCurrentConfiguration('github', generation)) return false
       clearProtocolUpgrade('github')
-      github.value = {
-        configured: true, owner: result.owner, repo: result.repo,
-        autoSync: true, lastSyncTime: 0,
-        dataSaver: true, silentFailures: false, historyUpdateMode: syncFrequency.value,
-      }
+      applyLoadedConfig(() => {
+        github.value = {
+          configured: true, owner: result.owner, repo: result.repo,
+          ...githubPreferencesAfterRequest(started), lastSyncTime: 0,
+          historyUpdateMode: syncFrequency.value,
+        }
+      })
       return true
     } catch (e: any) {
-      dialogError.value = e?.toString() || 'Repository not found or inaccessible'
+      configurationFailed('github', generation, e, 'Repository not found or inaccessible')
       return false
     }
   }
 
   /** 配置 GitHub 同步（一步到位，保留兼容） */
   async function configureGitHub(token: string, repo: string) {
-    dialogError.value = null
+    const started = { ...githubPreferenceRevision }
+    const generation = beginConfiguration('github')
     try {
       const result = await invoke<any>('configure_github_sync', { token, repo })
+      if (!isCurrentConfiguration('github', generation)) return false
       clearProtocolUpgrade('github')
-      github.value = {
-        configured: true, owner: result.owner, repo: result.repo,
-        autoSync: true, lastSyncTime: 0,
-        dataSaver: true, silentFailures: false, historyUpdateMode: syncFrequency.value,
-      }
+      applyLoadedConfig(() => {
+        github.value = {
+          configured: true, owner: result.owner, repo: result.repo,
+          ...githubPreferencesAfterRequest(started), lastSyncTime: 0,
+          historyUpdateMode: syncFrequency.value,
+        }
+      })
       return true
     } catch (e: any) {
-      dialogError.value = e?.toString() || 'Failed to configure GitHub sync'
+      configurationFailed('github', generation, e, 'Failed to configure GitHub sync')
       return false
     }
   }
@@ -297,6 +402,7 @@ export const useSyncStore = defineStore('sync', () => {
   async function syncGitHub(silent = false) {
     if (isSyncing.value) return
     if (silent && protocolUpgrades.value.some(item => item.backend === 'github')) return
+    const generation = configurationGeneration.github
     const toast = useToastStore()
     const history = useHistoryStore()
     isSyncing.value = true
@@ -306,8 +412,10 @@ export const useSyncStore = defineStore('sync', () => {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
+      if (!isCurrentConfiguration('github', generation)) return
       clearProtocolUpgrade('github')
-      if (result.history) await history.applySyncPayload(result.history)
+      if (result.history) await history.applySyncPayload(result.history, () => isCurrentConfiguration('github', generation))
+      if (!isCurrentConfiguration('github', generation)) return
       lastResult.value = {
         success: result.success, message: result.message,
         playlistsAdded: result.playlists_added ?? result.playlistsAdded ?? 0,
@@ -321,6 +429,7 @@ export const useSyncStore = defineStore('sync', () => {
       }
       await loadConfigs()
     } catch (e: any) {
+      if (!isCurrentConfiguration('github', generation)) return
       const upgrade = parseSyncProtocolUpgrade(e)
       if (upgrade) {
         rememberProtocolUpgrade(upgrade)
@@ -339,33 +448,43 @@ export const useSyncStore = defineStore('sync', () => {
 
   /** 断开 GitHub 同步 */
   async function disconnectGitHub() {
+    const generation = invalidateConfiguration('github')
     const toast = useToastStore()
     try {
       await invoke('disconnect_github_sync')
+      if (!isCurrentConfiguration('github', generation)) return
       clearProtocolUpgrade('github')
-      github.value = {
-        configured: false, owner: '', repo: '',
-        autoSync: false, lastSyncTime: 0,
-        dataSaver: true, silentFailures: false, historyUpdateMode: syncFrequency.value,
-      }
+      applyLoadedConfig(() => {
+        github.value = {
+          configured: false, owner: '', repo: '',
+          autoSync: false, lastSyncTime: 0,
+          dataSaver: true, silentFailures: false, historyUpdateMode: syncFrequency.value,
+        }
+      })
       toast.success(t('settings.github_disconnected'))
     } catch (e) {
+      if (!isCurrentConfiguration('github', generation)) return
       log.error('disconnectGitHub:', e)
     }
   }
 
   /** 配置 WebDAV 同步 */
   async function configureWebDav(serverUrl: string, username: string, password: string, basePath?: string) {
-    dialogError.value = null
+    const started = webdavPreferenceRevision
+    const generation = beginConfiguration('webdav')
     try {
       await invoke('configure_webdav_sync', { serverUrl, username, password, basePath })
+      if (!isCurrentConfiguration('webdav', generation)) return false
       clearProtocolUpgrade('webdav')
-      webdav.value = {
-        configured: true, serverUrl, basePath: basePath || '', autoSync: true, lastSyncTime: 0,
-      }
+      applyLoadedConfig(() => {
+        webdav.value = {
+          configured: true, serverUrl, basePath: basePath || '', lastSyncTime: 0,
+          autoSync: webdavPreferenceRevision !== started ? webdav.value.autoSync : true,
+        }
+      })
       return true
     } catch (e: any) {
-      dialogError.value = e?.toString() || 'Failed to configure WebDAV sync'
+      configurationFailed('webdav', generation, e, 'Failed to configure WebDAV sync')
       return false
     }
   }
@@ -374,6 +493,7 @@ export const useSyncStore = defineStore('sync', () => {
   async function syncWebDav(silent = false) {
     if (isSyncing.value) return
     if (silent && protocolUpgrades.value.some(item => item.backend === 'webdav')) return
+    const generation = configurationGeneration.webdav
     const toast = useToastStore()
     const history = useHistoryStore()
     isSyncing.value = true
@@ -383,8 +503,10 @@ export const useSyncStore = defineStore('sync', () => {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
+      if (!isCurrentConfiguration('webdav', generation)) return
       clearProtocolUpgrade('webdav')
-      if (result.history) await history.applySyncPayload(result.history)
+      if (result.history) await history.applySyncPayload(result.history, () => isCurrentConfiguration('webdav', generation))
+      if (!isCurrentConfiguration('webdav', generation)) return
       lastResult.value = {
         success: result.success, message: result.message,
         playlistsAdded: result.playlists_added ?? result.playlistsAdded ?? 0,
@@ -398,6 +520,7 @@ export const useSyncStore = defineStore('sync', () => {
       }
       await loadConfigs()
     } catch (e: any) {
+      if (!isCurrentConfiguration('webdav', generation)) return
       const upgrade = parseSyncProtocolUpgrade(e)
       if (upgrade) {
         rememberProtocolUpgrade(upgrade)
@@ -413,13 +536,18 @@ export const useSyncStore = defineStore('sync', () => {
 
   /** 断开 WebDAV 同步 */
   async function disconnectWebDav() {
+    const generation = invalidateConfiguration('webdav')
     const toast = useToastStore()
     try {
       await invoke('disconnect_webdav_sync')
+      if (!isCurrentConfiguration('webdav', generation)) return
       clearProtocolUpgrade('webdav')
-      webdav.value = { configured: false, serverUrl: '', basePath: '', autoSync: false, lastSyncTime: 0 }
+      applyLoadedConfig(() => {
+        webdav.value = { configured: false, serverUrl: '', basePath: '', autoSync: false, lastSyncTime: 0 }
+      })
       toast.success(t('settings.webdav_disconnected'))
     } catch (e) {
+      if (!isCurrentConfiguration('webdav', generation)) return
       log.error('disconnectWebDav:', e)
     }
   }
@@ -437,14 +565,17 @@ export const useSyncStore = defineStore('sync', () => {
   async function approveProtocolUpgrade() {
     const challenge = pendingProtocolUpgrade.value
     if (!challenge || isSyncing.value) return
+    const generation = configurationGeneration[challenge.backend]
     isSyncing.value = true
     try {
       await invoke('approve_sync_protocol_upgrade', { challenge })
+      if (!isCurrentConfiguration(challenge.backend, generation)) return
       clearProtocolUpgrade(challenge.backend)
       isSyncing.value = false
       if (challenge.backend === 'github') await syncGitHub()
       else await syncWebDav()
     } catch (error) {
+      if (!isCurrentConfiguration(challenge.backend, generation)) return
       useToastStore().error(String(error))
     } finally {
       isSyncing.value = false
@@ -516,13 +647,16 @@ export const useSyncStore = defineStore('sync', () => {
   }
 
   async function importConfig() {
+    const generations = {
+      github: invalidateConfiguration('github'),
+      webdav: invalidateConfiguration('webdav'),
+    }
     const toast = useToastStore()
     const settings = useSettingsStore()
     const auth = useAuthStore()
     try {
       const result = await invoke<any>('import_config')
       if (!result.success) return result
-      protocolUpgrades.value = []
       settings.applySnapshot(result.settings)
       if (result.listenTogetherUserUuid) {
         localStorage.setItem('neri:lt-uuid', result.listenTogetherUserUuid)
@@ -531,7 +665,7 @@ export const useSyncStore = defineStore('sync', () => {
       }
       if (result.settings?.locale) setLocale(result.settings.locale, false)
       await auth.checkStatus()
-      await loadConfigs()
+      await loadConfigs(generations)
       toast.success(t('settings.import_config_success'))
       return result
     } catch (e: any) {

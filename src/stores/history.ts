@@ -125,6 +125,7 @@ function emitHistoryChanged(type: 'record' | 'remove' | 'clear' | 'sync') {
 export const useHistoryStore = defineStore('history', () => {
   const entries = ref<PlayedEntry[]>([])
   const deletions = ref<HistoryDeletion[]>([])
+  let mutationEpoch = 0
 
   function save() {
     try {
@@ -166,6 +167,7 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   function record(track: TrackInfo) {
+    mutationEpoch++
     const idx = entries.value.findIndex(entry => entry.track.id === track.id)
     if (idx >= 0) entries.value.splice(idx, 1)
     deletions.value = deletions.value.filter(deletion => deletion.track.id !== track.id)
@@ -176,6 +178,7 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   function remove(trackId: string) {
+    mutationEpoch++
     const removed = entries.value.find(entry => entry.track.id === trackId)?.track
     const before = entries.value.length
     entries.value = entries.value.filter(entry => entry.track.id !== trackId)
@@ -190,6 +193,7 @@ export const useHistoryStore = defineStore('history', () => {
   }
 
   function clear() {
+    mutationEpoch++
     if (entries.value.length === 0) return
     const deletedAt = Date.now()
     const current = entries.value.map(entry => ({ track: entry.track, deletedAt }))
@@ -214,8 +218,10 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
-  async function applySyncPayload(payload: any) {
-    if (!payload || typeof payload !== 'object') return
+  async function applySyncPayload(payload: any, isCurrent: () => boolean = () => true) {
+    if (!payload || typeof payload !== 'object' || !isCurrent()) return
+    const epoch = ++mutationEpoch
+    const canApply = () => epoch === mutationEpoch && isCurrent()
     const previousEntries = entries.value.map(entry => entry.track)
     const previousDeletions = deletions.value.map(deletion => deletion.track)
     const rawEntries: BackendHistoryEntry[] = Array.isArray(payload.entries) ? payload.entries : []
@@ -224,7 +230,8 @@ export const useHistoryStore = defineStore('history', () => {
     const resolvedDeletions: HistoryDeletion[] = []
 
     for (const rawDeletion of rawDeletions) {
-      const candidate = await findMatchingTrack(candidates, rawDeletion)
+      const candidate = await findMatchingTrack(candidates, rawDeletion, canApply)
+      if (!canApply()) return
       if (candidate) {
         resolvedDeletions.push({
           track: candidate,
@@ -241,6 +248,9 @@ export const useHistoryStore = defineStore('history', () => {
       .filter(entry => entry.track.id && entry.playedAt > 0)
       .sort((left, right) => right.playedAt - left.playedAt)
 
+    // 提交阶段没有异步等待，先复核账号意图和本地修改再一起保存
+    if (!canApply()) return
+    mutationEpoch++
     entries.value = nextEntries.slice(0, MAX_ENTRIES)
     deletions.value = resolvedDeletions
       .filter(deletion => deletion.track.id && deletion.deletedAt > 0)
@@ -253,12 +263,14 @@ export const useHistoryStore = defineStore('history', () => {
   async function findMatchingTrack(
     candidates: TrackInfo[],
     deletion: BackendHistoryDeletion,
+    isCurrent: () => boolean,
   ): Promise<TrackInfo | undefined> {
     const expectedSongId = String(deletion.songId ?? '')
     const expectedAlbum = String(deletion.album ?? '')
     const expectedMediaUri = String(deletion.mediaUri ?? '')
     for (const candidate of candidates) {
       const identity = await syncIdentity(candidate)
+      if (!isCurrent()) return undefined
       if (
         identity.songId === expectedSongId &&
         (identity.album === expectedAlbum || !expectedAlbum) &&
