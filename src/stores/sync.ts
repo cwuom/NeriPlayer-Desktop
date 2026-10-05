@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
 import { useHistoryStore } from './history'
@@ -78,6 +78,32 @@ export interface SyncResult {
   songsRemoved: number
 }
 
+export interface SyncProtocolUpgrade {
+  backend: 'github' | 'webdav'
+  target: string
+  fingerprint: string
+  sourceProtocol: 0 | 3
+  targetProtocol: 4
+}
+
+export function parseSyncProtocolUpgrade(error: unknown): SyncProtocolUpgrade | null {
+  const message = String(error)
+  const marker = 'SYNC_PROTOCOL_UPGRADE_REQUIRED:'
+  const index = message.indexOf(marker)
+  if (index < 0) return null
+  try {
+    const value = JSON.parse(message.slice(index + marker.length))
+    if ((value.backend !== 'github' && value.backend !== 'webdav')
+      || typeof value.target !== 'string' || !value.target
+      || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+      || (value.sourceProtocol !== 0 && value.sourceProtocol !== 3)
+      || value.targetProtocol !== 4) return null
+    return value as SyncProtocolUpgrade
+  } catch {
+    return null
+  }
+}
+
 export const useSyncStore = defineStore('sync', () => {
   const github = ref<GitHubSyncConfig>({
     configured: false, owner: '', repo: '',
@@ -92,6 +118,17 @@ export const useSyncStore = defineStore('sync', () => {
   const lastResult = ref<SyncResult | null>(null)
   // 仅弹窗内部配置流程的错误（token 验证、仓库创建等）
   const dialogError = ref<string | null>(null)
+  const protocolUpgrades = ref<SyncProtocolUpgrade[]>([])
+  const pendingProtocolUpgrade = computed(() => protocolUpgrades.value[0] ?? null)
+
+  function rememberProtocolUpgrade(challenge: SyncProtocolUpgrade) {
+    protocolUpgrades.value = protocolUpgrades.value.filter(item => item.backend !== challenge.backend)
+    protocolUpgrades.value.push(challenge)
+  }
+
+  function clearProtocolUpgrade(backend: 'github' | 'webdav') {
+    protocolUpgrades.value = protocolUpgrades.value.filter(item => item.backend !== backend)
+  }
 
   // 防止 loadConfigs 触发 watch 保存
   let _loading = false
@@ -207,6 +244,7 @@ export const useSyncStore = defineStore('sync', () => {
     dialogError.value = null
     try {
       const result = await invoke<any>('create_github_repo', { repoName })
+      clearProtocolUpgrade('github')
       github.value = {
         configured: true, owner: result.owner, repo: result.repo,
         autoSync: true, lastSyncTime: 0,
@@ -224,6 +262,7 @@ export const useSyncStore = defineStore('sync', () => {
     dialogError.value = null
     try {
       const result = await invoke<any>('use_existing_github_repo', { owner, repo })
+      clearProtocolUpgrade('github')
       github.value = {
         configured: true, owner: result.owner, repo: result.repo,
         autoSync: true, lastSyncTime: 0,
@@ -241,6 +280,7 @@ export const useSyncStore = defineStore('sync', () => {
     dialogError.value = null
     try {
       const result = await invoke<any>('configure_github_sync', { token, repo })
+      clearProtocolUpgrade('github')
       github.value = {
         configured: true, owner: result.owner, repo: result.repo,
         autoSync: true, lastSyncTime: 0,
@@ -256,6 +296,7 @@ export const useSyncStore = defineStore('sync', () => {
   /** 执行 GitHub 同步。silent=true 时成功不弹 toast（自动同步场景） */
   async function syncGitHub(silent = false) {
     if (isSyncing.value) return
+    if (silent && protocolUpgrades.value.some(item => item.backend === 'github')) return
     const toast = useToastStore()
     const history = useHistoryStore()
     isSyncing.value = true
@@ -265,6 +306,7 @@ export const useSyncStore = defineStore('sync', () => {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
+      clearProtocolUpgrade('github')
       if (result.history) await history.applySyncPayload(result.history)
       lastResult.value = {
         success: result.success, message: result.message,
@@ -279,6 +321,11 @@ export const useSyncStore = defineStore('sync', () => {
       }
       await loadConfigs()
     } catch (e: any) {
+      const upgrade = parseSyncProtocolUpgrade(e)
+      if (upgrade) {
+        rememberProtocolUpgrade(upgrade)
+        return
+      }
       // 错误始终显示（除非 silentFailures 开启）
       const message = e?.toString() || 'Sync failed'
       const tokenExpired = /token|unauthorized|401|expired/i.test(message)
@@ -295,6 +342,7 @@ export const useSyncStore = defineStore('sync', () => {
     const toast = useToastStore()
     try {
       await invoke('disconnect_github_sync')
+      clearProtocolUpgrade('github')
       github.value = {
         configured: false, owner: '', repo: '',
         autoSync: false, lastSyncTime: 0,
@@ -311,6 +359,7 @@ export const useSyncStore = defineStore('sync', () => {
     dialogError.value = null
     try {
       await invoke('configure_webdav_sync', { serverUrl, username, password, basePath })
+      clearProtocolUpgrade('webdav')
       webdav.value = {
         configured: true, serverUrl, basePath: basePath || '', autoSync: true, lastSyncTime: 0,
       }
@@ -324,6 +373,7 @@ export const useSyncStore = defineStore('sync', () => {
   /** 执行 WebDAV 同步。silent=true 时成功不弹 toast（自动同步场景） */
   async function syncWebDav(silent = false) {
     if (isSyncing.value) return
+    if (silent && protocolUpgrades.value.some(item => item.backend === 'webdav')) return
     const toast = useToastStore()
     const history = useHistoryStore()
     isSyncing.value = true
@@ -333,6 +383,7 @@ export const useSyncStore = defineStore('sync', () => {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
+      clearProtocolUpgrade('webdav')
       if (result.history) await history.applySyncPayload(result.history)
       lastResult.value = {
         success: result.success, message: result.message,
@@ -347,6 +398,11 @@ export const useSyncStore = defineStore('sync', () => {
       }
       await loadConfigs()
     } catch (e: any) {
+      const upgrade = parseSyncProtocolUpgrade(e)
+      if (upgrade) {
+        rememberProtocolUpgrade(upgrade)
+        return
+      }
       if (!webdav.value.autoSync || !silent) {
         toast.error(e?.toString() || 'Sync failed')
       }
@@ -360,6 +416,7 @@ export const useSyncStore = defineStore('sync', () => {
     const toast = useToastStore()
     try {
       await invoke('disconnect_webdav_sync')
+      clearProtocolUpgrade('webdav')
       webdav.value = { configured: false, serverUrl: '', basePath: '', autoSync: false, lastSyncTime: 0 }
       toast.success(t('settings.webdav_disconnected'))
     } catch (e) {
@@ -374,6 +431,23 @@ export const useSyncStore = defineStore('sync', () => {
     }
     if (webdav.value.configured && webdav.value.autoSync) {
       await syncWebDav(silent)
+    }
+  }
+
+  async function approveProtocolUpgrade() {
+    const challenge = pendingProtocolUpgrade.value
+    if (!challenge || isSyncing.value) return
+    isSyncing.value = true
+    try {
+      await invoke('approve_sync_protocol_upgrade', { challenge })
+      clearProtocolUpgrade(challenge.backend)
+      isSyncing.value = false
+      if (challenge.backend === 'github') await syncGitHub()
+      else await syncWebDav()
+    } catch (error) {
+      useToastStore().error(String(error))
+    } finally {
+      isSyncing.value = false
     }
   }
 
@@ -448,6 +522,7 @@ export const useSyncStore = defineStore('sync', () => {
     try {
       const result = await invoke<any>('import_config')
       if (!result.success) return result
+      protocolUpgrades.value = []
       settings.applySnapshot(result.settings)
       if (result.listenTogetherUserUuid) {
         localStorage.setItem('neri:lt-uuid', result.listenTogetherUserUuid)
@@ -467,6 +542,7 @@ export const useSyncStore = defineStore('sync', () => {
 
   return {
     github, webdav, syncFrequency, isSyncing, lastResult, dialogError,
+    pendingProtocolUpgrade, approveProtocolUpgrade,
     loadConfigs,
     validateGitHubToken, createGitHubRepo, useExistingGitHubRepo,
     configureGitHub, syncGitHub, syncAuto, disconnectGitHub,

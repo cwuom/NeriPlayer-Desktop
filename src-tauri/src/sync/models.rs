@@ -308,6 +308,8 @@ pub struct SyncData {
     pub playback_stat_buckets: Vec<SyncPlaybackStatBucket>,
     #[serde(default)]
     pub playlist_song_deletions: Vec<SyncPlaylistSongDeletion>,
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, Value>,
 }
 
 fn default_version() -> String { "2.0".into() }
@@ -545,6 +547,14 @@ pub struct SyncSong {
     pub sync_metadata_version: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_added_at: Option<i64>,
+    #[serde(default)]
+    pub lyric_sync_revision: i64,
+    #[serde(default)]
+    pub lyric_sync_edited: Option<bool>,
+    #[serde(default)]
+    pub matched_romanized_lyric: Option<String>,
+    #[serde(default)]
+    pub original_romanized_lyric: Option<String>,
 }
 
 impl SyncSong {
@@ -612,10 +622,7 @@ impl SyncSong {
     pub fn normalized_for_sync(&self) -> Self {
         let mut normalized = self.clone();
         normalized.sync_membership_tokens = normalize_sync_causal_tokens(&self.sync_membership_tokens);
-        // 空字符串歌词/元数据视为缺失, 避免上传 Some("") 洗掉云端或制造伪 diff
-        normalized.matched_lyric = normalize_optional_text(self.matched_lyric.as_deref());
-        normalized.matched_translated_lyric =
-            normalize_optional_text(self.matched_translated_lyric.as_deref());
+        // 歌词空值与空文本是不同的可恢复状态，不能裁剪原文或尾部换行
         normalized.matched_lyric_source =
             normalize_optional_text(self.matched_lyric_source.as_deref());
         normalized.matched_song_id = normalize_optional_text(self.matched_song_id.as_deref());
@@ -625,9 +632,6 @@ impl SyncSong {
         normalized.original_name = normalize_optional_text(self.original_name.as_deref());
         normalized.original_artist = normalize_optional_text(self.original_artist.as_deref());
         normalized.original_cover_url = normalize_optional_text(self.original_cover_url.as_deref());
-        normalized.original_lyric = normalize_optional_text(self.original_lyric.as_deref());
-        normalized.original_translated_lyric =
-            normalize_optional_text(self.original_translated_lyric.as_deref());
         normalized.channel_id = normalize_optional_text(self.channel_id.as_deref());
         normalized.audio_id = normalize_optional_text(self.audio_id.as_deref());
         normalized.sub_audio_id = normalize_optional_text(self.sub_audio_id.as_deref());
@@ -674,6 +678,8 @@ pub struct SyncRecentPlay {
     pub played_at: i64,
     #[serde(default)]
     pub device_id: String,
+    #[serde(default)]
+    pub resume_position_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1232,7 +1238,7 @@ mod legacy_json_tests {
     }
 
     #[test]
-    fn normalized_for_sync_clears_blank_lyric_fields() {
+    fn normalized_for_sync_preserves_lyric_text_and_clears_blank_metadata() {
         let song = SyncSong {
             id: "1".into(),
             matched_lyric: Some("   ".into()),
@@ -1245,9 +1251,9 @@ mod legacy_json_tests {
         };
 
         let normalized = song.normalized_for_sync();
-        assert!(normalized.matched_lyric.is_none());
-        assert!(normalized.matched_translated_lyric.is_none());
-        assert_eq!(normalized.original_lyric.as_deref(), Some("keep"));
+        assert_eq!(normalized.matched_lyric.as_deref(),Some("   "));
+        assert_eq!(normalized.matched_translated_lyric.as_deref(),Some(""));
+        assert_eq!(normalized.original_lyric.as_deref(), Some(" keep "));
         assert!(normalized.matched_lyric_source.is_none());
         assert!(normalized.custom_name.is_none());
         assert_eq!(normalized.channel_id.as_deref(), Some("netease"));

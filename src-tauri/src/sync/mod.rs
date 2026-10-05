@@ -5,3 +5,7 @@ pub mod github_api;
 pub mod webdav_api;
 pub mod merge;
 pub mod manager;
+pub mod archive;
+pub mod webdav_archive;
+pub mod cloud;
+mod webdav_gc;

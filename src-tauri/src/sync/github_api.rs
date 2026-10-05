@@ -23,7 +23,11 @@ pub enum GitHubApiError {
     #[error("Invalid GitHub API response: {0}")]
     InvalidResponse(String),
     #[error("GitHub network error: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(reqwest::Error),
+}
+
+impl From<reqwest::Error> for GitHubApiError {
+    fn from(error:reqwest::Error)->Self {Self::Network(error.without_url())}
 }
 
 impl GitHubApiError {
@@ -60,7 +64,114 @@ pub struct GitHubApiClient {
     api_base: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct GitHubHead {
+    pub branch: String,
+    pub sha: String,
+    pub repository_id: String,
+}
+
 impl GitHubApiClient {
+    async fn bounded_body(mut response: reqwest::Response, maximum: usize) -> GitHubResult<Vec<u8>> {
+        if response.content_length().is_some_and(|bytes| bytes > maximum as u64) {
+            return Err(GitHubApiError::InvalidResponse("response exceeds sync budget".into()));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if chunk.len() > maximum.saturating_sub(body.len()) {
+                return Err(GitHubApiError::InvalidResponse("response exceeds sync budget".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    async fn archive_json(&self, request: RequestBuilder) -> GitHubResult<serde_json::Value> {
+        let response = self.request(request).send().await?;
+        let status = response.status();
+        let body = Self::bounded_body(response, 4 * 1024 * 1024).await?;
+        if status == StatusCode::UNAUTHORIZED { return Err(GitHubApiError::TokenExpired); }
+        if !status.is_success() { return Err(api_error(status, String::from_utf8_lossy(&body).into(), "sync archive", true)); }
+        serde_json::from_slice(&body).map_err(|error| GitHubApiError::InvalidResponse(format!("invalid archive JSON: {error}")))
+    }
+
+    pub async fn get_repository_head(&self, owner: &str, repo: &str) -> GitHubResult<GitHubHead> {
+        let repository = self.archive_json(self.http.get(self.endpoint(&format!("repos/{owner}/{repo}")))).await?;
+        let branch = required_json_string(&repository,"default_branch")?;
+        let repository_id = required_json_string(&repository,"node_id")?;
+        let reference = self.archive_json(self.http.get(self.endpoint(&format!("repos/{owner}/{repo}/git/ref/heads/{}",urlencoding::encode(&branch))))).await?;
+        let sha = required_json_string(&reference["object"],"sha")?;
+        Ok(GitHubHead {branch,sha,repository_id})
+    }
+
+    pub async fn get_file_at_ref(&self, owner: &str, repo: &str, path: &str, reference: &str, maximum: usize) -> GitHubResult<Option<Vec<u8>>> {
+        if path.contains('/') || path.contains('\\') || path.is_empty() || reference.is_empty() { return Err(GitHubApiError::InvalidResponse("invalid archive path or fixed reference".into())); }
+        let response = self.http.get(self.endpoint(&format!("repos/{owner}/{repo}/contents/{}",urlencoding::encode(path))))
+            .query(&[("ref",reference)])
+            .bearer_auth(&self.token)
+            .header("Accept","application/vnd.github.raw+json")
+            .header("X-GitHub-Api-Version","2022-11-28")
+            .send().await?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND { return Ok(None); }
+        let body = Self::bounded_body(response,maximum).await?;
+        if status == StatusCode::UNAUTHORIZED { return Err(GitHubApiError::TokenExpired); }
+        if !status.is_success() { return Err(api_error(status,String::from_utf8_lossy(&body).into(),"read fixed archive",false)); }
+        Ok(Some(body))
+    }
+
+    pub async fn publish_archive(&self, owner: &str, repo: &str, head: &GitHubHead, prepared: &super::archive::PreparedArchive, verified_paths: &std::collections::HashSet<String>) -> GitHubResult<String> {
+        use super::archive::{MANIFEST_FILE, canonical_object_path};
+        let commit = self.archive_json(self.http.get(self.endpoint(&format!("repos/{owner}/{repo}/git/commits/{}",head.sha)))).await?;
+        let base_tree = required_json_string(&commit["tree"],"sha")?;
+        let listing = self.archive_json(self.http.get(self.endpoint(&format!("repos/{owner}/{repo}/git/trees/{base_tree}")))).await?;
+        if listing["truncated"].as_bool()!=Some(false) { return Err(GitHubApiError::InvalidResponse("archive tree listing is truncated or incomplete".into())); }
+        let entries = listing["tree"].as_array().ok_or_else(||GitHubApiError::InvalidResponse("missing archive tree entries".into()))?;
+        let mut existing = std::collections::HashMap::new();
+        for entry in entries {
+            let path = required_json_string(entry,"path")?;
+            if path==MANIFEST_FILE && (entry["type"].as_str()!=Some("blob") || entry["mode"].as_str()!=Some("100644")) {return Err(GitHubApiError::InvalidResponse("manifest is not a regular file".into()));}
+            if canonical_object_path(&path) {
+                if entry["type"].as_str()!=Some("blob") || entry["mode"].as_str()!=Some("100644") { return Err(GitHubApiError::InvalidResponse("owned archive path is not a regular file".into())); }
+                existing.insert(path,required_json_string(entry,"sha")?);
+            }
+        }
+        let mut changes = Vec::new();
+        for (path,content) in prepared.objects.iter().chain(std::iter::once((&MANIFEST_FILE.to_string(),&prepared.content))) {
+            if path!=MANIFEST_FILE && !canonical_object_path(path) {return Err(GitHubApiError::InvalidResponse("object outside archive closure".into()));}
+            if path!=MANIFEST_FILE && verified_paths.contains(path) && existing.contains_key(path) {continue;}
+            let blob = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/blobs"))).json(&serde_json::json!({"content":BASE64.encode(content),"encoding":"base64"}))).await?;
+            changes.push(serde_json::json!({"path":path,"mode":"100644","type":"blob","sha":required_json_string(&blob,"sha")?}));
+        }
+        for path in existing.keys().filter(|path|!prepared.objects.contains_key(*path)) {
+            changes.push(serde_json::json!({"path":path,"mode":"100644","type":"blob","sha":null}));
+        }
+        let tree = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/trees"))).json(&serde_json::json!({"base_tree":base_tree,"tree":changes}))).await?;
+        let commit = self.archive_json(self.http.post(self.endpoint(&format!("repos/{owner}/{repo}/git/commits"))).json(&serde_json::json!({"message":"Sync from NeriPlayer Desktop","tree":required_json_string(&tree,"sha")?,"parents":[head.sha]}))).await?;
+        let commit_sha = required_json_string(&commit,"sha")?;
+        let mut endpoint = url::Url::parse(&self.api_base).map_err(|_|GitHubApiError::InvalidResponse("invalid GitHub API base".into()))?;
+        endpoint.set_path(if endpoint.path().trim_end_matches('/')=="/api/v3" {"/api/graphql"} else if endpoint.path().trim_matches('/').is_empty() {"/graphql"} else {return Err(GitHubApiError::InvalidResponse("unsupported atomic GraphQL endpoint".into()));});
+        endpoint.set_query(None); endpoint.set_fragment(None);
+        let response = self.http.post(endpoint.clone()).bearer_auth(&self.token).header("Accept","application/json").json(&serde_json::json!({
+            "query":"mutation NeriPlayerSyncPublish($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }",
+            "variables":{"input":{"repositoryId":head.repository_id,"refUpdates":[{"name":format!("refs/heads/{}",head.branch),"beforeOid":head.sha,"afterOid":commit_sha,"force":false}],"clientMutationId":commit_sha}}
+        })).send().await?;
+        if response.url()!=&endpoint {return Err(GitHubApiError::InvalidResponse("atomic publication response redirected".into()));}
+        let status=response.status(); let body=Self::bounded_body(response,64*1024).await?;
+        if status==StatusCode::UNAUTHORIZED {return Err(GitHubApiError::TokenExpired);}
+        if !status.is_success() {return Err(api_error(status,String::from_utf8_lossy(&body).into(),"atomic archive publication",true));}
+        let result:serde_json::Value=serde_json::from_slice(&body).map_err(|_|GitHubApiError::InvalidResponse("invalid GraphQL publication response".into()))?;
+        if let Some(errors)=result.get("errors") {
+            let errors=errors.as_array().ok_or_else(||GitHubApiError::InvalidResponse("invalid GraphQL errors".into()))?;
+            if !errors.is_empty() {
+                let stale=errors.iter().any(|error|error["type"].as_str()==Some("STALE_DATA") || error["extensions"]["code"].as_str()==Some("STALE_DATA"));
+                if stale {return Err(GitHubApiError::ContentConflict{status:409,message:"branch changed before atomic publication".into()});}
+                return Err(GitHubApiError::Api{status:status.as_u16(),message:"GitHub atomic archive publication failed".into()});
+            }
+        }
+        if result["data"]["updateRefs"]["clientMutationId"].as_str()!=Some(&commit_sha) {return Err(GitHubApiError::InvalidResponse("atomic publication acknowledgement mismatch".into()));}
+        Ok(commit_sha)
+    }
     pub fn new(http: &Client, token: &str) -> Self {
         Self::with_api_base(http, token, GITHUB_API_BASE)
     }
@@ -347,6 +458,10 @@ impl GitHubApiClient {
     }
 }
 
+fn required_json_string(value:&serde_json::Value,key:&str)->GitHubResult<String> {
+    value.get(key).and_then(serde_json::Value::as_str).filter(|text|!text.is_empty()).map(String::from).ok_or_else(||GitHubApiError::InvalidResponse(format!("missing {key}")))
+}
+
 fn api_error(
     status: StatusCode,
     body: String,
@@ -409,6 +524,46 @@ fn truncate_error_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn archive_publication_responses(prepared:&super::super::archive::PreparedArchive,last:&str)->Vec<String> {
+        let retired=format!("neriplayer-sync-v3-{}.zst","a".repeat(64));
+        let mut responses=vec![response("200 OK",r#"{"tree":{"sha":"base-tree"}}"#),response("200 OK",&format!(r#"{{"truncated":false,"tree":[{{"path":"README.md","type":"blob","mode":"100644","sha":"unrelated"}},{{"path":"{retired}","type":"blob","mode":"100644","sha":"retired"}}]}}"#))];
+        for index in 0..=prepared.objects.len(){responses.push(response("201 Created",&format!(r#"{{"sha":"blob-{index}"}}"#)));}
+        responses.extend([response("201 Created",r#"{"sha":"new-tree"}"#),response("201 Created",r#"{"sha":"new-commit"}"#),response("200 OK",last)]);responses
+    }
+
+    #[tokio::test]
+    async fn archive_publication_is_one_atomic_before_oid_update_and_preserves_unrelated_files() {
+        let prepared=super::super::archive::prepare(&super::super::models::SyncData::default(),Some("publish".into())).unwrap();
+        let (base,mut requests,server)=mock_server(archive_publication_responses(&prepared,r#"{"data":{"updateRefs":{"clientMutationId":"new-commit"}}}"#)).await;
+        let api=GitHubApiClient::new_with_api_base(&loopback_client(),"fixture",&base);
+        let head=GitHubHead{branch:"sync-data".into(),sha:"old-head".into(),repository_id:"repo-node".into()};
+        assert_eq!(api.publish_archive("owner","repo",&head,&prepared,&std::collections::HashSet::new()).await.unwrap(),"new-commit");
+        let count=prepared.objects.len()+6;let mut captured=Vec::new();for _ in 0..count{captured.push(requests.recv().await.unwrap());}
+        let tree=&captured[captured.len()-3];assert!(tree.contains("\"base_tree\":\"base-tree\""));assert!(tree.contains("\"sha\":null"));assert!(!tree.contains("README.md"));
+        let mutation=captured.last().unwrap();assert!(mutation.starts_with("POST /graphql "));assert!(mutation.contains("\"beforeOid\":\"old-head\""));assert!(mutation.contains("\"afterOid\":\"new-commit\""));assert!(mutation.contains("\"force\":false"));assert!(!captured.iter().any(|request|request.starts_with("PATCH ")||request.starts_with("PUT ")));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn atomic_stale_data_is_a_conflict_and_never_falls_back_to_rest_ref_patch() {
+        let prepared=super::super::archive::prepare(&super::super::models::SyncData::default(),None).unwrap();
+        let (base,mut requests,server)=mock_server(archive_publication_responses(&prepared,r#"{"errors":[{"type":"STALE_DATA","message":"branch changed"}]}"#)).await;
+        let api=GitHubApiClient::new_with_api_base(&loopback_client(),"fixture",&base);
+        let head=GitHubHead{branch:"main".into(),sha:"old-head".into(),repository_id:"repo-node".into()};
+        assert!(api.publish_archive("owner","repo",&head,&prepared,&std::collections::HashSet::new()).await.unwrap_err().is_content_conflict());
+        for _ in 0..prepared.objects.len()+6 {assert!(!requests.recv().await.unwrap().starts_with("PATCH "));}
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fixed_commit_reads_keep_the_same_snapshot_ref_and_raw_bytes() {
+        let (base,mut requests,server)=mock_server(vec![response("200 OK","manifest"),response("200 OK","object")]).await;
+        let api=GitHubApiClient::new_with_api_base(&loopback_client(),"fixture",&base);
+        for path in ["neriplayer-sync-v3.manifest","object.zst"] {api.get_file_at_ref("owner","repo",path,"fixed-head",100).await.unwrap();}
+        for _ in 0..2 {let request=requests.recv().await.unwrap();assert!(request.lines().next().unwrap().contains("ref=fixed-head"));assert!(request.contains("application/vnd.github.raw+json"));}
+        server.await.unwrap();
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;

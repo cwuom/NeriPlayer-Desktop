@@ -15,7 +15,7 @@ use chrono::{Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::sync::models::{
-    SyncPlaybackCounterShard, SyncPlaybackStatBucket, SyncTrackStat,
+    SyncData, SyncPlaybackCounterShard, SyncPlaybackStatBucket, SyncTrackStat,
 };
 
 /// 一次收听增量上报，由前端 PlaybackStatsTracker 产出
@@ -326,15 +326,36 @@ impl StatsStore {
         cleared_at: i64,
         device_id: &str,
     ) {
-        self.cleared_at = self.cleared_at.max(cleared_at).max(0);
-        self.stats = stats.to_vec();
-        self.buckets = buckets.to_vec();
-        self.track_shards = stats
+        // 回写时重新合并当前分片和清除时间，保留同步期间产生的本机变更
+        let (current_stats, current_buckets, current_cleared_at) = self.sync_snapshot();
+        let current = SyncData {
+            device_id: device_id.to_string(),
+            playback_stats: current_stats,
+            playback_stat_buckets: current_buckets,
+            playback_stats_cleared_at: current_cleared_at,
+            ..Default::default()
+        };
+        let incoming = SyncData {
+            playback_stats: stats.to_vec(),
+            playback_stat_buckets: buckets.to_vec(),
+            playback_stats_cleared_at: cleared_at,
+            ..Default::default()
+        };
+        let merged = crate::sync::merge::three_way_merge(
+            &current,
+            &incoming,
+            0,
+            &HashMap::new(),
+        );
+        self.cleared_at = merged.playback_stats_cleared_at;
+        self.stats = merged.playback_stats;
+        self.buckets = merged.playback_stat_buckets;
+        self.track_shards = self.stats
             .iter()
             .map(|stat| (stat.identity_key.clone(), retain_own_shards(&stat.counter_shards, device_id)))
             .filter(|(_, shards)| !shards.is_empty())
             .collect();
-        self.daily_shards = buckets
+        self.daily_shards = self.buckets
             .iter()
             .map(|bucket| {
                 (
@@ -673,6 +694,55 @@ mod tests {
         let shards = &store.track_shards["k"];
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].device_id, "desktop");
+    }
+
+    #[test]
+    fn android_alignment_stats_apply_preserves_recorded_during_sync() {
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("k", 30_000, 1), "desktop", now);
+        let (stats, buckets, cleared_at) = store.sync_snapshot();
+
+        store.record(&session("k", 30_000, 1), "desktop", now + 1_000);
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        assert_eq!(store.stats[0].play_count, 2);
+        assert_eq!(store.stats[0].total_listen_ms, 60_000);
+        assert_eq!(store.buckets[0].play_count, 2);
+        assert_eq!(store.track_shards["k"][0].play_count, 2);
+        assert_eq!(store.daily_shards.values().next().unwrap()[0].play_count, 2);
+
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        assert_eq!(store.stats[0].play_count, 2);
+        store.record(&session("k", 30_000, 1), "desktop", now + 2_000);
+        assert_eq!(store.stats[0].play_count, 3);
+        assert_eq!(store.track_shards["k"][0].play_count, 3);
+    }
+
+    #[test]
+    fn android_alignment_stats_apply_preserves_clear_and_new_epoch() {
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("old", 30_000, 1), "desktop", now);
+        let (stats, buckets, cleared_at) = store.sync_snapshot();
+        let cleared = now + 1_000;
+        store.clear(cleared);
+
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        assert_eq!(store.cleared_at, cleared);
+        assert!(store.stats.is_empty());
+        assert!(store.buckets.is_empty());
+        assert!(store.track_shards.is_empty());
+        assert!(store.daily_shards.is_empty());
+
+        store.record(&session("new", 30_000, 1), "desktop", now + 2_000);
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        assert_eq!(store.stats.len(), 1);
+        assert_eq!(store.stats[0].identity_key, "new");
+        assert_eq!(store.stats[0].play_count, 1);
+        assert_eq!(store.buckets.len(), 1);
+        assert_eq!(store.buckets[0].identity_key, "new");
+        assert_eq!(store.track_shards["new"][0].epoch_started_at, cleared);
+        assert!(store.daily_shards.values().all(|shards| shards[0].epoch_started_at == cleared));
     }
 
     #[test]

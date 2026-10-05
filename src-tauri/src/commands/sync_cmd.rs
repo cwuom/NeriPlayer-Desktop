@@ -19,6 +19,47 @@ const SYNC_STORE: &str = "sync-config.json";
 const CONFIG_FILE_KIND: &str = "moe.ouom.neriplayer.config";
 const CONFIG_FILE_VERSION: u32 = 1;
 
+fn with_sync_config<R>(operation: impl FnOnce() -> R) -> R {
+    // 配置变更和本地同步提交共用临界区，网络请求始终在锁外执行
+    static CONFIG_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = CONFIG_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(()))
+        .lock();
+    operation()
+}
+
+fn same_github_target(current: &GitHubSyncConfig, requested: &GitHubSyncConfig) -> bool {
+    !current.token.is_empty()
+        && current.owner == requested.owner
+        && current.repo == requested.repo
+        && current.token == requested.token
+}
+
+fn same_webdav_target(current: &WebDavSyncConfig, requested: &WebDavSyncConfig) -> bool {
+    !current.server_url.is_empty()
+        && current.server_url == requested.server_url
+        && current.username == requested.username
+        && current.password == requested.password
+        && current.base_path == requested.base_path
+}
+
+fn complete_for_current_target<C, R>(
+    current: &mut C,
+    requested: &C,
+    same_target: impl FnOnce(&C, &C) -> bool,
+    apply: impl FnOnce() -> AppResult<R>,
+    record: impl FnOnce(&mut C),
+) -> AppResult<R> {
+    if !same_target(current, requested) {
+        return Err(AppError::Other(
+            "Sync target or credentials changed; retry with the current configuration".into(),
+        ));
+    }
+    let result = apply()?;
+    record(current);
+    Ok(result)
+}
+
 fn config_default_true() -> bool { true }
 fn config_default_history_mode() -> String { "immediate".into() }
 
@@ -216,7 +257,13 @@ pub fn initialize_secure_storage(app: &AppHandle) {
 }
 
 fn load_github_config(app: &AppHandle) -> GitHubSyncConfig {
-    let mut config: GitHubSyncConfig = app.store(SYNC_STORE).ok()
+    with_sync_config(|| load_github_config_unlocked(app))
+}
+
+fn load_github_config_unlocked(app: &AppHandle) -> GitHubSyncConfig {
+    let mut config: GitHubSyncConfig = app
+        .store(SYNC_STORE)
+        .ok()
         .and_then(|s| s.get(GITHUB_CONFIG_KEY))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
@@ -226,7 +273,7 @@ fn load_github_config(app: &AppHandle) -> GitHubSyncConfig {
     if let Some(token) = security::get_secret(security::GITHUB_TOKEN_KEY) {
         config.token = token;
         if !legacy_token.is_empty() {
-            save_github_config(app, &config);
+            save_github_config_unlocked(app, &config);
         }
         return config;
     }
@@ -237,17 +284,21 @@ fn load_github_config(app: &AppHandle) -> GitHubSyncConfig {
 
     if security::set_secret(security::GITHUB_TOKEN_KEY, &legacy_token) {
         config.token = legacy_token;
-        save_github_config(app, &config);
+        save_github_config_unlocked(app, &config);
     } else {
         // 安全存储不可用时清除旧明文，不让凭据继续留在配置文件
         log::error!(target: "sync", "旧版 GitHub Token 迁移到凭据存储失败，已清除明文凭据");
         config.token.clear();
-        save_github_config(app, &config);
+        save_github_config_unlocked(app, &config);
     }
     config
 }
 
 fn save_github_config(app: &AppHandle, config: &GitHubSyncConfig) {
+    with_sync_config(|| save_github_config_unlocked(app, config))
+}
+
+fn save_github_config_unlocked(app: &AppHandle, config: &GitHubSyncConfig) {
     if config.token.is_empty() {
         let _ = security::delete_secret(security::GITHUB_TOKEN_KEY);
     } else if !security::set_secret(security::GITHUB_TOKEN_KEY, &config.token) {
@@ -261,7 +312,13 @@ fn save_github_config(app: &AppHandle, config: &GitHubSyncConfig) {
 }
 
 fn load_webdav_config(app: &AppHandle) -> WebDavSyncConfig {
-    let mut config: WebDavSyncConfig = app.store(SYNC_STORE).ok()
+    with_sync_config(|| load_webdav_config_unlocked(app))
+}
+
+fn load_webdav_config_unlocked(app: &AppHandle) -> WebDavSyncConfig {
+    let mut config: WebDavSyncConfig = app
+        .store(SYNC_STORE)
+        .ok()
         .and_then(|s| s.get(WEBDAV_CONFIG_KEY))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
@@ -270,7 +327,7 @@ fn load_webdav_config(app: &AppHandle) -> WebDavSyncConfig {
     if let Some(password) = security::get_secret(security::WEBDAV_PASSWORD_KEY) {
         config.password = password;
         if !legacy_password.is_empty() {
-            save_webdav_config(app, &config);
+            save_webdav_config_unlocked(app, &config);
         }
         return config;
     }
@@ -281,17 +338,21 @@ fn load_webdav_config(app: &AppHandle) -> WebDavSyncConfig {
 
     if security::set_secret(security::WEBDAV_PASSWORD_KEY, &legacy_password) {
         config.password = legacy_password;
-        save_webdav_config(app, &config);
+        save_webdav_config_unlocked(app, &config);
     } else {
         // 安全存储不可用时清除旧明文，不让凭据继续留在配置文件
         log::error!(target: "sync", "旧版 WebDAV 密码迁移到凭据存储失败，已清除明文凭据");
         config.password.clear();
-        save_webdav_config(app, &config);
+        save_webdav_config_unlocked(app, &config);
     }
     config
 }
 
 fn save_webdav_config(app: &AppHandle, config: &WebDavSyncConfig) {
+    with_sync_config(|| save_webdav_config_unlocked(app, config))
+}
+
+fn save_webdav_config_unlocked(app: &AppHandle, config: &WebDavSyncConfig) {
     if config.password.is_empty() {
         let _ = security::delete_secret(security::WEBDAV_PASSWORD_KEY);
     } else if !security::set_secret(security::WEBDAV_PASSWORD_KEY, &config.password) {
@@ -305,26 +366,32 @@ fn save_webdav_config(app: &AppHandle, config: &WebDavSyncConfig) {
 }
 
 fn load_sync_preferences(app: &AppHandle) -> SyncPreferencesConfig {
-    let stored = app.store(SYNC_STORE).ok()
+    with_sync_config(|| load_sync_preferences_unlocked(app))
+}
+
+fn load_sync_preferences_unlocked(app: &AppHandle) -> SyncPreferencesConfig {
+    let stored = app
+        .store(SYNC_STORE)
+        .ok()
         .and_then(|s| s.get(SYNC_PREFERENCES_KEY))
         .and_then(|v| serde_json::from_value::<SyncPreferencesConfig>(v.clone()).ok());
     let has_stored = stored.is_some();
 
     let mut config = stored.unwrap_or_else(|| {
         // 旧版本把频率放在 GitHub 配置中，首次读取时迁移到全局偏好
-        let github = load_github_config(app);
+        let github = load_github_config_unlocked(app);
         SyncPreferencesConfig {
             history_update_mode: github.history_update_mode,
         }
     });
     config.history_update_mode = normalize_history_update_mode(&config.history_update_mode);
     if !has_stored {
-        save_sync_preferences(app, &config);
+        save_sync_preferences_unlocked(app, &config);
     }
     config
 }
 
-fn save_sync_preferences(app: &AppHandle, config: &SyncPreferencesConfig) {
+fn save_sync_preferences_unlocked(app: &AppHandle, config: &SyncPreferencesConfig) {
     if let Ok(store) = app.store(SYNC_STORE) {
         store.set(SYNC_PREFERENCES_KEY, sync_preferences_store_value(config));
         let _ = store.save();
@@ -393,11 +460,13 @@ pub async fn update_sync_preferences(
     app: AppHandle,
     history_update_mode: Option<String>,
 ) -> AppResult<()> {
-    let mut preferences = load_sync_preferences(&app);
-    if let Some(mode) = history_update_mode {
-        preferences.history_update_mode = normalize_history_update_mode(&mode);
-    }
-    save_sync_preferences(&app, &preferences);
+    with_sync_config(|| {
+        let mut preferences = load_sync_preferences_unlocked(&app);
+        if let Some(mode) = history_update_mode {
+            preferences.history_update_mode = normalize_history_update_mode(&mode);
+        }
+        save_sync_preferences_unlocked(&app, &preferences);
+    });
     Ok(())
 }
 
@@ -408,14 +477,16 @@ pub async fn validate_github_token(
     state: State<'_, AppState>,
     token: String,
 ) -> AppResult<Value> {
-    let api = crate::sync::github_api::GitHubApiClient::new(&state.http(), &token);
+    let api = crate::sync::github_api::GitHubApiClient::new(&state.sync_http(), &token);
     let username = api.validate_token().await?;
 
     // 暂存 token（还没配置完，只保存 token 和 owner）
-    let mut config = load_github_config(&app);
-    config.token = token;
-    config.owner = username.clone();
-    save_github_config(&app, &config);
+    with_sync_config(|| {
+        let mut config = load_github_config_unlocked(&app);
+        config.token = token;
+        config.owner = username.clone();
+        save_github_config_unlocked(&app, &config);
+    });
 
     Ok(serde_json::json!({
         "success": true,
@@ -435,7 +506,7 @@ pub async fn create_github_repo(
         return Err(AppError::Api("Token not validated yet".into()));
     }
 
-    let api = crate::sync::github_api::GitHubApiClient::new(&state.http(), &config.token);
+    let api = crate::sync::github_api::GitHubApiClient::new(&state.sync_http(), &config.token);
     api.create_repository(&repo_name).await?;
 
     let updated = GitHubSyncConfig {
@@ -468,7 +539,7 @@ pub async fn use_existing_github_repo(
         return Err(AppError::Api("Token not validated yet".into()));
     }
 
-    let api = crate::sync::github_api::GitHubApiClient::new(&state.http(), &config.token);
+    let api = crate::sync::github_api::GitHubApiClient::new(&state.sync_http(), &config.token);
     let _branch = api.check_repository(&owner, &repo).await?;
 
     let updated = GitHubSyncConfig {
@@ -496,7 +567,7 @@ pub async fn configure_github_sync(
     token: String,
     repo: String,
 ) -> AppResult<Value> {
-    let api = crate::sync::github_api::GitHubApiClient::new(&state.http(), &token);
+    let api = crate::sync::github_api::GitHubApiClient::new(&state.sync_http(), &token);
     let owner = api.validate_token().await?;
 
     match api.check_repository(&owner, &repo).await {
@@ -562,13 +633,27 @@ fn apply_merged_stats(app: &AppHandle, state: &State<'_, AppState>, merged: &Syn
 
 /// 执行 GitHub 同步
 #[tauri::command]
+pub async fn approve_sync_protocol_upgrade(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    challenge: crate::sync::archive::approval::SyncProtocolUpgrade,
+) -> AppResult<()> {
+    let current = match challenge.backend.as_str() {
+        "github" => crate::sync::cloud::inspect_github_upgrade(&state.sync_http(), &load_github_config(&app)).await?,
+        "webdav" => crate::sync::cloud::inspect_webdav_upgrade(&state.sync_http(), &load_webdav_config(&app)).await?,
+        _ => return Err(AppError::Other("Invalid sync upgrade provider".into())),
+    };
+    crate::sync::archive::approval::approve_verified(&challenge, &current)
+}
+
+#[tauri::command]
 pub async fn sync_github(
     app: AppHandle,
     state: State<'_, AppState>,
     history_entries: Option<Vec<manager::SyncHistoryEntry>>,
     history_deletions: Option<Vec<manager::SyncHistoryDeletion>>,
 ) -> AppResult<SyncResult> {
-    let mut config = load_github_config(&app);
+    let config = load_github_config(&app);
     if config.token.is_empty() {
         return Err(AppError::Api("GitHub sync not configured".into()));
     }
@@ -580,14 +665,34 @@ pub async fn sync_github(
         local_stats_payload(&state),
     )?;
     let outcome = manager::sync_github(
-        &state.http(),
-        &mut config,
+        &state.sync_http(),
+        &config,
         &local_data,
         playlist_epoch,
+        |completed| {
+            with_sync_config(|| {
+                let mut current = load_github_config_unlocked(&app);
+                let outcome = complete_for_current_target(
+                    &mut current,
+                    &config,
+                    same_github_target,
+                    || {
+                        let outcome =
+                            manager::complete_cloud_sync(&completed, &local_data, playlist_epoch)?;
+                        apply_merged_stats(&app, &state, &outcome.merged);
+                        Ok(outcome)
+                    },
+                    |current| {
+                        current.last_remote_sha = completed.version.clone();
+                        current.last_sync_time = chrono::Utc::now().timestamp_millis();
+                    },
+                )?;
+                save_github_config_unlocked(&app, &current);
+                Ok(outcome)
+            })
+        },
     )
     .await?;
-    apply_merged_stats(&app, &state, &outcome.merged);
-    save_github_config(&app, &config);
     // 仅本地数据确有变化时通知前端：App.vue 监听该事件后会防抖触发自动同步，
     // "Already up to date" 也无条件 emit 会形成 5s 自激同步环；
     // 有变化时事件照发，手动同步后的 UI 刷新能力不受影响
@@ -631,11 +736,6 @@ pub async fn configure_webdav_sync(
     base_path: Option<String>,
 ) -> AppResult<Value> {
     let bp = base_path.unwrap_or_default();
-    let api = crate::sync::webdav_api::WebDavApiClient::new(
-        &state.http(), &server_url, &username, &password, &bp,
-    );
-    api.validate_connection().await?;
-
     let config = WebDavSyncConfig {
         server_url: server_url.clone(),
         username,
@@ -644,6 +744,7 @@ pub async fn configure_webdav_sync(
         auto_sync: true,
         ..Default::default()
     };
+    crate::sync::webdav_archive::WebDavArchiveClient::new(&state.sync_http(),&config)?.validate_connection().await?;
     save_webdav_config(&app, &config);
 
     Ok(serde_json::json!({
@@ -660,7 +761,7 @@ pub async fn sync_webdav(
     history_entries: Option<Vec<manager::SyncHistoryEntry>>,
     history_deletions: Option<Vec<manager::SyncHistoryDeletion>>,
 ) -> AppResult<SyncResult> {
-    let mut config = load_webdav_config(&app);
+    let config = load_webdav_config(&app);
     if config.server_url.is_empty() {
         return Err(AppError::Api("WebDAV sync not configured".into()));
     }
@@ -672,14 +773,34 @@ pub async fn sync_webdav(
         local_stats_payload(&state),
     )?;
     let outcome = manager::sync_webdav(
-        &state.http(),
-        &mut config,
+        &state.sync_http(),
+        &config,
         &local_data,
         playlist_epoch,
+        |completed| {
+            with_sync_config(|| {
+                let mut current = load_webdav_config_unlocked(&app);
+                let outcome = complete_for_current_target(
+                    &mut current,
+                    &config,
+                    same_webdav_target,
+                    || {
+                        let outcome =
+                            manager::complete_cloud_sync(&completed, &local_data, playlist_epoch)?;
+                        apply_merged_stats(&app, &state, &outcome.merged);
+                        Ok(outcome)
+                    },
+                    |current| {
+                        current.last_remote_fingerprint = completed.version.clone();
+                        current.last_sync_time = chrono::Utc::now().timestamp_millis();
+                    },
+                )?;
+                save_webdav_config_unlocked(&app, &current);
+                Ok(outcome)
+            })
+        },
     )
     .await?;
-    apply_merged_stats(&app, &state, &outcome.merged);
-    save_webdav_config(&app, &config);
     // 与 sync_github 同理：无本地变化不 emit，消除自激同步环
     if outcome.local_changed {
         let _ = app.emit("playlists-changed", ());
@@ -697,37 +818,49 @@ pub async fn update_github_sync_settings(
     silent_failures: Option<bool>,
     history_update_mode: Option<String>,
 ) -> AppResult<()> {
-    let mut config = load_github_config(&app);
-    if config.token.is_empty() {
-        return Err(AppError::Api("GitHub sync not configured".into()));
-    }
-    if let Some(v) = auto_sync { config.auto_sync = v; }
-    if let Some(v) = data_saver { config.data_saver = v; }
-    if let Some(v) = silent_failures { config.silent_failures = v; }
-    if let Some(v) = history_update_mode {
-        let normalized = normalize_history_update_mode(&v);
-        config.history_update_mode = normalized.clone();
-        save_sync_preferences(&app, &SyncPreferencesConfig {
-            history_update_mode: normalized,
-        });
-    }
-    save_github_config(&app, &config);
-    Ok(())
+    with_sync_config(|| {
+        let mut config = load_github_config_unlocked(&app);
+        if config.token.is_empty() {
+            return Err(AppError::Api("GitHub sync not configured".into()));
+        }
+        if let Some(v) = auto_sync {
+            config.auto_sync = v;
+        }
+        if let Some(v) = data_saver {
+            config.data_saver = v;
+        }
+        if let Some(v) = silent_failures {
+            config.silent_failures = v;
+        }
+        if let Some(v) = history_update_mode {
+            let normalized = normalize_history_update_mode(&v);
+            config.history_update_mode = normalized.clone();
+            save_sync_preferences_unlocked(
+                &app,
+                &SyncPreferencesConfig {
+                    history_update_mode: normalized,
+                },
+            );
+        }
+        save_github_config_unlocked(&app, &config);
+        Ok(())
+    })
 }
 
 /// 更新 WebDAV 同步子设置
 #[tauri::command]
-pub async fn update_webdav_sync_settings(
-    app: AppHandle,
-    auto_sync: Option<bool>,
-) -> AppResult<()> {
-    let mut config = load_webdav_config(&app);
-    if config.server_url.is_empty() {
-        return Err(AppError::Api("WebDAV sync not configured".into()));
-    }
-    if let Some(v) = auto_sync { config.auto_sync = v; }
-    save_webdav_config(&app, &config);
-    Ok(())
+pub async fn update_webdav_sync_settings(app: AppHandle, auto_sync: Option<bool>) -> AppResult<()> {
+    with_sync_config(|| {
+        let mut config = load_webdav_config_unlocked(&app);
+        if config.server_url.is_empty() {
+            return Err(AppError::Api("WebDAV sync not configured".into()));
+        }
+        if let Some(v) = auto_sync {
+            config.auto_sync = v;
+        }
+        save_webdav_config_unlocked(&app, &config);
+        Ok(())
+    })
 }
 
 /// 清除应用缓存（音频/图片缓存目录 + app_data_dir 下的临时缓存子目录）
@@ -1058,7 +1191,10 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     let imported_listen_together = payload.listen_together;
     let imported_language = payload.language;
     let mut settings = payload.settings;
-    if let Some(language) = imported_language.as_ref().filter(|language| !language.code.is_empty()) {
+    if let Some(language) = imported_language
+        .as_ref()
+        .filter(|language| !language.code.is_empty())
+    {
         settings.locale = language.code.clone();
     }
     if let Some(listen_together) = imported_listen_together.as_ref() {
@@ -1091,19 +1227,24 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
         .github_sync
         .as_ref()
         .map(|github| github.history_update_mode.clone());
-    if let Some(preferences) = payload.sync_preferences {
-        save_sync_preferences(&app, &preferences.into_config());
-    } else if let Some(mode) = legacy_history_mode {
-        save_sync_preferences(&app, &SyncPreferencesConfig {
-            history_update_mode: normalize_history_update_mode(&mode),
-        });
-    }
-    if let Some(github) = payload.github_sync {
-        save_github_config(&app, &github.into_config());
-    }
-    if let Some(webdav) = payload.webdav_sync {
-        save_webdav_config(&app, &webdav.into_config());
-    }
+    with_sync_config(|| {
+        if let Some(preferences) = payload.sync_preferences {
+            save_sync_preferences_unlocked(&app, &preferences.into_config());
+        } else if let Some(mode) = legacy_history_mode {
+            save_sync_preferences_unlocked(
+                &app,
+                &SyncPreferencesConfig {
+                    history_update_mode: normalize_history_update_mode(&mode),
+                },
+            );
+        }
+        if let Some(github) = payload.github_sync {
+            save_github_config_unlocked(&app, &github.into_config());
+        }
+        if let Some(webdav) = payload.webdav_sync {
+            save_webdav_config_unlocked(&app, &webdav.into_config());
+        }
+    });
 
     Ok(serde_json::json!({
         "success": true,
@@ -1132,6 +1273,215 @@ mod tests {
     use crate::auth::state::AuthState;
     use crate::settings::store::AppSettings;
     use crate::sync::models::{GitHubSyncConfig, SyncPreferencesConfig, WebDavSyncConfig};
+
+    #[test]
+    fn completion_preserves_preferences_changed_during_network_request() {
+        let requested = GitHubSyncConfig {
+            token: "fixture-token".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            auto_sync: true,
+            ..Default::default()
+        };
+        let mut current = requested.clone();
+        current.auto_sync = false;
+        current.data_saver = false;
+        current.silent_failures = true;
+        current.history_update_mode = "every_15_minutes".into();
+        let result = super::complete_for_current_target(
+            &mut current,
+            &requested,
+            super::same_github_target,
+            || Ok(7),
+            |current| {
+                current.last_remote_sha = "completed".into();
+                current.last_sync_time = 20;
+            },
+        )
+        .unwrap();
+        assert_eq!(result, 7);
+        assert!(!current.auto_sync);
+        assert!(!current.data_saver);
+        assert!(current.silent_failures);
+        assert_eq!(current.history_update_mode, "every_15_minutes");
+        assert_eq!(current.last_remote_sha, "completed");
+        assert_eq!(current.last_sync_time, 20);
+
+        let requested = WebDavSyncConfig {
+            server_url: "https://fixture.invalid/".into(),
+            username: "fixture".into(),
+            password: "fixture-password".into(),
+            base_path: "backup".into(),
+            auto_sync: true,
+            ..Default::default()
+        };
+        let mut current = requested.clone();
+        current.auto_sync = false;
+        current.data_saver = false;
+        super::complete_for_current_target(
+            &mut current,
+            &requested,
+            super::same_webdav_target,
+            || Ok(()),
+            |current| {
+                current.last_remote_fingerprint = "completed".into();
+                current.last_sync_time = 20;
+            },
+        )
+        .unwrap();
+        assert!(!current.auto_sync);
+        assert!(!current.data_saver);
+        assert_eq!(current.last_remote_fingerprint, "completed");
+        assert_eq!(current.last_sync_time, 20);
+    }
+
+    #[test]
+    fn changed_target_credentials_and_disconnect_reject_before_any_local_apply() {
+        let requested = GitHubSyncConfig {
+            token: "fixture-token".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            ..Default::default()
+        };
+        for field in ["owner", "repo", "token", "disconnect"] {
+            let mut current = requested.clone();
+            match field {
+                "owner" => current.owner = "different".into(),
+                "repo" => current.repo = "different".into(),
+                "token" => current.token = "different".into(),
+                _ => current = GitHubSyncConfig::default(),
+            }
+            let before = super::github_config_store_value(&current);
+            let result = super::complete_for_current_target(
+                &mut current,
+                &requested,
+                super::same_github_target,
+                || -> crate::error::AppResult<()> {
+                    panic!("stale completion must not apply local data")
+                },
+                |_| panic!("stale completion must not record progress"),
+            );
+            assert!(result.is_err(), "{field}");
+            assert_eq!(super::github_config_store_value(&current), before);
+            if field == "disconnect" {
+                assert!(current.token.is_empty());
+            }
+        }
+        let requested = WebDavSyncConfig {
+            server_url: "https://fixture.invalid/".into(),
+            username: "fixture".into(),
+            password: "fixture-password".into(),
+            base_path: "backup".into(),
+            ..Default::default()
+        };
+        for field in ["server", "username", "password", "path", "disconnect"] {
+            let mut current = requested.clone();
+            match field {
+                "server" => current.server_url = "https://different.invalid/".into(),
+                "username" => current.username = "different".into(),
+                "password" => current.password = "different".into(),
+                "path" => current.base_path = "different".into(),
+                _ => current = WebDavSyncConfig::default(),
+            }
+            let before = super::webdav_config_store_value(&current);
+            let result = super::complete_for_current_target(
+                &mut current,
+                &requested,
+                super::same_webdav_target,
+                || -> crate::error::AppResult<()> {
+                    panic!("stale completion must not apply local data")
+                },
+                |_| panic!("stale completion must not record progress"),
+            );
+            assert!(result.is_err(), "{field}");
+            assert_eq!(super::webdav_config_store_value(&current), before);
+            if field == "disconnect" {
+                assert!(current.password.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn failed_local_apply_does_not_advance_sync_progress() {
+        let requested = GitHubSyncConfig {
+            token: "fixture-token".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            last_sync_time: 10,
+            ..Default::default()
+        };
+        let mut current = requested.clone();
+        let result = super::complete_for_current_target(
+            &mut current,
+            &requested,
+            super::same_github_target,
+            || -> crate::error::AppResult<()> {
+                Err(crate::error::AppError::Other(
+                    "fixture write failure".into(),
+                ))
+            },
+            |_| panic!("failed local apply must not advance progress"),
+        );
+        assert!(result.is_err());
+        assert_eq!(current.last_sync_time, 10);
+    }
+
+    #[test]
+    fn disconnect_serializes_with_completion_and_is_not_revived() {
+        use std::sync::{mpsc, Arc};
+        let requested = GitHubSyncConfig {
+            token: "fixture-token".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            ..Default::default()
+        };
+        let stored = Arc::new(parking_lot::Mutex::new(requested.clone()));
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let completion_store = stored.clone();
+        let completion = std::thread::spawn(move || {
+            super::with_sync_config(|| {
+                let mut current = completion_store.lock().clone();
+                super::complete_for_current_target(
+                    &mut current,
+                    &requested,
+                    super::same_github_target,
+                    || {
+                        entered.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        Ok(())
+                    },
+                    |current| current.last_sync_time = 20,
+                )
+                .unwrap();
+                *completion_store.lock() = current;
+            })
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (started, started_rx) = mpsc::channel();
+        let (done, done_rx) = mpsc::channel();
+        let disconnect_store = stored.clone();
+        let disconnect = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            super::with_sync_config(|| *disconnect_store.lock() = GitHubSyncConfig::default());
+            done.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        release.send(()).unwrap();
+        completion.join().unwrap();
+        disconnect.join().unwrap();
+        let current = stored.lock();
+        assert!(current.token.is_empty());
+        assert!(current.owner.is_empty());
+        assert_eq!(current.last_sync_time, 0);
+    }
 
     #[test]
     fn github_store_value_excludes_token() {

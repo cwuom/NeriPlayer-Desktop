@@ -44,7 +44,9 @@ pub fn get_filename(data_saver: bool) -> &'static str {
 pub fn serialize_compressed(data: &SyncData) -> AppResult<Vec<u8>> {
     let normalized = data.normalized_for_sync();
     let proto = sync_data_to_proto(&normalized);
-    let proto_bytes = proto.encode_to_vec();
+    let mut projected = proto_to_sync_data(&proto);
+    projected.extensions = normalized.extensions;
+    let proto_bytes = super::archive::encode_legacy_proto(&projected)?;
 
     // GZIP 压缩
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -121,7 +123,7 @@ pub fn deserialize_compressed(compressed: &[u8]) -> AppResult<SyncData> {
                     return Ok(legacy_data.normalized_for_sync());
                 }
             }
-            Ok(data.normalized_for_sync())
+            super::archive::decode_legacy_proto(&proto_bytes).map(|data| data.normalized_for_sync())
         }
         Err(current_err) => {
             let legacy_proto = LegacyProtoSyncData::decode(&proto_bytes[..]).map_err(|legacy_err| {
@@ -185,7 +187,9 @@ pub fn deserialize(content: &[u8]) -> AppResult<SyncData> {
         let body = content.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(content);
         let text = std::str::from_utf8(body)
             .map_err(|e| AppError::Other(format!("JSON is not UTF-8: {}", e)))?;
-        return serde_json::from_str::<SyncData>(text)
+        return serde_json::from_str::<serde_json::Value>(text)
+            .map_err(AppError::from)
+            .and_then(super::archive::decode_legacy_json)
             .map(|data| data.normalized_for_sync())
             .map_err(|e| AppError::Other(format!("JSON parse: {}", e)));
     }
@@ -273,6 +277,7 @@ fn proto_to_sync_data(p: &ProtoSyncData) -> SyncData {
         playback_stats_cleared_at: p.playback_stats_cleared_at,
         playback_stat_buckets: p.playback_stat_buckets.iter().map(proto_to_stat_bucket).collect(),
         playlist_song_deletions: p.playlist_song_deletions.iter().map(proto_to_playlist_song_deletion).collect(),
+        extensions: Default::default(),
     }
 }
 
@@ -436,6 +441,7 @@ fn legacy_proto_to_sync_data(p: &LegacyProtoSyncData) -> SyncData {
         playback_stats_cleared_at: 0,
         playback_stat_buckets: Vec::new(),
         playlist_song_deletions: Vec::new(),
+        extensions: Default::default(),
     }
 }
 
@@ -482,6 +488,7 @@ fn legacy_proto_to_sync_song(p: &LegacyProtoSyncSong) -> SyncSong {
         sync_membership_tokens: Vec::new(),
         sync_metadata_version: LEGACY_SYNC_METADATA_VERSION,
         legacy_added_at: None,
+        ..Default::default()
     }
 }
 
@@ -494,6 +501,7 @@ fn legacy_proto_to_recent_play(p: &LegacyProtoSyncRecentPlay) -> SyncRecentPlay 
         }),
         played_at: p.played_at,
         device_id: p.device_id.clone(),
+        resume_position_ms: 0,
     }
 }
 
@@ -569,6 +577,10 @@ fn sync_song_to_proto(s: &SyncSong) -> ProtoSyncSong {
         sync_membership_tokens: s.sync_membership_tokens.iter().map(causal_token_to_proto).collect(),
         sync_metadata_version: s.sync_metadata_version,
         legacy_added_at: s.legacy_added_at,
+        lyric_sync_revision: s.lyric_sync_revision,
+        lyric_sync_edited: s.lyric_sync_edited,
+        matched_romanized_lyric: s.matched_romanized_lyric.clone(),
+        original_romanized_lyric: s.original_romanized_lyric.clone(),
     }
 }
 
@@ -603,6 +615,10 @@ fn proto_to_sync_song(p: &ProtoSyncSong) -> SyncSong {
         sync_membership_tokens: p.sync_membership_tokens.iter().map(proto_to_causal_token).collect(),
         sync_metadata_version: p.sync_metadata_version,
         legacy_added_at: p.legacy_added_at,
+        lyric_sync_revision: p.lyric_sync_revision,
+        lyric_sync_edited: p.lyric_sync_edited,
+        matched_romanized_lyric: p.matched_romanized_lyric.clone(),
+        original_romanized_lyric: p.original_romanized_lyric.clone(),
     }
 }
 
@@ -672,6 +688,7 @@ fn recent_play_to_proto(r: &SyncRecentPlay) -> ProtoSyncRecentPlay {
         song: Some(sync_song_to_proto(&r.song)),
         played_at: r.played_at,
         device_id: r.device_id.clone(),
+        resume_position_ms: r.resume_position_ms,
     }
 }
 
@@ -684,6 +701,7 @@ fn proto_to_recent_play(p: &ProtoSyncRecentPlay) -> SyncRecentPlay {
         }),
         played_at: p.played_at,
         device_id: p.device_id.clone(),
+        resume_position_ms: p.resume_position_ms,
     }
 }
 
