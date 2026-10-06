@@ -23,6 +23,7 @@ import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { DEFAULT_DOWNLOAD_NAME_TEMPLATE } from '@/stores/settings'
 import StorageManagementDialog from '@/components/StorageManagementDialog.vue'
 import EditableRangeValue from '@/components/ui/EditableRangeValue.vue'
+import CustomSelect from '@/components/ui/CustomSelect.vue'
 import {
   clearBrowserCache,
   mergeBrowserCacheUsage,
@@ -88,6 +89,11 @@ const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map
 })))
 const youtubePlaybackSourceDescription = computed(() => t(`settings.youtube_source_${youtubePlaybackSource.value}_desc`))
 
+function changeYouTubePlaybackSource(value: string) {
+  const source = YOUTUBE_PLAYBACK_SOURCES.find(source => source === value)
+  if (source) youtubePlaybackSource.value = source
+}
+
 const audioOutputDevices = ref<Array<{ name: string; isDefault: boolean }>>([])
 const audioOutputSwitching = ref(false)
 const audioOutputOptions = computed(() => {
@@ -109,16 +115,14 @@ async function loadAudioOutputDevices() {
   }
 }
 
-async function changeAudioOutputDevice(event: Event) {
-  const selected = (event.target as HTMLSelectElement).value
-  if (audioOutputSwitching.value) return
+async function changeAudioOutputDevice(selected: string) {
+  if (audioOutputSwitching.value || selected === audioOutputDevice.value) return
   audioOutputSwitching.value = true
   try {
     await invoke('set_audio_output_device', { name: selected || null })
     audioOutputDevice.value = selected
   } catch (error) {
     log.warn('failed to switch audio output:', error)
-    ;(event.target as HTMLSelectElement).value = audioOutputDevice.value
     toast.error(t('settings.audio_output_failed'))
   } finally {
     audioOutputSwitching.value = false
@@ -1388,15 +1392,15 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
 
     <!-- 播放 -->
         <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
-    <div class="setting-card">
+    <div class="setting-card setting-card--select">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">speaker</span></div>
       <div class="setting-info">
         <label class="setting-title" for="audio-output-device">{{ t('settings.audio_output') }}</label>
         <div class="setting-desc">{{ t('settings.audio_output_desc') }}</div>
       </div>
-      <select id="audio-output-device" class="audio-output-select" :value="audioOutputDevice" :disabled="audioOutputSwitching" @focus="loadAudioOutputDevices" @change="changeAudioOutputDevice">
-        <option v-for="device in audioOutputOptions" :key="device.value" :value="device.value">{{ device.label }}</option>
-      </select>
+      <CustomSelect id="audio-output-device" class="settings-select settings-select--device"
+        :model-value="audioOutputDevice" :options="audioOutputOptions" :label="t('settings.audio_output')"
+        :disabled="audioOutputSwitching" @open="loadAudioOutputDevices" @update:model-value="changeAudioOutputDevice" />
     </div>
     <div class="section-label clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
@@ -1882,16 +1886,15 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
       <span>{{ t('settings.playback_sources') }}</span>
     </div>
 
-    <div class="setting-card">
+    <div class="setting-card setting-card--select">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">smart_display</span></div>
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.youtube_playback_source') }}</div>
         <div class="setting-desc">{{ t('settings.youtube_playback_source_desc') }}</div>
         <div class="setting-desc">{{ youtubePlaybackSourceDescription }}</div>
       </div>
-      <select v-model="youtubePlaybackSource" class="audio-output-select" :aria-label="t('settings.youtube_playback_source')">
-        <option v-for="option in youtubePlaybackSourceOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-      </select>
+      <CustomSelect class="settings-select" :model-value="youtubePlaybackSource" :options="youtubePlaybackSourceOptions"
+        :label="t('settings.youtube_playback_source')" @update:model-value="changeYouTubePlaybackSource" />
     </div>
 
     <div class="setting-card">
@@ -2552,15 +2555,23 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
 </template>
 
 <style scoped lang="scss">
-.audio-output-select {
-  max-width: 45%;
-  min-width: 140px;
-  padding: 10px 12px;
-  border: 1px solid var(--md-outline-variant);
-  border-radius: var(--radius-md);
-  background: var(--md-surface-container);
-  color: var(--md-on-surface);
-  font: inherit;
+.setting-card--select {
+  flex-wrap: wrap;
+
+  .setting-info { flex-basis: 240px; }
+}
+
+.settings-select {
+  flex: 0 1 200px;
+  margin-left: auto;
+
+  &--device { flex-basis: 300px; }
+
+  :deep(.custom-select-trigger) {
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 14px;
+  }
 }
 
 .settings-view {
@@ -3739,6 +3750,11 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
   .setting-card {
     gap: 10px;
     padding: 12px;
+  }
+
+  .setting-card--select {
+    .setting-info { flex-basis: calc(100% - 46px); }
+    .settings-select { flex-basis: 100%; margin-left: 46px; }
   }
 
   .setting-icon-wrap {

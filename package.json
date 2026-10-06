@@ -23,6 +23,7 @@
     "test:artist-navigation": "node scripts/test-artist-navigation.mjs",
     "test:favorite-artists": "node scripts/test-favorite-artists.mjs",
     "test:artist-request-state": "node scripts/test-artist-request-state.mjs",
+    "test:custom-select": "node scripts/test-custom-select.mjs",
     "test:lyric-offset": "node scripts/test-lyric-offset.mjs",
     "test:now-playing-background": "node scripts/test-now-playing-background.mjs",
     "test:lyrics-format": "node scripts/test-lyrics-format.mjs",
