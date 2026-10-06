@@ -219,6 +219,48 @@ impl BiliClient {
         validate_bili_response(resp)
     }
 
+    pub async fn get_uploader_profile(&self, mid: u64) -> AppResult<Value> {
+        self.wbi_get("https://api.bilibili.com/x/space/wbi/acc/info", BTreeMap::from([
+            ("mid".into(), mid.to_string()),
+            ("platform".into(), "web".into()),
+            ("web_location".into(), "1550101".into()),
+        ])).await
+    }
+
+    pub async fn get_uploader_videos(&self, mid: u64, page: u32) -> AppResult<Value> {
+        self.wbi_get("https://api.bilibili.com/x/space/wbi/arc/search", BTreeMap::from([
+            ("mid".into(), mid.to_string()),
+            ("pn".into(), page.max(1).to_string()),
+            ("ps".into(), "30".into()),
+            ("order".into(), "pubdate".into()),
+        ])).await
+    }
+
+    pub async fn get_uploader_contents(&self, mid: u64, page: u32) -> AppResult<Value> {
+        self.wbi_get("https://api.bilibili.com/x/polymer/web-space/seasons_series_list", BTreeMap::from([
+            ("mid".into(), mid.to_string()),
+            ("page_num".into(), page.max(1).to_string()),
+            ("page_size".into(), "20".into()),
+            ("web_location".into(), "333.999".into()),
+        ])).await
+    }
+
+    pub async fn get_uploader_collection(&self, mid: u64, content_id: u64, kind: &str, page: u32) -> AppResult<Value> {
+        match kind {
+            "collection" => self.wbi_get("https://api.bilibili.com/x/polymer/web-space/seasons_archives_list", BTreeMap::from([
+                ("mid".into(), mid.to_string()), ("season_id".into(), content_id.to_string()),
+                ("page_num".into(), page.max(1).to_string()), ("page_size".into(), "30".into()),
+                ("sort_reverse".into(), "false".into()), ("web_location".into(), "333.999".into()),
+            ])).await,
+            "series" => self.api_get("https://api.bilibili.com/x/series/archives", &BTreeMap::from([
+                ("mid".into(), mid.to_string()), ("series_id".into(), content_id.to_string()),
+                ("pn".into(), page.max(1).to_string()), ("ps".into(), "30".into()),
+                ("only_normal".into(), "true".into()), ("sort".into(), "desc".into()),
+            ])).await,
+            _ => Err(AppError::Other("Unsupported uploader content type".into())),
+        }
+    }
+
     /// 获取视频信息
     pub async fn get_video_info(&self, bvid: &str) -> AppResult<BiliVideoInfo> {
         let mut params = BTreeMap::new();
@@ -248,10 +290,15 @@ impl BiliClient {
 
     /// 搜索视频
     pub async fn search(&self, keyword: &str) -> AppResult<Value> {
+        self.search_with_duration(keyword, 0).await
+    }
+
+    pub async fn search_with_duration(&self, keyword: &str, duration: u8) -> AppResult<Value> {
         let mut params = BTreeMap::new();
         params.insert("search_type".into(), "video".into());
         params.insert("keyword".into(), keyword.into());
         params.insert("page".into(), "1".into());
+        params.insert("duration".into(), duration.to_string());
 
         self.wbi_get("https://api.bilibili.com/x/web-interface/wbi/search/type", params).await
     }

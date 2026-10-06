@@ -467,6 +467,14 @@ impl NeteaseClient {
         self.get_song_url(song_id, quality).await
     }
 
+    /// 关注歌手列表使用 Android 相同的 WEAPI 分页入口
+    pub async fn get_followed_artists(&self, offset: u32, limit: u32) -> AppResult<Value> {
+        self.weapi_post(
+            &format!("{}/weapi/artist/sublist", BASE_URL),
+            &json!({ "offset": offset, "limit": limit.clamp(1, 100), "total": true }),
+        ).await
+    }
+
     /// 歌手头部信息 (对齐 Android getArtistDetail: /api/artist/head/info/get)
     pub async fn get_artist_detail(&self, artist_id: u64) -> AppResult<Value> {
         let resp = self

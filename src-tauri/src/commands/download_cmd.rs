@@ -110,16 +110,18 @@ async fn refresh_youtube_download_source(
     avoid_direct: bool,
 ) -> AppResult<recovery::Source> {
     let auth = app.state::<AppState>().auth.lock().youtube.clone();
+    let playback_source = crate::settings::store::load_settings(&app)?.settings.youtube_playback_source;
     let mut last_error = None;
     for (force_refresh, require_direct) in recovery::resolve_plan(true, avoid_direct) {
         let result = tokio::time::timeout(
             Duration::from_secs(18),
-            crate::api::youtube::playback::resolve_audio_streams_with_strategy(
+            crate::api::youtube::playback::resolve_audio_streams_with_source(
                 &video_id,
                 auth.as_ref().filter(|auth| auth.has_login()),
                 Some(&app),
                 force_refresh,
                 avoid_direct,
+                &playback_source,
             ),
         )
         .await;

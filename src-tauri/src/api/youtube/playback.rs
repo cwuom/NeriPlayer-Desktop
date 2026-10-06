@@ -20,6 +20,91 @@ use std::sync::LazyLock;
 static AUDIO_STREAM_CACHE: LazyLock<Mutex<super::cache::AudioStreamCache>> =
     LazyLock::new(|| Mutex::new(super::cache::AudioStreamCache::default()));
 
+
+const PO_TOKEN_FAST_PATH_WAIT: Duration = Duration::from_millis(150);
+
+struct BootstrapAttempt<T> {
+    value: Option<Result<T, ()>>,
+}
+
+impl<T> Default for BootstrapAttempt<T> {
+    fn default() -> Self {
+        Self { value: None }
+    }
+}
+
+impl<T> BootstrapAttempt<T> {
+    async fn get_or_fetch<F, Fut>(&mut self, fetch: F) -> Option<&T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = AppResult<T>>,
+    {
+        if self.value.is_none() {
+            self.value = Some(fetch().await.map_err(|_| ()));
+        }
+        self.value.as_ref().and_then(|value| value.as_ref().ok())
+    }
+}
+
+struct PoTokenAcquisition {
+    handle: Option<tokio::task::JoinHandle<Option<String>>>,
+    token: Option<String>,
+    checked_fast_path: bool,
+}
+
+impl PoTokenAcquisition {
+    fn new(future: impl std::future::Future<Output = Option<String>> + Send + 'static) -> Self {
+        Self {
+            handle: Some(tokio::spawn(future)),
+            token: None,
+            checked_fast_path: false,
+        }
+    }
+
+    async fn fast_token(&mut self) -> Option<String> {
+        let Some(handle) = self.handle.as_mut() else {
+            return self.token.clone();
+        };
+        if self.checked_fast_path && !handle.is_finished() {
+            return None;
+        }
+        self.checked_fast_path = true;
+        if let Ok(result) = tokio::time::timeout(PO_TOKEN_FAST_PATH_WAIT, handle).await {
+            self.token = result.ok().flatten();
+            self.handle = None;
+        }
+        self.token.clone()
+    }
+
+    async fn finish(&mut self) -> Option<String> {
+        if let Some(handle) = self.handle.as_mut() {
+            self.token = match tokio::time::timeout(Duration::from_secs(65), &mut *handle).await {
+                Ok(result) => result.ok().flatten(),
+                Err(_) => {
+                    handle.abort();
+                    None
+                }
+            };
+            self.handle = None;
+        }
+        self.token.clone()
+    }
+}
+
+impl Drop for PoTokenAcquisition {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+struct TokenPendingStreams {
+    streams: Vec<YtAudioStream>,
+    manifest: Option<String>,
+    duration_ms: u64,
+}
+
 // 桌面播放端点: 非 WEB_REMIX 客户端统一走 www, 降低与 music 登录会话的关联
 const PLAYER_URL_WWW: &str = "https://www.youtube.com/youtubei/v1/player";
 const PLAYER_URL_MUSIC: &str = "https://music.youtube.com/youtubei/v1/player";
@@ -138,6 +223,42 @@ fn ordered_profiles(authenticated: bool) -> Vec<&'static PlayerClientProfile> {
         [0, 1, 2, 3, 4, 5]
     };
     indices.into_iter().map(|index| &profiles[index]).collect()
+}
+
+
+pub fn normalize_playback_source(source: &str) -> &'static str {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "visionos" => "visionos",
+        "android_vr" => "android_vr",
+        "web_remix" => "web_remix",
+        "tv_html5" => "tv_html5",
+        "web_creator" => "web_creator",
+        _ => "automatic",
+    }
+}
+
+fn ordered_profiles_with_source(
+    authenticated: bool,
+    source: &str,
+) -> Vec<&'static PlayerClientProfile> {
+    let preferred = match normalize_playback_source(source) {
+        "visionos" => Some("VISIONOS"),
+        "android_vr" => Some("ANDROID_VR"),
+        "web_remix" => Some("WEB_REMIX"),
+        "tv_html5" => Some("TVHTML5"),
+        "web_creator" => Some("WEB_CREATOR"),
+        _ => None,
+    };
+    let mut profiles = ordered_profiles(authenticated);
+    if let Some(index) = preferred.and_then(|client| {
+        profiles
+            .iter()
+            .position(|profile| profile.client_name == client)
+    }) {
+        let preferred = profiles.remove(index);
+        profiles.insert(0, preferred);
+    }
+    profiles
 }
 
 fn player_endpoint(profile: &PlayerClientProfile) -> (&'static str, &'static str) {
@@ -411,6 +532,33 @@ fn collect_format_arrays(resp: &Value) -> Vec<Value> {
         out.extend(arr.iter().cloned());
     }
     out
+}
+
+
+fn response_needs_po_token(response: &Value, avoid_direct: bool) -> bool {
+    let mut formats = collect_format_arrays(response);
+    if formats.iter().any(is_audio_like) {
+        formats.retain(is_audio_like);
+    }
+    let manifest_needs_token = response
+        .pointer("/streamingData/hlsManifestUrl")
+        .and_then(Value::as_str)
+        .is_some_and(|url| {
+            super::hls::is_trusted_hls_url(url) && !super::hls::has_manifest_token(url)
+        });
+    manifest_needs_token
+        || (!avoid_direct
+            && formats.iter().any(|format| {
+                if let Some(url) = resolve_format_url(format) {
+                    trusted_stream_url(&url) && !super::hls::has_manifest_token(&url)
+                } else {
+                    format
+                        .get("signatureCipher")
+                        .or_else(|| format.get("cipher"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|cipher| !cipher.is_empty())
+                }
+            }))
 }
 
 fn is_audio_like(format: &Value) -> bool {
@@ -718,7 +866,29 @@ async fn resolve_response_streams(
     response: &Value,
     bootstrap: &PlaybackBootstrap,
 ) -> AppResult<Vec<YtAudioStream>> {
-    let formats = collect_format_arrays(response);
+    let (audio_formats, mut muxed_formats): (Vec<_>, Vec<_>) = collect_format_arrays(response)
+        .into_iter()
+        .partition(is_audio_like);
+    muxed_formats.retain(|format| {
+        format
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .is_some_and(|mime| mime.starts_with("video/"))
+    });
+    // 成功音频不处理视频 challenge，音频不可用时保留 progressive 兜底
+    match resolve_format_streams(http, audio_formats, bootstrap).await {
+        Ok(streams) if !streams.is_empty() => return Ok(streams),
+        Err(error) if muxed_formats.is_empty() => return Err(error),
+        _ => {}
+    }
+    resolve_format_streams(http, muxed_formats, bootstrap).await
+}
+
+async fn resolve_format_streams(
+    http: &FallbackHttp,
+    formats: Vec<Value>,
+    bootstrap: &PlaybackBootstrap,
+) -> AppResult<Vec<YtAudioStream>> {
     let mut signatures = Vec::new();
     let mut throttling = Vec::new();
     for format in &formats {
@@ -818,12 +988,32 @@ pub async fn resolve_audio_streams_with_app(
     resolve_audio_streams_with_strategy(video_id, auth, app, force_refresh, false).await
 }
 
+
 pub async fn resolve_audio_streams_with_strategy(
     video_id: &str,
     auth: Option<&YouTubeAuth>,
     app: Option<&tauri::AppHandle>,
     force_refresh: bool,
     avoid_direct: bool,
+) -> AppResult<Vec<YtAudioStream>> {
+    resolve_audio_streams_with_source(
+        video_id,
+        auth,
+        app,
+        force_refresh,
+        avoid_direct,
+        "automatic",
+    )
+    .await
+}
+
+pub async fn resolve_audio_streams_with_source(
+    video_id: &str,
+    auth: Option<&YouTubeAuth>,
+    app: Option<&tauri::AppHandle>,
+    force_refresh: bool,
+    avoid_direct: bool,
+    playback_source: &str,
 ) -> AppResult<Vec<YtAudioStream>> {
     let video_id = video_id.trim();
     if video_id.is_empty()
@@ -834,7 +1024,11 @@ pub async fn resolve_audio_streams_with_strategy(
     {
         return Err(AppError::Api("Invalid YouTube video id".into()));
     }
-    let cache_key = format!("{}|hls={avoid_direct}", stream_cache_key(video_id, auth));
+    let playback_source = normalize_playback_source(playback_source);
+    let cache_key = format!(
+        "{}|hls={avoid_direct}|source={playback_source}",
+        stream_cache_key(video_id, auth)
+    );
     if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
         if force_refresh {
             cache.remove(&cache_key);
@@ -849,39 +1043,36 @@ pub async fn resolve_audio_streams_with_strategy(
     let http = playback_http_client(bypass_proxy)?;
     let logged_in = auth.is_some_and(YouTubeAuth::has_login);
     let mut errors = Vec::new();
-    let mut authenticated_bootstrap = None;
-    let mut anonymous_bootstrap = None;
+    let mut authenticated_bootstrap = BootstrapAttempt::default();
+    let mut anonymous_bootstrap = BootstrapAttempt::default();
     let mut hls_fallback = Vec::new();
-    let mut acquired_token: Option<Option<String>> = None;
-    for profile in ordered_profiles(logged_in) {
+    let mut token_acquisition: Option<PoTokenAcquisition> = None;
+    let mut token_pending_streams = Vec::new();
+    for profile in ordered_profiles_with_source(logged_in, playback_source) {
         let bootstrap_slot = if profile.supports_authenticated_context {
             &mut authenticated_bootstrap
         } else {
             &mut anonymous_bootstrap
         };
-        if bootstrap_slot.is_none() {
-            match super::bootstrap::fetch(
-                &http,
-                if profile.supports_authenticated_context {
-                    auth
-                } else {
-                    None
-                },
-                profile.supports_authenticated_context,
-                force_refresh,
-            )
-            .await
-            {
-                Ok(value) => {
-                    *bootstrap_slot = Some(value);
-                }
-                Err(_) => {
-                    errors.push(format!("{}:bootstrap_failed", profile.client_name));
-                    continue;
-                }
-            }
-        }
-        let mut bootstrap = bootstrap_slot.as_ref().expect("bootstrap loaded").clone();
+        let bootstrap = bootstrap_slot
+            .get_or_fetch(|| {
+                super::bootstrap::fetch(
+                    &http,
+                    if profile.supports_authenticated_context {
+                        auth
+                    } else {
+                        None
+                    },
+                    profile.supports_authenticated_context,
+                    // 流级重试复用有效配置，首页过期由自身 TTL 和登录指纹判定
+                    false,
+                )
+            })
+            .await;
+        let Some(mut bootstrap) = bootstrap.cloned() else {
+            errors.push(format!("{}:bootstrap_failed", profile.client_name));
+            continue;
+        };
         if profile.supports_authenticated_context
             && bootstrap.signature_timestamp.is_none()
             && !bootstrap.player_js_url.is_empty()
@@ -908,46 +1099,93 @@ pub async fn resolve_audio_streams_with_strategy(
             errors.push(format!("{}:{}", profile.client_name, status));
             continue;
         }
-        let mut streams = match resolve_response_streams(&http, &response, &bootstrap).await {
-            Ok(value) => value,
-            Err(_) => {
-                errors.push(format!("{}:challenge_failed", profile.client_name));
-                Vec::new()
-            }
-        };
         let manifest = response
             .pointer("/streamingData/hlsManifestUrl")
             .and_then(Value::as_str)
             .filter(|url| super::hls::is_trusted_hls_url(url));
-        let requires_token = profile.requires_po_token
-            && (streams
-                .iter()
-                .any(|stream| !super::hls::has_manifest_token(&stream.url))
-                || manifest.is_some_and(|url| !super::hls::has_manifest_token(url)));
-        if requires_token && acquired_token.is_none() {
-            acquired_token = Some(if let Some(app) = app {
-                let session_auth = YouTubeAuth {
-                    cookies: bootstrap.cookies.clone(),
-                    nickname: None,
-                    avatar_url: None,
-                };
+        let mut requires_token =
+            profile.requires_po_token && response_needs_po_token(&response, avoid_direct);
+        let start_token_acquisition = || {
+            let app = app?.clone();
+            let session_auth = YouTubeAuth {
+                cookies: bootstrap.cookies.clone(),
+                nickname: None,
+                avatar_url: None,
+            };
+            let video_id = video_id.to_owned();
+            let visitor_data = bootstrap.visitor_data.clone();
+            let remote_host = bootstrap.remote_host.clone();
+            Some(PoTokenAcquisition::new(async move {
                 super::web_po::mint(
-                    app,
+                    &app,
                     Some(&session_auth),
                     &super::bootstrap::auth_fingerprint(Some(&session_auth)),
-                    video_id,
-                    &bootstrap.visitor_data,
-                    &bootstrap.remote_host,
+                    &video_id,
+                    &visitor_data,
+                    &remote_host,
                     force_refresh,
                 )
                 .await
                 .ok()
+            }))
+        };
+        if requires_token && token_acquisition.is_none() {
+            token_acquisition = start_token_acquisition();
+        }
+        // 令牌预取与签名解析并行，短等待后让其它客户端接管
+        let mut streams = if avoid_direct {
+            Vec::new()
+        } else {
+            match resolve_response_streams(&http, &response, &bootstrap).await {
+                Ok(value) => value,
+                Err(_) => {
+                    errors.push(format!("{}:challenge_failed", profile.client_name));
+                    Vec::new()
+                }
+            }
+        };
+        // progressive 兜底可能在原始音频格式之外，需要沿用相同令牌校验
+        requires_token |= profile.requires_po_token
+            && streams
+                .iter()
+                .any(|stream| !super::hls::has_manifest_token(&stream.url));
+        if requires_token && token_acquisition.is_none() {
+            token_acquisition = start_token_acquisition();
+        }
+        let acquired_token = if requires_token {
+            if let Some(acquisition) = token_acquisition.as_mut() {
+                acquisition.fast_token().await
             } else {
                 None
+            }
+        } else {
+            None
+        };
+        let duration_ms = response
+            .pointer("/videoDetails/lengthSeconds")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .or_else(|| value.as_u64())
+            })
+            .unwrap_or(0)
+            .saturating_mul(1000);
+        if requires_token && acquired_token.is_none() && token_acquisition.is_some() {
+            token_pending_streams.push(TokenPendingStreams {
+                streams: streams
+                    .iter()
+                    .filter(|stream| !super::hls::has_manifest_token(&stream.url))
+                    .cloned()
+                    .collect(),
+                manifest: manifest
+                    .filter(|url| !super::hls::has_manifest_token(url))
+                    .map(str::to_owned),
+                duration_ms,
             });
         }
         if profile.requires_po_token {
-            if let Some(Some(token)) = &acquired_token {
+            if let Some(token) = &acquired_token {
                 for stream in &mut streams {
                     if !super::hls::has_manifest_token(&stream.url) {
                         if let Some(url) = replace_query(&stream.url, "pot", token) {
@@ -969,22 +1207,11 @@ pub async fn resolve_audio_streams_with_strategy(
             {
                 acquired_token
                     .as_ref()
-                    .and_then(Option::as_ref)
                     .and_then(|token| super::hls::append_manifest_token(manifest, token))
             } else {
                 Some(manifest.into())
             };
             if let Some(manifest) = manifest {
-                let duration_ms = response
-                    .pointer("/videoDetails/lengthSeconds")
-                    .and_then(|value| {
-                        value
-                            .as_str()
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .or_else(|| value.as_u64())
-                    })
-                    .unwrap_or(0)
-                    .saturating_mul(1000);
                 if let Ok(candidates) =
                     super::hls::fetch_audio_playlists(&http, &manifest, duration_ms).await
                 {
@@ -1000,6 +1227,42 @@ pub async fn resolve_audio_streams_with_strategy(
             }
         }
         errors.push(format!("{}:no_playable_audio", profile.client_name));
+    }
+    // 所有其它来源都失败时复用预取结果，不重新请求 player 或重新铸造
+    if hls_fallback.is_empty() && !token_pending_streams.is_empty() {
+        if let Some(acquisition) = token_acquisition.as_mut() {
+            if let Some(token) = acquisition.finish().await {
+                for pending in token_pending_streams {
+                    if !avoid_direct {
+                        let streams = pending
+                            .streams
+                            .into_iter()
+                            .filter_map(|mut stream| {
+                                stream.url = replace_query(&stream.url, "pot", &token)?;
+                                Some(stream)
+                            })
+                            .collect::<Vec<_>>();
+                        if !streams.is_empty() {
+                            if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
+                                cache.put(cache_key, streams.clone(), now_ms());
+                            }
+                            return Ok(streams);
+                        }
+                    }
+                    if let Some(manifest) = pending
+                        .manifest
+                        .and_then(|manifest| super::hls::append_manifest_token(&manifest, &token))
+                    {
+                        if let Ok(candidates) =
+                            super::hls::fetch_audio_playlists(&http, &manifest, pending.duration_ms)
+                                .await
+                        {
+                            hls_fallback.extend(candidates);
+                        }
+                    }
+                }
+            }
+        }
     }
     if !hls_fallback.is_empty() {
         hls_fallback.sort_by_key(|stream| std::cmp::Reverse(stream.bitrate));
@@ -1024,6 +1287,154 @@ mod tests {
         STREAM_ANDROID_VR_USER_AGENT, STREAM_IOS_USER_AGENT, STREAM_WEB_USER_AGENT,
     };
     use serde_json::json;
+
+
+    #[test]
+    fn selected_source_is_first_without_losing_android_fallback_order() {
+        for authenticated in [false, true] {
+            for (source, client) in [
+                ("visionos", "VISIONOS"),
+                ("android_vr", "ANDROID_VR"),
+                ("web_remix", "WEB_REMIX"),
+                ("tv_html5", "TVHTML5"),
+                ("web_creator", "WEB_CREATOR"),
+            ] {
+                let profiles = super::ordered_profiles_with_source(authenticated, source);
+                assert_eq!(profiles[0].client_name, client);
+                assert_eq!(profiles.len(), playback_client_profiles().len());
+                let mut expected = ordered_profiles(authenticated);
+                let selected = expected
+                    .iter()
+                    .position(|profile| profile.client_name == client)
+                    .unwrap();
+                let selected = expected.remove(selected);
+                expected.insert(0, selected);
+                assert_eq!(
+                    profiles
+                        .iter()
+                        .map(|profile| profile.client_version)
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|profile| profile.client_version)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        assert_eq!(super::normalize_playback_source("unknown"), "automatic");
+        assert_eq!(super::normalize_playback_source(" WEB_REMIX "), "web_remix");
+    }
+
+    #[tokio::test]
+    async fn video_challenges_do_not_delay_an_already_playable_audio_format() {
+        let bootstrap: super::PlaybackBootstrap = serde_json::from_value(json!({
+            "api_key":"fixture", "client_version":"fixture", "visitor_data":"",
+            "player_js_url":"https://untrusted.invalid/player.js", "signature_timestamp":null,
+            "session_index":"0", "user_session_id":"", "delegated_session_id":"", "logged_in":false
+        }))
+        .unwrap();
+        let client = build_playback_client(true).unwrap();
+        let http = crate::api::transport::FallbackHttp::new(&client, "fixture");
+        let response = json!({"streamingData":{"adaptiveFormats":[
+            {"mimeType":"video/mp4", "signatureCipher":"url=https%3A%2F%2Frr.googlevideo.com%2Fvideo&s=irrelevant-video-challenge"},
+            {"mimeType":"audio/mp4", "url":"https://rr.googlevideo.com/audio?c=VISIONOS", "bitrate":160000}
+        ]}});
+        let streams = super::resolve_response_streams(&http, &response, &bootstrap)
+            .await
+            .unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].bitrate, 160000);
+    }
+
+    #[tokio::test]
+    async fn unusable_audio_formats_preserve_progressive_fallback() {
+        let bootstrap: super::PlaybackBootstrap = serde_json::from_value(json!({
+            "api_key":"fixture", "client_version":"fixture", "visitor_data":"",
+            "player_js_url":"https://untrusted.invalid/player.js", "signature_timestamp":null,
+            "session_index":"0", "user_session_id":"", "delegated_session_id":"", "logged_in":false
+        }))
+        .unwrap();
+        let client = build_playback_client(true).unwrap();
+        let http = crate::api::transport::FallbackHttp::new(&client, "fixture");
+        for audio in [
+            json!({"mimeType":"audio/mp4", "bitrate":160000}),
+            json!({"mimeType":"audio/mp4", "signatureCipher":"url=https%3A%2F%2Frr.googlevideo.com%2Faudio&s=unavailable-audio-challenge"}),
+        ] {
+            let response = json!({"streamingData":{
+                "adaptiveFormats":[audio],
+                "formats":[{"mimeType":"video/mp4", "url":"https://rr.googlevideo.com/progressive?c=VISIONOS", "bitrate":128000}]
+            }});
+            let streams = super::resolve_response_streams(&http, &response, &bootstrap)
+                .await
+                .unwrap();
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].mime_type, "video/mp4");
+            assert_eq!(streams[0].bitrate, 128000);
+            assert!(streams[0].url.contains("/progressive"));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_bootstrap_is_not_retried_for_each_client_in_the_same_resolve() {
+        let mut attempt = super::BootstrapAttempt::<usize>::default();
+        let mut hits = 0;
+        for _ in 0..4 {
+            let value = attempt
+                .get_or_fetch(|| async {
+                    hits += 1;
+                    Err(crate::error::AppError::Api("fixture unavailable".into()))
+                })
+                .await;
+            assert!(value.is_none());
+        }
+        assert_eq!(hits, 1);
+    }
+
+    #[tokio::test]
+    async fn slow_po_token_yields_to_fallback_and_is_reused_without_a_second_mint() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut acquisition = super::PoTokenAcquisition::new(async { receiver.await.ok() });
+        let started = std::time::Instant::now();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), acquisition.fast_token())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() >= super::PO_TOKEN_FAST_PATH_WAIT);
+        assert!(acquisition.fast_token().await.is_none());
+        sender.send("fixture-token".to_string()).unwrap();
+        assert_eq!(acquisition.finish().await.as_deref(), Some("fixture-token"));
+        assert_eq!(
+            acquisition.fast_token().await.as_deref(),
+            Some("fixture-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_po_token_is_cancelled_when_a_faster_client_wins() {
+        struct CancelGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for CancelGuard {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (cancelled_sender, cancelled_receiver) = tokio::sync::oneshot::channel();
+        let acquisition = super::PoTokenAcquisition::new(async move {
+            let _guard = CancelGuard(Some(cancelled_sender));
+            let _ = started_sender.send(());
+            std::future::pending::<Option<String>>().await
+        });
+        started_receiver.await.unwrap();
+        drop(acquisition);
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancelled_receiver)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn http_proxy_priority_respects_the_user_preference() {

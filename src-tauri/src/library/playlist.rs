@@ -28,6 +28,10 @@ pub(crate) fn io_epoch() -> u64 {
     PLAYLIST_EPOCH.load(Ordering::Acquire)
 }
 
+pub(crate) fn mark_io_changed() {
+    PLAYLIST_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
     pub id: i64,
@@ -93,7 +97,7 @@ impl PlaylistStore {
         let json = serde_json::to_string_pretty(self)?;
         // 原子写：temp + fsync + rename，杜绝半截 JSON
         crate::fsutil::atomic_write(path, json)?;
-        PLAYLIST_EPOCH.fetch_add(1, Ordering::AcqRel);
+        mark_io_changed();
         Ok(())
     }
 

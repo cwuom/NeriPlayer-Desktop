@@ -5,6 +5,7 @@
 // CDN 请求继续按直链客户端选择 UA，不携带账号 Cookie
 
 mod account;
+mod artist;
 mod bootstrap;
 mod cache;
 mod challenge;

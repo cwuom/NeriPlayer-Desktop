@@ -5,7 +5,7 @@ use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionControl
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
     auth_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
-    listen_together_cmd, lyrics_cmd, player_cmd, recommend_cmd, search_cmd, settings_cmd,
+    listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd, recommend_cmd, search_cmd, settings_cmd,
     stats_cmd, storage_cmd, sync_cmd,
 };
 use neri_player_desktop::state::AppState;
@@ -441,6 +441,15 @@ fn main() {
             library_cmd::reorder_playlist_tracks,
             library_cmd::update_playlist_track,
             library_cmd::list_favorite_playlists,
+            library_cmd::set_artist_favorite,
+            library_cmd::import_followed_artists,
+            library_cmd::get_bili_artist_detail,
+            library_cmd::get_bili_artist_contents,
+            library_cmd::get_bili_artist_collection,
+            library_cmd::get_youtube_artist_detail,
+            library_cmd::get_youtube_artist_items,
+            playback_fallback_cmd::find_netease_local_sources,
+            playback_fallback_cmd::find_netease_bili_sources,
             search_cmd::search,
             image_cmd::fetch_bilibili_cover,
             lyrics_cmd::parse_lrc_content,

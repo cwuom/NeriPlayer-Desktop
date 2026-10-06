@@ -62,6 +62,9 @@ pub struct AppSettings {
     pub qq_music_quality: String,
     pub youtube_quality: String,
     pub bili_quality: String,
+    pub youtube_playback_source: String,
+    pub netease_auto_source_switch: bool,
+    pub netease_local_source_fallback: bool,
     pub bypass_proxy: bool,
     pub internationalization_enabled: bool,
     pub background_image_uri: String,
@@ -129,6 +132,9 @@ impl Default for AppSettings {
             qq_music_quality: "high".into(),
             youtube_quality: "very_high".into(),
             bili_quality: "high".into(),
+            youtube_playback_source: "automatic".into(),
+            netease_auto_source_switch: false,
+            netease_local_source_fallback: false,
             bypass_proxy: true,
             internationalization_enabled: false,
             background_image_uri: String::new(),
@@ -226,6 +232,8 @@ impl AppSettings {
             &["low", "medium", "high", "dolby", "lossless", "hires"],
             "high",
         );
+        self.youtube_playback_source =
+            normalize_youtube_playback_source(&self.youtube_playback_source);
         self.equalizer_preset_id = normalize_equalizer_preset(&self.equalizer_preset_id);
         self.log_level = normalize_choice(
             &self.log_level,
@@ -373,6 +381,28 @@ fn normalize_equalizer_preset(value: &str) -> String {
     )
 }
 
+fn normalize_youtube_playback_source(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    let canonical = match normalized.as_str() {
+        "vision_os" => "visionos",
+        "androidvr" => "android_vr",
+        "creator" => "web_creator",
+        value => value,
+    };
+    normalize_choice(
+        canonical,
+        &[
+            "automatic",
+            "visionos",
+            "android_vr",
+            "web_remix",
+            "tv_html5",
+            "web_creator",
+        ],
+        "automatic",
+    )
+}
+
 fn non_empty_or_default(value: &str, fallback: &str) -> String {
     let normalized = value.trim();
     if normalized.is_empty() {
@@ -396,6 +426,49 @@ mod tests {
     }
 
     use super::{AppSettings, MAX_MEDIA_CACHE_SIZE_MB, MIN_MEDIA_CACHE_SIZE_MB};
+
+    #[test]
+    fn playback_source_settings_are_backward_compatible() {
+        let old: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert_eq!(old.youtube_playback_source, "automatic");
+        assert!(!old.netease_auto_source_switch);
+        assert!(!old.netease_local_source_fallback);
+
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "youtubePlaybackSource": " Web_Remix ",
+            "neteaseAutoSourceSwitch": true,
+            "neteaseLocalSourceFallback": true,
+        }))
+        .expect("playback source settings");
+        let json = serde_json::to_value(settings.normalized()).expect("settings");
+        assert_eq!(json["youtubePlaybackSource"], "web_remix");
+        assert_eq!(json["neteaseAutoSourceSwitch"], true);
+        assert_eq!(json["neteaseLocalSourceFallback"], true);
+    }
+
+    #[test]
+    fn youtube_playback_source_normalization_matches_android() {
+        for (value, expected) in [
+            ("automatic", "automatic"),
+            (" VISION_OS ", "visionos"),
+            ("visionos", "visionos"),
+            ("AndroidVR", "android_vr"),
+            ("android_vr", "android_vr"),
+            ("web_remix", "web_remix"),
+            ("tv_html5", "tv_html5"),
+            ("Creator", "web_creator"),
+            ("web_creator", "web_creator"),
+            ("invalid", "automatic"),
+            ("", "automatic"),
+        ] {
+            let mut settings = AppSettings {
+                youtube_playback_source: value.into(),
+                ..AppSettings::default()
+            };
+            settings.normalize();
+            assert_eq!(settings.youtube_playback_source, expected, "{value}");
+        }
+    }
 
     #[test]
     fn media_cache_is_mandatory_and_capped_at_512_gib() {

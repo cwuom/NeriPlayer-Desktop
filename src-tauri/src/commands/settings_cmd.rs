@@ -363,6 +363,7 @@ pub struct YtAudioResult {
 #[tauri::command]
 pub async fn get_youtube_audio_url(
     video_id: String,
+    playback_source: Option<String>,
     force_refresh: Option<bool>,
     avoid_direct: Option<bool>,
     request_generation: Option<u64>,
@@ -380,14 +381,19 @@ pub async fn get_youtube_audio_url(
         let auth = state.auth.lock();
         auth.youtube.clone()
     };
-    let streams = crate::api::youtube::playback::resolve_audio_streams_with_strategy(
+    let playback_source = match playback_source {
+        Some(source) => source,
+        None => store::load_settings(&app)?.settings.youtube_playback_source,
+    };
+    let resolution = crate::api::youtube::playback::resolve_audio_streams_with_source(
         &video_id,
         yt_auth.as_ref().filter(|a| a.has_login()),
         Some(&app),
         force_refresh.unwrap_or(false),
         avoid_direct.unwrap_or(false),
-    )
-    .await?;
+        &playback_source,
+    );
+    let streams = await_current_playback_resolution(resolution, request_generation, &state.playback_generation).await?;
     if let Some(gen) = request_generation {
         if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
             return Err(AppError::Audio("Playback request superseded".into()));
@@ -403,6 +409,27 @@ pub async fn get_youtube_audio_url(
             stream_type: s.stream_type,
         })
         .collect())
+}
+
+async fn await_current_playback_resolution<T>(
+    resolution: impl std::future::Future<Output = AppResult<T>>,
+    request_generation: Option<u64>,
+    active_generation: &std::sync::atomic::AtomicU64,
+) -> AppResult<T> {
+    tokio::select! {
+        result = resolution => result,
+        _ = async {
+            let Some(generation) = request_generation else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                if active_generation.load(std::sync::atomic::Ordering::Acquire) > generation {
+                    return;
+                }
+            }
+        } => Err(AppError::Audio("Playback request superseded".into())),
+    }
 }
 
 /// 将字节数据保存到本地文件（供前端封面保存等场景使用）
@@ -442,6 +469,33 @@ pub async fn get_build_info() -> AppResult<BuildInfo> {
 
 #[cfg(test)]
 mod tests {
+    use super::await_current_playback_resolution;
+    use crate::error::AppResult;
+
+    #[tokio::test]
+    async fn superseded_youtube_resolution_drops_its_pending_resources() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = DropFlag(dropped.clone());
+        let active = AtomicU64::new(1);
+        let resolution = async move {
+            let _flag = flag;
+            std::future::pending::<AppResult<()>>().await
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(await_current_playback_resolution(resolution, Some(1), &active), async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                active.store(2, Ordering::Release);
+            })
+        }).await.expect("an old stream must stop without waiting for its network timeout");
+        assert!(result.unwrap_err().to_string().contains("superseded"));
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
     use super::{
         build_bili_audio_candidates, select_bili_audio_stream, split_legacy_bili_song_id,
         LegacyBiliSongId,

@@ -952,6 +952,26 @@ pub fn load_favorite_playlists() -> AppResult<Vec<SyncFavoritePlaylist>> {
     load_favorites_at(&favorites_path(), false)
 }
 
+pub fn update_favorite_playlists<T>(
+    update: impl FnOnce(&mut Vec<SyncFavoritePlaylist>) -> AppResult<T>,
+) -> AppResult<T> {
+    let _guard = playlist::lock_io();
+    update_favorites_at(&favorites_path(), update)
+}
+
+fn update_favorites_at<T>(
+    path: &std::path::Path,
+    update: impl FnOnce(&mut Vec<SyncFavoritePlaylist>) -> AppResult<T>,
+) -> AppResult<T> {
+    let mut favorites = load_favorites_at(path, true)?;
+    let result = update(&mut favorites)?;
+    let data = SyncData { favorite_playlists: favorites, ..Default::default() };
+    save_favorites_at(path, &data)?;
+    // 收藏也是同步快照的一部分，网络窗口中的修改必须让旧快照失效
+    playlist::mark_io_changed();
+    Ok(result)
+}
+
 fn load_favorites_at(path: &std::path::Path, include_deleted: bool) -> AppResult<Vec<SyncFavoritePlaylist>> {
     read_optional_json::<Vec<SyncFavoritePlaylist>>(path, "favorites.json")
         .map(|favorites| {
@@ -1189,6 +1209,28 @@ mod tests {
         assert_eq!(std::fs::read(quarantined[0].path()).unwrap(), b"{not-json");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn favorite_updates_preserve_tombstones_and_invalidate_sync_snapshots() {
+        let directory = std::env::temp_dir().join(format!("neri-favorite-update-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("favorites.json");
+        let deleted: SyncFavoritePlaylist = serde_json::from_value(serde_json::json!({"id":42,"name":"deleted artist","source":"neteaseArtist","modifiedAt":20,"isDeleted":true})).unwrap();
+        save_favorites_at(&path, &SyncData { favorite_playlists: vec![deleted], ..Default::default() }).unwrap();
+        let epoch = playlist::io_epoch();
+        update_favorites_at(&path, |favorites| {
+            assert!(favorites[0].is_deleted);
+            favorites.push(serde_json::from_value(serde_json::json!({"id":43,"name":"new artist","source":"biliArtist","modifiedAt":21})).unwrap());
+            Ok(())
+        }).unwrap();
+        assert!(playlist::io_epoch() > epoch);
+        assert_eq!(load_favorites_at(&path, true).unwrap().len(), 2);
+        assert_eq!(load_favorites_at(&path, false).unwrap().len(), 1);
+        let before = std::fs::read(&path).unwrap();
+        assert!(update_favorites_at(&path, |favorites| { favorites.clear(); Err::<(), _>(AppError::Other("fixture error".into())) }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::api::transport::FallbackHttp;
 use crate::error::{AppError, AppResult};
 
 pub use super::account::YouTubeAccountProfile;
+pub use super::artist::YtFollowedArtist;
 
 const INNERTUBE_URL: &str = "https://music.youtube.com/youtubei/v1";
 pub(super) const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
@@ -321,6 +322,105 @@ impl YouTubeClient {
             log::warn!(target: "youtube", "library returned a message page: {}", message);
         }
         Ok(data)
+    }
+
+    /// 歌手页沿用当前账号上下文，未登录时允许匿名浏览
+    pub async fn get_creator_detail(
+        &self,
+        browse_id: &str,
+        auth: Option<&crate::auth::state::YouTubeAuth>,
+    ) -> AppResult<Value> {
+        self.get_creator_items(browse_id, None, None, auth).await
+    }
+
+    pub async fn get_creator_items(
+        &self,
+        browse_id: &str,
+        params: Option<&str>,
+        continuation: Option<&str>,
+        auth: Option<&crate::auth::state::YouTubeAuth>,
+    ) -> AppResult<Value> {
+        let mut body = json!({"context": self.build_context()});
+        if let Some(continuation) = continuation
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if continuation.len() > 16384 || continuation.chars().any(char::is_control) {
+                return Err(AppError::Api("Invalid YouTube creator continuation".into()));
+            }
+            body["continuation"] = json!(continuation);
+        } else {
+            let browse_id = browse_id.trim();
+            if browse_id.is_empty()
+                || browse_id.len() > 256
+                || !browse_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            {
+                return Err(AppError::Api("Invalid YouTube creator browse id".into()));
+            }
+            body["browseId"] = json!(browse_id);
+            if let Some(params) = params.filter(|value| !value.is_empty()) {
+                if params.len() > 16384 || params.chars().any(char::is_control) {
+                    return Err(AppError::Api("Invalid YouTube creator params".into()));
+                }
+                body["params"] = json!(params);
+            }
+        }
+        if let Some(auth) = auth.filter(|auth| auth.has_login()) {
+            self.innertube_post_auth("browse", &body, auth).await
+        } else {
+            self.innertube_post("browse", &body).await
+        }
+    }
+
+    pub async fn get_followed_artists(
+        &self,
+        auth: &crate::auth::state::YouTubeAuth,
+    ) -> AppResult<Vec<YtFollowedArtist>> {
+        if !auth.has_login() {
+            return Err(AppError::Api(
+                "YouTube login is required to fetch followed artists".into(),
+            ));
+        }
+        let mut current_auth = auth.clone();
+        let mut continuation = None;
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut seen_artists = std::collections::HashSet::new();
+        let mut artists = Vec::new();
+        for _ in 0..80 {
+            let body = if let Some(token) = continuation.take() {
+                json!({"context": self.build_context(), "continuation": token})
+            } else {
+                json!({"context": self.build_context(), "browseId": "FEmusic_library_corpus_artists"})
+            };
+            let (response, updated_auth) = self
+                .innertube_post_auth_with_session("browse", &body, &current_auth)
+                .await?;
+            if let Some(auth) = updated_auth {
+                current_auth = auth;
+            }
+            let page = super::artist::parse_followed_artists_page(&response).ok_or_else(|| {
+                AppError::Api("YouTube followed artists response missing library contents".into())
+            })?;
+            artists.extend(
+                page.artists
+                    .into_iter()
+                    .filter(|artist| seen_artists.insert(artist.browse_id.clone())),
+            );
+            let Some(token) = page.continuation else {
+                return Ok(artists);
+            };
+            if !seen_tokens.insert(token.clone()) {
+                return Err(AppError::Api(
+                    "YouTube followed artists continuation repeated".into(),
+                ));
+            }
+            continuation = Some(token);
+        }
+        Err(AppError::Api(
+            "YouTube followed artists pagination did not reach an end".into(),
+        ))
     }
 
     /// YouTube Music 歌单详情（需登录）

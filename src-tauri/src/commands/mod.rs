@@ -7,6 +7,7 @@ pub mod library_cmd;
 pub mod listen_together_cmd;
 pub mod lyrics_cmd;
 pub mod player_cmd;
+pub mod playback_fallback_cmd;
 pub mod recommend_cmd;
 pub mod search_cmd;
 pub mod settings_cmd;
