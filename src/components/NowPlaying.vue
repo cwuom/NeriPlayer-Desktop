@@ -3649,7 +3649,7 @@ const sliderActiveColor = computed(() => {
   font-weight: 600;
   color: rgba(255,255,255,0.68);
   letter-spacing: 0.2px;
-  margin-top: 6px;
+  margin-top: 0;
   /* 给下载 chip 完整高度，禁止裁切圆角 */
   min-height: 24px;
   height: auto;
