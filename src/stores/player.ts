@@ -625,6 +625,9 @@ export const usePlayerStore = defineStore('player', () => {
       qqMusicQuality: settings.qqMusicQuality,
       biliQuality: settings.biliQuality,
       youtubeQuality: settings.youtubeQuality,
+      youtubePlaybackSource: settings.youtubePlaybackSource,
+      neteaseAutoSourceSwitch: settings.neteaseAutoSourceSwitch,
+      neteaseLocalSourceFallback: settings.neteaseLocalSourceFallback,
     }
   }
 
@@ -684,6 +687,7 @@ export const usePlayerStore = defineStore('player', () => {
       tracks,
       playbackSourceSettings(),
       playbackUrlResolver,
+      playbackRequestToken,
     )
   }
 
@@ -695,6 +699,7 @@ export const usePlayerStore = defineStore('player', () => {
       [...candidates],
       playbackSourceSettings(),
       playbackUrlResolver,
+      playbackRequestToken,
     )
   }
 
@@ -1361,9 +1366,17 @@ export const usePlayerStore = defineStore('player', () => {
                     `candidate=${candidateIndex}, startMs=${startPlan.positionMs}, crossfade=${startPlan.useCrossfade}, elapsedMs=${Math.round(performance.now() - requestStarted)}`,
                     token,
                   )
-                  const duration = await playRemoteUrl(
+                  const duration = selected.source === 'local' ? await playDownloadedFile(
+                    candidateUrl,
+                    selected.durationMs || track.durationMs,
+                    startPlan.useCrossfade,
+                    transitionFadeOutMs,
+                    transitionFadeInMs,
+                    token,
+                    startPlan.positionMs,
+                  ) : await playRemoteUrl(
                   candidateUrl,
-                  resolved.durationMs || track.durationMs,
+                  selected.durationMs || track.durationMs,
                   startPlan.useCrossfade,
                   transitionFadeOutMs,
                   transitionFadeInMs,
@@ -1375,8 +1388,8 @@ export const usePlayerStore = defineStore('player', () => {
                   selected.streamType,
                   )
                   if (token === playbackRequestToken) {
-                    currentStreamUrl.value = candidateUrl
-                    currentResolvedStreamUrls = candidates.slice(candidateIndex)
+                    currentStreamUrl.value = resolved.source === 'local' ? null : candidateUrl
+                    currentResolvedStreamUrls = resolved.source === 'local' ? [] : candidates.slice(candidateIndex)
                     result = selectPlaybackCandidate(resolved, candidateIndex)
                   }
                   markLoadStartApplied(startPlan)

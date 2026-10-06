@@ -10,6 +10,9 @@ export interface PlaybackSourceSettings {
   qqMusicQuality: string
   biliQuality: string
   youtubeQuality: string
+  youtubePlaybackSource?: string
+  neteaseAutoSourceSwitch?: boolean
+  neteaseLocalSourceFallback?: boolean
 }
 
 export interface PlaybackQualityOption {
@@ -45,7 +48,7 @@ export interface ResolvedPlaybackSource {
   audioInfo?: PlaybackAudioInfo
   cacheKeyOverride?: string
   cacheKey: string
-  source: PlaybackSourceKind
+  source: PlaybackAudioSource
   qualityKey: string
 
   // 兼容现有播放状态和设置页展示字段
@@ -65,6 +68,7 @@ export interface PlaybackResolveOptions {
   avoidDirect?: boolean
   qualityOverride?: string
   requestGeneration?: number
+  allowFallback?: boolean
 }
 
 export interface PlaybackCacheWriteOptions {
@@ -151,6 +155,7 @@ export interface PlaybackCandidateDetails {
   format?: string
   expectedContentLength?: number
   streamType?: 'direct' | 'hls'
+  durationMs?: number
 }
 
 export function getPlaybackSourceKind(track: TrackInfo): PlaybackSourceKind | null {
@@ -269,7 +274,15 @@ export function playbackPrefetchCacheId(
   track: TrackInfo,
   settings: PlaybackSourceSettings,
 ): string {
-  return playbackQualityCachePrefix(track, settings) ?? track.id
+  const base = playbackQualityCachePrefix(track, settings) ?? track.id
+  const source = getPlaybackSourceKind(track)
+  if (source === 'youtube' && settings.youtubePlaybackSource && settings.youtubePlaybackSource !== 'automatic') {
+    return `${base}|youtube-source:${settings.youtubePlaybackSource}`
+  }
+  if (source === 'netease' && (settings.neteaseLocalSourceFallback || settings.neteaseAutoSourceSwitch)) {
+    return `${base}|fallback:${Number(!!settings.neteaseLocalSourceFallback)}:${Number(!!settings.neteaseAutoSourceSwitch)}`
+  }
+  return base
 }
 
 export class PlaybackUrlResolver {
@@ -299,7 +312,8 @@ export class PlaybackUrlResolver {
       adapter.kind,
       options.qualityOverride,
     )
-    const cacheKey = playbackPrefetchCacheId(track, resolvedSettings) + (options.avoidDirect ? '|hls' : '')
+    const cacheKey = playbackPrefetchCacheId(track, resolvedSettings)
+      + (options.avoidDirect ? '|hls' : '') + (options.allowFallback === false ? '|original' : '')
     if (options.forceRefresh) this.cache.delete(cacheKey)
 
     if (!options.forceRefresh && !options.avoidDirect && isDirectStreamUrl(track.audioUrl)) {
@@ -330,7 +344,7 @@ export class PlaybackUrlResolver {
         this.cache.delete(cacheKey)
       }
       const existing = this.inFlight.get(cacheKey)
-      if (existing && (existing.requestGeneration == null || existing.requestGeneration === options.requestGeneration)) {
+      if (existing && existing.requestGeneration === options.requestGeneration) {
         return existing.promise
       }
     }
@@ -416,7 +430,7 @@ export async function resolvePlaybackSource(
 }
 
 export async function resolveDownloadSource(track: TrackInfo, settings: PlaybackSourceSettings): Promise<ResolvedPlaybackSource> {
-  const result = await resolvePlaybackResult(track, settings, { forceRefresh: true })
+  const result = await resolvePlaybackResult(track, settings, { forceRefresh: true, allowFallback: false })
   if (result.type !== 'success') {
     throw new Error('message' in result ? result.message || 'No downloadable stream' : 'No downloadable stream')
   }
@@ -432,7 +446,7 @@ export function playbackCacheWriteOptions(
   resolved: ResolvedPlaybackSource,
   candidateIndex: number,
 ): PlaybackCacheWriteOptions {
-  if (resolved.isPreview) return {}
+  if (resolved.isPreview || resolved.source === 'local') return {}
   const selected = selectPlaybackCandidate(resolved, candidateIndex)
   if (candidateIndex !== 0 && selected !== resolved) {
     return { cacheKey: selected.cacheKey, expectedContentLength: selected.expectedContentLength }
@@ -454,7 +468,10 @@ export function playbackCacheWriteOptions(
 
 export function selectPlaybackCandidate(resolved: ResolvedPlaybackSource, candidateIndex: number): ResolvedPlaybackSource {
   if (candidateIndex === 0) return resolved
-  const url = uniqueUrls([resolved.url, ...resolved.candidateUrls])[candidateIndex]
+  const urls = resolved.source === 'local'
+    ? [resolved.url, ...resolved.candidateUrls].filter((url, index, values) => values.indexOf(url) === index)
+    : uniqueUrls([resolved.url, ...resolved.candidateUrls])
+  const url = urls[candidateIndex]
   const candidate = resolved.candidateDetails?.find(item => item.url === url)
   if (!candidate) return resolved
   return {
@@ -650,6 +667,8 @@ function resolveNetease(
   const qualities = neteaseQualityFallbacks(preferred)
   let lastError: unknown = null
   let previewFallback: ResolvedPlaybackSource | null = null
+  let unavailable = false
+  let requiresLogin = false
   const requestGeneration = options.requestGeneration
 
   return (async () => {
@@ -671,10 +690,17 @@ function resolveNetease(
           { songId, quality, requestGeneration },
         )
         if (result.unavailable_reason === 'requires_login') {
-          throw new Error('Playback requires login')
+          requiresLogin = true
+          continue
         }
-        if (result.unavailable_reason === 'unknown') break
-        if (!result.url) continue
+        if (result.unavailable_reason === 'unknown') {
+          unavailable = false
+          break
+        }
+        if (!result.url) {
+          unavailable = result.unavailable_reason === 'no_permission'
+          continue
+        }
         if (result.song_id != null && result.song_id !== songId) throw new Error('Playback source song identity mismatch')
         const actualQuality = result.level?.trim().toLowerCase() || quality
         const mimeType = normalizeMimeType(result.format)
@@ -713,10 +739,100 @@ function resolveNetease(
         lastError = error
       }
     }
+    if (options.allowFallback !== false && (previewFallback || unavailable)) {
+      const fallback = await resolveNeteaseFallback(track, settings, options)
+      if (fallback) return fallback
+    }
     if (previewFallback) return previewFallback
+    if (requiresLogin) throw new Error('Playback requires login')
     if (lastError) throw lastError
     return null
   })()
+}
+
+interface FallbackTrack {
+  id: string
+  title: string
+  artist: string
+  album: string
+  url: string
+  duration_ms: number
+}
+
+async function resolveNeteaseFallback(
+  track: TrackInfo,
+  settings: PlaybackSourceSettings,
+  options: PlaybackResolveOptions,
+): Promise<ResolvedPlaybackSource | null> {
+  const identity = {
+    title: syncPayloadString(track, 'originalName', 'original_name') ?? track.title,
+    artist: syncPayloadString(track, 'originalArtist', 'original_artist') ?? track.artist,
+    durationMs: track.durationMs || 0,
+  }
+  if (settings.neteaseLocalSourceFallback) {
+    const local = await invoke<FallbackTrack[]>('find_netease_local_sources', {
+      ...identity, songId: trackValue(track, 'netease'),
+    }).catch(() => [])
+    if (local.length > 0) {
+      const details = local.map(candidate => {
+        const format = candidate.url.split(/[\\/]/).pop()?.split('.').pop()?.toLowerCase()
+        const mimeType = normalizeMimeType(format ?? '')
+        return {
+          url: candidate.url, durationMs: candidate.duration_ms,
+          qualityKey: '', cacheKey: '', format,
+          audioInfo: { source: 'local' as const, mimeType, codecLabel: deriveCodecLabel(mimeType) },
+        }
+      })
+      const selected = details[0]!
+      return {
+        ...selected, type: 'success', source: 'local',
+        candidateUrls: local.slice(1).map(candidate => candidate.url),
+        candidateDetails: details.slice(1),
+      }
+    }
+  }
+  if (settings.neteaseAutoSourceSwitch) {
+    const candidates = await invoke<FallbackTrack[]>('find_netease_bili_sources', {
+      ...identity, requestGeneration: options.requestGeneration,
+    }).catch(error => {
+      if (/superseded/i.test(String(error))) throw error
+      return []
+    })
+    let primary: ResolvedPlaybackSource | null = null
+    const alternates: PlaybackCandidateDetails[] = []
+    for (const candidate of candidates) {
+      try {
+        const alternate = await resolveBilibili({
+          ...track, ...candidate, durationMs: candidate.duration_ms, audioUrl: '',
+          source: 'bilibili', syncPayload: undefined,
+        }, settings, options)
+        if (!alternate) continue
+        if (!primary) {
+          primary = { ...alternate, durationMs: candidate.duration_ms || track.durationMs }
+        } else {
+          for (const index of [0, ...alternate.candidateUrls.map((_, index) => index + 1)]) {
+            const selected = selectPlaybackCandidate(alternate, index)
+            alternates.push({
+              url: index === 0 ? alternate.url : alternate.candidateUrls[index - 1]!,
+              qualityKey: selected.qualityKey, cacheKey: selected.cacheKey,
+              durationMs: candidate.duration_ms || track.durationMs,
+              audioInfo: selected.audioInfo ?? createAudioInfo('bilibili', selected.qualityKey),
+              mimeType: selected.mimeType, bitrate: selected.bitrate, codec: selected.codec,
+              expectedContentLength: selected.expectedContentLength,
+            })
+          }
+        }
+      } catch (error) {
+        if (/superseded/i.test(String(error))) throw error
+      }
+    }
+    if (primary) return {
+      ...primary,
+      candidateUrls: [...primary.candidateUrls, ...alternates.map(candidate => candidate.url)],
+      candidateDetails: [...(primary.candidateDetails ?? []), ...alternates],
+    }
+  }
+  return null
 }
 
 function resolveQq(
@@ -840,6 +956,7 @@ function resolveYoutube(
   const quality = settings.youtubeQuality
   return invoke<YoutubeAudioStream[]>('get_youtube_audio_url', {
     videoId,
+    playbackSource: settings.youtubePlaybackSource ?? 'automatic',
     forceRefresh: options.forceRefresh ?? false,
     avoidDirect: options.avoidDirect ?? false,
     requestGeneration: options.requestGeneration,

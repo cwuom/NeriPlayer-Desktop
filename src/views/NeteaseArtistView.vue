@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -13,6 +13,8 @@ import {
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 import { resolveNeteaseCover } from '@/utils/neteaseCover'
 import { createLogger } from '@/utils/logger'
+import { useToastStore } from '@/stores/toast'
+import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 
 const log = createLogger('netease-artist-view')
 
@@ -20,6 +22,7 @@ const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
 const { t } = useI18n()
+const toast = useToastStore()
 
 interface ArtistHeader {
   name: string
@@ -53,6 +56,17 @@ const albums = ref<ArtistAlbum[]>([])
 const activeTab = ref<'songs' | 'albums'>('songs')
 
 const artistId = computed(() => Number(route.params.id) || 0)
+let generation = 0
+const { following, changing, toggle } = useArtistFavorite(computed(() => ({
+  source: 'neteaseArtist', id: String(artistId.value),
+  name: header.value?.name || String(route.query.name || ''),
+  coverUrl: header.value?.avatarUrl || header.value?.coverUrl || String(route.query.cover || ''),
+  trackCount: header.value?.musicSize || tracks.value.length,
+  subtitle: header.value?.alias || String(route.query.subtitle || ''),
+})))
+async function toggleFollow() {
+  try { await toggle() } catch (cause) { toast.error(String(cause)) }
+}
 
 // 大列表窗口渲染, 与歌单详情页同策略
 const RENDER_CHUNK = 100
@@ -73,7 +87,7 @@ function parseHeader(raw: any): ArtistHeader {
   const aliasList = Array.isArray(artist.alias) ? artist.alias.filter(Boolean) : []
   return {
     name: String(artist.name || route.query.name || ''),
-    alias: aliasList.join(' / '),
+    alias: aliasList.join(' / ') || String(route.query.subtitle || ''),
     coverUrl: resolveNeteaseCover(artist.cover, artist.picUrl) || String(route.query.cover || ''),
     avatarUrl: resolveNeteaseCover(artist.avatar, artist.img1v1Url),
     briefDesc: String(artist.briefDesc || ''),
@@ -85,6 +99,7 @@ function parseHeader(raw: any): ArtistHeader {
 async function load() {
   const id = artistId.value
   if (!id) return
+  const request = ++generation
 
   const cacheKey = playlistDetailCacheKey('netease-artist-v2', id)
   const cached = readPlaylistDetailCache<ArtistDetailCache>(cacheKey)
@@ -94,6 +109,9 @@ async function load() {
     albums.value = cached.albums
     isLoading.value = false
   } else {
+    header.value = parseHeader(null)
+    tracks.value = []
+    albums.value = []
     isLoading.value = true
   }
   error.value = null
@@ -105,6 +123,7 @@ async function load() {
       invoke<any>('get_netease_artist_songs', { artistId: id }),
       invoke<any>('get_netease_artist_albums', { artistId: id }),
     ])
+    if (request !== generation) return
 
     if (detailRes.status === 'fulfilled') {
       header.value = parseHeader(detailRes.value)
@@ -152,10 +171,11 @@ async function load() {
       })
     }
   } catch (e: any) {
+    if (request !== generation) return
     if (!cached) error.value = e?.toString() || t('player.load_failed')
     log.error('load artist failed:', e)
   } finally {
-    isLoading.value = false
+    if (request === generation) isLoading.value = false
   }
 }
 
@@ -176,7 +196,8 @@ const songCountLabel = computed(() =>
 const albumCountLabel = computed(() =>
   t('player.artist_album_count', { count: header.value?.albumSize || albums.value.length }))
 
-onMounted(load)
+watch(artistId, () => { void load() }, { immediate: true })
+onUnmounted(() => { generation++ })
 </script>
 
 <template>
@@ -235,6 +256,10 @@ onMounted(load)
             <button class="play-all-btn" :disabled="!tracks.length" @click="playAll">
               <span class="material-symbols-rounded filled">play_arrow</span>
               {{ t('player.play_all') }}
+            </button>
+            <button class="artist-follow-btn" :class="{ active: following }" :disabled="changing || !header?.name" @click="toggleFollow">
+              <span class="material-symbols-rounded">{{ following ? 'check' : 'person_add' }}</span>
+              {{ t(following ? 'player.artist_unsubscribe' : 'player.artist_subscribe') }}
             </button>
           </div>
         </div>
@@ -472,6 +497,21 @@ onMounted(load)
 
   .play-all-btn { margin-top: 0; }
   .play-all-btn:disabled { opacity: 0.4; pointer-events: none; }
+}
+
+.artist-follow-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  color: var(--md-primary);
+
+  &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+  &:disabled { opacity: 0.5; }
+  .material-symbols-rounded { font-size: 18px; }
 }
 
 // 歌曲 / 专辑 Tab

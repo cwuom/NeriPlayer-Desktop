@@ -34,6 +34,8 @@ async function mountWindow() {
       { path: '/playlist/netease/:id', name: 'netease-playlist', meta: { section: 'library' }, component: () => import('./views/NeteasePlaylistView.vue') },
       { path: '/album/netease/:id', name: 'netease-album', meta: { section: 'library' }, component: () => import('./views/NeteasePlaylistView.vue'), props: { isAlbum: true } },
       { path: '/artist/netease/:id', name: 'netease-artist', meta: { section: 'library' }, component: () => import('./views/NeteaseArtistView.vue') },
+      { path: '/artist/bilibili/:mid', name: 'bili-artist', meta: { section: 'library' }, component: () => import('./views/BiliArtistView.vue') },
+      { path: '/artist/youtube/:browseId', name: 'youtube-artist', meta: { section: 'library' }, component: () => import('./views/YouTubeArtistView.vue') },
       { path: '/playlist/bilibili/:mediaId', name: 'bili-playlist', meta: { section: 'library' }, component: () => import('./views/BiliPlaylistView.vue') },
       { path: '/playlist/youtube/:browseId', name: 'youtube-playlist', meta: { section: 'library' }, component: () => import('./views/YouTubePlaylistView.vue') },
       { path: '/playlist/local/:id', name: 'local-playlist', meta: { section: 'library' }, component: () => import('./views/LocalPlaylistView.vue') },

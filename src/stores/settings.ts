@@ -4,6 +4,10 @@ import { invoke } from '@tauri-apps/api/core'
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
+export const YOUTUBE_PLAYBACK_SOURCES = [
+  'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
+] as const
+export type YouTubePlaybackSource = typeof YOUTUBE_PLAYBACK_SOURCES[number]
 
 export interface AppSettings {
   formatVersion: number
@@ -45,6 +49,9 @@ export interface AppSettings {
   qqMusicQuality: string
   youtubeQuality: string
   biliQuality: string
+  youtubePlaybackSource: YouTubePlaybackSource
+  neteaseAutoSourceSwitch: boolean
+  neteaseLocalSourceFallback: boolean
   bypassProxy: boolean
   internationalizationEnabled: boolean
   backgroundImageUri: string
@@ -124,6 +131,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   qqMusicQuality: 'high',
   youtubeQuality: 'very_high',
   biliQuality: 'high',
+  youtubePlaybackSource: 'automatic',
+  neteaseAutoSourceSwitch: false,
+  neteaseLocalSourceFallback: false,
   bypassProxy: true,
   internationalizationEnabled: typeof navigator !== 'undefined' && !navigator.language.startsWith('zh'),
   backgroundImageUri: '',
@@ -186,6 +196,9 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   qqMusicQuality: 'qq_quality',
   youtubeQuality: 'youtube_quality',
   biliQuality: 'bili_quality',
+  youtubePlaybackSource: 'youtube_playback_source',
+  neteaseAutoSourceSwitch: 'netease_auto_source_switch',
+  neteaseLocalSourceFallback: 'netease_local_source_fallback',
   bypassProxy: 'bypass_proxy',
   internationalizationEnabled: 'intl_enabled',
   backgroundImageUri: 'bg_image_uri',
@@ -285,6 +298,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   if (!['zh-CN', 'zh-TW', 'en', 'ja'].includes(result.locale)) result.locale = DEFAULT_SETTINGS.locale
   if (!['off', 'error', 'warn', 'info', 'debug', 'trace'].includes(result.logLevel)) result.logLevel = DEFAULT_SETTINGS.logLevel
   if (result.themeColor.startsWith('#')) result.themeColor = result.themeColor === '#6750A4' ? 'purple' : DEFAULT_SETTINGS.themeColor
+  result.youtubePlaybackSource = normalizeYouTubePlaybackSource(result.youtubePlaybackSource)
 
   result.lyricFontScale = clamp(result.lyricFontScale, 0.5, 1.5)
   result.fadeInDuration = clamp(result.fadeInDuration, 0, 10000)
@@ -310,6 +324,14 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.equalizerBands = result.equalizerBands.slice(0, 5).map(value => clamp(Math.round(value), -1500, 1500))
   while (result.equalizerBands.length < 5) result.equalizerBands.push(0)
   return result
+}
+
+function normalizeYouTubePlaybackSource(value: string): YouTubePlaybackSource {
+  let source = value.trim().toLowerCase()
+  if (source === 'vision_os') source = 'visionos'
+  else if (source === 'androidvr') source = 'android_vr'
+  else if (source === 'creator') source = 'web_creator'
+  return YOUTUBE_PLAYBACK_SOURCES.find(option => option === source) ?? 'automatic'
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -367,6 +389,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const qqMusicQuality = ref(initial.qqMusicQuality)
   const youtubeQuality = ref(initial.youtubeQuality)
   const biliQuality = ref(initial.biliQuality)
+  const youtubePlaybackSource = ref(initial.youtubePlaybackSource)
+  const neteaseAutoSourceSwitch = ref(initial.neteaseAutoSourceSwitch)
+  const neteaseLocalSourceFallback = ref(initial.neteaseLocalSourceFallback)
   const bypassProxy = ref(initial.bypassProxy)
   const internationalizationEnabled = ref(initial.internationalizationEnabled)
   const backgroundImageUri = ref(initial.backgroundImageUri)
@@ -401,6 +426,7 @@ export const useSettingsStore = defineStore('settings', () => {
     advancedLyrics, dynamicBackground, dynamicColor, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled,
+    youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
     logToFile, logLevel,
     maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
@@ -486,6 +512,7 @@ export const useSettingsStore = defineStore('settings', () => {
     cloudMusicOffset, qqMusicOffset, advancedLyrics, dynamicBackground,
     dynamicColor, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
+    youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     internationalizationEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,

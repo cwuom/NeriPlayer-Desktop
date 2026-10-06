@@ -313,6 +313,7 @@ export const useDownloadStore = defineStore('download', () => {
         qqMusicQuality: settings.qqMusicQuality,
         biliQuality: settings.biliQuality,
         youtubeQuality,
+        youtubePlaybackSource: settings.youtubePlaybackSource,
       })
 
       // 解析期间被取消则不再启动后端下载（DL-7）

@@ -11,6 +11,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
+  YOUTUBE_PLAYBACK_SOURCES,
   useSettingsStore,
 } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
@@ -56,6 +57,7 @@ const {
   advancedLyrics, dynamicBackground, dynamicColor, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
+  youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
@@ -79,6 +81,12 @@ const logLevelOptions = computed<Array<{ value: string; label: string }>>(() => 
   { value: 'debug', label: t('settings.log_level_debug') },
   { value: 'trace', label: t('settings.log_level_trace') },
 ])
+
+const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map(value => ({
+  value,
+  label: t(`settings.youtube_source_${value}`),
+})))
+const youtubePlaybackSourceDescription = computed(() => t(`settings.youtube_source_${youtubePlaybackSource.value}_desc`))
 
 const audioOutputDevices = ref<Array<{ name: string; isDefault: boolean }>>([])
 const audioOutputSwitching = ref(false)
@@ -342,6 +350,7 @@ type SettingsSectionId =
   | 'accounts'
   | 'personalization'
   | 'playback'
+  | 'playback_sources'
   | 'quality'
   | 'motion'
   | 'lyrics'
@@ -354,7 +363,7 @@ type SettingsSectionId =
 
 const SETTINGS_UI_STATE_KEY = 'neri:settings-ui-state'
 const SETTINGS_SECTION_IDS: SettingsSectionId[] = [
-  'accounts', 'playback', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
+  'accounts', 'playback', 'playback_sources', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
   'backup', 'listen_together', 'language', 'about',
 ]
 
@@ -453,6 +462,12 @@ const settingsNavGroups = computed(() => [
         icon: 'high_quality',
       },
       {
+        id: 'playback_sources' as SettingsSectionId,
+        label: t('settings.playback_sources'),
+        description: t('settings.playback_sources_desc'),
+        icon: 'alt_route',
+      },
+      {
         id: 'storage' as SettingsSectionId,
         label: t('settings.storage'),
         description: t('settings.nav_storage_desc'),
@@ -531,6 +546,7 @@ function selectSettingsSection(id: SettingsSectionId) {
       accounts: [],
       personalization: ['personal'],
       playback: ['playback'],
+      playback_sources: [],
       quality: ['quality'],
       motion: ['effects'],
       lyrics: ['lyrics'],
@@ -1857,6 +1873,50 @@ watch(() => syncStore.pendingProtocolUpgrade, () => { hideProtocolUpgrade.value 
         </div>
       </template>
     </div></Transition>
+        </div>
+
+    <!-- 播放源 -->
+        <div v-show="activeSettingsSection === 'playback_sources'" class="settings-section-panel">
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">alt_route</span>
+      <span>{{ t('settings.playback_sources') }}</span>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">smart_display</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.youtube_playback_source') }}</div>
+        <div class="setting-desc">{{ t('settings.youtube_playback_source_desc') }}</div>
+        <div class="setting-desc">{{ youtubePlaybackSourceDescription }}</div>
+      </div>
+      <select v-model="youtubePlaybackSource" class="audio-output-select" :aria-label="t('settings.youtube_playback_source')">
+        <option v-for="option in youtubePlaybackSourceOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+      </select>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">library_music</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.netease_local_source_fallback') }}</div>
+        <div class="setting-desc">{{ t('settings.netease_local_source_fallback_desc') }}</div>
+      </div>
+      <label class="m3-switch">
+        <input type="checkbox" v-model="neteaseLocalSourceFallback" :aria-label="t('settings.netease_local_source_fallback')" />
+        <span class="track"><span class="thumb"><span v-if="neteaseLocalSourceFallback" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+      </label>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">sync_alt</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.netease_auto_source_switch') }}</div>
+        <div class="setting-desc">{{ t('settings.netease_auto_source_switch_desc') }}</div>
+      </div>
+      <label class="m3-switch">
+        <input type="checkbox" v-model="neteaseAutoSourceSwitch" :aria-label="t('settings.netease_auto_source_switch')" />
+        <span class="track"><span class="thumb"><span v-if="neteaseAutoSourceSwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+      </label>
+    </div>
         </div>
 
     <!-- 音质 -->

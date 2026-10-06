@@ -105,6 +105,88 @@ try {
     await first
     assert.equal((await second).url, 'https://rr.googlevideo.com/new-generation')
   })
+  await run('a foreground generation does not inherit a generationless in-flight prefetch', async () => {
+    const resolver = new source.PlaybackUrlResolver()
+    const old = deferred()
+    let calls = 0
+    globalThis.__cacheInvoke = async () => ++calls === 1 ? old.promise : stream('https://rr.googlevideo.com/foreground')
+    const first = resolver.resolve(youtube, settings)
+    const second = resolver.resolve(youtube, settings, { requestGeneration: 2 })
+    try {
+      await new Promise(setImmediate)
+      assert.equal(calls, 2)
+    } finally {
+      old.resolve(stream('https://rr.googlevideo.com/generationless'))
+      await Promise.all([first, second])
+    }
+    assert.equal((await second).url, 'https://rr.googlevideo.com/foreground')
+    assert.equal((await resolver.resolve(youtube, settings, { requestGeneration: 3 })).url, 'https://rr.googlevideo.com/foreground')
+    assert.equal(calls, 2, 'completed cache remains reusable by later generations')
+  })
+  await run('matching playback generations share their pending resolution', async () => {
+    const resolver = new source.PlaybackUrlResolver()
+    const waiting = deferred()
+    let calls = 0
+    globalThis.__cacheInvoke = async () => { calls++; return waiting.promise }
+    const first = resolver.resolve(youtube, settings, { requestGeneration: 7 })
+    const second = resolver.resolve(youtube, settings, { requestGeneration: 7 })
+    waiting.resolve(stream('https://rr.googlevideo.com/shared-generation'))
+    assert.deepEqual(await first, await second)
+    assert.equal(calls, 1)
+  })
+  await run('prefetch windows propagate their playback generation to each YouTube IPC', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const generations = []
+    globalThis.__cacheInvoke = async (_, args) => {
+      generations.push(args.requestGeneration)
+      return stream(`https://rr.googlevideo.com/${args.videoId}`)
+    }
+    manager.prefetchWindow([youtube, { ...youtube, id: 'youtube:next-song' }], settings, new source.PlaybackUrlResolver(), 11)
+    await new Promise(setImmediate)
+    assert.deepEqual(generations, [11, 11])
+    assert.ok(manager.take(youtube, settings))
+  })
+  await run('a newer prefetch generation replaces the old job without accepting late results', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const resolver = new source.PlaybackUrlResolver()
+    const old = deferred()
+    const fresh = deferred()
+    const generations = []
+    globalThis.__cacheInvoke = async (_, args) => {
+      generations.push(args.requestGeneration)
+      return generations.length === 1 ? old.promise : fresh.promise
+    }
+    manager.prefetch(youtube, settings, resolver, 1)
+    manager.prefetch(youtube, settings, resolver, 2)
+    try {
+      await new Promise(setImmediate)
+      assert.deepEqual(generations, [1, 2])
+      old.resolve(stream('https://rr.googlevideo.com/stale-prefetch'))
+      await new Promise(setImmediate)
+      assert.equal(manager.take(youtube, settings), null)
+      manager.prefetch(youtube, settings, resolver, 2)
+      assert.equal(generations.length, 2, 'stale cleanup must retain the newer job token')
+      fresh.resolve(stream('https://rr.googlevideo.com/current-prefetch'))
+      await new Promise(setImmediate)
+      assert.equal(manager.take(youtube, settings).url, 'https://rr.googlevideo.com/current-prefetch')
+    } finally {
+      old.resolve(stream('https://rr.googlevideo.com/stale-prefetch'))
+      fresh.resolve(stream('https://rr.googlevideo.com/current-prefetch'))
+      await new Promise(setImmediate)
+    }
+  })
+  await run('completed prefetch cache remains usable after the playback generation changes', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const resolver = new source.PlaybackUrlResolver()
+    let calls = 0
+    globalThis.__cacheInvoke = async () => { calls++; return stream('https://rr.googlevideo.com/completed-prefetch') }
+    manager.prefetch(youtube, settings, resolver, 1)
+    await new Promise(setImmediate)
+    manager.prefetch(youtube, settings, resolver, 2)
+    await new Promise(setImmediate)
+    assert.equal(calls, 1)
+    assert.equal(manager.take(youtube, settings).url, 'https://rr.googlevideo.com/completed-prefetch')
+  })
   await run('force refresh propagates to the YouTube backend cache', async () => {
     globalThis.__cacheInvoke = async (command, args) => {
       assert.equal(command, 'get_youtube_audio_url')

@@ -32,6 +32,16 @@ import {
 } from '@/modules/library/localArtists'
 import { createLogger } from '@/utils/logger'
 import { usePointerListReorder } from '@/composables/usePointerListReorder'
+import {
+  ARTIST_FAVORITE_SOURCES,
+  favoriteArtistRoute,
+  favoriteKey,
+  filterFavoriteArtists,
+  isArtistFavoriteSource,
+  parseFavoritePlaylists,
+  type ArtistFavoriteSource,
+  type FavoritePlaylist,
+} from '@/modules/library/favoriteArtists'
 
 const log = createLogger('library-view')
 
@@ -359,16 +369,48 @@ const filteredPlaylists = computed(() =>
 )
 // 收藏分类: 歌单 / 歌手 (对齐 Android FavoritePlaylistList 的二级分类)
 const favoriteCategory = ref<'playlists' | 'artists'>('playlists')
+const favoriteArtistSource = ref<ArtistFavoriteSource>('neteaseArtist')
+const importingArtists = ref(false)
+const favoriteRenderCount = ref(100)
 const playlistFavorites = computed(() =>
-  favoritePlaylists.value.filter((fpl) => fpl.source !== 'neteaseArtist'),
+  favoritePlaylists.value.filter((fpl) => !isArtistFavoriteSource(fpl.source)),
 )
 const artistFavorites = computed(() =>
-  favoritePlaylists.value.filter((fpl) => fpl.source === 'neteaseArtist'),
+  filterFavoriteArtists(favoritePlaylists.value, favoriteArtistSource.value),
 )
 const filteredFavoritePlaylists = computed(() => {
-  const pool = favoriteCategory.value === 'artists' ? artistFavorites.value : playlistFavorites.value
-  return pool.filter((fpl) => matchesQuery(tabQuery.value, fpl.name, fpl.source))
+  if (favoriteCategory.value === 'artists') {
+    return filterFavoriteArtists(favoritePlaylists.value, favoriteArtistSource.value, tabQuery.value)
+  }
+  return playlistFavorites.value.filter((fpl) => matchesQuery(tabQuery.value, fpl.name, fpl.source))
 })
+const visibleFavoritePlaylists = computed(() => filteredFavoritePlaylists.value.slice(0, favoriteRenderCount.value))
+watch([favoriteCategory, favoriteArtistSource, tabQuery], () => { favoriteRenderCount.value = 100 })
+
+function favoriteArtistPlatformLabel(source: string): string {
+  return source === 'neteaseArtist' ? t('player.source_netease')
+    : source === 'biliArtist' ? t('player.source_bilibili') : 'YouTube'
+}
+
+async function importFollowedArtists() {
+  if (importingArtists.value) return
+  const source = favoriteArtistSource.value
+  const loggedIn = source === 'neteaseArtist' ? auth.netease.loggedIn : auth.youtube.loggedIn
+  if (!loggedIn) {
+    toast.show(t('library.artist_import_login'), 'info')
+    return
+  }
+  importingArtists.value = true
+  try {
+    const count = await invoke<number>('import_followed_artists', { source })
+    await loadFavorites()
+    toast.show(t('library.artist_import_success', { count }), 'success')
+  } catch (error) {
+    toast.show(String(error), 'error')
+  } finally {
+    importingArtists.value = false
+  }
+}
 const filteredNeteasePlaylists = computed(() =>
   neteasePlaylists.value.filter((npl: any) => matchesQuery(tabQuery.value, npl.name)),
 )
@@ -665,29 +707,24 @@ const biliPlaylists = computed(() => recommend.userPlaylists['bilibili'] || [])
 const youtubePlaylists = computed(() => recommend.userPlaylists['youtube'] || [])
 
 // 收藏歌单（从同步数据中获取）
-interface FavoritePlaylist {
-  id: string; name: string; coverUrl: string; trackCount: number; source: string;
-  songs: any[]; addedTime: number; modifiedAt: number; isDeleted: boolean;
-  browseId: string; playlistId: string;
-}
 const favoritePlaylists = ref<FavoritePlaylist[]>([])
+let favoritesLoadVersion = 0
 
 /// 对齐 Android LibraryScreen: 按 source 跳平台详情页懒加载曲目,
 /// 无法定位平台页时才退回同步曲目快照的本地详情
 function openFavorite(fpl: FavoritePlaylist) {
+  if (isArtistFavoriteSource(fpl.source)) {
+    const target = favoriteArtistRoute(fpl)
+    if (target) router.push(target)
+    else toast.show(t('player.load_failed'), 'error')
+    return
+  }
   switch (fpl.source) {
     case 'netease':
       router.push({ name: 'netease-playlist', params: { id: fpl.id } })
       return
     case 'neteaseAlbum':
       router.push({ name: 'netease-album', params: { id: fpl.id } })
-      return
-    case 'neteaseArtist':
-      router.push({
-        name: 'netease-artist',
-        params: { id: fpl.id },
-        query: { name: fpl.name, ...(fpl.coverUrl ? { cover: fpl.coverUrl } : {}) },
-      })
       return
     case 'youtubeMusic': {
       const browseId = fpl.browseId || (fpl.playlistId ? `VL${fpl.playlistId}` : '')
@@ -705,22 +742,11 @@ function openFavorite(fpl: FavoritePlaylist) {
 }
 
 async function loadFavorites() {
+  const request = ++favoritesLoadVersion
   try {
-    const raw = await invoke<any[]>('list_favorite_playlists')
-    // 后端序列化为 camelCase; snake_case 仅为兼容旧字段保留
-    favoritePlaylists.value = (raw || []).map((f: any) => ({
-      id: String(f.id ?? ''),
-      name: f.name ?? '',
-      coverUrl: f.coverUrl ?? f.cover_url ?? '',
-      trackCount: f.trackCount ?? f.track_count ?? f.songs?.length ?? 0,
-      source: f.source ?? '',
-      songs: f.songs ?? [],
-      addedTime: f.addedTime ?? f.added_time ?? 0,
-      modifiedAt: f.modifiedAt ?? f.modified_at ?? 0,
-      isDeleted: f.isDeleted ?? f.is_deleted ?? false,
-      browseId: f.browseId ?? f.browse_id ?? '',
-      playlistId: f.playlistId ?? f.playlist_id ?? '',
-    }))
+    const raw = await invoke<unknown>('list_favorite_playlists')
+    if (request !== favoritesLoadVersion) return
+    favoritePlaylists.value = parseFavoritePlaylists(raw)
   } catch (e) {
     log.error('Load favorites failed:', e)
   }
@@ -974,12 +1000,18 @@ onUnmounted(() => window.removeEventListener(AUTH_CHANGED_EVENT, handleAuthChang
 
 // 监听同步完成后的歌单变更事件
 let unlistenPlaylistsChanged: UnlistenFn | null = null
+let libraryUnmounted = false
 onMounted(async () => {
-  unlistenPlaylistsChanged = await listen('playlists-changed', () => {
-    loadPlaylists()
+  const stop = await listen('playlists-changed', () => {
+    void loadPlaylists()
+    void loadFavorites()
   })
+  if (libraryUnmounted) stop()
+  else unlistenPlaylistsChanged = stop
 })
 onUnmounted(() => {
+  libraryUnmounted = true
+  favoritesLoadVersion++
   unlistenPlaylistsChanged?.()
 })
 </script>
@@ -1287,29 +1319,61 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <section v-if="favoriteCategory === 'artists'" class="favorite-artist-header">
+        <div class="favorite-artist-summary">
+          <h2>{{ t('library.artist_following') }}</h2>
+          <span>{{ t('library.artist_count', { count: artistFavorites.length }) }}</span>
+        </div>
+        <div class="favorite-artist-platforms" role="group" :aria-label="t('library.artist_following')">
+          <button
+            v-for="source in ARTIST_FAVORITE_SOURCES"
+            :key="source"
+            :class="{ active: favoriteArtistSource === source }"
+            :aria-pressed="favoriteArtistSource === source"
+            @click="favoriteArtistSource = source"
+          >
+            <span v-if="favoriteArtistSource === source" class="material-symbols-rounded">check</span>
+            {{ favoriteArtistPlatformLabel(source) }}
+          </button>
+        </div>
+        <button
+          v-if="favoriteArtistSource !== 'biliArtist'"
+          class="favorite-artist-import"
+          :disabled="importingArtists"
+          @click="importFollowedArtists"
+        >
+          <span class="material-symbols-rounded" :class="{ spinning: importingArtists }">
+            {{ importingArtists ? 'progress_activity' : 'cloud_download' }}
+          </span>
+          {{ t(importingArtists ? 'library.artist_import_loading' : 'library.artist_import') }}
+        </button>
+      </section>
+
       <Transition name="fade" mode="out-in">
       <TransitionGroup
         v-if="filteredFavoritePlaylists.length > 0"
-        :key="'fav-' + favoriteCategory"
+        :key="'fav-' + favoriteCategory + (favoriteCategory === 'artists' ? favoriteArtistSource : '')"
         tag="div"
         name="lib-list"
         class="lib-list"
       >
         <div
-          v-for="fpl in filteredFavoritePlaylists"
-          :key="'fav-' + fpl.id"
+          v-for="fpl in visibleFavoritePlaylists"
+          :key="favoriteKey(fpl)"
           class="playlist-item"
+          :class="{ 'favorite-artist-item': favoriteCategory === 'artists' }"
           role="button"
           tabindex="0"
           @click="openFavorite(fpl)"
           @keydown.enter="openFavorite(fpl)"
+          @keydown.space.prevent="openFavorite(fpl)"
         >
-          <div class="pl-icon has-cover" v-if="fpl.coverUrl && !isLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)">
-            <img
+          <div class="pl-icon has-cover" v-if="fpl.coverUrl && !isLibraryCoverFailed('favorite', favoriteKey(fpl), fpl.coverUrl)">
+            <BilibiliCoverImage
               :src="toDisplayableLibraryCoverUrl(fpl.coverUrl)"
-              referrerpolicy="no-referrer"
               class="pl-cover-img"
-              @error="markLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)"
+              loading="lazy"
+              @error="markLibraryCoverFailed('favorite', favoriteKey(fpl), fpl.coverUrl)"
             />
           </div>
           <div class="pl-icon" v-else>
@@ -1319,7 +1383,8 @@ onUnmounted(() => {
           </div>
           <div class="pl-info">
             <div class="pl-name">{{ fpl.name }}</div>
-            <div class="pl-count">{{ t('player.track_count', { count: fpl.trackCount }) }} · {{ favoriteSourceLabel(fpl.source) }}</div>
+            <div class="pl-count" v-if="favoriteCategory === 'artists'">{{ fpl.subtitle || favoriteArtistPlatformLabel(fpl.source) }}</div>
+            <div class="pl-count" v-else>{{ t('player.track_count', { count: fpl.trackCount }) }} · {{ favoriteSourceLabel(fpl.source) }}</div>
           </div>
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
@@ -1330,10 +1395,15 @@ onUnmounted(() => {
             {{ favoriteCategory === 'artists' ? 'account_circle' : 'bookmark' }}
           </span>
         </div>
-        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
-        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
+        <p class="empty-title">{{ t(favoriteCategory === 'artists' ? (tabQuery.trim() ? 'library.artist_search_empty' : 'library.artist_empty') : 'explore.no_playlists') }}</p>
+        <p class="empty-desc">{{ t(favoriteCategory === 'artists' ? 'library.artist_empty_hint' : 'explore.login_for_playlists') }}</p>
       </div>
       </Transition>
+      <button
+        v-if="visibleFavoritePlaylists.length < filteredFavoritePlaylists.length"
+        class="favorite-artist-import"
+        @click="favoriteRenderCount += 100"
+      >{{ t('player.artist_load_more') }}</button>
     </div>
 
     <!-- Tab: 下载 -->
@@ -2496,6 +2566,73 @@ onUnmounted(() => {
   text-align: center;
   color: var(--md-on-surface-variant);
   opacity: 0.7;
+}
+
+.favorite-artist-header {
+  padding: 18px;
+  margin-bottom: 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 24px;
+  background: var(--md-surface-container);
+}
+
+.favorite-artist-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+
+  h2 { font-size: 16px; font-weight: 600; margin: 0; }
+  span { color: var(--md-primary); font-size: 13px; font-weight: 600; }
+}
+
+.favorite-artist-platforms {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--md-outline);
+  border-radius: var(--radius-full);
+
+  button {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 40px;
+    font-size: 13px;
+    color: var(--md-on-surface-variant);
+
+    + button { border-left: 1px solid var(--md-outline); }
+    &:hover { background: var(--md-surface-container-high); }
+    &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+    .material-symbols-rounded { font-size: 18px; }
+  }
+}
+
+.favorite-artist-import {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  color: var(--md-primary);
+  font-size: 13px;
+  font-weight: 500;
+
+  &:hover:not(:disabled) { background: var(--md-surface-container-high); }
+  &:disabled { opacity: 0.5; cursor: progress; }
+  .material-symbols-rounded { font-size: 19px; }
+}
+
+.favorite-artist-item {
+  .pl-icon { width: 56px; height: 56px; border-radius: 50%; }
+  .pl-name { font-size: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
