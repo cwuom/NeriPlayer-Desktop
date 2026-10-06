@@ -1614,9 +1614,11 @@ export const usePlayerStore = defineStore('player', () => {
       if (shouldRestorePreviousPlaybackState) {
         try {
           const state = await invoke<{ is_playing?: boolean }>('get_player_state')
+          if (token !== playbackRequestToken) return
           isPlaying.value = !!state?.is_playing
           _interpIsPlaying = isPlaying.value
         } catch {
+          if (token !== playbackRequestToken) return
           isPlaying.value = true
           _interpIsPlaying = true
         }

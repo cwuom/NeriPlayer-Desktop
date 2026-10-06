@@ -526,7 +526,6 @@ onUnmounted(() => {
   height: 100%;
   overflow: hidden;
   position: relative;
-  border-radius: var(--radius-lg);
   padding-top: var(--titlebar-height, 36px); /* 让出顶栏高度（与 TitleBar / mac 红绿灯对齐） */
   isolation: isolate;
 }

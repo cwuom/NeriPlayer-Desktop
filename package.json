@@ -13,6 +13,7 @@
     "test:lyrics-request": "node scripts/test-lyrics-request.mjs",
     "test:desktop-lyrics": "node scripts/test-desktop-lyrics.mjs",
     "test:playback-request": "node scripts/playback-request.test.mjs",
+    "test:playback-audio-info": "node scripts/test-playback-audio-info.mjs",
     "test:playback-queue": "node scripts/playback-queue.test.mjs",
     "test:playback-source": "node scripts/test-playback-source.mjs",
     "test:playback-cache": "node scripts/test-playback-cache.mjs",

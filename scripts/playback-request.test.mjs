@@ -121,6 +121,82 @@ assert.doesNotMatch(
   'a failed YouTube retry must preserve the user-selected quality',
 )
 
+const playerStoreAst = ts.createSourceFile('player.ts', playerStoreSource, ts.ScriptTarget.Latest, true)
+let recoveryBranch
+function findRecoveryBranch(node) {
+  if (ts.isIfStatement(node) && node.expression.getText(playerStoreAst) === 'shouldRestorePreviousPlaybackState') {
+    recoveryBranch = node
+  }
+  ts.forEachChild(node, findRecoveryBranch)
+}
+findRecoveryBranch(playerStoreAst)
+assert.ok(recoveryBranch, 'the store must retain its crossfade failure recovery branch')
+const recoveryStatements = recoveryBranch.parent.statements
+const endLoadingStatement = recoveryStatements[recoveryStatements.indexOf(recoveryBranch) + 1]
+assert.ok(endLoadingStatement)
+
+// 执行真实恢复分支，仅把后端查询替换为可控 Promise，复现请求在 await 期间被替换
+const recoveryCode = ts.transpileModule(`
+  export function createRecoveryHarness(invoke) {
+    let playbackRequestToken = 8
+    const token = 8
+    const isPlaying = { value: false }
+    const isLoadingAudio = { value: true }
+    let _interpIsPlaying = false
+    let interpolationRestarts = 0
+    const shouldRestorePreviousPlaybackState = true
+    function _startInterpolationLoop() { interpolationRestarts++ }
+    async function recover() {
+      ${recoveryBranch.getText(playerStoreAst)}
+      ${endLoadingStatement.getText(playerStoreAst)}
+    }
+    return {
+      recover,
+      supersede() { playbackRequestToken++ },
+      snapshot() {
+        return { isPlaying: isPlaying.value, isLoadingAudio: isLoadingAudio.value,
+          interpolating: _interpIsPlaying, interpolationRestarts }
+      },
+    }
+  }
+`, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText
+const { createRecoveryHarness } = await import(`data:text/javascript;base64,${Buffer.from(recoveryCode).toString('base64')}`)
+
+async function recoverWhileRequestChanges(outcome, superseded) {
+  let completeQuery
+  let failQuery
+  const query = new Promise((resolve, reject) => {
+    completeQuery = resolve
+    failQuery = reject
+  })
+  const harness = createRecoveryHarness(() => query)
+  const recovering = harness.recover()
+  if (superseded) harness.supersede()
+  if (outcome === 'failure') failQuery(new Error('backend state unavailable'))
+  else completeQuery({ is_playing: outcome === 'playing' })
+  await recovering
+  return harness.snapshot()
+}
+
+const staleRecoveryFailures = []
+for (const outcome of ['playing', 'failure']) {
+  try {
+    assert.deepEqual(await recoverWhileRequestChanges(outcome, true), {
+      isPlaying: false, isLoadingAudio: true, interpolating: false, interpolationRestarts: 0,
+    }, `a superseded crossfade recovery must not overwrite the latest request after ${outcome}`)
+  } catch (error) {
+    staleRecoveryFailures.push(error.message)
+  }
+}
+assert.deepEqual(staleRecoveryFailures, [])
+for (const outcome of ['playing', 'stopped', 'failure']) {
+  const expectedPlaying = outcome !== 'stopped'
+  assert.deepEqual(await recoverWhileRequestChanges(outcome, false), {
+    isPlaying: expectedPlaying, isLoadingAudio: false, interpolating: expectedPlaying,
+    interpolationRestarts: expectedPlaying ? 1 : 0,
+  }, `the current crossfade recovery must preserve ${outcome} backend behavior`)
+}
+
 const appSource = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
 assert.match(
   appSource,

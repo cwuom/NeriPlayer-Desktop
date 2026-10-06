@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { usePlayerStore, displayAlbum, type LyricLine, type TrackInfo } from '@/stores/player'
+import { usePlayerStore, displayAlbum, type AudioInfo, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -52,6 +52,7 @@ import { neteaseSongArtists } from '@/modules/library/artistNavigation'
 import { splitArtistNames } from '@/modules/library/localArtists'
 import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
+import { usePlaybackAudioInfoDisplay } from '@/composables/usePlaybackAudioInfoDisplay'
 
 const log = createLogger('now-playing')
 
@@ -707,11 +708,6 @@ const nowPlayingTrackKey = computed(() => (
 ))
 const transitionStateClass = computed(() => props.transitionState ? `np-shell--${props.transitionState}` : '')
 const nowPlayingTimeKey = computed(() => `time:${nowPlayingTrackKey.value}`)
-const nowPlayingAudioInfoKey = computed(() => [
-  nowPlayingTrackKey.value,
-  player.isPlayingFromDownload ? 'download' : 'stream',
-  audioInfoDisplay.value || 'none',
-].join(':'))
 const favoriteVisualKey = computed(() => `${nowPlayingTrackKey.value}:${isFavorite.value ? 'favorite' : 'normal'}`)
 const headerAlbumKey = computed(() => `${nowPlayingTrackKey.value}:${albumName.value || 'album'}`)
 const coverTransitionName = computed(() => {
@@ -1794,11 +1790,17 @@ const canViewNeteaseArtist = computed(() =>
 
 // 进度条下方音质信息（不展示 Local / download 占位）
 // 纸面规格: 最高/极高/杜比… + 可选编解码; 不展示 kbps 数字
+const displayedAudioInfo = usePlaybackAudioInfoDisplay(() => ({
+  info: player.audioInfo,
+  fromDownload: player.isPlayingFromDownload,
+  loading: player.isLoadingAudio,
+  hasSession: player.hasPlaybackSession,
+}))
 const audioInfoParts = computed(() => {
-  const info = player.audioInfo
+  const info = displayedAudioInfo.value.info
   if (!info) return []
   const parts: Array<{ text: string; accent?: boolean }> = []
-  if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(), true)
+  if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(info), true)
   if (settings.showAudioCodec) addAudioInfoPart(parts, normalizeAudioDisplayToken(info.codec))
   // showAudioSpec: 只补 sampleRate/bitDepth 类纸面规格, 不写 kbps
   if (settings.showAudioSpec) {
@@ -1807,12 +1809,7 @@ const audioInfoParts = computed(() => {
   return parts.filter(part => !isHiddenAudioInfoToken(part.text))
 })
 
-const audioInfoDisplay = computed(() => {
-  return audioInfoParts.value.map(part => part.text).join(' · ')
-})
-
-function currentAudioQualityLabel() {
-  const info = player.audioInfo
+function currentAudioQualityLabel(info: AudioInfo | null = player.audioInfo) {
   const source = info?.source && info.source !== 'local' ? info.source : currentSource.value
   // 优先已本地化的 qualityLabel; 否则用 qualityKey 映射到 标准/极高/最高…
   const labeled = info?.qualityLabel?.trim()
@@ -2150,23 +2147,23 @@ const sliderActiveColor = computed(() => {
             <span>{{ player.durationFormatted }}</span>
           </div>
           <!-- 音质行始终占位，空内容也保留高度 -->
-          <div class="np-audio-info" :key="nowPlayingAudioInfoKey">
-            <span v-if="player.isPlayingFromDownload" class="np-download-chip">
+          <div class="np-audio-info" :aria-busy="player.isLoadingAudio">
+            <span v-if="displayedAudioInfo.fromDownload" class="np-download-chip">
               <span class="material-symbols-rounded">download_done</span>
               {{ t('player.playing_from_download') }}
             </span>
-            <span v-if="audioInfoParts.length" class="np-audio-detail" :class="{ separated: player.isPlayingFromDownload }">
+            <span v-if="audioInfoParts.length" class="np-audio-detail" :class="{ separated: displayedAudioInfo.fromDownload }">
               <template v-for="(part, index) in audioInfoParts" :key="`${part.text}:${index}`">
                 <span
                   class="np-audio-detail-part"
                   :class="{
                     'np-audio-detail-part--accent': part.accent,
-                    'np-audio-detail-part--clickable': part.accent && currentSource !== 'local',
+                    'np-audio-detail-part--clickable': part.accent && currentSource !== 'local' && !player.isLoadingAudio,
                   }"
-                  :role="part.accent && currentSource !== 'local' ? 'button' : undefined"
-                  :tabindex="part.accent && currentSource !== 'local' ? 0 : undefined"
-                  @click="part.accent && openQualitySwitcher()"
-                  @keydown.enter="part.accent && openQualitySwitcher()"
+                  :role="part.accent && currentSource !== 'local' && !player.isLoadingAudio ? 'button' : undefined"
+                  :tabindex="part.accent && currentSource !== 'local' && !player.isLoadingAudio ? 0 : undefined"
+                  @click="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
+                  @keydown.enter="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
                 >{{ part.text }}</span>
                 <span v-if="index < audioInfoParts.length - 1" class="np-audio-separator">·</span>
               </template>
@@ -2925,7 +2922,7 @@ const sliderActiveColor = computed(() => {
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_audio_params') }}</span>
-                <strong>{{ trackDetailAudioParams || audioInfoDisplay || '-' }}</strong>
+                <strong>{{ trackDetailAudioParams || '-' }}</strong>
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_bitrate') }}</span>
@@ -3129,8 +3126,6 @@ const sliderActiveColor = computed(() => {
   // 确保完全不透明
   isolation: isolate;
   overflow: hidden;
-  /* 与窗体圆角一致，避免全屏层直角顶出 OS 圆角 */
-  border-radius: var(--radius-lg);
   user-select: none;
   -webkit-user-select: none;
   transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1), opacity 300ms ease;
@@ -3617,6 +3612,7 @@ const sliderActiveColor = computed(() => {
   max-width: 100%;
   /* 进度条 + 时间 + 音质/下载 chip，留足高度避免裁切 */
   height: 80px;
+  padding-top: 10px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
