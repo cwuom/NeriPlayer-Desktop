@@ -4,9 +4,11 @@ use neri_player_desktop::audio::analyzer::SharedAudioLevel;
 use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
 use neri_player_desktop::commands::{
-    auth_cmd, download_cmd, image_cmd, library_cmd, listen_together_cmd, lyrics_cmd, player_cmd,
+    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
+    local_files_cmd, listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd,
     recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd,
-    debug_cmd,};
+    user_data_cmd,
+};
 use neri_player_desktop::state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -91,6 +93,28 @@ fn main() {
         .manage(AppState::new())
         .setup(move |app| {
             let handle = app.handle().clone();
+            // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
+            neri_player_desktop::logging::set_runtime_level(log_cfg.level);
+
+            // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
+            match app.path().resource_dir() {
+                Ok(resources) => {
+                    neri_player_desktop::audio::ffmpeg::set_bundled_directory(resources.join("ffmpeg"));
+                }
+                Err(error) => log::warn!(
+                    target: "audio-decoder",
+                    "resource directory unavailable, looking for FFmpeg next to the executable only: {error}",
+                ),
+            }
+            // 后台预加载 FFmpeg：第一首杜比或 Opus 曲目起播时就不用再等动态库加载
+            let preload = std::thread::Builder::new()
+                .name("ffmpeg-preload".into())
+                .spawn(|| {
+                    let _ = neri_player_desktop::audio::ffmpeg::runtime();
+                });
+            if let Err(error) = preload {
+                log::warn!(target: "audio-decoder", "could not start FFmpeg preloading: {error}");
+            }
 
             // macOS 使用原生红绿灯（Overlay 标题栏）；Windows/Linux 移除原生装饰，
             // 由前端 TitleBar.vue 自绘窗口控制。配置里 decorations 默认为 true 以
@@ -98,6 +122,11 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_decorations(false);
+            }
+
+            #[cfg(windows)]
+            if let Some(win) = app.get_webview_window("main") {
+                pause_rendering_while_minimized(win);
             }
 
             // macOS: 挂载空 NSToolbar 并启用 Unified 工具栏样式（macOS 11+），
@@ -231,6 +260,22 @@ fn main() {
                 let saved_auth = auth::cookies::load_auth(&handle);
                 auth::cookies::inject_all(&state.cookie_jar, &saved_auth);
                 *state.auth.lock() = saved_auth;
+            }
+
+            // 代理模式与 YouTube 地区偏好在首批请求前就按已保存的设置生效，不等前端水合
+            match neri_player_desktop::settings::store::load_settings(&handle) {
+                Ok(loaded) => {
+                    if !loaded.settings.bypass_proxy {
+                        handle.state::<AppState>().rebuild_http(false);
+                    }
+                    settings_cmd::apply_runtime_settings(&loaded.settings);
+                    let handle_prune = handle.clone();
+                    let cache_limit = loaded.settings.max_cache_size;
+                    tauri::async_runtime::spawn_blocking(move || {
+                        player_cmd::prune_media_caches(&handle_prune, cache_limit);
+                    });
+                }
+                Err(error) => log::warn!(target: "settings", "启动时读取设置失败: {error}"),
             }
 
             // 启动即主动保鲜一次 YouTube 会话, 让长期空闲的登录在首次使用前完成 cookie 轮换
@@ -492,14 +537,20 @@ fn main() {
             // IPC 脚本，且应用自定义命令不经 ACL 校验。仅放行主窗口调用命令，阻止登录页
             // （music.163.com / passport.bilibili.com / accounts.google.com）上的任意 JS
             // 越权调用 save_file_bytes 等命令写/读任意文件或导出凭据
+            // 桌面歌词窗口只允许读取显示快照，播放和账号命令仍只对主窗口开放
             let app_handler: Box<
                 dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
             > = Box::new(tauri::generate_handler![
+            desktop_lyrics_cmd::open_desktop_lyrics,
+            desktop_lyrics_cmd::close_desktop_lyrics,
+            desktop_lyrics_cmd::publish_desktop_lyrics,
+            desktop_lyrics_cmd::get_desktop_lyrics_snapshot,
             player_cmd::trace_playback_ui,
             player_cmd::begin_playback_request,
             player_cmd::play_file,
             player_cmd::play_cached_audio,
             player_cmd::play_cached_audio_candidates,
+            player_cmd::has_cached_audio,
             player_cmd::play_url,
             player_cmd::play_url_fast,
             player_cmd::play_url_streaming,
@@ -507,11 +558,14 @@ fn main() {
             player_cmd::resume,
             player_cmd::toggle_play_pause,
             player_cmd::set_volume,
+            player_cmd::list_audio_output_devices,
+            player_cmd::set_audio_output_device,
             player_cmd::seek,
             player_cmd::stop,
             player_cmd::set_speed,
             player_cmd::set_loudness_gain,
             player_cmd::set_normalize_volume,
+            player_cmd::set_volume_balance,
             player_cmd::set_equalizer,
             player_cmd::reset_audio_effects,
             player_cmd::pause_with_fade,
@@ -528,8 +582,21 @@ fn main() {
             player_cmd::toggle_shuffle,
             player_cmd::cycle_repeat,
             library_cmd::scan_music_directory,
+            local_files_cmd::scan_local_files,
+            local_files_cmd::cancel_local_scan,
+            local_files_cmd::get_local_playlist_tracks,
+            local_files_cmd::edit_local_file_tags,
+            local_files_cmd::get_local_audio_info,
+            player_cmd::release_audio_file,
+            player_cmd::get_playback_audio_info,
+            player_cmd::get_decoder_capabilities,
+            player_cmd::set_multichannel_drc,
             library_cmd::list_playlists,
+            library_cmd::get_playlist_usage_stats,
+            library_cmd::record_playlist_open,
+            library_cmd::get_home_local_playlists,
             library_cmd::create_playlist,
+            library_cmd::ensure_favorites_playlist,
             library_cmd::delete_playlist,
             library_cmd::rename_playlist,
             library_cmd::get_playlist_tracks,
@@ -538,16 +605,30 @@ fn main() {
             library_cmd::remove_from_playlist,
             library_cmd::remove_tracks_from_playlist,
             library_cmd::reorder_playlist_tracks,
+            library_cmd::reorder_playlists,
             library_cmd::update_playlist_track,
+            library_cmd::record_lyric_override,
             library_cmd::list_favorite_playlists,
+            library_cmd::set_artist_favorite,
+            library_cmd::import_followed_artists,
+            library_cmd::get_bili_artist_detail,
+            library_cmd::get_bili_artist_contents,
+            library_cmd::get_bili_artist_collection,
+            library_cmd::get_youtube_artist_detail,
+            library_cmd::get_youtube_artist_items,
+            playback_fallback_cmd::find_netease_local_sources,
+            playback_fallback_cmd::find_netease_bili_sources,
             search_cmd::search,
             image_cmd::fetch_bilibili_cover,
             lyrics_cmd::parse_lrc_content,
             lyrics_cmd::load_lyrics_file,
             lyrics_cmd::fetch_lyrics,
+            lyrics_cmd::fetch_word_timed_lyrics,
             settings_cmd::get_settings,
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
+            settings_cmd::import_background_image,
+            settings_cmd::clear_background_images,
             settings_cmd::get_log_dir,
             settings_cmd::get_netease_song_url,
             settings_cmd::get_qq_song_url,
@@ -559,6 +640,7 @@ fn main() {
             settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
+            debug_cmd::audio_engine_stats,
             debug_cmd::export_debug_report,
             debug_cmd::reveal_in_file_manager,
             debug_cmd::list_crash_reports,
@@ -578,6 +660,7 @@ fn main() {
             auth_cmd::logout,
             recommend_cmd::get_recommended_playlists,
             recommend_cmd::get_recommended_songs,
+            recommend_cmd::get_netease_home_section,
             recommend_cmd::get_user_playlists,
             recommend_cmd::get_user_account,
             recommend_cmd::get_home_feed,
@@ -603,11 +686,11 @@ fn main() {
             sync_cmd::use_existing_github_repo,
             sync_cmd::configure_github_sync,
             sync_cmd::sync_github,
+            sync_cmd::approve_sync_protocol_upgrade,
             sync_cmd::disconnect_github_sync,
             sync_cmd::update_github_sync_settings,
             sync_cmd::update_sync_preferences,
             sync_cmd::update_webdav_sync_settings,
-            sync_cmd::clear_app_cache,
             sync_cmd::export_playlists,
             sync_cmd::import_playlists,
             sync_cmd::export_config,
@@ -630,7 +713,9 @@ fn main() {
             listen_together_cmd::lt_get_room_state,
             listen_together_cmd::lt_connect_ws,
             listen_together_cmd::lt_disconnect_ws,
+            listen_together_cmd::lt_leave_room,
             listen_together_cmd::lt_send_event,
+            listen_together_cmd::lt_send_control,
             listen_together_cmd::lt_send_ping,
             stats_cmd::record_playback_session,
             stats_cmd::record_playback_sessions,
@@ -639,11 +724,23 @@ fn main() {
             stats_cmd::clear_playback_stats,
             stats_cmd::remove_playback_stats,
             stats_cmd::playback_stats_identity_key,
+            user_data_cmd::load_user_data_snapshot,
+            user_data_cmd::import_legacy_user_data,
+            user_data_cmd::save_playback_state,
+            user_data_cmd::record_play_history,
+            user_data_cmd::remove_play_history,
+            user_data_cmd::clear_play_history,
+            user_data_cmd::replace_play_history,
+            user_data_cmd::set_lyric_offset,
+            user_data_cmd::replace_lyric_offsets,
+            cache_cmd::cache_get,
+            cache_cmd::cache_put,
+            cache_cmd::cache_remove,
             tray_cmd::set_tray_texts,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();
-                if label != "main" {
+                if !window_command_allowed(&label, invoke.message.command()) {
                     let command = invoke.message.command().to_string();
                     log::warn!(
                         target: "security",
@@ -694,14 +791,88 @@ fn main() {
                         }
                     }
                 }
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: WindowEvent::Destroyed,
+                    ..
+                } if label == "main" => {
+                    // 主窗口销毁时一并关闭桌面歌词窗口（上游行为）
+                    if let Some(window) =
+                        app_handle.get_webview_window(desktop_lyrics_cmd::WINDOW_LABEL)
+                    {
+                        let _ = window.close();
+                    }
+                }
                 _ => {}
             }
         });
 }
 
+/// 窗口最小化时告诉 WebView2 页面不可见，恢复时再设回可见
+///
+/// WebView2 不会自己察觉窗口最小化：页面仍报告可见，并按没有 vsync 的 300 多帧每秒驱动 rAF、
+/// 动画与合成，只放着听歌也要吃掉半个核。设为不可见后 Chromium 暂停这些渲染；计时器节流已在
+/// 启动参数里关掉，播放、桌面歌词等后台逻辑照常运行。
+#[cfg(windows)]
+fn pause_rendering_while_minimized(window: tauri::WebviewWindow) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let visible = Arc::new(AtomicBool::new(true));
+    let handle = window.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Resized(_)) {
+            return;
+        }
+        let show = !handle.is_minimized().unwrap_or(false);
+        if visible.swap(show, Ordering::AcqRel) == show {
+            return;
+        }
+        let result = handle.with_webview(move |webview| {
+            // SAFETY: with_webview 的回调在 UI 线程上执行，控制器在窗口存活期间有效
+            if let Err(error) = unsafe { webview.controller().SetIsVisible(show) } {
+                log::warn!(target: "window", "WebView2 visibility not set to {show}: {error}");
+            }
+        });
+        match result {
+            Ok(()) => log::info!(
+                target: "window",
+                "webview rendering {}",
+                if show { "resumed" } else { "paused while minimized" },
+            ),
+            Err(error) => log::warn!(
+                target: "window",
+                "could not reach the webview to set visibility {show}: {error}",
+            ),
+        }
+    });
+}
+
+fn window_command_allowed(label: &str, command: &str) -> bool {
+    label == "main"
+        || (label == desktop_lyrics_cmd::WINDOW_LABEL && command == "get_desktop_lyrics_snapshot")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_playback_finish, PlaybackFinishState};
+
+    #[test]
+    fn desktop_lyrics_window_only_reads_its_snapshot() {
+        assert!(super::window_command_allowed(
+            "main", "publish_desktop_lyrics",
+        ));
+        assert!(super::window_command_allowed(
+            "desktop-lyrics", "get_desktop_lyrics_snapshot",
+        ));
+        assert!(!super::window_command_allowed("desktop-lyrics", "play_url"));
+        assert!(!super::window_command_allowed(
+            "desktop-lyrics", "publish_desktop_lyrics",
+        ));
+        assert!(!super::window_command_allowed(
+            "youtube-login", "get_desktop_lyrics_snapshot",
+        ));
+    }
 
     #[test]
     fn unknown_duration_eof_ends_track() {

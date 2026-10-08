@@ -64,6 +64,29 @@ impl PcmRing {
         true
     }
 
+    /// 一次取出尽可能多的整帧填进 `out`（交错），返回帧数
+    ///
+    /// 只发布一次读位置，设备回调里批量取比逐帧取少很多原子操作
+    pub fn pop_frames(&self, out: &mut [f32], channels: usize) -> usize {
+        let channels = channels.max(1);
+        let wanted = out.len() / channels * channels;
+        if wanted == 0 {
+            return 0;
+        }
+        let read = self.read_position.load(Ordering::Relaxed);
+        let write = self.write_position.load(Ordering::Acquire);
+        let available = write.wrapping_sub(read).min(self.capacity) / channels * channels;
+        let take = available.min(wanted);
+        for (offset, sample) in out[..take].iter_mut().enumerate() {
+            let index = read.wrapping_add(offset) % self.capacity;
+            // SAFETY: 槽位已由生产者发布，消费者在推进 read_position 前独占读取
+            *sample = unsafe { *self.samples[index].get() };
+        }
+        self.read_position
+            .store(read.wrapping_add(take), Ordering::Release);
+        take / channels
+    }
+
     pub fn try_pop_frame(&self, frame: &mut [f32]) -> bool {
         if frame.is_empty() || frame.len() > self.capacity {
             return false;
@@ -104,6 +127,23 @@ mod tests {
         assert!(ring.try_pop_frame(&mut frame));
         assert_eq!(frame, [3.0, 4.0]);
         assert!(!ring.try_pop_frame(&mut frame));
+    }
+
+    #[test]
+    fn bulk_pop_takes_whole_frames_in_order_across_the_wrap() {
+        let ring = PcmRing::new(8);
+        assert!(ring.try_push_frame(&[1.0, 2.0]));
+        assert!(ring.try_push_frame(&[3.0, 4.0]));
+        let mut out = [0.0; 6];
+        assert_eq!(ring.pop_frames(&mut out, 2), 2, "只取已发布的整帧");
+        assert_eq!(&out[..4], &[1.0, 2.0, 3.0, 4.0]);
+        for value in [5.0, 7.0, 9.0] {
+            assert!(ring.try_push_frame(&[value, value + 1.0]));
+        }
+        let mut wrapped = [0.0; 7];
+        assert_eq!(ring.pop_frames(&mut wrapped, 2), 3, "输出缓冲按整帧截断");
+        assert_eq!(&wrapped[..6], &[5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        assert_eq!(ring.pop_frames(&mut wrapped, 2), 0);
     }
 
     #[test]

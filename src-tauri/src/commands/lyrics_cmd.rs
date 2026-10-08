@@ -1,6 +1,7 @@
 use crate::error::AppResult;
 use crate::lyrics::manager::LyricsManager;
 use crate::lyrics::parser::{self, LyricLine};
+use crate::lyrics::FetchedLyrics;
 use crate::state::AppState;
 use std::time::Instant;
 use tauri::State;
@@ -9,6 +10,20 @@ use tauri::State;
 pub async fn parse_lrc_content(content: String) -> AppResult<Vec<LyricLine>> {
     // 自动识别 LRC / YRC(逐字), 支持逐字歌词编辑往返
     Ok(parser::parse_auto(&content))
+}
+
+#[tauri::command]
+pub async fn fetch_word_timed_lyrics(
+    title: String,
+    artist: String,
+    duration_ms: u64,
+    state: State<'_, AppState>,
+) -> AppResult<FetchedLyrics> {
+    let manager = LyricsManager::with_transport(
+        state.transport("lyrics"),
+        crate::auth::cookies::read_netease_csrf(&state.cookie_jar),
+    );
+    manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await
 }
 
 #[tauri::command]
@@ -33,7 +48,7 @@ pub async fn fetch_lyrics(
     qq_song_mid: Option<String>,
     youtube_video_id: Option<String>,
     state: State<'_, AppState>,
-) -> AppResult<Vec<LyricLine>> {
+) -> AppResult<FetchedLyrics> {
     let started = Instant::now();
     log::info!(
         target: "lyrics-command",
@@ -61,9 +76,10 @@ pub async fn fetch_lyrics(
         .await;
     log::info!(
         target: "lyrics-command",
-        "end ok={}, lines={}, elapsed_ms={}",
+        "end ok={}, source={:?}, lines={}, elapsed_ms={}",
         result.is_ok(),
-        result.as_ref().map_or(0, Vec::len),
+        result.as_ref().ok().and_then(|fetched| fetched.source),
+        result.as_ref().map_or(0, |fetched| fetched.lines.len()),
         started.elapsed().as_millis(),
     );
     result

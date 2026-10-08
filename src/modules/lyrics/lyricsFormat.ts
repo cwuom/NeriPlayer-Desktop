@@ -139,6 +139,25 @@ export function mergeParsedLyricsWithTranslations(
   }))
 }
 
+export function mergeWordTimedLyricsWithBaseline(
+  baseline: LyricLine[],
+  upgrade: LyricLine[],
+): LyricLine[] {
+  const translations = mergeParsedLyricsWithTranslations(upgrade, baseline.map(line => ({
+    ...line, text: line.translation || '',
+  })))
+  const roman = mergeParsedLyricsWithTranslations(
+    upgrade.map(line => ({ ...line, translation: line.roman })),
+    baseline.map(line => ({ ...line, text: line.roman || '' })),
+  )
+  // 只补时间轴匹配的缺失字段，外源自身的翻译和音译优先
+  return upgrade.map((line, index) => ({
+    ...line,
+    translation: line.translation || translations[index].translation,
+    roman: line.roman || roman[index].translation,
+  }))
+}
+
 /**
  * 本地歌词覆盖状态, 对齐 Android LocalLyricOverrideState
  * - absent: 无本地词, 允许在线拉取
@@ -236,6 +255,7 @@ export function withUpdatedLyricsPayload(
   nextLyric: string | null,
   nextTranslated: string | null,
   source?: string | null,
+  now: number = Date.now(),
 ): Record<string, unknown> {
   const base: Record<string, unknown> = { ...(payload || {}) }
   const prevMatched = typeof base.matchedLyric === 'string'
@@ -285,6 +305,13 @@ export function withUpdatedLyricsPayload(
     base.syncMetadataVersion = 1
     delete base.sync_metadata_version
   }
+
+  // 用户编辑：标记已编辑并推进修订号，同步合并按修订号取最新（对齐 Android nextUserLyricSyncRevision）
+  const previousRevision = Number(base.lyricSyncRevision ?? base.lyric_sync_revision ?? 0)
+  base.lyricSyncEdited = true
+  base.lyricSyncRevision = Math.max(now, (Number.isFinite(previousRevision) ? previousRevision : 0) + 1)
+  delete base.lyric_sync_edited
+  delete base.lyric_sync_revision
 
   return base
 }

@@ -1,49 +1,126 @@
 // YouTube Music 播放客户端
-//
-// 分层 (对齐 yt-dlp 默认 jsless 客户端 + 桌面防互踢):
-// 1. 主路径 ANDROID_VR + visitorData (yt-dlp _DEFAULT_JSLESS_CLIENTS)
-//    IOS/ANDROID plain url 在 2026-07 实测会被 googlevideo 限到约 1MB 后 403
-//    ANDROID_VR 无此限速, 但缺少 visitorData 时会 LOGIN_REQUIRED bot check
-// 2. player API 在已登录时携带用户 Cookie (不附 SAPISID*HASH)
-//    mobile player + SAPISIDHASH 会被 Innertube 以 HTTP 400 INVALID_ARGUMENT 拒绝
-//    WEB_REMIX 库接口继续用完整 hash; 播放侧故意不走 WEB_REMIX + PO token 完整浏览器模拟
-// 3. googlevideo CDN 拉流不附带登录 Cookie (Android buildYouTubeStreamRequestHeaders 同款)
-// 4. 仅接受 plain url 或已带 sig 的 cipher; 加密 s= 需 player JS 解签, 当前跳过并回退
-// 5. 排序优先 audio/mp4 (AAC): cpal/symphonia 未启 opus, webm/opus 会 unsupported codec
+// 客户端顺序、认证隔离与 challenge 处理参考 Android YouTubeMusicPlaybackRepository
+// 匿名优先 VISIONOS/ANDROID_VR，登录优先 WEB_REMIX；CDN 拉流不携带登录 Cookie
+// EJS 在受限 QuickJS 中处理 sig/n，WebPo 在独立匿名窗口中获取 GVS token
+// 音频容器优先 AAC/mp4，保持与桌面解码器能力一致
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
+use tauri::Manager;
 
+use crate::api::transport::FallbackHttp;
 use crate::auth::state::YouTubeAuth;
 use crate::error::{AppError, AppResult};
-use crate::api::transport::FallbackHttp;
 
+use super::bootstrap::PlaybackBootstrap;
 use super::client::YtAudioStream;
+use std::sync::LazyLock;
+static AUDIO_STREAM_CACHE: LazyLock<Mutex<super::cache::AudioStreamCache>> =
+    LazyLock::new(|| Mutex::new(super::cache::AudioStreamCache::default()));
 
-// visitorData 缓存: ANDROID_VR 等 jsless 客户端依赖它绕过 bot check
-const VISITOR_DATA_TTL: Duration = Duration::from_secs(30 * 60);
-const WATCH_PAGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 
-struct VisitorDataCache {
-    value: String,
-    fetched_at: Instant,
+const PO_TOKEN_FAST_PATH_WAIT: Duration = Duration::from_millis(150);
+// 第一轮里已预热的签名求解只限时等待，超时同样挪到第二轮阻塞重试
+const CHALLENGE_WARMUP_WAIT: Duration = Duration::from_millis(2500);
+const CHALLENGE_WARMING: &str = "YouTube JS challenge is still warming up";
+
+struct BootstrapAttempt<T> {
+    value: Option<Result<T, ()>>,
 }
 
-static VISITOR_DATA_CACHE: Mutex<Option<VisitorDataCache>> = Mutex::new(None);
+impl<T> Default for BootstrapAttempt<T> {
+    fn default() -> Self {
+        Self { value: None }
+    }
+}
+
+impl<T> BootstrapAttempt<T> {
+    fn is_resolved(&self) -> bool {
+        self.value.is_some()
+    }
+
+    fn set(&mut self, value: T) {
+        self.value = Some(Ok(value));
+    }
+
+    async fn get_or_fetch<F, Fut>(&mut self, fetch: F) -> Option<&T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = AppResult<T>>,
+    {
+        if self.value.is_none() {
+            self.value = Some(fetch().await.map_err(|_| ()));
+        }
+        self.value.as_ref().and_then(|value| value.as_ref().ok())
+    }
+}
+
+struct PoTokenAcquisition {
+    handle: Option<tokio::task::JoinHandle<Option<String>>>,
+    token: Option<String>,
+    checked_fast_path: bool,
+}
+
+impl PoTokenAcquisition {
+    fn new(future: impl std::future::Future<Output = Option<String>> + Send + 'static) -> Self {
+        Self {
+            handle: Some(tokio::spawn(future)),
+            token: None,
+            checked_fast_path: false,
+        }
+    }
+
+    async fn fast_token(&mut self) -> Option<String> {
+        let Some(handle) = self.handle.as_mut() else {
+            return self.token.clone();
+        };
+        if self.checked_fast_path && !handle.is_finished() {
+            return None;
+        }
+        self.checked_fast_path = true;
+        if let Ok(result) = tokio::time::timeout(PO_TOKEN_FAST_PATH_WAIT, handle).await {
+            self.token = result.ok().flatten();
+            self.handle = None;
+        }
+        self.token.clone()
+    }
+
+    async fn finish(&mut self) -> Option<String> {
+        if let Some(handle) = self.handle.as_mut() {
+            self.token = match tokio::time::timeout(Duration::from_secs(65), &mut *handle).await {
+                Ok(result) => result.ok().flatten(),
+                Err(_) => {
+                    handle.abort();
+                    None
+                }
+            };
+            self.handle = None;
+        }
+        self.token.clone()
+    }
+}
+
+impl Drop for PoTokenAcquisition {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+struct TokenPendingStreams {
+    streams: Vec<YtAudioStream>,
+    manifest: Option<String>,
+    duration_ms: u64,
+}
 
 // 桌面播放端点: 非 WEB_REMIX 客户端统一走 www, 降低与 music 登录会话的关联
 const PLAYER_URL_WWW: &str = "https://www.youtube.com/youtubei/v1/player";
 const PLAYER_URL_MUSIC: &str = "https://music.youtube.com/youtubei/v1/player";
 const ORIGIN_WWW: &str = "https://www.youtube.com";
 const ORIGIN_MUSIC: &str = "https://music.youtube.com";
-
-// 公开 InnerTube key (与 WEB 客户端共用, 非密钥; 失效时仍可无 key 调用)
-const DEFAULT_PLAYER_API_KEY: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-
-// ANDROID_MUSIC 常用 player params: 请求音频向格式
-const ANDROID_MUSIC_PLAYER_PARAMS: &str = "CgIIAdgDAQ==";
 
 // googlevideo CDN 拉流 User-Agent (对齐 Android resolveYouTubeStreamUserAgent).
 // CDN 会校验拉流 UA 与 stream URL 中 `c=` 客户端参数一致, 不一致直接 403.
@@ -60,12 +137,12 @@ const STREAM_ANDROID_MUSIC_USER_AGENT: &str =
 // WEB / TV 及未知客户端回退到桌面 Chrome UA
 const STREAM_WEB_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+const STREAM_VISIONOS_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
 
 #[derive(Debug, Clone, Copy)]
 enum PlayerHost {
     Www,
-    // 预留给将来可选的 music.youtube.com player (默认不用, 防会话耦合)
-    #[allow(dead_code)]
     Music,
 }
 
@@ -91,109 +168,108 @@ struct PlayerClientProfile {
     player_params: Option<&'static str>,
     // ANDROID_VR 等 jsless 客户端缺 visitorData 会被 bot check 拦下
     requires_visitor_data: bool,
+    supports_authenticated_context: bool,
+    requires_po_token: bool,
 }
 
-/// 播放客户端顺序 (对齐 yt-dlp 2026-07 默认 jsless 路径):
-/// ANDROID_VR (主) -> IOS -> ANDROID -> ANDROID_MUSIC -> TVHTML5
-///
-/// 2026-07 实测关键结论:
-/// - IOS/ANDROID plain url 可解析, 但 googlevideo 约 1MB 后 Range/整文件 403 (无 n/ratebypass)
-/// - ANDROID_VR + visitorData 可拿到可完整下载的 plain url (yt-dlp 同款)
-/// - ANDROID_VR 无 visitorData -> LOGIN_REQUIRED bot check
-/// - 故意不包含 WEB_REMIX player (需 PO token / 完整浏览器模拟, 互踢风险高)
-/// - 登录时 player 只附 Cookie, 不附 SAPISID*HASH (mobile + hash = HTTP 400)
+// 客户端版本和自动顺序取自 Android YouTubePlayerRequestComposer
 fn playback_client_profiles() -> &'static [PlayerClientProfile] {
     &[
-        // 主路径: yt-dlp _DEFAULT_JSLESS_CLIENTS; 需 visitorData, 直链可完整下载
         PlayerClientProfile {
-            client_id: "28",
-            client_name: "ANDROID_VR",
-            client_version: "1.65.10",
-            user_agent: STREAM_ANDROID_VR_USER_AGENT,
-            platform: "MOBILE",
-            hl: "en",
-            gl: "US",
-            host: PlayerHost::Www,
-            android_sdk_version: Some(32),
-            os_name: Some("Android"),
-            os_version: Some("12L"),
-            device_make: Some("Oculus"),
-            device_model: Some("Quest 3"),
-            player_params: None,
-            requires_visitor_data: true,
-        },
-        // 回退: 仍可解析 plain url, 但 CDN 可能限速; 保留作 ANDROID_VR 失败时兜底
-        PlayerClientProfile {
-            client_id: "5",
-            client_name: "IOS",
-            client_version: "20.10.4",
-            user_agent: STREAM_IOS_USER_AGENT,
-            platform: "MOBILE",
-            hl: "en",
-            gl: "US",
-            host: PlayerHost::Www,
-            android_sdk_version: None,
-            os_name: Some("iOS"),
-            os_version: Some("18.3.2"),
-            device_make: Some("Apple"),
-            device_model: Some("iPhone"),
-            player_params: None,
-            requires_visitor_data: false,
+            client_id: "101", client_name: "VISIONOS", client_version: "0.1",
+            user_agent: STREAM_VISIONOS_USER_AGENT, platform: "MOBILE", hl: "en", gl: "US",
+            host: PlayerHost::Www, android_sdk_version: None, os_name: Some("visionOS"),
+            os_version: Some("1.3.21O771"), device_make: Some("Apple"), device_model: Some("RealityDevice14,1"),
+            player_params: None, requires_visitor_data: false, supports_authenticated_context: false,
+            requires_po_token: false,
         },
         PlayerClientProfile {
-            client_id: "3",
-            client_name: "ANDROID",
-            client_version: "20.10.38",
-            user_agent: STREAM_ANDROID_USER_AGENT,
-            platform: "MOBILE",
-            hl: "en",
-            gl: "US",
-            host: PlayerHost::Www,
-            android_sdk_version: Some(35),
-            os_name: Some("Android"),
-            os_version: Some("15"),
-            device_make: Some("Google"),
-            device_model: Some("Pixel 8"),
-            player_params: None,
-            requires_visitor_data: false,
+            client_id: "28", client_name: "ANDROID_VR", client_version: "1.65.10",
+            user_agent: STREAM_ANDROID_VR_USER_AGENT, platform: "MOBILE", hl: "en", gl: "US",
+            host: PlayerHost::Www, android_sdk_version: Some(32), os_name: Some("Android"),
+            os_version: Some("12L"), device_make: Some("Oculus"), device_model: Some("Quest 3"),
+            player_params: None, requires_visitor_data: true, supports_authenticated_context: false,
+            requires_po_token: false,
         },
-        // 音乐客户端: Cookie-only 时常 LOGIN_REQUIRED; 有完整 mobile OAuth 时更利于 Premium
         PlayerClientProfile {
-            client_id: "21",
-            client_name: "ANDROID_MUSIC",
-            client_version: "8.32.52",
-            user_agent: STREAM_ANDROID_MUSIC_USER_AGENT,
-            platform: "MOBILE",
-            hl: "en",
-            gl: "US",
-            host: PlayerHost::Www,
-            android_sdk_version: Some(35),
-            os_name: Some("Android"),
-            os_version: Some("15"),
-            device_make: Some("Google"),
-            device_model: Some("Pixel 8"),
-            player_params: Some(ANDROID_MUSIC_PLAYER_PARAMS),
-            requires_visitor_data: false,
+            client_id: "67", client_name: "WEB_REMIX", client_version: "1.20260403.09.00",
+            user_agent: STREAM_WEB_USER_AGENT, platform: "DESKTOP", hl: "en", gl: "US",
+            host: PlayerHost::Music, android_sdk_version: None, os_name: Some("Windows"),
+            os_version: Some("10.0"), device_make: None, device_model: None,
+            player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
+            requires_po_token: true,
         },
-        // TV 客户端目前常返回 "page needs to be reloaded", 保留为最后兜底
         PlayerClientProfile {
-            client_id: "7",
-            client_name: "TVHTML5",
-            client_version: "7.20250709.16.00",
+            client_id: "7", client_name: "TVHTML5", client_version: "7.20260114.12.00",
             user_agent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
-            platform: "TV",
-            hl: "en",
-            gl: "US",
-            host: PlayerHost::Www,
-            android_sdk_version: None,
-            os_name: None,
-            os_version: None,
-            device_make: None,
-            device_model: None,
-            player_params: None,
-            requires_visitor_data: false,
+            platform: "TV", hl: "en", gl: "US", host: PlayerHost::Www, android_sdk_version: None,
+            os_name: None, os_version: None, device_make: None, device_model: None,
+            player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
+            requires_po_token: true,
+        },
+        PlayerClientProfile {
+            client_id: "62", client_name: "WEB_CREATOR", client_version: "1.20260114.05.00",
+            user_agent: STREAM_WEB_USER_AGENT, platform: "DESKTOP", hl: "en", gl: "US",
+            host: PlayerHost::Www, android_sdk_version: None, os_name: Some("Windows"),
+            os_version: Some("10.0"), device_make: None, device_model: None,
+            player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
+            requires_po_token: true,
+        },
+        PlayerClientProfile {
+            client_id: "7", client_name: "TVHTML5", client_version: "5.20260114",
+            user_agent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+            platform: "TV", hl: "en", gl: "US", host: PlayerHost::Www, android_sdk_version: None,
+            os_name: None, os_version: None, device_make: None, device_model: None,
+            player_params: None, requires_visitor_data: false, supports_authenticated_context: true,
+            requires_po_token: true,
         },
     ]
+}
+
+fn ordered_profiles(authenticated: bool) -> Vec<&'static PlayerClientProfile> {
+    let profiles = playback_client_profiles();
+    let indices = if authenticated {
+        [2, 3, 4, 5, 0, 1]
+    } else {
+        [0, 1, 2, 3, 4, 5]
+    };
+    indices.into_iter().map(|index| &profiles[index]).collect()
+}
+
+
+pub fn normalize_playback_source(source: &str) -> &'static str {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "visionos" => "visionos",
+        "android_vr" => "android_vr",
+        "web_remix" => "web_remix",
+        "tv_html5" => "tv_html5",
+        "web_creator" => "web_creator",
+        _ => "automatic",
+    }
+}
+
+fn ordered_profiles_with_source(
+    authenticated: bool,
+    source: &str,
+) -> Vec<&'static PlayerClientProfile> {
+    let preferred = match normalize_playback_source(source) {
+        "visionos" => Some("VISIONOS"),
+        "android_vr" => Some("ANDROID_VR"),
+        "web_remix" => Some("WEB_REMIX"),
+        "tv_html5" => Some("TVHTML5"),
+        "web_creator" => Some("WEB_CREATOR"),
+        _ => None,
+    };
+    let mut profiles = ordered_profiles(authenticated);
+    if let Some(index) = preferred.and_then(|client| {
+        profiles
+            .iter()
+            .position(|profile| profile.client_name == client)
+    }) {
+        let preferred = profiles.remove(index);
+        profiles.insert(0, preferred);
+    }
+    profiles
 }
 
 fn player_endpoint(profile: &PlayerClientProfile) -> (&'static str, &'static str) {
@@ -212,9 +288,12 @@ fn build_player_context(profile: &PlayerClientProfile, visitor_data: Option<&str
         "hl": locale.0,
         "gl": locale.1,
         "platform": profile.platform,
-        "userAgent": profile.user_agent,
-        "utcOffsetMinutes": 0
+        "clientScreen": "WATCH",
+        "utcOffsetMinutes": chrono::Local::now().offset().local_minus_utc() / 60
     });
+    if matches!(profile.client_name, "ANDROID_VR" | "TVHTML5") {
+        client["userAgent"] = json!(format!("{},gzip(gfe)", profile.user_agent));
+    }
 
     if let Some(sdk) = profile.android_sdk_version {
         client["androidSdkVersion"] = json!(sdk);
@@ -238,6 +317,7 @@ fn build_player_context(profile: &PlayerClientProfile, visitor_data: Option<&str
 
     json!({
         "client": client,
+        "request": { "useSsl": true, "internalExperimentFlags": [], "consistencyTokenJars": [] },
         "user": { "lockedSafetyMode": false }
     })
 }
@@ -259,8 +339,10 @@ fn build_player_body(
                 "lactMilliseconds": "9",
                 "autonavState": "STATE_OFF",
                 "autoCaptionsDefaultOn": false,
+                "mdxContext": {},
                 "vis": 10
-            }
+            },
+            "devicePlaybackCapabilities": {"supportsVp9Encoding": true, "supportXhr": true}
         }
     });
 
@@ -271,105 +353,107 @@ fn build_player_body(
     body
 }
 
-/// 从 youtube watch 页提取 visitorData (对齐 yt-dlp webpage bootstrap).
-/// ANDROID_VR 无此字段会 LOGIN_REQUIRED; 缓存 30 分钟避免每首歌都打首页.
-async fn fetch_visitor_data(http: &FallbackHttp) -> AppResult<String> {
-    if let Ok(guard) = VISITOR_DATA_CACHE.lock() {
-        if let Some(cached) = guard.as_ref() {
-            if cached.fetched_at.elapsed() < VISITOR_DATA_TTL && !cached.value.is_empty() {
-                return Ok(cached.value.clone());
-            }
+fn authenticated_player_body(
+    profile: &PlayerClientProfile,
+    video_id: &str,
+    bootstrap: &PlaybackBootstrap,
+) -> Value {
+    let mut body = build_player_body(profile, video_id, Some(&bootstrap.visitor_data));
+    if profile.supports_authenticated_context {
+        if let Some(timestamp) = bootstrap.signature_timestamp {
+            body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"] =
+                json!(timestamp);
         }
     }
-
-    let html = http
-        .send(|client| {
-            client
-                .get("https://www.youtube.com/watch?v=dQw4w9WgXcQ&bpctr=9999999999&has_verified=1")
-                .header("User-Agent", WATCH_PAGE_UA)
-                .header("Accept-Language", "en-US,en;q=0.9")
-        })
-        .await
-        .map_err(|e| AppError::Api(format!("youtube visitor page network: {e}")))?
-        .text()
-        .await
-        .map_err(|e| AppError::Api(format!("youtube visitor page body: {e}")))?;
-
-    let visitor = extract_visitor_data_from_html(&html).ok_or_else(|| {
-        AppError::Api("youtube visitorData missing from watch page".into())
-    })?;
-
-    if let Ok(mut guard) = VISITOR_DATA_CACHE.lock() {
-        *guard = Some(VisitorDataCache {
-            value: visitor.clone(),
-            fetched_at: Instant::now(),
-        });
-    }
-    log::info!(
-        target: "youtube-playback",
-        "visitorData refreshed len={}",
-        visitor.len()
-    );
-    Ok(visitor)
-}
-
-fn extract_visitor_data_from_html(html: &str) -> Option<String> {
-    // "visitorData":"Cgt..."
-    let key = "\"visitorData\":\"";
-    let start = html.find(key)? + key.len();
-    let rest = &html[start..];
-    let end = rest.find('"')?;
-    let value = rest[..end].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hex = &input[i + 1..i + 3];
-                if let Ok(v) = u8::from_str_radix(hex, 16) {
-                    out.push(v);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
+    if profile.client_name == "WEB_REMIX" {
+        let client = &mut body["context"]["client"];
+        client["clientVersion"] = json!(bootstrap.client_version);
+        client["clientScreen"] = json!("WATCH_FULL_SCREEN");
+        client["userAgent"] = json!(format!("{},gzip(gfe)", profile.user_agent));
+        client["browserName"] = json!("Chrome");
+        client["browserVersion"] = json!("146.0.0.0");
+        client["originalUrl"] = json!(format!("{ORIGIN_MUSIC}/"));
+        client["clientFormFactor"] = json!("UNKNOWN_FORM_FACTOR");
+        client["playerType"] = json!("UNIPLAYER");
+        client["userInterfaceTheme"] = json!("USER_INTERFACE_THEME_LIGHT");
+        client["connectionType"] = json!("CONN_CELLULAR_4G");
+        client["screenWidthPoints"] = json!(771);
+        client["screenHeightPoints"] = json!(897);
+        client["screenPixelDensity"] = json!(1);
+        client["screenDensityFloat"] = json!(1.375);
+        client["tvAppInfo"] = json!({"livingRoomAppMode": "LIVING_ROOM_APP_MODE_UNSPECIFIED"});
+        client["deviceMake"] = json!("");
+        client["deviceModel"] = json!("");
+        client["acceptHeader"] = json!("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+        if let Ok(time_zone) = iana_time_zone::get_timezone() {
+            client["timeZone"] = json!(time_zone);
+        }
+        client["configInfo"] = if bootstrap.config_info.is_object() {
+            bootstrap.config_info.clone()
+        } else {
+            json!({})
+        };
+        for (key, value) in [
+            ("rolloutToken", &bootstrap.rollout_token),
+            ("deviceExperimentId", &bootstrap.device_experiment_id),
+            ("remoteHost", &bootstrap.remote_host),
+        ] {
+            if !value.is_empty() {
+                client[key] = json!(value);
             }
         }
+        body["context"]["clientScreenNonce"] = json!(request_nonce());
+        body["context"]["clickTracking"] = json!({"clickTrackingParams": ""});
+        body["context"]["adSignalsInfo"] = web_remix_ad_signals();
+        body["playbackContext"]["contentPlaybackContext"]["referer"] =
+            json!(format!("{ORIGIN_MUSIC}/"));
+        body["cpn"] = json!(request_nonce());
+        body["captionParams"] = json!({});
+        body["playlistId"] = json!(format!("RDAMVM{video_id}"));
     }
-    String::from_utf8_lossy(&out).into_owned()
+    body
+}
+
+fn web_remix_ad_signals() -> Value {
+    let params = [
+        ("dt", now_ms().to_string()),
+        ("flash", "0".into()),
+        ("frm", "0".into()),
+        (
+            "u_tz",
+            (chrono::Local::now().offset().local_minus_utc() / 60).to_string(),
+        ),
+        ("u_his", "5".into()),
+        ("u_h", "1152".into()),
+        ("u_w", "2048".into()),
+        ("u_ah", "1104".into()),
+        ("u_aw", "2048".into()),
+        ("u_cd", "32".into()),
+        ("bc", "31".into()),
+        ("bih", "897".into()),
+        ("biw", "757".into()),
+        ("brdim", "0,0,0,0,2048,0,2048,1104,771,897".into()),
+        ("vis", "1".into()),
+        ("wgl", "true".into()),
+        ("ca_type", "image".into()),
+    ];
+    json!({"params": params.into_iter().map(|(key, value)| json!({"key": key, "value": value})).collect::<Vec<_>>()})
+}
+
+fn request_nonce() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut random = rand::thread_rng();
+    (0..16)
+        .map(|_| ALPHABET[random.gen_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 fn parse_query_map(query: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let mut parts = pair.splitn(2, '=');
-        let key = percent_decode(parts.next().unwrap_or(""));
-        let value = percent_decode(parts.next().unwrap_or(""));
-        if !key.is_empty() {
-            map.insert(key, value);
-        }
-    }
-    map
+    url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, _)| !key.is_empty())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect()
 }
 
 /// 从 stream URL 的 `c=` 客户端参数推导拉流 User-Agent.
@@ -382,6 +466,7 @@ pub fn stream_user_agent_for_url(url: &str) -> &'static str {
         .map(|s| s.trim().to_ascii_uppercase())
         .unwrap_or_default();
     match client.as_str() {
+        "VISIONOS" => STREAM_VISIONOS_USER_AGENT,
         "IOS" => STREAM_IOS_USER_AGENT,
         "ANDROID" | "ANDROID_TESTSUITE" => STREAM_ANDROID_USER_AGENT,
         "ANDROID_MUSIC" => STREAM_ANDROID_MUSIC_USER_AGENT,
@@ -430,11 +515,7 @@ pub fn resolve_format_url(format: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let sp = params
-            .get("sp")
-            .map(String::as_str)
-            .unwrap_or("sig")
-            .trim();
+        let sp = params.get("sp").map(String::as_str).unwrap_or("sig").trim();
         return Some(append_query_param(url, sp, signature));
     }
 
@@ -464,6 +545,33 @@ fn collect_format_arrays(resp: &Value) -> Vec<Value> {
     out
 }
 
+
+fn response_needs_po_token(response: &Value, avoid_direct: bool) -> bool {
+    let mut formats = collect_format_arrays(response);
+    if formats.iter().any(is_audio_like) {
+        formats.retain(is_audio_like);
+    }
+    let manifest_needs_token = response
+        .pointer("/streamingData/hlsManifestUrl")
+        .and_then(Value::as_str)
+        .is_some_and(|url| {
+            super::hls::is_trusted_hls_url(url) && !super::hls::has_manifest_token(url)
+        });
+    manifest_needs_token
+        || (!avoid_direct
+            && formats.iter().any(|format| {
+                if let Some(url) = resolve_format_url(format) {
+                    trusted_stream_url(&url) && !super::hls::has_manifest_token(&url)
+                } else {
+                    format
+                        .get("signatureCipher")
+                        .or_else(|| format.get("cipher"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|cipher| !cipher.is_empty())
+                }
+            }))
+}
+
 fn is_audio_like(format: &Value) -> bool {
     let mime = format
         .get("mimeType")
@@ -480,6 +588,7 @@ fn format_to_stream(format: &Value) -> Option<YtAudioStream> {
     let url = resolve_format_url(format)?;
     Some(YtAudioStream {
         url,
+        stream_type: super::client::YtStreamType::Direct,
         bitrate: format.get("bitrate").and_then(|v| v.as_u64()).unwrap_or(0),
         mime_type: format
             .get("mimeType")
@@ -533,7 +642,12 @@ fn extract_audio_streams(resp: &Value) -> Vec<YtAudioStream> {
 }
 
 fn mime_playback_score(mime: &str) -> u8 {
-    let base = mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase();
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase();
     if base.starts_with("audio/mp4") || base == "audio/m4a" || base == "audio/aac" {
         3
     } else if base.starts_with("audio/") {
@@ -576,7 +690,15 @@ fn build_playback_client(no_proxy: bool) -> AppResult<Client> {
         .user_agent("com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)")
         // 不启用 cookie_store: 登录 Cookie 仅在 player 请求上显式附带,
         // CDN 拉流路径不会被 jar 自动污染
-        .cookie_store(false);
+        .cookie_store(false)
+        // API 与 CDN 地址均已规范化，禁止带 token 的 Location 跨来源跟随
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(20))
+        // 经代理时一次 TLS 握手就要 2-3 秒，连接留在池里跨曲目复用，并用心跳保活
+        .pool_idle_timeout(Duration::from_secs(10 * 60))
+        .tcp_keepalive(Duration::from_secs(30))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_while_idle(true);
     if no_proxy {
         builder = builder.no_proxy();
     }
@@ -585,210 +707,699 @@ fn build_playback_client(no_proxy: bool) -> AppResult<Client> {
         .map_err(|e| AppError::Other(format!("build youtube playback client: {e}")))
 }
 
-/// 播放侧专用传输：主路直连，兜底走系统代理
-///
-/// 这条链路刻意独立于 AppState 的共享客户端（不带 cookie jar），
-/// 但同样要能在「必须走代理才能出网」的网络里自愈，所以配一个反向兜底。
-fn playback_http_client() -> AppResult<FallbackHttp> {
+fn proxy_order(bypass_proxy: bool) -> [bool; 2] {
+    [bypass_proxy, !bypass_proxy]
+}
+
+// 直连与走代理各一个进程级客户端；每次解析都新建会丢掉连接池，次次重新握手
+static PLAYBACK_CLIENTS: std::sync::OnceLock<[Client; 2]> = std::sync::OnceLock::new();
+
+fn shared_playback_client(no_proxy: bool) -> AppResult<Client> {
+    if PLAYBACK_CLIENTS.get().is_none() {
+        let built = [build_playback_client(false)?, build_playback_client(true)?];
+        let _ = PLAYBACK_CLIENTS.set(built);
+    }
+    let clients = PLAYBACK_CLIENTS
+        .get()
+        .ok_or_else(|| AppError::Other("youtube playback client unavailable".into()))?;
+    Ok(clients[usize::from(no_proxy)].clone())
+}
+
+// 与主应用保持相同代理优先级，独立客户端避免自动携带账号 Cookie
+fn playback_http_client(bypass_proxy: bool) -> AppResult<FallbackHttp> {
+    let [primary, fallback] = proxy_order(bypass_proxy);
     Ok(FallbackHttp::with_fallback(
-        &build_playback_client(true)?,
-        &build_playback_client(false)?,
+        &shared_playback_client(primary)?,
+        &shared_playback_client(fallback)?,
         "youtube-playback",
     ))
 }
 
-fn build_cookie_header(auth: &YouTubeAuth) -> String {
-    auth.cookies
-        .iter()
-        .filter(|c| !c.name.is_empty() && !c.value.is_empty())
-        .map(|c| format!("{}={}", c.name, c.value))
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-/// player 登录 Cookie 头.
-/// 注意: 当前 mobile/TV player 路径不要附带 SAPISID*HASH.
-/// 2026-07 实测: IOS/ANDROID + Cookie 正常; 再加 Authorization 会 HTTP 400 INVALID_ARGUMENT.
-/// WEB_REMIX 库接口仍使用完整 SAPISID*HASH (见 client.rs / account.rs).
-fn player_cookie_header(auth: Option<&YouTubeAuth>) -> Option<String> {
-    let auth = auth.filter(|a| a.has_login())?;
-    let cookie_header = build_cookie_header(auth);
-    if cookie_header.is_empty() {
-        None
-    } else {
-        Some(cookie_header)
+fn build_player_request(
+    client: &Client,
+    profile: &PlayerClientProfile,
+    video_id: &str,
+    bootstrap: &PlaybackBootstrap,
+) -> reqwest::RequestBuilder {
+    let body = authenticated_player_body(profile, video_id, bootstrap);
+    let (endpoint, origin) = player_endpoint(profile);
+    let mut url = url::Url::parse(endpoint).expect("static player URL");
+    url.query_pairs_mut()
+        .append_pair("prettyPrint", "false")
+        .append_pair("key", &bootstrap.api_key);
+    if profile.client_name != "WEB_REMIX" {
+        url.query_pairs_mut().append_pair("id", video_id);
     }
+    let host = if matches!(profile.host, PlayerHost::Music) {
+        "music.youtube.com"
+    } else {
+        "www.youtube.com"
+    };
+    let cookie_values = super::account::select_cookie_values(&bootstrap.cookies, host);
+    let cookie_header = cookie_values
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let authorization = if profile.supports_authenticated_context && bootstrap.logged_in {
+        crate::auth::youtube_hash::build_youtube_authorization(
+            cookie_values.get("SAPISID").map(String::as_str),
+            cookie_values.get("__Secure-1PAPISID").map(String::as_str),
+            cookie_values.get("__Secure-3PAPISID").map(String::as_str),
+            cookie_values.get("APISID").map(String::as_str),
+            origin,
+            &bootstrap.user_session_id,
+        )
+    } else {
+        None
+    };
+    let version = if profile.client_name == "WEB_REMIX" {
+        bootstrap.client_version.as_str()
+    } else {
+        profile.client_version
+    };
+    let referer = if profile.client_name == "WEB_REMIX" {
+        format!("{origin}/watch?v={video_id}&list=RDAMVM{video_id}")
+    } else {
+        format!("{origin}/")
+    };
+    let mut request = client
+        .post(url.clone())
+        .header("User-Agent", profile.user_agent)
+        .header("Content-Type", "application/json")
+        .header(
+            "Accept-Language",
+            format!("{},en;q=0.8", super::innertube_locale().0),
+        )
+        .header("Origin", origin)
+        .header("Referer", &referer)
+        .header("X-YouTube-Client-Name", profile.client_id)
+        .header("X-YouTube-Client-Version", version);
+    if !bootstrap.visitor_data.is_empty() {
+        request = request.header("X-Goog-Visitor-Id", &bootstrap.visitor_data);
+    }
+    if profile.client_name != "WEB_REMIX" {
+        request = request.header("X-Goog-Api-Format-Version", "2");
+    }
+    if profile.supports_authenticated_context {
+        request = request.header("X-Goog-AuthUser", &bootstrap.session_index);
+        if !cookie_header.is_empty() {
+            request = request.header("Cookie", &cookie_header);
+        }
+        if profile.client_name == "WEB_REMIX" {
+            request = request.header(
+                "X-YouTube-Bootstrap-Logged-In",
+                bootstrap.logged_in.to_string(),
+            );
+        }
+        if let Some(value) = &authorization {
+            request = request
+                .header("Authorization", value)
+                .header("X-Origin", origin);
+        }
+        if bootstrap.logged_in {
+            request = request.header("X-YouTube-Bootstrap-Logged-In", "true");
+        }
+        if profile.client_name == "TVHTML5" && !bootstrap.delegated_session_id.is_empty() {
+            request = request.header("X-Goog-PageId", &bootstrap.delegated_session_id);
+        }
+    }
+    request.json(&body)
 }
 
 async fn player_request(
     http: &FallbackHttp,
     profile: &PlayerClientProfile,
     video_id: &str,
-    auth: Option<&YouTubeAuth>,
-    visitor_data: Option<&str>,
+    bootstrap: &PlaybackBootstrap,
 ) -> AppResult<Value> {
-    let body = build_player_body(profile, video_id, visitor_data);
-    let (endpoint, origin) = player_endpoint(profile);
-    let url = format!(
-        "{endpoint}?prettyPrint=false&id={}&key={}",
-        urlencoding::encode(video_id),
-        DEFAULT_PLAYER_API_KEY
-    );
-    let cookie_header = player_cookie_header(auth);
-
-    // build 会被兜底路径重复调用，必须是可重复执行的纯构造
-    let resp = http
-        .send(|client| {
-            let mut req = client
-                .post(&url)
-                .header("User-Agent", profile.user_agent)
-                .header("Content-Type", "application/json")
-                .header("Origin", origin)
-                .header("Referer", format!("{origin}/"))
-                .header("X-YouTube-Client-Name", profile.client_id)
-                .header("X-YouTube-Client-Version", profile.client_version)
-                .header("X-Goog-Api-Format-Version", "2");
-
-            // visitorData 同时放 body 与 header (yt-dlp generate_api_headers 同款)
-            if let Some(vd) = visitor_data.map(str::trim).filter(|s| !s.is_empty()) {
-                req = req.header("X-Goog-Visitor-Id", vd);
-            }
-
-            // 仅 Cookie: 让服务端识别登录会话/地区偏好; 不发 SAPISIDHASH 以免 mobile player 400
-            if let Some(cookie) = cookie_header.as_deref() {
-                req = req.header("Cookie", cookie).header("X-Goog-AuthUser", "0");
-            }
-
-            req.json(&body)
-        })
-        .await
-        .map_err(|e| AppError::Api(format!("youtube player network: {e}")))?;
-
-    let status = resp.status();
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Api(format!("youtube player json: {e}")))?;
-
-    if !status.is_success() {
-        let (ps, reason, _) = playability_summary(&data);
-        let api_message = data
-            .pointer("/error/message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        return Err(AppError::Api(format!(
-            "youtube player http {}: client={} playability={} reason={} api={}",
-            status.as_u16(),
-            profile.client_name,
-            ps,
-            reason,
-            api_message
-        )));
-    }
-    Ok(data)
+    let response = http
+        .send(|client| build_player_request(client, profile, video_id, bootstrap))
+        .await?;
+    crate::api::transport::parse_json_response(
+        response,
+        &format!("youtube player {}", profile.client_name),
+    )
+    .await
 }
 
-/// 多客户端解析可播音频流
-/// `auth`: 已登录时传入, player 请求带 Cookie 以启用 Premium; CDN 拉流仍不带 Cookie
+fn stream_cache_key(video_id: &str, auth: Option<&YouTubeAuth>) -> String {
+    let locale = super::innertube_locale();
+    format!(
+        "{}|{}|{}|{}",
+        video_id,
+        super::bootstrap::auth_fingerprint(auth),
+        locale.0,
+        locale.1
+    )
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn trusted_stream_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default();
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && (host == "googlevideo.com"
+            || host.ends_with(".googlevideo.com")
+            || host == "youtube.com"
+            || host.ends_with(".youtube.com"))
+}
+
+fn replace_query(url: &str, key: &str, value: &str) -> Option<String> {
+    let mut url = url::Url::parse(url).ok()?;
+    let pairs = url
+        .query_pairs()
+        .filter(|(name, _)| name != key)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    url.query_pairs_mut()
+        .extend_pairs(pairs)
+        .append_pair(key, value);
+    Some(url.into())
+}
+
+async fn resolve_response_streams(
+    http: &FallbackHttp,
+    response: &Value,
+    bootstrap: &PlaybackBootstrap,
+    challenge_wait: Option<Duration>,
+) -> AppResult<Vec<YtAudioStream>> {
+    let (audio_formats, mut muxed_formats): (Vec<_>, Vec<_>) = collect_format_arrays(response)
+        .into_iter()
+        .partition(is_audio_like);
+    muxed_formats.retain(|format| {
+        format
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .is_some_and(|mime| mime.starts_with("video/"))
+    });
+    // 成功音频不处理视频 challenge，音频不可用时保留 progressive 兜底
+    match resolve_format_streams(http, audio_formats, bootstrap, challenge_wait).await {
+        Ok(streams) if !streams.is_empty() => return Ok(streams),
+        Err(error) if muxed_formats.is_empty() || is_challenge_warming(&error) => {
+            return Err(error)
+        }
+        _ => {}
+    }
+    resolve_format_streams(http, muxed_formats, bootstrap, challenge_wait).await
+}
+
+fn is_challenge_warming(error: &AppError) -> bool {
+    matches!(error, AppError::Api(message) if message == CHALLENGE_WARMING)
+}
+
+async fn resolve_format_streams(
+    http: &FallbackHttp,
+    formats: Vec<Value>,
+    bootstrap: &PlaybackBootstrap,
+    challenge_wait: Option<Duration>,
+) -> AppResult<Vec<YtAudioStream>> {
+    let mut signatures = Vec::new();
+    let mut throttling = Vec::new();
+    for format in &formats {
+        let cipher = format
+            .get("signatureCipher")
+            .or_else(|| format.get("cipher"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = parse_query_map(cipher);
+        if let Some(signature) = params.get("s").filter(|value| !value.is_empty()) {
+            if !signatures.contains(signature) {
+                signatures.push(signature.clone());
+            }
+        }
+        let raw = format
+            .get("url")
+            .and_then(Value::as_str)
+            .or_else(|| params.get("url").map(String::as_str))
+            .unwrap_or_default();
+        if let Some(value) = url::Url::parse(raw).ok().and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "n")
+                .map(|(_, value)| value.into_owned())
+        }) {
+            if !throttling.contains(&value) {
+                throttling.push(value);
+            }
+        }
+    }
+    let solving = super::challenge::solve(http, &bootstrap.player_js_url, signatures, throttling);
+    let solutions = match challenge_wait {
+        Some(wait) => tokio::time::timeout(wait, solving)
+            .await
+            .map_err(|_| AppError::Api(CHALLENGE_WARMING.into()))??,
+        None => solving.await?,
+    };
+    let mut resolved = Vec::new();
+    for mut format in formats {
+        let cipher = format
+            .get("signatureCipher")
+            .or_else(|| format.get("cipher"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = parse_query_map(cipher);
+        let mut raw = resolve_format_url(&format);
+        if raw.is_none() {
+            if let (Some(url), Some(signature)) = (
+                params.get("url"),
+                params
+                    .get("s")
+                    .and_then(|value| solutions.signatures.get(value)),
+            ) {
+                raw = replace_query(
+                    url,
+                    params
+                        .get("sp")
+                        .filter(|value| !value.is_empty())
+                        .map(String::as_str)
+                        .unwrap_or("sig"),
+                    signature,
+                );
+            }
+        }
+        let Some(mut raw) = raw.filter(|url| trusted_stream_url(url)) else {
+            continue;
+        };
+        let n = url::Url::parse(&raw).ok().and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "n")
+                .map(|(_, value)| value.into_owned())
+        });
+        if let Some(n) = n {
+            let Some(value) = solutions.throttling.get(&n) else {
+                continue;
+            };
+            let Some(url) = replace_query(&raw, "n", value) else {
+                continue;
+            };
+            raw = url;
+        }
+        format["url"] = json!(raw);
+        resolved.push(format);
+    }
+    Ok(extract_audio_streams(
+        &json!({"streamingData": {"adaptiveFormats": resolved}}),
+    ))
+}
+
 pub async fn resolve_audio_streams(
     video_id: &str,
     auth: Option<&YouTubeAuth>,
 ) -> AppResult<Vec<YtAudioStream>> {
-    let video_id = video_id.trim();
-    if video_id.is_empty() {
-        return Err(AppError::Api("empty youtube video id".into()));
-    }
+    resolve_audio_streams_with_app(video_id, auth, None, false).await
+}
 
-    let http = playback_http_client()?;
-    let mut errors = Vec::new();
-    let logged_in = auth.map(YouTubeAuth::has_login).unwrap_or(false);
-    log::info!(
-        target: "youtube-playback",
-        "resolve streams video_id={} logged_in={}",
+pub async fn resolve_audio_streams_with_app(
+    video_id: &str,
+    auth: Option<&YouTubeAuth>,
+    app: Option<&tauri::AppHandle>,
+    force_refresh: bool,
+) -> AppResult<Vec<YtAudioStream>> {
+    resolve_audio_streams_with_strategy(video_id, auth, app, force_refresh, false).await
+}
+
+
+pub async fn resolve_audio_streams_with_strategy(
+    video_id: &str,
+    auth: Option<&YouTubeAuth>,
+    app: Option<&tauri::AppHandle>,
+    force_refresh: bool,
+    avoid_direct: bool,
+) -> AppResult<Vec<YtAudioStream>> {
+    resolve_audio_streams_with_source(
         video_id,
-        logged_in
-    );
+        auth,
+        app,
+        force_refresh,
+        avoid_direct,
+        "automatic",
+    )
+    .await
+}
 
-    // 任一客户端声明需要 visitorData 时预取; 失败不致命, 由该客户端自行报错回退
-    let needs_visitor = playback_client_profiles()
-        .iter()
-        .any(|p| p.requires_visitor_data);
-    let visitor_data = if needs_visitor {
-        match fetch_visitor_data(&http).await {
-            Ok(vd) => Some(vd),
-            Err(err) => {
-                log::warn!(
-                    target: "youtube-playback",
-                    "visitorData fetch failed: {}",
-                    err
-                );
-                errors.push(format!("visitorData:{err}"));
-                None
+pub async fn resolve_audio_streams_with_source(
+    video_id: &str,
+    auth: Option<&YouTubeAuth>,
+    app: Option<&tauri::AppHandle>,
+    force_refresh: bool,
+    avoid_direct: bool,
+    playback_source: &str,
+) -> AppResult<Vec<YtAudioStream>> {
+    let video_id = video_id.trim();
+    if video_id.is_empty()
+        || video_id.len() > 128
+        || !video_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(AppError::Api("Invalid YouTube video id".into()));
+    }
+    let playback_source = normalize_playback_source(playback_source);
+    let cache_key = format!(
+        "{}|hls={avoid_direct}|source={playback_source}",
+        stream_cache_key(video_id, auth)
+    );
+    if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
+        if force_refresh {
+            cache.remove(&cache_key);
+        } else if let Some(streams) = cache.get(&cache_key, now_ms()) {
+            return Ok(streams);
+        }
+    }
+    let bypass_proxy = app
+        .and_then(|app| app.try_state::<crate::state::AppState>())
+        .map(|state| state.bypasses_system_proxy())
+        .unwrap_or(true);
+    let http = playback_http_client(bypass_proxy)?;
+    let logged_in = auth.is_some_and(YouTubeAuth::has_login);
+    let mut errors = Vec::new();
+    let mut authenticated_bootstrap = BootstrapAttempt::default();
+    let mut anonymous_bootstrap = BootstrapAttempt::default();
+    let mut hls_fallback = Vec::new();
+    let mut token_acquisition: Option<PoTokenAcquisition> = None;
+    let mut token_pending_streams = Vec::new();
+    let resolve_started = std::time::Instant::now();
+    // 第一轮只跑能立即出结果的客户端；还要等 player 预热或令牌铸造的挪到队尾，
+    // 其它客户端都失败后再按原顺序阻塞重试，需要登录的内容不受影响
+    let mut queue: Vec<(&'static PlayerClientProfile, bool)> =
+        ordered_profiles_with_source(logged_in, playback_source)
+            .into_iter()
+            .map(|profile| (profile, false))
+            .collect();
+    let mut position = 0;
+    while let Some(&(profile, deferred)) = queue.get(position) {
+        position += 1;
+        let profile_started = std::time::Instant::now();
+        let bootstrap_slot = if profile.supports_authenticated_context {
+            &mut authenticated_bootstrap
+        } else {
+            &mut anonymous_bootstrap
+        };
+        let bootstrap_auth = if profile.supports_authenticated_context {
+            auth
+        } else {
+            None
+        };
+        // 第一轮不为首页配置等网络：有缓存或快照就直接用；登录态还没有时先让匿名客户端起播
+        if !deferred && !bootstrap_slot.is_resolved() {
+            if let Some(value) = super::bootstrap::cached(
+                &http,
+                bootstrap_auth,
+                profile.supports_authenticated_context,
+            ) {
+                bootstrap_slot.set(value);
+            } else if profile.supports_authenticated_context {
+                super::bootstrap::refresh_in_background(&http, bootstrap_auth, true);
+                log::info!(target: "youtube-playback", "client={} deferred: bootstrap not cached", profile.client_name);
+                queue.push((profile, true));
+                continue;
             }
         }
-    } else {
-        None
-    };
-
-    for profile in playback_client_profiles() {
-        if profile.requires_visitor_data && visitor_data.is_none() {
-            errors.push(format!("{}:missing_visitor_data", profile.client_name));
+        let bootstrap = bootstrap_slot
+            .get_or_fetch(|| {
+                super::bootstrap::fetch(
+                    &http,
+                    bootstrap_auth,
+                    profile.supports_authenticated_context,
+                    // 流级重试复用有效配置，首页过期由自身 TTL 和登录指纹判定
+                    false,
+                )
+            })
+            .await;
+        let Some(mut bootstrap) = bootstrap.cloned() else {
+            errors.push(format!("{}:bootstrap_failed", profile.client_name));
             continue;
-        }
-        let profile_visitor = if profile.requires_visitor_data {
-            visitor_data.as_deref()
-        } else {
-            // IOS/ANDROID 不强制 visitor; 有则附带无害
-            visitor_data.as_deref()
         };
-        match player_request(&http, profile, video_id, auth, profile_visitor).await {
-            Ok(resp) => {
-                let (status, reason, subreason) = playability_summary(&resp);
-                if status != "OK" {
-                    log::warn!(
-                        target: "youtube-playback",
-                        "client={} status={} reason={} sub={} logged_in={}",
-                        profile.client_name,
-                        status,
-                        reason,
-                        subreason,
-                        logged_in
-                    );
-                    errors.push(format!(
-                        "{}:{}:{}:{}",
-                        profile.client_name, status, reason, subreason
-                    ));
+        if profile.supports_authenticated_context && !bootstrap.player_js_url.is_empty() {
+            let player_js_url = bootstrap.player_js_url.clone();
+            if bootstrap.signature_timestamp.is_none() {
+                bootstrap.signature_timestamp =
+                    super::challenge::cached_signature_timestamp(&player_js_url);
+            }
+            if bootstrap.signature_timestamp.is_none()
+                || !super::challenge::player_ready(&player_js_url)
+            {
+                super::challenge::warm(http.clone(), player_js_url.clone());
+                if !deferred {
+                    log::info!(target: "youtube-playback", "client={} deferred: player warming", profile.client_name);
+                    queue.push((profile, true));
                     continue;
                 }
-
-                let streams = extract_audio_streams(&resp);
-                log::info!(
-                    target: "youtube-playback",
-                    "client={} version={} streams={} logged_in={}",
-                    profile.client_name,
-                    profile.client_version,
-                    streams.len(),
-                    logged_in
-                );
-                if !streams.is_empty() {
-                    return Ok(streams);
+                if bootstrap.signature_timestamp.is_none() {
+                    bootstrap.signature_timestamp =
+                        super::challenge::signature_timestamp(&http, &player_js_url).await;
                 }
-                errors.push(format!("{}:no_audio_url", profile.client_name));
             }
-            Err(err) => {
-                log::warn!(
-                    target: "youtube-playback",
-                    "client={} error={}",
-                    profile.client_name,
-                    err
-                );
-                errors.push(format!("{}:{}", profile.client_name, err));
+        }
+        if profile.requires_po_token && !deferred {
+            if let Some(app) = app {
+                let session_auth = YouTubeAuth {
+                    cookies: bootstrap.cookies.clone(),
+                    nickname: None,
+                    avatar_url: None,
+                };
+                let fingerprint = super::bootstrap::auth_fingerprint(Some(&session_auth));
+                if super::web_po::cached_token(&fingerprint, &bootstrap.remote_host, video_id)
+                    .is_none()
+                {
+                    super::web_po::warm(
+                        app.clone(),
+                        session_auth,
+                        video_id.to_owned(),
+                        bootstrap.visitor_data.clone(),
+                        bootstrap.remote_host.clone(),
+                    );
+                    log::info!(target: "youtube-playback", "client={} deferred: po token not ready", profile.client_name);
+                    queue.push((profile, true));
+                    continue;
+                }
+            }
+        }
+        if profile.requires_visitor_data && bootstrap.visitor_data.is_empty() {
+            errors.push(format!("{}:missing_visitor", profile.client_name));
+            continue;
+        }
+        let bootstrap_ms = profile_started.elapsed().as_millis();
+        let response = match player_request(&http, profile, video_id, &bootstrap).await {
+            Ok(value) => value,
+            Err(_) => {
+                errors.push(format!("{}:request_failed", profile.client_name));
+                continue;
+            }
+        };
+        let (status, _, _) = playability_summary(&response);
+        let player_ms = profile_started.elapsed().as_millis();
+        if status != "OK" {
+            log::info!(
+                target: "youtube-playback",
+                "client={} status={status} bootstrap_ms={bootstrap_ms} player_ms={player_ms}",
+                profile.client_name,
+            );
+            errors.push(format!("{}:{}", profile.client_name, status));
+            continue;
+        }
+        let manifest = response
+            .pointer("/streamingData/hlsManifestUrl")
+            .and_then(Value::as_str)
+            .filter(|url| super::hls::is_trusted_hls_url(url));
+        let mut requires_token =
+            profile.requires_po_token && response_needs_po_token(&response, avoid_direct);
+        let start_token_acquisition = || {
+            let app = app?.clone();
+            let session_auth = YouTubeAuth {
+                cookies: bootstrap.cookies.clone(),
+                nickname: None,
+                avatar_url: None,
+            };
+            let video_id = video_id.to_owned();
+            let visitor_data = bootstrap.visitor_data.clone();
+            let remote_host = bootstrap.remote_host.clone();
+            Some(PoTokenAcquisition::new(async move {
+                super::web_po::mint(
+                    &app,
+                    Some(&session_auth),
+                    &super::bootstrap::auth_fingerprint(Some(&session_auth)),
+                    &video_id,
+                    &visitor_data,
+                    &remote_host,
+                    force_refresh,
+                )
+                .await
+                .ok()
+            }))
+        };
+        if requires_token && token_acquisition.is_none() {
+            token_acquisition = start_token_acquisition();
+        }
+        // 令牌预取与签名解析并行，短等待后让其它客户端接管
+        let mut streams = if avoid_direct {
+            Vec::new()
+        } else {
+            let challenge_wait = (!deferred).then_some(CHALLENGE_WARMUP_WAIT);
+            match resolve_response_streams(&http, &response, &bootstrap, challenge_wait).await {
+                Ok(value) => value,
+                Err(error) if is_challenge_warming(&error) => {
+                    log::info!(target: "youtube-playback", "client={} deferred: challenge still solving", profile.client_name);
+                    queue.push((profile, true));
+                    continue;
+                }
+                Err(_) => {
+                    errors.push(format!("{}:challenge_failed", profile.client_name));
+                    Vec::new()
+                }
+            }
+        };
+        // progressive 兜底可能在原始音频格式之外，需要沿用相同令牌校验
+        requires_token |= profile.requires_po_token
+            && streams
+                .iter()
+                .any(|stream| !super::hls::has_manifest_token(&stream.url));
+        if requires_token && token_acquisition.is_none() {
+            token_acquisition = start_token_acquisition();
+        }
+        let acquired_token = if requires_token {
+            if let Some(acquisition) = token_acquisition.as_mut() {
+                acquisition.fast_token().await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let duration_ms = response
+            .pointer("/videoDetails/lengthSeconds")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .or_else(|| value.as_u64())
+            })
+            .unwrap_or(0)
+            .saturating_mul(1000);
+        if requires_token && acquired_token.is_none() && token_acquisition.is_some() {
+            token_pending_streams.push(TokenPendingStreams {
+                streams: streams
+                    .iter()
+                    .filter(|stream| !super::hls::has_manifest_token(&stream.url))
+                    .cloned()
+                    .collect(),
+                manifest: manifest
+                    .filter(|url| !super::hls::has_manifest_token(url))
+                    .map(str::to_owned),
+                duration_ms,
+            });
+        }
+        if profile.requires_po_token {
+            if let Some(token) = &acquired_token {
+                for stream in &mut streams {
+                    if !super::hls::has_manifest_token(&stream.url) {
+                        if let Some(url) = replace_query(&stream.url, "pot", token) {
+                            stream.url = url;
+                        }
+                    }
+                }
+            }
+            streams.retain(|stream| super::hls::has_manifest_token(&stream.url));
+        }
+        log::info!(
+            target: "youtube-playback",
+            "client={} streams={} token_required={requires_token} token={} bootstrap_ms={bootstrap_ms} player_ms={player_ms} profile_ms={} total_ms={}",
+            profile.client_name,
+            streams.len(),
+            acquired_token.is_some(),
+            profile_started.elapsed().as_millis(),
+            resolve_started.elapsed().as_millis(),
+        );
+        if !avoid_direct && !streams.is_empty() {
+            if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
+                cache.put(cache_key, streams.clone(), now_ms());
+            }
+            return Ok(streams);
+        }
+        if let Some(manifest) = manifest {
+            let manifest = if profile.requires_po_token && !super::hls::has_manifest_token(manifest)
+            {
+                acquired_token
+                    .as_ref()
+                    .and_then(|token| super::hls::append_manifest_token(manifest, token))
+            } else {
+                Some(manifest.into())
+            };
+            if let Some(manifest) = manifest {
+                if let Ok(candidates) =
+                    super::hls::fetch_audio_playlists(&http, &manifest, duration_ms).await
+                {
+                    for candidate in candidates {
+                        if !hls_fallback
+                            .iter()
+                            .any(|stream: &YtAudioStream| stream.url == candidate.url)
+                        {
+                            hls_fallback.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        errors.push(format!("{}:no_playable_audio", profile.client_name));
+    }
+    // 所有其它来源都失败时复用预取结果，不重新请求 player 或重新铸造
+    if hls_fallback.is_empty() && !token_pending_streams.is_empty() {
+        if let Some(acquisition) = token_acquisition.as_mut() {
+            if let Some(token) = acquisition.finish().await {
+                for pending in token_pending_streams {
+                    if !avoid_direct {
+                        let streams = pending
+                            .streams
+                            .into_iter()
+                            .filter_map(|mut stream| {
+                                stream.url = replace_query(&stream.url, "pot", &token)?;
+                                Some(stream)
+                            })
+                            .collect::<Vec<_>>();
+                        if !streams.is_empty() {
+                            if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
+                                cache.put(cache_key, streams.clone(), now_ms());
+                            }
+                            return Ok(streams);
+                        }
+                    }
+                    if let Some(manifest) = pending
+                        .manifest
+                        .and_then(|manifest| super::hls::append_manifest_token(&manifest, &token))
+                    {
+                        if let Ok(candidates) =
+                            super::hls::fetch_audio_playlists(&http, &manifest, pending.duration_ms)
+                                .await
+                        {
+                            hls_fallback.extend(candidates);
+                        }
+                    }
+                }
             }
         }
     }
-
+    if !hls_fallback.is_empty() {
+        hls_fallback.sort_by_key(|stream| std::cmp::Reverse(stream.bitrate));
+        if let Ok(mut cache) = AUDIO_STREAM_CACHE.lock() {
+            cache.put(cache_key, hls_fallback.clone(), now_ms());
+        }
+        return Ok(hls_fallback);
+    }
     Err(AppError::Api(format!(
-        "YouTube playback failed for {video_id}: {}",
+        "YouTube playback failed: {}",
         errors.join(" | ")
     )))
 }
@@ -796,13 +1407,258 @@ pub async fn resolve_audio_streams(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_query_param, build_player_body, collect_format_arrays, extract_audio_streams,
-        extract_visitor_data_from_html, parse_query_map, playback_client_profiles,
-        player_cookie_header, resolve_format_url, stream_user_agent_for_url, PlayerHost,
-        STREAM_ANDROID_MUSIC_USER_AGENT, STREAM_ANDROID_USER_AGENT, STREAM_ANDROID_VR_USER_AGENT,
-        STREAM_IOS_USER_AGENT, STREAM_WEB_USER_AGENT,
+        append_query_param, build_playback_client, build_player_body, build_player_request,
+        collect_format_arrays, extract_audio_streams, ordered_profiles, parse_query_map,
+        playback_client_profiles, replace_query, resolve_format_url, stream_user_agent_for_url,
+        trusted_stream_url, STREAM_ANDROID_MUSIC_USER_AGENT, STREAM_ANDROID_USER_AGENT,
+        STREAM_ANDROID_VR_USER_AGENT, STREAM_IOS_USER_AGENT, STREAM_WEB_USER_AGENT,
     };
     use serde_json::json;
+
+
+    #[test]
+    fn selected_source_is_first_without_losing_android_fallback_order() {
+        for authenticated in [false, true] {
+            for (source, client) in [
+                ("visionos", "VISIONOS"),
+                ("android_vr", "ANDROID_VR"),
+                ("web_remix", "WEB_REMIX"),
+                ("tv_html5", "TVHTML5"),
+                ("web_creator", "WEB_CREATOR"),
+            ] {
+                let profiles = super::ordered_profiles_with_source(authenticated, source);
+                assert_eq!(profiles[0].client_name, client);
+                assert_eq!(profiles.len(), playback_client_profiles().len());
+                let mut expected = ordered_profiles(authenticated);
+                let selected = expected
+                    .iter()
+                    .position(|profile| profile.client_name == client)
+                    .unwrap();
+                let selected = expected.remove(selected);
+                expected.insert(0, selected);
+                assert_eq!(
+                    profiles
+                        .iter()
+                        .map(|profile| profile.client_version)
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|profile| profile.client_version)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        assert_eq!(super::normalize_playback_source("unknown"), "automatic");
+        assert_eq!(super::normalize_playback_source(" WEB_REMIX "), "web_remix");
+    }
+
+    #[tokio::test]
+    async fn video_challenges_do_not_delay_an_already_playable_audio_format() {
+        let bootstrap: super::PlaybackBootstrap = serde_json::from_value(json!({
+            "api_key":"fixture", "client_version":"fixture", "visitor_data":"",
+            "player_js_url":"https://untrusted.invalid/player.js", "signature_timestamp":null,
+            "session_index":"0", "user_session_id":"", "delegated_session_id":"", "logged_in":false
+        }))
+        .unwrap();
+        let client = build_playback_client(true).unwrap();
+        let http = crate::api::transport::FallbackHttp::new(&client, "fixture");
+        let response = json!({"streamingData":{"adaptiveFormats":[
+            {"mimeType":"video/mp4", "signatureCipher":"url=https%3A%2F%2Frr.googlevideo.com%2Fvideo&s=irrelevant-video-challenge"},
+            {"mimeType":"audio/mp4", "url":"https://rr.googlevideo.com/audio?c=VISIONOS", "bitrate":160000}
+        ]}});
+        let streams = super::resolve_response_streams(&http, &response, &bootstrap, None)
+            .await
+            .unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].bitrate, 160000);
+    }
+
+    #[tokio::test]
+    async fn unusable_audio_formats_preserve_progressive_fallback() {
+        let bootstrap: super::PlaybackBootstrap = serde_json::from_value(json!({
+            "api_key":"fixture", "client_version":"fixture", "visitor_data":"",
+            "player_js_url":"https://untrusted.invalid/player.js", "signature_timestamp":null,
+            "session_index":"0", "user_session_id":"", "delegated_session_id":"", "logged_in":false
+        }))
+        .unwrap();
+        let client = build_playback_client(true).unwrap();
+        let http = crate::api::transport::FallbackHttp::new(&client, "fixture");
+        for audio in [
+            json!({"mimeType":"audio/mp4", "bitrate":160000}),
+            json!({"mimeType":"audio/mp4", "signatureCipher":"url=https%3A%2F%2Frr.googlevideo.com%2Faudio&s=unavailable-audio-challenge"}),
+        ] {
+            let response = json!({"streamingData":{
+                "adaptiveFormats":[audio],
+                "formats":[{"mimeType":"video/mp4", "url":"https://rr.googlevideo.com/progressive?c=VISIONOS", "bitrate":128000}]
+            }});
+            let streams = super::resolve_response_streams(&http, &response, &bootstrap, None)
+                .await
+                .unwrap();
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].mime_type, "video/mp4");
+            assert_eq!(streams[0].bitrate, 128000);
+            assert!(streams[0].url.contains("/progressive"));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_bootstrap_is_not_retried_for_each_client_in_the_same_resolve() {
+        let mut attempt = super::BootstrapAttempt::<usize>::default();
+        let mut hits = 0;
+        for _ in 0..4 {
+            let value = attempt
+                .get_or_fetch(|| async {
+                    hits += 1;
+                    Err(crate::error::AppError::Api("fixture unavailable".into()))
+                })
+                .await;
+            assert!(value.is_none());
+        }
+        assert_eq!(hits, 1);
+    }
+
+    #[tokio::test]
+    async fn slow_po_token_yields_to_fallback_and_is_reused_without_a_second_mint() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut acquisition = super::PoTokenAcquisition::new(async { receiver.await.ok() });
+        let started = std::time::Instant::now();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), acquisition.fast_token())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() >= super::PO_TOKEN_FAST_PATH_WAIT);
+        assert!(acquisition.fast_token().await.is_none());
+        sender.send("fixture-token".to_string()).unwrap();
+        assert_eq!(acquisition.finish().await.as_deref(), Some("fixture-token"));
+        assert_eq!(
+            acquisition.fast_token().await.as_deref(),
+            Some("fixture-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_po_token_is_cancelled_when_a_faster_client_wins() {
+        struct CancelGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for CancelGuard {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (cancelled_sender, cancelled_receiver) = tokio::sync::oneshot::channel();
+        let acquisition = super::PoTokenAcquisition::new(async move {
+            let _guard = CancelGuard(Some(cancelled_sender));
+            let _ = started_sender.send(());
+            std::future::pending::<Option<String>>().await
+        });
+        started_receiver.await.unwrap();
+        drop(acquisition);
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancelled_receiver)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn http_proxy_priority_respects_the_user_preference() {
+        assert_eq!(super::proxy_order(true), [true, false]);
+        assert_eq!(super::proxy_order(false), [false, true]);
+    }
+
+    #[test]
+    fn actual_player_requests_match_android_headers_context_and_cookie_isolation() {
+        use crate::api::youtube::bootstrap::PlaybackBootstrap;
+        use crate::auth::state::CookieEntry;
+        let mut bootstrap: PlaybackBootstrap = serde_json::from_value(json!({
+            "api_key": "fixture-key", "client_version": "dynamic-version", "visitor_data": "fixture-visitor",
+            "player_js_url": "", "signature_timestamp": 12345, "session_index": "2",
+            "user_session_id": "fixture-user", "delegated_session_id": "fixture-page", "logged_in": true,
+            "remote_host": "fixture-remote", "config_info": {"appInstallData": "fixture-install"},
+            "rollout_token": "fixture-rollout", "device_experiment_id": "fixture-device"
+        })).unwrap();
+        bootstrap.cookies = vec![
+            CookieEntry {
+                name: "SAPISID".into(),
+                value: "fixture-secret".into(),
+                domain: ".youtube.com".into(),
+            },
+            CookieEntry {
+                name: "music-only".into(),
+                value: "fixture".into(),
+                domain: "music.youtube.com".into(),
+            },
+        ];
+        let client = build_playback_client(true).unwrap();
+        for profile in playback_client_profiles() {
+            let request = build_player_request(&client, profile, "fixture-video", &bootstrap)
+                .build()
+                .unwrap();
+            let headers = request.headers();
+            let body: serde_json::Value =
+                serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+            assert_eq!(headers["x-youtube-client-name"], profile.client_id);
+            assert_eq!(headers["x-goog-visitor-id"], "fixture-visitor");
+            assert_eq!(body["videoId"], "fixture-video");
+            assert_eq!(
+                request
+                    .url()
+                    .query_pairs()
+                    .find(|(key, _)| key == "key")
+                    .unwrap()
+                    .1,
+                "fixture-key"
+            );
+            if !profile.supports_authenticated_context {
+                assert!(!headers.contains_key("cookie"));
+                assert!(!headers.contains_key("authorization"));
+                assert!(!headers.contains_key("x-goog-authuser"));
+                assert!(
+                    body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"]
+                        .is_null()
+                );
+            } else {
+                assert!(headers["authorization"]
+                    .to_str()
+                    .unwrap()
+                    .contains("SAPISIDHASH"));
+                assert_eq!(headers["x-goog-authuser"], "2");
+                assert_eq!(
+                    body["playbackContext"]["contentPlaybackContext"]["signatureTimestamp"],
+                    12345
+                );
+            }
+            if profile.client_name == "WEB_REMIX" {
+                assert_eq!(request.url().host_str(), Some("music.youtube.com"));
+                assert!(headers["cookie"]
+                    .to_str()
+                    .unwrap()
+                    .contains("music-only=fixture"));
+                assert_eq!(headers["x-youtube-client-version"], "dynamic-version");
+                assert_eq!(
+                    headers["referer"],
+                    "https://music.youtube.com/watch?v=fixture-video&list=RDAMVMfixture-video"
+                );
+                assert_eq!(
+                    body["context"]["client"]["configInfo"]["appInstallData"],
+                    "fixture-install"
+                );
+                assert_eq!(body["context"]["client"]["remoteHost"], "fixture-remote");
+                assert_eq!(body["context"]["client"]["rolloutToken"], "fixture-rollout");
+                assert_eq!(body["context"]["adSignalsInfo"]["params"][0]["key"], "dt");
+                assert_eq!(body["cpn"].as_str().unwrap().len(), 16);
+            } else {
+                assert_eq!(request.url().host_str(), Some("www.youtube.com"));
+                assert!(!headers
+                    .get("cookie")
+                    .is_some_and(|value| value.to_str().unwrap().contains("music-only")));
+                assert_eq!(headers["x-goog-api-format-version"], "2");
+            }
+        }
+    }
 
     #[test]
     fn stream_ua_matches_client_param() {
@@ -822,7 +1678,9 @@ mod tests {
             STREAM_ANDROID_MUSIC_USER_AGENT
         );
         assert_eq!(
-            stream_user_agent_for_url("https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR&id=1"),
+            stream_user_agent_for_url(
+                "https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR&id=1"
+            ),
             STREAM_ANDROID_VR_USER_AGENT
         );
         // 小写 / TVHTML5 / 缺失 c= 均回退 Web UA
@@ -874,72 +1732,71 @@ mod tests {
     }
 
     #[test]
-    fn profiles_prefer_unciphered_clients_without_web_remix() {
-        let profiles = playback_client_profiles();
-        assert!(profiles.len() >= 4);
-        // 主路径 ANDROID_VR (yt-dlp jsless) + visitorData; IOS/ANDROID 作回退
-        assert_eq!(profiles[0].client_name, "ANDROID_VR");
-        assert!(profiles[0].requires_visitor_data);
-        assert!(profiles.iter().any(|p| p.client_name == "IOS"));
-        assert!(profiles.iter().any(|p| p.client_name == "ANDROID"));
-        assert!(profiles.iter().any(|p| p.client_name == "ANDROID_MUSIC"));
-        // IOS/ANDROID 回退版本必须足够新, 否则 Innertube 直接 HTTP 400
-        let ios = profiles.iter().find(|p| p.client_name == "IOS").unwrap();
-        let android = profiles.iter().find(|p| p.client_name == "ANDROID").unwrap();
-        assert!(ios.client_version.starts_with("20."));
-        assert!(android.client_version.starts_with("20."));
-        // 全部非 Music host, 避免和 WEB_REMIX 登录会话绑定到同一 player 端点
-        assert!(profiles
-            .iter()
-            .all(|p| matches!(p.host, PlayerHost::Www)));
-        // 不包含 WEB_REMIX player
-        assert!(profiles.iter().all(|p| p.client_name != "WEB_REMIX"));
-    }
-
-    #[test]
-    fn player_cookie_header_none_without_login() {
-        assert!(player_cookie_header(None).is_none());
-    }
-
-    #[test]
-    fn player_cookie_header_includes_cookie_when_logged_in() {
-        use crate::auth::state::{CookieEntry, YouTubeAuth};
-        let auth = YouTubeAuth {
-            cookies: vec![
-                CookieEntry {
-                    name: "SAPISID".into(),
-                    value: "sap-value".into(),
-                    domain: ".youtube.com".into(),
-                },
-                CookieEntry {
-                    name: "SID".into(),
-                    value: "sid-value".into(),
-                    domain: ".youtube.com".into(),
-                },
-            ],
-            nickname: None,
-            avatar_url: None,
-        };
-        let cookie = player_cookie_header(Some(&auth)).expect("cookie");
-        assert!(cookie.contains("SAPISID=sap-value"));
-        assert!(cookie.contains("SID=sid-value"));
-        // mobile player 不再附带 SAPISIDHASH (见 player_request)
-        assert!(!cookie.contains("SAPISIDHASH"));
-    }
-
-    #[test]
-    fn android_music_body_includes_player_params() {
-        let profile = playback_client_profiles()
-            .iter()
-            .find(|p| p.client_name == "ANDROID_MUSIC")
-            .expect("android music profile");
-        let body = build_player_body(profile, "dQw4w9WgXcQ", None);
-        assert_eq!(body["videoId"], "dQw4w9WgXcQ");
-        assert_eq!(body["params"], ANDROID_MUSIC_PLAYER_PARAMS_CONST);
+    fn profiles_follow_android_authenticated_and_anonymous_order() {
+        let anonymous = ordered_profiles(false);
         assert_eq!(
-            body["playbackContext"]["contentPlaybackContext"]["html5Preference"],
-            "HTML5_PREF_WANTS"
+            anonymous
+                .iter()
+                .map(|profile| profile.client_name)
+                .collect::<Vec<_>>(),
+            vec![
+                "VISIONOS",
+                "ANDROID_VR",
+                "WEB_REMIX",
+                "TVHTML5",
+                "WEB_CREATOR",
+                "TVHTML5"
+            ]
         );
+        assert_eq!(
+            ordered_profiles(true)
+                .iter()
+                .map(|profile| profile.client_name)
+                .collect::<Vec<_>>(),
+            vec![
+                "WEB_REMIX",
+                "TVHTML5",
+                "WEB_CREATOR",
+                "TVHTML5",
+                "VISIONOS",
+                "ANDROID_VR"
+            ]
+        );
+        assert!(anonymous
+            .iter()
+            .take(2)
+            .all(|profile| !profile.supports_authenticated_context));
+        assert_eq!(anonymous[0].client_version, "0.1");
+        assert_eq!(anonymous[2].client_version, "1.20260403.09.00");
+    }
+
+    #[test]
+    fn encrypted_parameters_are_not_returned_without_solver() {
+        assert!(resolve_format_url(
+            &json!({"signatureCipher": "url=https%3A%2F%2Frr.googlevideo.com%2Fv&s=secret"})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn stream_urls_and_replacements_are_restricted() {
+        assert!(trusted_stream_url(
+            "https://rr1.googlevideo.com/videoplayback?c=VISIONOS"
+        ));
+        assert!(!trusted_stream_url("https://googlevideo.com.evil.test/v"));
+        assert!(!trusted_stream_url("http://rr.googlevideo.com/v"));
+        assert!(!trusted_stream_url("https://user@rr.googlevideo.com/v"));
+        assert!(!trusted_stream_url("https://rr.googlevideo.com:8443/v"));
+        assert_eq!(
+            replace_query(
+                "https://rr.googlevideo.com/v?n=old&n=dup&a=1#fragment",
+                "n",
+                "solved"
+            )
+            .unwrap(),
+            "https://rr.googlevideo.com/v?a=1&n=solved#fragment"
+        );
+        assert_eq!(parse_query_map("bad=%é").get("bad").unwrap(), "%é");
     }
 
     #[test]
@@ -952,19 +1809,6 @@ mod tests {
         assert_eq!(body["context"]["client"]["visitorData"], "CgtVisitorTest");
         assert_eq!(body["context"]["client"]["clientName"], "ANDROID_VR");
     }
-
-    #[test]
-    fn extract_visitor_data_from_watch_html() {
-        let html = r#"{"responseContext":{"visitorData":"CgtABC123xyz"}}"#;
-        assert_eq!(
-            extract_visitor_data_from_html(html).as_deref(),
-            Some("CgtABC123xyz")
-        );
-        assert!(extract_visitor_data_from_html("no visitor here").is_none());
-    }
-
-    // 测试用常量镜像, 避免 pub(crate) 泄漏
-    const ANDROID_MUSIC_PLAYER_PARAMS_CONST: &str = "CgIIAdgDAQ==";
 
     #[test]
     fn extract_prefers_audio_over_muxed() {

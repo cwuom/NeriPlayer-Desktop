@@ -9,29 +9,45 @@ import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
+  COVER_BLUR_PX_PER_UNIT,
+  LYRIC_DEFAULT_OFFSET_RANGE_MS,
+  LYRIC_DEFAULT_OFFSET_STEP_MS,
+  LYRIC_FONT_SCALE_MAX,
+  LYRIC_FONT_SCALE_MIN,
+  LYRIC_FONT_SCALE_STEP,
+  normalizeLyricDefaultOffset,
+  MAX_COVER_BLUR_AMOUNT,
   MAX_MEDIA_CACHE_SIZE_MB,
   MIN_MEDIA_CACHE_SIZE_MB,
+  MAX_DOWNLOAD_PARALLELISM,
+  MIN_DOWNLOAD_PARALLELISM,
+  YOUTUBE_PLAYBACK_SOURCES,
   useSettingsStore,
   type ColorMode,
 } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
 import { useSyncStore, type SyncFrequency } from '@/stores/sync'
 import { useDownloadStore } from '@/stores/download'
+import { useListenTogetherStore } from '@/stores/listenTogether'
+import { isValidLtNickname, LT_NICKNAME_MAX_LENGTH } from '@/stores/listenTogether/protocol'
 import { usePlayerStore } from '@/stores/player'
+import { DEFAULT_LYRIC_OFFSET_MS, formatLyricOffsetMs } from '@/modules/lyrics/lyricOffset'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { DEFAULT_DOWNLOAD_NAME_TEMPLATE } from '@/stores/settings'
 import StorageManagementDialog from '@/components/StorageManagementDialog.vue'
 import EditableRangeValue from '@/components/ui/EditableRangeValue.vue'
+import CustomSelect from '@/components/ui/CustomSelect.vue'
 import {
   clearBrowserCache,
   mergeBrowserCacheUsage,
   type StorageCacheClearOptions,
   type StorageUsageSummary,
 } from '@/utils/storage'
-import { switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
+import { applyTheme, switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import { shortcutDescriptors } from '@/modules/shortcuts/globalShortcuts'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('settings-view')
@@ -43,27 +59,40 @@ const auth = useAuthStore()
 const syncStore = useSyncStore()
 const downloadStore = useDownloadStore()
 const player = usePlayerStore()
+const lt = useListenTogetherStore()
 const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle,
   defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
-  showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
-  crossfade, normalizeVolume,
+  showQualitySwitch, lyricFontScale,
+  normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-  keepProgress, keepPlaybackMode,
+  keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, lyricBlur, lyricBlurAmount,
   cloudMusicOffset, qqMusicOffset,
   advancedLyrics, dynamicBackground, colorMode, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
-  bypassProxy, internationalizationEnabled,
+  youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
+  bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
+  downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
+  downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
+  downloadYoutubeQuality, downloadBiliQuality,
   ltServerUrl, ltNickname, ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks,
   locale: settingLocale,
 } = storeToRefs(settings)
+
+const audioDisplayOptions = [
+  { key: 'showAudioBitrate', label: 'audio_bitrate', icon: 'speed' },
+  { key: 'showAudioFormat', label: 'audio_format', icon: 'audio_file' },
+  { key: 'showAudioChannels', label: 'audio_channels', icon: 'speaker_group' },
+  { key: 'showAudioSampleRate', label: 'audio_sample_rate', icon: 'graphic_eq' },
+  { key: 'showAudioBitDepth', label: 'audio_bit_depth', icon: 'equalizer' },
+] as const
 
 const syncFrequencyOptions = computed<Array<{ value: SyncFrequency; label: string }>>(() => [
   { value: 'immediate', label: t('settings.sync_immediate') },
@@ -80,6 +109,53 @@ const logLevelOptions = computed<Array<{ value: string; label: string }>>(() => 
   { value: 'debug', label: t('settings.log_level_debug') },
   { value: 'trace', label: t('settings.log_level_trace') },
 ])
+
+const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map(value => ({
+  value,
+  label: t(`settings.youtube_source_${value}`),
+})))
+const youtubePlaybackSourceDescription = computed(() => t(`settings.youtube_source_${youtubePlaybackSource.value}_desc`))
+
+function changeYouTubePlaybackSource(value: string) {
+  const source = YOUTUBE_PLAYBACK_SOURCES.find(source => source === value)
+  if (source) youtubePlaybackSource.value = source
+}
+
+const audioOutputDevices = ref<Array<{ name: string; isDefault: boolean }>>([])
+const audioOutputSwitching = ref(false)
+const audioOutputOptions = computed(() => {
+  const devices = audioOutputDevices.value.map(device => ({
+    value: device.name,
+    label: device.name,
+  }))
+  if (audioOutputDevice.value && !devices.some(device => device.value === audioOutputDevice.value)) {
+    devices.unshift({ value: audioOutputDevice.value, label: t('settings.audio_output_unavailable', { name: audioOutputDevice.value }) })
+  }
+  return [{ value: '', label: t('settings.audio_output_default') }, ...devices]
+})
+
+async function loadAudioOutputDevices() {
+  try {
+    audioOutputDevices.value = await invoke('list_audio_output_devices')
+  } catch (error) {
+    log.warn('failed to list audio output devices:', error)
+  }
+}
+
+async function changeAudioOutputDevice(selected: string) {
+  if (audioOutputSwitching.value || selected === audioOutputDevice.value) return
+  audioOutputSwitching.value = true
+  try {
+    await invoke('set_audio_output_device', { name: selected || null })
+    audioOutputDevice.value = selected
+  } catch (error) {
+    log.warn('failed to switch audio output:', error)
+    toast.error(t('settings.audio_output_failed'))
+  } finally {
+    audioOutputSwitching.value = false
+    void loadAudioOutputDevices()
+  }
+}
 
 async function openLogDir() {
   try {
@@ -239,7 +315,7 @@ const defaultScreenOptions = computed(() => [
 
 const neteaseQualityOptions = computed(() => [
   { value: 'standard', label: t('settings.q_standard') },
-  { value: 'high', label: t('settings.q_high') },
+  { value: 'higher', label: t('settings.q_high') },
   { value: 'exhigh', label: t('settings.q_exhigh') },
   { value: 'lossless', label: t('settings.q_lossless') },
   { value: 'hires', label: t('settings.q_hires') },
@@ -248,9 +324,12 @@ const neteaseQualityOptions = computed(() => [
   { value: 'jymaster', label: t('settings.q_master') },
 ])
 
+const downloadNeteaseQualityOptions = neteaseQualityOptions
+
+// 与播放页音质列表同一套文案：QQ 的 high 档是「高」而不是网易云的「较高」
 const qqQualityOptions = computed(() => [
   { value: 'standard', label: t('settings.q_standard') },
-  { value: 'high', label: t('settings.q_high') },
+  { value: 'high', label: t('settings.q_high_yt') },
   { value: 'lossless', label: t('settings.q_lossless') },
 ])
 
@@ -312,6 +391,7 @@ type SettingsSectionId =
   | 'accounts'
   | 'personalization'
   | 'playback'
+  | 'playback_sources'
   | 'quality'
   | 'motion'
   | 'lyrics'
@@ -324,7 +404,7 @@ type SettingsSectionId =
 
 const SETTINGS_UI_STATE_KEY = 'neri:settings-ui-state'
 const SETTINGS_SECTION_IDS: SettingsSectionId[] = [
-  'accounts', 'playback', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
+  'accounts', 'playback', 'playback_sources', 'quality', 'storage', 'personalization', 'motion', 'lyrics', 'network',
   'backup', 'listen_together', 'language', 'about',
 ]
 
@@ -423,6 +503,12 @@ const settingsNavGroups = computed(() => [
         icon: 'high_quality',
       },
       {
+        id: 'playback_sources' as SettingsSectionId,
+        label: t('settings.playback_sources'),
+        description: t('settings.playback_sources_desc'),
+        icon: 'alt_route',
+      },
+      {
         id: 'storage' as SettingsSectionId,
         label: t('settings.storage'),
         description: t('settings.nav_storage_desc'),
@@ -501,6 +587,7 @@ function selectSettingsSection(id: SettingsSectionId) {
       accounts: [],
       personalization: ['personal'],
       playback: ['playback'],
+      playback_sources: [],
       quality: ['quality'],
       motion: ['effects'],
       lyrics: ['lyrics'],
@@ -522,12 +609,13 @@ function selectSettingsSection(id: SettingsSectionId) {
 onMounted(() => {
   auth.checkStatus()
   syncStore.loadConfigs()
-  downloadStore.initEvents()
+  void downloadStore.initEvents().catch(error => log.error('Download listener failed:', error))
   downloadStore.loadDownloads()
   // 加载构建信息
   loadBuildInfo()
   // 加载默认下载目录
   loadDefaultDownloadDir()
+  void loadAudioOutputDevices()
   void restoreSettingsScrollPosition(activeSettingsSection.value)
 })
 
@@ -540,11 +628,14 @@ onBeforeUnmount(() => {
 
 // 网络：绕过代理
 async function handleBypassProxyChange(val: boolean) {
+  const previous = bypassProxy.value
   bypassProxy.value = val
   try {
     await invoke('set_bypass_proxy', { bypass: val })
   } catch (e) {
     log.error('Failed to set bypass proxy:', e)
+    bypassProxy.value = previous
+    toast.error(t('settings.bypass_proxy_failed'))
   }
 }
 
@@ -553,8 +644,21 @@ const showResetLtIdentityConfirm = ref(false)
 
 function confirmResetLtIdentity() {
   showResetLtIdentityConfirm.value = false
-  localStorage.removeItem('neri:lt-uuid')
-  toast.success(t('listen_together.identity_reset'))
+  if (lt.resetIdentity()) toast.success(t('listen_together.identity_reset'))
+  else toast.error(t('listen_together.reset_identity_in_room'))
+}
+
+// 与协议校验同一规则：去首尾空白，空值回到默认昵称，非法值不保存
+function handleLtNicknameChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const value = input.value.trim()
+  if (value && !isValidLtNickname(value)) {
+    toast.error(t('listen_together.invalid_nickname'))
+    input.value = ltNickname.value
+    return
+  }
+  ltNickname.value = value
+  input.value = value
 }
 
 const showConfigExportWarning = ref(false)
@@ -564,12 +668,19 @@ async function confirmConfigExport() {
   await syncStore.exportConfig()
 }
 
+// 导入只写回了设置值：主题、强调色和播放引擎（均衡器、响度、倍速等）要按新值重新应用
 async function importConfig() {
-  await syncStore.importConfig()
+  const result = await syncStore.importConfig()
+  if (!result?.success) return
+  applyTheme(darkMode.value, false)
+  // 三态取色：仅「默认取色」需要按预设主题色重刷，system/cover 由动态取色路径接管
+  if (colorMode.value === 'default') applyThemeColor(selectedColor.value, undefined, false)
+  lt.reloadIdentity()
+  await player.applyPersistedSettings()
 }
 
 // 下载管理
-const activeDownloadCount = computed(() => downloadStore.downloading.size)
+const activeDownloadCount = computed(() => downloadStore.runningDownloadCount)
 const completedDownloadCount = computed(() => downloadStore.downloads.length)
 const activeDownloadTasks = computed(() => downloadStore.activeDownloads)
 
@@ -582,7 +693,9 @@ function formatDownloadSize(bytes?: number): string {
 
 function activeDownloadStatusText(status: string) {
   switch (status) {
+    case 'queued': return t('download.queued')
     case 'resolving': return t('download.resolving')
+    case 'processing': return t('download.processing')
     case 'cancelling': return t('download.cancelling')
     case 'cancelled': return t('download.cancelled')
     case 'error': return t('download.download_failed')
@@ -598,7 +711,7 @@ function activeDownloadProgressText(task: {
   totalBytes?: number
   message?: string
 }) {
-  if (task.status === 'resolving' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists') {
+  if (['queued', 'resolving', 'processing', 'cancelling', 'cancelled', 'already_exists'].includes(task.status)) {
     return activeDownloadStatusText(task.status)
   }
   if (task.status === 'error') {
@@ -669,6 +782,10 @@ const templatePreview = computed(() => {
     ['{artist}', '周杰伦'], ['%artist%', '周杰伦'],
     ['{album}', '叶惠美'], ['%album%', '叶惠美'],
     ['{source}', 'netease'], ['%source%', 'netease'],
+    ['{id}', 'netease:123456'], ['%id%', 'netease:123456'],
+    ['{audioId}', '123456'], ['%audioId%', '123456'],
+    ['{subAudioId}', ''], ['%subAudioId%', ''],
+    ['{hash}', '4c853a1f'], ['%hash%', '4c853a1f'],
   ]) {
     preview = replaceTemplateToken(preview, token, value)
   }
@@ -728,7 +845,7 @@ async function clearStorageCache(options: StorageCacheClearOptions) {
   try {
     const result = await invoke<{ clearedBytes: number; deletedFiles: number; failedCount: number }>(
       'clear_storage_cache',
-      { options },
+      { options, downloadDir: downloadDir.value || null },
     )
     clearBrowserCache(options)
     const mb = ((result.clearedBytes || 0) / 1024 / 1024).toFixed(1)
@@ -751,21 +868,19 @@ async function clearStorageCache(options: StorageCacheClearOptions) {
 // YouTube 国际化
 const intlChecking = ref(false)
 
+// 对齐 Android：开关直接生效。开启时只探测传输层连通性并提示，不回退用户的选择
 async function handleIntlToggle(val: boolean) {
-  const prev = internationalizationEnabled.value
+  if (intlChecking.value) return
   internationalizationEnabled.value = val
-  if (val) {
-    intlChecking.value = true
-    try {
-      // 简单连通性检测：尝试调用 YouTube API
-      await invoke('get_youtube_audio_url', { videoId: 'dQw4w9WgXcQ' })
-    } catch {
-      // 失败时回退
-      internationalizationEnabled.value = prev
-      toast.error(t('settings.intl_check_failed'))
-    } finally {
-      intlChecking.value = false
-    }
+  if (!val) return
+  intlChecking.value = true
+  try {
+    const reachable = await invoke<boolean>('probe_platform_connectivity', { platform: 'youtube' })
+    if (!reachable) toast.show(t('settings.intl_check_failed'), 'info')
+  } catch (error) {
+    log.warn('YouTube connectivity probe failed:', error)
+  } finally {
+    intlChecking.value = false
   }
 }
 
@@ -791,15 +906,18 @@ async function selectBackgroundImage() {
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
     })
     if (result) {
-      backgroundImageUri.value = typeof result === 'string' ? result : (result as any).path || String(result)
+      const picked = typeof result === 'string' ? result : (result as any).path || String(result)
+      backgroundImageUri.value = await invoke<string>('import_background_image', { source: picked })
     }
   } catch (e) {
     log.error('Failed to select image:', e)
+    toast.error(t('settings.background_image_failed'))
   }
 }
 
 function clearBackgroundImage() {
   backgroundImageUri.value = ''
+  invoke('clear_background_images').catch((error) => log.warn('Failed to delete background copies:', error))
 }
 
 // 开发者模式：7-tap 解锁
@@ -865,7 +983,35 @@ const githubNewRepoName = ref('neriplayer-backup')
 const githubExistingRepo = ref('') // owner/repo 格式
 const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
-const PROJECT_REPOSITORY_URL = 'https://github.com/nicepkg/NeriPlayer'
+// 各歌词来源的默认偏移，顺序与默认值对齐 Android 设置页
+const lyricOffsetSettings = [
+  { key: 'cloudMusicOffset', label: 'settings.netease_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.netease },
+  { key: 'qqMusicOffset', label: 'settings.qq_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.qq },
+  { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou },
+  { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib },
+  { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml },
+] as const
+
+const lyricOffsetsChanged = computed(() => lyricOffsetSettings.some(item => settings[item.key] !== item.defaultMs))
+
+function resetLyricOffsets() {
+  for (const item of lyricOffsetSettings) settings[item.key] = item.defaultMs
+}
+
+const volumeBalanceLabel = computed(() => {
+  const percent = Math.round(Math.abs(volumeBalance.value) * 100)
+  if (percent === 0) return t('settings.volume_balance_center')
+  return t(volumeBalance.value < 0 ? 'settings.volume_balance_left' : 'settings.volume_balance_right', { percent })
+})
+
+const PROJECT_REPOSITORY_URL = 'https://github.com/cwuom/NeriPlayer-Desktop'
+const FFMPEG_LEGAL_URL = 'https://ffmpeg.org/legal.html'
+// 随包的 FFmpeg 是否加载成功、加载的是哪个版本；没加载上时说明哪些格式受影响
+const ffmpegComponentText = computed(() => {
+  const capabilities = player.decoderCapabilities
+  if (capabilities?.ffmpeg) return t('settings.ffmpeg_component_loaded', { version: capabilities.ffmpeg.avcodec })
+  return t('settings.ffmpeg_component_unavailable')
+})
 
 function openGitHubSetup() {
   githubPhase.value = 1
@@ -931,7 +1077,7 @@ const webdavBasePath = ref('')
 const webdavConfiguring = ref(false)
 
 async function configureWebDav() {
-  if (!webdavUrl.value.trim() || !webdavUsername.value.trim()) return
+  if (!webdavUrl.value.trim() || !webdavUsername.value.trim() || !webdavPassword.value) return
   webdavConfiguring.value = true
   const ok = await syncStore.configureWebDav(
     webdavUrl.value, webdavUsername.value, webdavPassword.value, webdavBasePath.value || undefined,
@@ -948,7 +1094,7 @@ async function configureWebDav() {
 
 function formatSyncTime(ms: number): string {
   if (!ms) return ''
-  return new Date(ms).toLocaleString()
+  return new Date(ms).toLocaleString(locale.value)
 }
 
 // 平台账号配置
@@ -981,28 +1127,29 @@ async function confirmClearGitHub() {
   await syncStore.disconnectGitHub()
 }
 
-// 切换省流模式前确认，避免用户误解已有云端文件格式
-const showDataSaverConfirm = ref(false)
-const pendingDataSaverValue = ref<boolean | null>(null)
+const hideProtocolUpgrade = ref(false)
+const upgradeDevicesConfirmed = ref(false)
+watch(() => syncStore.pendingProtocolUpgrade, () => {
+  hideProtocolUpgrade.value = false
+  upgradeDevicesConfirmed.value = false
+})
 
-function requestDataSaverChange(event: Event) {
-  const target = event.target as HTMLInputElement | null
-  if (!target || target.checked === syncStore.github.dataSaver) return
-  pendingDataSaverValue.value = target.checked
-  showDataSaverConfirm.value = true
+// 页内旧式对话框（.dialog-overlay）同样响应 Escape，并与 M3Dialog 共用弹层栈
+for (const dialog of [
+  showGitHubDialog,
+  showWebDavDialog,
+  showLogoutConfirm,
+  showClearGitHubConfirm,
+  showResetLtIdentityConfirm,
+  showConfigExportWarning,
+  showDownloadTemplateDialog,
+]) {
+  useEscapeClose(() => dialog.value, () => { dialog.value = false })
 }
-
-function cancelDataSaverChange() {
-  pendingDataSaverValue.value = null
-  showDataSaverConfirm.value = false
-}
-
-function confirmDataSaverChange() {
-  if (pendingDataSaverValue.value !== null) {
-    syncStore.github.dataSaver = pendingDataSaverValue.value
-  }
-  cancelDataSaverChange()
-}
+useEscapeClose(
+  () => !!syncStore.pendingProtocolUpgrade && !hideProtocolUpgrade.value,
+  () => { hideProtocolUpgrade.value = true },
+)
 </script>
 
 <template>
@@ -1120,12 +1267,21 @@ function confirmDataSaverChange() {
         </div>
       </div>
       <label class="m3-switch">
-        <input type="checkbox" :checked="internationalizationEnabled" @change="handleIntlToggle(($event.target as HTMLInputElement).checked)" />
+        <input type="checkbox" :checked="internationalizationEnabled" :disabled="intlChecking" @change="handleIntlToggle(($event.target as HTMLInputElement).checked)" />
         <span class="track"><span class="thumb">
           <span v-if="intlChecking" class="material-symbols-rounded spinning" style="font-size: 14px">progress_activity</span>
           <span v-else-if="internationalizationEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span>
         </span></span>
       </label>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">manage_search</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.explore_search_history') }}</div>
+        <div class="setting-desc">{{ t('settings.explore_search_history_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="exploreSearchHistoryEnabled" /><span class="track"><span class="thumb"><span v-if="exploreSearchHistoryEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
     <!-- 外观 -->
@@ -1272,22 +1428,13 @@ function confirmDataSaverChange() {
         <label class="m3-switch"><input type="checkbox" v-model="showQualitySwitch" /><span class="track"><span class="thumb"><span v-if="showQualitySwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">audio_file</span></div>
+      <div v-for="option in audioDisplayOptions" :key="option.key" class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">{{ option.icon }}</span></div>
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.audio_codec') }}</div>
-          <div class="setting-desc">{{ t('settings.audio_codec_desc') }}</div>
+          <div class="setting-title">{{ t('settings.' + option.label) }}</div>
+          <div class="setting-desc">{{ t('settings.' + option.label + '_desc') }}</div>
         </div>
-        <label class="m3-switch"><input type="checkbox" v-model="showAudioCodec" /><span class="track"><span class="thumb"><span v-if="showAudioCodec" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
-      </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">equalizer</span></div>
-        <div class="setting-info">
-          <div class="setting-title">{{ t('settings.audio_spec') }}</div>
-          <div class="setting-desc">{{ t('settings.audio_spec_desc') }}</div>
-        </div>
-        <label class="m3-switch"><input type="checkbox" v-model="showAudioSpec" /><span class="track"><span class="thumb"><span v-if="showAudioSpec" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+        <label class="m3-switch"><input type="checkbox" v-model="settings[option.key]" /><span class="track"><span class="thumb"><span v-if="settings[option.key]" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
       <div class="setting-card">
@@ -1297,15 +1444,16 @@ function confirmDataSaverChange() {
           <EditableRangeValue
             v-model="lyricFontScale"
             class="setting-desc"
-            :min="0.5"
-            :max="1.5"
-            :step="0.1"
-            :display-value="`${lyricFontScale.toFixed(1)}x`"
-            input-suffix="x"
+            :min="LYRIC_FONT_SCALE_MIN"
+            :max="LYRIC_FONT_SCALE_MAX"
+            :step="LYRIC_FONT_SCALE_STEP"
+            :display-value="`${Math.round(lyricFontScale * 100)}%`"
+            :input-scale="100"
+            input-suffix="%"
             :aria-label="t('settings.lyric_font_size')"
           />
         </div>
-        <input type="range" class="m3-slider" v-model.number="lyricFontScale" min="0.5" max="1.5" step="0.1" />
+        <input type="range" class="m3-slider" v-model.number="lyricFontScale" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP" />
       </div>
 
       <!-- 封面样式 -->
@@ -1372,19 +1520,20 @@ function confirmDataSaverChange() {
 
     <!-- 播放 -->
         <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel">
+    <div class="setting-card setting-card--select">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">speaker</span></div>
+      <div class="setting-info">
+        <label class="setting-title" for="audio-output-device">{{ t('settings.audio_output') }}</label>
+        <div class="setting-desc">{{ t('settings.audio_output_desc') }}</div>
+      </div>
+      <CustomSelect id="audio-output-device" class="settings-select settings-select--device"
+        :model-value="audioOutputDevice" :options="audioOutputOptions" :label="t('settings.audio_output')"
+        :disabled="audioOutputSwitching" @open="loadAudioOutputDevices" @update:model-value="changeAudioOutputDevice" />
+    </div>
     <div class="section-label clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
       <span>{{ t('settings.playback') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('playback') }">expand_more</span>
-    </div>
-
-    <div class="setting-card">
-      <div class="setting-icon-wrap"><span class="material-symbols-rounded">swap_horiz</span></div>
-      <div class="setting-info">
-        <div class="setting-title">{{ t('settings.crossfade') }}</div>
-        <div class="setting-desc">{{ t('settings.crossfade_desc') }}</div>
-      </div>
-      <label class="m3-switch"><input type="checkbox" v-model="crossfade" /><span class="track"><span class="thumb"><span v-if="crossfade" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
     <div class="setting-card">
@@ -1398,6 +1547,32 @@ function confirmDataSaverChange() {
 
     <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('playback')">
       <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">balance</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.volume_balance') }}</div>
+          <EditableRangeValue
+            v-model="volumeBalance"
+            class="setting-desc"
+            :min="-1"
+            :max="1"
+            :step="0.01"
+            :input-scale="100"
+            :display-value="volumeBalanceLabel"
+            input-suffix="%"
+            :aria-label="t('settings.volume_balance')"
+          />
+        </div>
+        <input type="range" class="m3-slider" v-model.number="volumeBalance" min="-1" max="1" step="0.05" :aria-label="t('settings.volume_balance')" :aria-valuetext="volumeBalanceLabel" />
+      </div>
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">surround_sound</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.multichannel_drc') }}</div>
+          <div class="setting-desc">{{ t('settings.multichannel_drc_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="multichannelDrc" /><span class="track"><span class="thumb"><span v-if="multichannelDrc" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+      <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">volume_up</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.fade_in') }}</div>
@@ -1406,9 +1581,7 @@ function confirmDataSaverChange() {
         <label class="m3-switch"><input type="checkbox" v-model="fadeIn" /><span class="track"><span class="thumb"><span v-if="fadeIn" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
-      <!-- crossfade（无缝切换）在 crossfadeNext 关闭时复用淡入/淡出时长做 overlap，
-           因此 crossfade 开启时也须展示这两个滑杆，否则时长被隐藏且固定为默认（ST-08） -->
-      <template v-if="fadeIn || crossfade">
+      <template v-if="fadeIn">
         <div class="setting-card sub-card">
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.fade_in_duration') }}</div>
@@ -1497,6 +1670,15 @@ function confirmDataSaverChange() {
       </div>
 
       <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">bookmark</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.remember_long_form_progress') }}</div>
+          <div class="setting-desc">{{ t('settings.remember_long_form_progress_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="rememberLongFormProgress" /><span class="track"><span class="thumb"><span v-if="rememberLongFormProgress" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">repeat</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.keep_mode') }}</div>
@@ -1574,8 +1756,8 @@ function confirmDataSaverChange() {
           class="lt-url-input lt-input-left"
           style="width: 140px"
           :value="ltNickname"
-          @change="ltNickname = ($event.target as HTMLInputElement).value"
-          maxlength="20"
+          @change="handleLtNicknameChange"
+          :maxlength="LT_NICKNAME_MAX_LENGTH"
           :placeholder="t('listen_together.nickname_placeholder')"
           :aria-label="t('listen_together.nickname')"
         />
@@ -1587,7 +1769,7 @@ function confirmDataSaverChange() {
           <div class="setting-title">{{ t('listen_together.allow_member_control') }}</div>
         </div>
         <label class="m3-switch">
-          <input type="checkbox" v-model="ltAllowMemberControl" />
+          <input type="checkbox" :checked="ltAllowMemberControl" @change="lt.updateRoomSettings({ allowMemberControl: ($event.target as HTMLInputElement).checked })" />
           <span class="track"><span class="thumb"><span v-if="ltAllowMemberControl" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
         </label>
       </div>
@@ -1598,7 +1780,7 @@ function confirmDataSaverChange() {
           <div class="setting-title">{{ t('listen_together.auto_pause_on_change') }}</div>
         </div>
         <label class="m3-switch">
-          <input type="checkbox" v-model="ltAutoPauseOnMemberChange" />
+          <input type="checkbox" :checked="ltAutoPauseOnMemberChange" @change="lt.updateRoomSettings({ autoPauseOnMemberChange: ($event.target as HTMLInputElement).checked })" />
           <span class="track"><span class="thumb"><span v-if="ltAutoPauseOnMemberChange" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
         </label>
       </div>
@@ -1609,7 +1791,7 @@ function confirmDataSaverChange() {
           <div class="setting-title">{{ t('listen_together.share_audio_links') }}</div>
         </div>
         <label class="m3-switch">
-          <input type="checkbox" v-model="ltShareAudioLinks" />
+          <input type="checkbox" :checked="ltShareAudioLinks" @change="lt.updateRoomSettings({ shareAudioLinks: ($event.target as HTMLInputElement).checked })" />
           <span class="track"><span class="thumb"><span v-if="ltShareAudioLinks" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
         </label>
       </div>
@@ -1620,7 +1802,12 @@ function confirmDataSaverChange() {
           <div class="setting-title">{{ t('listen_together.reset_identity') }}</div>
           <div class="setting-desc">{{ t('listen_together.reset_identity_desc') }}</div>
         </div>
-        <button class="m3-chip sm danger" @click="showResetLtIdentityConfirm = true">{{ t('listen_together.reset_btn') }}</button>
+        <button
+          class="m3-chip sm danger"
+          :disabled="lt.isInSession"
+          :title="lt.isInSession ? t('listen_together.reset_identity_in_room') : undefined"
+          @click="showResetLtIdentityConfirm = true"
+        >{{ t('listen_together.reset_btn') }}</button>
       </div>
     </div></Transition>
         </div>
@@ -1655,9 +1842,9 @@ function confirmDataSaverChange() {
           <div
             class="settings-download-progress"
             :class="{
-              indeterminate: task.status === 'downloading' && !task.totalBytes,
+              indeterminate: task.status === 'processing' || task.status === 'resolving' || (task.status === 'downloading' && !task.totalBytes),
               error: task.status === 'error',
-              muted: task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
+              muted: task.status === 'queued' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
             }"
           >
             <div
@@ -1729,40 +1916,42 @@ function confirmDataSaverChange() {
         <input type="range" class="m3-slider" v-model.number="lyricBlurAmount" min="0" max="8" step="0.5" />
       </div>
 
-      <div class="setting-card">
+      <!-- 各歌词来源的默认偏移（对齐 Android）：显示的就是这类歌词实际生效的偏移 -->
+      <div v-for="item in lyricOffsetSettings" :key="item.key" class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">music_note</span></div>
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.netease_offset') }}</div>
+          <div class="setting-title">{{ t(item.label) }}</div>
           <EditableRangeValue
-            v-model="cloudMusicOffset"
+            :model-value="settings[item.key]"
             class="setting-desc"
-            :min="-2000"
-            :max="2000"
-            :step="50"
-            :display-value="`${cloudMusicOffset >= 0 ? '+' : ''}${cloudMusicOffset}ms`"
+            :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS"
+            :max="LYRIC_DEFAULT_OFFSET_RANGE_MS"
+            :step="LYRIC_DEFAULT_OFFSET_STEP_MS"
+            :display-value="formatLyricOffsetMs(settings[item.key])"
             input-suffix="ms"
-            :aria-label="t('settings.netease_offset')"
+            :aria-label="t(item.label)"
+            @update:model-value="settings[item.key] = normalizeLyricDefaultOffset($event, item.defaultMs)"
           />
         </div>
-        <input type="range" class="m3-slider" v-model.number="cloudMusicOffset" min="-2000" max="2000" step="50" />
+        <button
+          v-if="settings[item.key] !== item.defaultMs"
+          class="m3-chip sm"
+          :title="t('settings.lyric_offset_reset_to', { value: formatLyricOffsetMs(item.defaultMs) })"
+          @click="settings[item.key] = item.defaultMs"
+        >{{ t('settings.lyric_offset_reset') }}</button>
+        <input
+          type="range" class="m3-slider"
+          :value="settings[item.key]"
+          :min="-LYRIC_DEFAULT_OFFSET_RANGE_MS" :max="LYRIC_DEFAULT_OFFSET_RANGE_MS" :step="LYRIC_DEFAULT_OFFSET_STEP_MS"
+          :aria-label="t(item.label)"
+          @input="settings[item.key] = normalizeLyricDefaultOffset(Number(($event.target as HTMLInputElement).value), item.defaultMs)"
+        />
       </div>
-
-      <div class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">music_note</span></div>
+      <div v-if="lyricOffsetsChanged" class="setting-card sub-card">
         <div class="setting-info">
-          <div class="setting-title">{{ t('settings.qq_offset') }}</div>
-          <EditableRangeValue
-            v-model="qqMusicOffset"
-            class="setting-desc"
-            :min="-2000"
-            :max="2000"
-            :step="50"
-            :display-value="`${qqMusicOffset >= 0 ? '+' : ''}${qqMusicOffset}ms`"
-            input-suffix="ms"
-            :aria-label="t('settings.qq_offset')"
-          />
+          <div class="setting-desc">{{ t('settings.lyric_offset_reset_all_desc') }}</div>
         </div>
-        <input type="range" class="m3-slider" v-model.number="qqMusicOffset" min="-2000" max="2000" step="50" />
+        <button class="m3-chip sm" @click="resetLyricOffsets">{{ t('settings.lyric_offset_reset_all') }}</button>
       </div>
     </div></Transition>
         </div>
@@ -1820,13 +2009,15 @@ function confirmDataSaverChange() {
               v-model="coverBlurAmount"
               class="setting-desc"
               :min="0"
-              :max="500"
-              :step="10"
-              :display-value="coverBlurAmount.toFixed(1)"
+              :max="MAX_COVER_BLUR_AMOUNT"
+              :step="0.1"
+              :display-value="`${Math.round(coverBlurAmount * COVER_BLUR_PX_PER_UNIT)} px`"
+              :input-scale="COVER_BLUR_PX_PER_UNIT"
+              input-suffix="px"
               :aria-label="t('settings.blur_amount')"
             />
           </div>
-          <input type="range" class="m3-slider" v-model.number="coverBlurAmount" min="0" max="500" step="10" />
+          <input type="range" class="m3-slider" v-model.number="coverBlurAmount" min="0" :max="MAX_COVER_BLUR_AMOUNT" step="0.1" />
         </div>
         <div class="setting-card sub-card">
           <div class="setting-info">
@@ -1847,6 +2038,49 @@ function confirmDataSaverChange() {
         </div>
       </template>
     </div></Transition>
+        </div>
+
+    <!-- 播放源 -->
+        <div v-show="activeSettingsSection === 'playback_sources'" class="settings-section-panel">
+    <div class="section-label">
+      <span class="material-symbols-rounded" style="font-size: 18px">alt_route</span>
+      <span>{{ t('settings.playback_sources') }}</span>
+    </div>
+
+    <div class="setting-card setting-card--select">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">smart_display</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.youtube_playback_source') }}</div>
+        <div class="setting-desc">{{ t('settings.youtube_playback_source_desc') }}</div>
+        <div class="setting-desc">{{ youtubePlaybackSourceDescription }}</div>
+      </div>
+      <CustomSelect class="settings-select" :model-value="youtubePlaybackSource" :options="youtubePlaybackSourceOptions"
+        :label="t('settings.youtube_playback_source')" @update:model-value="changeYouTubePlaybackSource" />
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">library_music</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.netease_local_source_fallback') }}</div>
+        <div class="setting-desc">{{ t('settings.netease_local_source_fallback_desc') }}</div>
+      </div>
+      <label class="m3-switch">
+        <input type="checkbox" v-model="neteaseLocalSourceFallback" :aria-label="t('settings.netease_local_source_fallback')" />
+        <span class="track"><span class="thumb"><span v-if="neteaseLocalSourceFallback" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+      </label>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">sync_alt</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.netease_auto_source_switch') }}</div>
+        <div class="setting-desc">{{ t('settings.netease_auto_source_switch_desc') }}</div>
+      </div>
+      <label class="m3-switch">
+        <input type="checkbox" v-model="neteaseAutoSourceSwitch" :aria-label="t('settings.netease_auto_source_switch')" />
+        <span class="track"><span class="thumb"><span v-if="neteaseAutoSourceSwitch" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span>
+      </label>
+    </div>
         </div>
 
     <!-- 音质 -->
@@ -1934,6 +2168,70 @@ function confirmDataSaverChange() {
         />
       </div>
 
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">downloading</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_parallelism') }}</div>
+          <div class="setting-desc">{{ t('settings.download_parallelism_desc') }}</div>
+          <EditableRangeValue
+            v-model="downloadParallelism"
+            class="setting-desc"
+            :min="MIN_DOWNLOAD_PARALLELISM"
+            :max="MAX_DOWNLOAD_PARALLELISM"
+            :step="1"
+            :display-value="t('settings.download_parallelism_value', { count: downloadParallelism })"
+            :aria-label="t('settings.download_parallelism')"
+          />
+        </div>
+        <input v-model.number="downloadParallelism" type="range" class="m3-slider" :min="MIN_DOWNLOAD_PARALLELISM" :max="MAX_DOWNLOAD_PARALLELISM" step="1" :aria-label="t('settings.download_parallelism')" />
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">audio_file</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_metadata') }}</div>
+          <div class="setting-desc">{{ t('settings.download_metadata_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadAutoFillMetadata" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">lyrics</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_embed_lyrics') }}</div>
+          <div class="setting-desc">{{ t('settings.download_embed_lyrics_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadEmbedLyrics" :disabled="!downloadAutoFillMetadata" /><span class="track"><span class="thumb"><span v-if="downloadEmbedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">high_quality</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.download_follow_playback_quality') }}</div>
+          <div class="setting-desc">{{ t('settings.download_follow_playback_quality_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="downloadFollowPlaybackQuality" /><span class="track"><span class="thumb"><span v-if="downloadFollowPlaybackQuality" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <template v-if="!downloadFollowPlaybackQuality">
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.netease_quality') }}</div></div>
+          <CustomSelect v-model="downloadNeteaseQuality" :options="downloadNeteaseQualityOptions" :label="t('settings.netease_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.qq_quality') }}</div></div>
+          <CustomSelect v-model="downloadQqMusicQuality" :options="qqQualityOptions" :label="t('settings.qq_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.youtube_quality') }}</div></div>
+          <CustomSelect v-model="downloadYoutubeQuality" :options="youtubeQualityOptions" :label="t('settings.youtube_quality')" />
+        </div>
+        <div class="setting-card sub-card">
+          <div class="setting-info"><div class="setting-title">{{ t('settings.bili_quality') }}</div></div>
+          <CustomSelect v-model="downloadBiliQuality" :options="biliQualityOptions" :label="t('settings.bili_quality')" />
+        </div>
+      </template>
+
       <div class="setting-card" style="cursor: pointer" @click="openDownloadTemplateDialog">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">text_fields</span></div>
         <div class="setting-info">
@@ -1948,6 +2246,7 @@ function confirmDataSaverChange() {
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.download_dir') }}</div>
           <div class="setting-desc" style="word-break: break-all">{{ displayDownloadDir }}</div>
+          <div class="setting-desc">{{ t('settings.download_dir_desc') }}</div>
         </div>
         <div class="chip-row">
           <button class="m3-chip sm" :disabled="activeDownloadCount > 0" @click="selectDownloadDir">{{ t('settings.download_dir_select') }}</button>
@@ -2074,16 +2373,6 @@ function confirmDataSaverChange() {
           </div>
           <span v-if="syncStore.isSyncing" class="material-symbols-rounded spinning" style="font-size: 20px">progress_activity</span>
           <span v-else class="sync-action-label">{{ t('settings.sync_action') }}</span>
-        </div>
-
-        <!-- 数据节省模式 -->
-        <div class="setting-card sub-card">
-          <div class="setting-icon-wrap"><span class="material-symbols-rounded">download</span></div>
-          <div class="setting-info">
-            <div class="setting-title">{{ t('settings.data_saver') }}</div>
-            <div class="setting-desc">{{ t('settings.data_saver_desc') }}</div>
-          </div>
-          <label class="m3-switch"><input type="checkbox" :checked="syncStore.github.dataSaver" @change="requestDataSaverChange" /><span class="track"><span class="thumb"><span v-if="syncStore.github.dataSaver" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
         </div>
 
         <!-- 静默同步失败 -->
@@ -2257,6 +2546,19 @@ function confirmDataSaverChange() {
       </div>
       <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">open_in_new</span>
     </div>
+    <div
+      class="setting-card"
+      style="cursor: pointer"
+      :title="player.decoderCapabilities?.ffmpegError ?? player.decoderCapabilities?.ffmpeg?.directory ?? ''"
+      @click="openExternalUrl(FFMPEG_LEGAL_URL)"
+    >
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.ffmpeg_component') }}</div>
+        <div class="setting-desc">{{ ffmpegComponentText }}</div>
+      </div>
+      <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">open_in_new</span>
+    </div>
         </div>
 
         </div>
@@ -2363,7 +2665,7 @@ function confirmDataSaverChange() {
           <p v-if="syncStore.dialogError" class="dialog-error">{{ syncStore.dialogError }}</p>
           <div class="dialog-actions">
             <button class="dialog-btn" @click="showWebDavDialog = false">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn primary" :disabled="webdavConfiguring || !webdavUrl.trim() || !webdavUsername.trim()" @click="configureWebDav">
+            <button class="dialog-btn primary" :disabled="webdavConfiguring || !webdavUrl.trim() || !webdavUsername.trim() || !webdavPassword" @click="configureWebDav">
               <span v-if="webdavConfiguring" class="material-symbols-rounded spinning" style="font-size: 16px">progress_activity</span>
               <span v-else>{{ t('settings.connect') }}</span>
             </button>
@@ -2400,18 +2702,23 @@ function confirmDataSaverChange() {
       </div>
     </Teleport>
 
-    <!-- 切换省流模式确认 -->
+    <!-- 旧客户端无法读取升级后的归档，写入前需明确确认 -->
     <Teleport to="body">
-      <div v-if="showDataSaverConfirm" class="dialog-overlay" @click.self="cancelDataSaverChange">
+      <div v-if="syncStore.pendingProtocolUpgrade && !hideProtocolUpgrade" class="dialog-overlay" @click.self="hideProtocolUpgrade = true">
         <div class="dialog-card" style="width: 380px">
           <div class="dialog-icon warning">
             <span class="material-symbols-rounded">warning</span>
           </div>
-          <h3 class="dialog-title">{{ t('settings.data_saver_warning_title') }}</h3>
-          <p class="dialog-desc">{{ t('settings.data_saver_warning_message') }}</p>
+          <h3 class="dialog-title">{{ t('settings.sync_upgrade_title') }}</h3>
+          <p class="dialog-desc">{{ t('settings.sync_upgrade_message', { provider: syncStore.pendingProtocolUpgrade.backend === 'github' ? 'GitHub' : 'WebDAV' }) }}</p>
+          <label class="dialog-check">
+            <input v-model="upgradeDevicesConfirmed" type="checkbox" :disabled="syncStore.isSyncing" />
+            <span>{{ t('settings.sync_upgrade_all_devices') }}</span>
+          </label>
+          <p v-if="syncStore.upgradeError" class="dialog-error">{{ syncStore.upgradeError }}</p>
           <div class="dialog-actions">
-            <button class="dialog-btn" @click="cancelDataSaverChange">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn primary" @click="confirmDataSaverChange">{{ t('settings.data_saver_warning_confirm') }}</button>
+            <button class="dialog-btn" :disabled="syncStore.isSyncing" @click="hideProtocolUpgrade = true">{{ t('settings.cancel') }}</button>
+            <button class="dialog-btn primary" :disabled="syncStore.isSyncing || !upgradeDevicesConfirmed" @click="syncStore.approveProtocolUpgrade(upgradeDevicesConfirmed)">{{ t('settings.sync_upgrade_confirm') }}</button>
           </div>
         </div>
       </div>
@@ -2492,6 +2799,25 @@ function confirmDataSaverChange() {
 </template>
 
 <style scoped lang="scss">
+.setting-card--select {
+  flex-wrap: wrap;
+
+  .setting-info { flex-basis: 240px; }
+}
+
+.settings-select {
+  flex: 0 1 200px;
+  margin-left: auto;
+
+  &--device { flex-basis: 300px; }
+
+  :deep(.custom-select-trigger) {
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 14px;
+  }
+}
+
 .settings-view {
   width: 100%;
   height: 100%;
@@ -3032,60 +3358,6 @@ function confirmDataSaverChange() {
   &.selected { border-color: rgba(255,255,255,0.8); }
 }
 
-/* M3 Switch：严格对齐 M3 规范 */
-.m3-switch {
-  position: relative;
-  flex-shrink: 0;
-  cursor: pointer;
-
-  input { display: none; }
-
-  .track {
-    display: flex;
-    align-items: center;
-    width: 52px;
-    height: 32px;
-    border-radius: 16px;
-    background: var(--md-surface-container-highest);
-    border: 2px solid var(--md-outline);
-    position: relative;
-    transition: background var(--duration-medium) var(--ease-standard),
-                border-color var(--duration-medium) var(--ease-standard);
-  }
-
-  .thumb {
-    position: absolute;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--md-outline);
-    top: 50%;
-    left: 6px;
-    transform: translateY(-50%);
-    transition: left var(--duration-medium) var(--ease-standard),
-                width var(--duration-medium) var(--ease-standard),
-                height var(--duration-medium) var(--ease-standard),
-                background var(--duration-medium) var(--ease-standard);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--md-on-primary);
-    font-size: 0;
-  }
-
-  input:checked + .track {
-    background: var(--md-primary);
-    border-color: var(--md-primary);
-
-    .thumb {
-      left: 22px;
-      width: 24px;
-      height: 24px;
-      background: var(--md-on-primary);
-      font-size: 14px;
-    }
-  }
-}
 /* 折叠区段箭头 */
 .section-label.clickable {
   cursor: pointer;
@@ -3391,6 +3663,22 @@ function confirmDataSaverChange() {
   margin-bottom: 12px;
 }
 
+.dialog-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--md-on-surface);
+  cursor: pointer;
+
+  input {
+    margin-top: 2px;
+    accent-color: var(--md-primary);
+  }
+}
+
 .dialog-desc {
   font-size: 13px;
   color: var(--md-on-surface-variant);
@@ -3668,6 +3956,11 @@ function confirmDataSaverChange() {
   .setting-card {
     gap: 10px;
     padding: 12px;
+  }
+
+  .setting-card--select {
+    .setting-info { flex-basis: calc(100% - 46px); }
+    .settings-select { flex-basis: 100%; margin-left: 46px; }
   }
 
   .setting-icon-wrap {

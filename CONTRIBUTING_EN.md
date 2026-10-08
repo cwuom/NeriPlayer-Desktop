@@ -41,6 +41,8 @@ sync with the source code and runtime behavior.
   positioning, capability boundaries, install/build, sync, privacy.
 - `CONTRIBUTING.md` / `CONTRIBUTING_EN.md` — for developers: real module
   boundaries, extension paths, testing, and PR requirements.
+- `scripts/test-sync-android-interop.ps1` — Kotlin reverse decoding with
+  read-only Android sources and existing Gradle caches.
 - `CODE_OF_CONDUCT.md` — community standards.
 - `CLAUDE.md` / `AGENTS.md` — repo guides for AI coding agents; human
   contributors can use them as an architecture primer.
@@ -91,7 +93,7 @@ git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
 
-pnpm tauri dev      # full app (Vite :1420 + Rust shell)
+pnpm tauri dev      # full app (Vite :1420, or the next free port if it is taken + Rust shell)
 pnpm dev            # frontend only (no Tauri backend; IPC calls fail)
 pnpm build          # vue-tsc type check + vite build -> dist/
 pnpm tauri build    # production bundle -> src-tauri/target/release/bundle/
@@ -116,10 +118,17 @@ number **7 times** to unlock developer mode and the `Debug` page
 - Local: `pnpm tauri build`; bundles land in
   `src-tauri/target/release/bundle/` (Windows: `msi/` + `nsis/`;
   macOS: `dmg/`; Linux: `deb/` + `rpm/` + `appimage/`).
+- Bundles ship a minimal FFmpeg (it decodes Opus, E-AC-3 and similar
+  formats): run `bash scripts/ffmpeg/build-ffmpeg.sh <target>` (the
+  Windows build cross-compiles on Linux / WSL), then
+  `node scripts/ffmpeg/bundle-config.mjs <target>`, and pass
+  `--config .cache/ffmpeg-build/<target>/tauri.bundle.json` when
+  building. Without it the bundle has no FFmpeg and the frontend avoids
+  those formats. See `src-tauri/native/ffmpeg/README.md`.
 - CI: pushing a `v*` tag triggers `.github/workflows/release.yml`,
   building on Windows x64 / macOS arm64 / macOS x64 / Linux x64 and
-  publishing a GitHub Release; macOS bundles are ad-hoc signed (file
-  names carry an `-adhoc` suffix).
+  publishing a GitHub Release with the FFmpeg source attached; macOS
+  bundles are ad-hoc signed (file names carry an `-adhoc` suffix).
 - Pushes to main trigger the `Artifacts` workflow producing the same
   matrix for testing.
 
@@ -183,6 +192,29 @@ talks to music platforms directly.
 - `commands/*_cmd.rs` — command implementations grouped by domain:
   player / library / search / lyrics / settings / auth / recommend /
   sync / download / listen_together / stats / storage / image / debug.
+- `commands/download_cmd.rs`, `commands/download_metadata.rs` —
+  `stores/download.ts` and `modules/download/downloadQueue.ts` schedule tasks;
+  `DownloadsView.vue` exposes queued/resolving/transferring/metadata-processing
+  progress, cancellation and failed-task retries in the Downloads tab.
+  Concurrency is clamped to 1-8, default 6. Quality follows playback by default
+  or uses independent per-platform download settings. Audio stays in the chosen
+  root, `Lyrics/` holds lyrics/translations/romanization, `Covers/` holds covers,
+  and `.tmp/` holds temporary files. `<audio filename>.npmeta.json` stores NP
+  metadata and asset references. Metadata completion defaults on; standardized
+  lyric embedding defaults off and retains original text in sidecars/NP metadata.
+  The manifest records the final file size after tagging to avoid false corruption
+  reports caused by tag writes.
+- `commands/local_files_cmd.rs`, `library/local_file_tags.rs` —
+  `LocalFilesView.vue` and `stores/library.ts` provide cancellable scan previews,
+  search, multi-select and filters for existing playlist files/duplicate metadata.
+  Scanning does not write playlists; users manually import into existing or new
+  playlists. Title/artist/album edits are prepared on a copy, then atomically
+  replace the original after verifying that lyrics, pictures and other tags
+  survive. Unmodified NP sidecar fields are retained. Editing a downloaded file
+  also updates its manifest entry and emits `downloads-changed`; failed commits
+  roll back. Focused tests: `node scripts/test-local-scan-preview.mjs`,
+  `node scripts/test-local-scan-store.mjs`, and
+  `cargo test --manifest-path src-tauri/Cargo.toml --lib library::local_file_tags::tests`.
 - `audio/` — `player.rs` (`PlayerEngine`: play/seek/fades/crossfades),
   `queue.rs` (shuffle/repeat), `effects.rs` (5-band EQ, loudness
   normalization, loudness gain), `growing.rs` (progressive buffering),
@@ -195,8 +227,9 @@ talks to music platforms directly.
   (SAPISIDHASH).
 - `sync/` — `models.rs` (payloads), `proto_models.rs` (ProtoBuf models
   tag-aligned with Android), `merge.rs` (three-way merge),
-  `serializer.rs` (JSON / data-saver), `github_api.rs`,
-  `webdav_api.rs`, `manager.rs`.
+  `serializer.rs` (legacy JSON / GZIP), `archive/` (V4 manifests and chunks),
+  `cloud.rs` (publication), `github_api.rs`, `webdav_archive.rs`,
+  `webdav_gc.rs`, and `manager.rs`.
 - `listen_together/` — `protocol.rs` (events and models), `session.rs`,
   `ws_client.rs`.
 - `library/` (local scanning, playlist storage), `lyrics/` (multi-source
@@ -320,6 +353,14 @@ Protect these paths before submitting:
    reads.
 3. Credentials go through `security.rs`, never back into plaintext
    config.
+4. V4 migration approval is bound to the backend, target, credential fingerprint,
+   and current remote content. GitHub uses conditional HEAD updates; WebDAV V4
+   manifests require strong ETags or verified finite exclusive collection leases.
+   Legacy single-file migration requires a finite collection lease. Redirects, unconditional writes,
+   and local object caches must not replace remote closure validation.
+5. Run `pnpm test:sync-protocol-upgrade` and Rust `sync` tests. Run the Kotlin
+   reverse decoder with `./scripts/test-sync-android-interop.ps1 -AndroidRoot <AndroidRepo> -ExportFixtures`.
+   This does not replace full Gradle, provider, or device tests.
 
 #### 6. Changing Listen Together
 
@@ -393,13 +434,15 @@ Commit messages follow Conventional Commits, e.g.
 
 - The project is for learning and research only; do not use it for
   illegal purposes.
-- This project is licensed under **MIT**; by contributing you agree to
-  distribute your changes under MIT.
-- The `vendor/applemusic-like-lyrics` submodule follows its own license.
-- The Android repository is GPL-3.0; the two repos are licensed
-  independently. When porting behavior from Android (Kotlin →
-  Rust/TS rewrites), align behavior — do not copy GPL-covered
-  implementation text directly.
+- This project is licensed under **GPL-3.0** (GPL-3.0-or-later); by
+  contributing you agree to distribute your changes under
+  GPL-3.0-or-later. Code contributed under MIT before 2026-10-07 keeps its
+  original notice in `LICENSES/MIT.txt`.
+- The `vendor/applemusic-like-lyrics` submodule is AGPL-3.0 and follows its
+  own license.
+- The Android repository is GPL-3.0 as well. When porting an Android
+  implementation, keep its copyright notices and name the source in the
+  commit body.
 
 ---
 

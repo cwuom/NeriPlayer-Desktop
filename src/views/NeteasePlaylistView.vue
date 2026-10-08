@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { useAuthStore } from '@/stores/auth'
 import { useDownloadStore } from '@/stores/download'
 import { useDelayedFlag } from '@/composables/useDelayedFlag'
 import { useI18n } from 'vue-i18n'
@@ -21,9 +22,10 @@ import {
 } from '@/utils/contextMenu'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 import { resolveNeteaseCover } from '@/utils/neteaseCover'
 
@@ -31,8 +33,9 @@ const props = defineProps<{ isAlbum?: boolean }>()
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const auth = useAuthStore()
 const downloadStore = useDownloadStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const isLoading = ref(true)
 // 慢加载才显示 spinner，避免快速加载时一闪而过（UI-016）
@@ -142,19 +145,22 @@ async function loadDetail() {
   const id = Number(route.params.id)
   if (!id) return
 
-  const cacheKey = playlistDetailCacheKey(props.isAlbum ? 'netease-album' : 'netease-playlist', id)
-  const cached = readPlaylistDetailCache<NeteaseDetailCache>(cacheKey)
-  if (cached) {
-    applyDetailCache(cached)
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  const cacheKey = playlistDetailCacheKey(
+    props.isAlbum ? 'netease-album' : 'netease-playlist',
+    id,
+    auth.netease.loggedIn ? auth.netease.nickname : null,
+  )
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<NeteaseDetailCache>(cacheKey, (detail) => {
+    applyDetailCache(detail)
+    isLoading.value = false
+  })
 
   try {
     if (props.isAlbum) {
       const data = await invoke<any>('get_album_detail', { albumId: id })
+      cached.markFresh()
       const album = data?.album || {}
       playlistName.value = album.name || ''
       const albumCover = resolveNeteaseCover(
@@ -182,6 +188,7 @@ async function loadDetail() {
       trackCount.value = tracks.value.length
     } else {
       const data = await invoke<any>('get_netease_playlist_detail', { playlistId: id })
+      cached.markFresh()
       const pl = data?.playlist || {}
       playlistName.value = pl.name || ''
       coverUrl.value = resolveNeteaseCover(pl.coverImgUrl, pl.picUrl, pl.cover)
@@ -202,13 +209,23 @@ async function loadDetail() {
       }))
     }
     saveDetailCache(cacheKey)
+    recordOpen()
   } catch (e: any) {
-    if (!cached) {
-      error.value = e?.toString() || t('player.load_failed')
-    }
+    if (await cached.shown()) recordOpen()
+    else error.value = e?.toString() || t('player.load_failed')
   } finally {
     isLoading.value = false
   }
+}
+
+function recordOpen() {
+  recordPlaylistOpen({
+    source: props.isAlbum ? 'neteaseAlbum' : 'netease',
+    id: String(route.params.id),
+    name: playlistName.value,
+    coverUrl: coverUrl.value,
+    trackCount: trackCount.value || tracks.value.length,
+  })
 }
 
 function playAll() {
@@ -240,10 +257,10 @@ function queueSelected() {
   leaveSelectionMode()
 }
 
+// 紧凑计数随界面语言：中文 1.5亿 / 1.2万，英文 150M / 12K
+const playCountFormat = computed(() => new Intl.NumberFormat(locale.value, { notation: 'compact', maximumFractionDigits: 1 }))
 function formatPlayCount(count: number): string {
-  if (count >= 100000000) return (count / 100000000).toFixed(1) + t('common.hundred_million')
-  if (count >= 10000) return (count / 10000).toFixed(1) + t('common.ten_thousand')
-  return count.toString()
+  return playCountFormat.value.format(count)
 }
 
 // 曲目右键菜单
@@ -335,10 +352,7 @@ function trackDownloadLabel(track: TrackInfo) {
 }
 
 function isTrackDownloadDisabled(track: TrackInfo) {
-  if (downloadStore.isDownloading(track.id)) return true
-  return downloadStore.isDownloaded(track.id)
-    && player.currentTrack?.id === track.id
-    && player.isPlayingFromDownload
+  return downloadStore.isDownloading(track.id)
 }
 
 async function handleTrackDownload(track: TrackInfo) {
@@ -435,7 +449,9 @@ onMounted(() => {
       <!-- 歌单 / 专辑 信息头 -->
       <div class="detail-hero">
         <div class="hero-cover">
-          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl" />
+          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl">
+            <span class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
+          </BilibiliCoverImage>
           <span v-else class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
         </div>
         <div class="hero-info">
@@ -463,7 +479,7 @@ onMounted(() => {
 
       <!-- 歌曲列表 -->
       <div v-if="filteredTracks.length === 0" class="state-center">
-        <p>{{ t('player.empty_playlist') }}</p>
+        <p>{{ searchQuery.trim() && tracks.length > 0 ? t('player.no_results') : t('player.empty_playlist') }}</p>
       </div>
       <div v-else>
         <TrackSelectionToolbar

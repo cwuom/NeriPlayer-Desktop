@@ -45,6 +45,9 @@ pub struct AppState {
     pub playback_generation: Arc<AtomicU64>,
     pub queue: Mutex<PlayQueue>,
     pub http: parking_lot::RwLock<reqwest::Client>,
+    sync_http: parking_lot::RwLock<reqwest::Client>,
+    sync_alt_http: parking_lot::RwLock<reqwest::Client>,
+    bypass_system_proxy: AtomicBool,
     /// 共享 Cookie Jar：允许外部注入持久化登录 Cookie
     pub cookie_jar: Arc<reqwest::cookie::Jar>,
     /// 三平台登录状态
@@ -104,6 +107,13 @@ impl AppState {
             playback_generation,
             queue: Mutex::new(PlayQueue::new()),
             http: parking_lot::RwLock::new(http),
+            sync_http: parking_lot::RwLock::new(
+                Self::build_sync_http(true).expect("Failed to create sync HTTP client"),
+            ),
+            sync_alt_http: parking_lot::RwLock::new(
+                Self::build_sync_http(false).expect("Failed to create fallback sync HTTP client"),
+            ),
+            bypass_system_proxy: AtomicBool::new(true),
             cookie_jar: jar,
             auth: Mutex::new(AuthState::default()),
             lt_session: Mutex::new(LtSession::new()),
@@ -133,11 +143,47 @@ impl AppState {
         };
         if let Ok(client) = build(bypass_proxy) {
             *self.http.write() = client;
+            self.bypass_system_proxy.store(bypass_proxy, std::sync::atomic::Ordering::Release);
         }
         // 备用客户端始终取相反设置
         if let Ok(client) = build(!bypass_proxy) {
             *self.alt_http.write() = client;
         }
+        if let Ok(client) = Self::build_sync_http(bypass_proxy) {
+            *self.sync_http.write() = client;
+        }
+        if let Ok(client) = Self::build_sync_http(!bypass_proxy) {
+            *self.sync_alt_http.write() = client;
+        }
+    }
+
+    fn build_sync_http(bypass_proxy: bool) -> Result<reqwest::Client, reqwest::Error> {
+        let mut builder = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .read_timeout(HTTP_READ_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none());
+        if bypass_proxy {
+            builder = builder.no_proxy();
+        }
+        builder.build()
+    }
+
+    pub fn bypasses_system_proxy(&self) -> bool {
+        self.bypass_system_proxy.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    // 同步锁和条件写入绑定资源地址，重定向不能绕过目标校验
+    pub fn sync_http(&self) -> reqwest::Client {
+        self.sync_http.read().clone()
+    }
+
+    pub fn hls_transport(&self) -> crate::api::transport::FallbackHttp {
+        crate::api::transport::FallbackHttp::with_fallback(
+            &self.sync_http(),
+            &self.sync_alt_http.read().clone(),
+            "youtube_hls",
+        )
     }
 
     /// 代理设置与 http() 相反的备用客户端
@@ -169,6 +215,7 @@ impl AppState {
 
     pub fn bilibili(&self) -> crate::api::bilibili::client::BiliClient {
         crate::api::bilibili::client::BiliClient::with_transport(self.transport("bilibili"))
+            .with_cookie_jar(self.cookie_jar.clone())
     }
 
     pub fn qq(&self) -> crate::api::qq::client::QqMusicClient {
@@ -221,4 +268,29 @@ pub enum RepeatMode {
     Off,
     All,
     One,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn sync_client_does_not_follow_redirects() {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = target.local_addr().unwrap();
+        let redirected_address = redirected.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{redirected_address}/locked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let response = AppState::build_sync_http(true).unwrap()
+            .get(format!("http://{address}/manifest")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), redirected.accept()).await.is_err());
+        server.await.unwrap();
+    }
 }

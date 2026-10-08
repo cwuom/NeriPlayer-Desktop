@@ -23,6 +23,9 @@ pub struct LyricWord {
 
 /// 自动检测格式并解析（对齐 Android parseNeteaseLyricsAuto）
 pub fn parse_auto(content: &str) -> Vec<LyricLine> {
+    if super::ttml::looks_like(content) {
+        return super::ttml::parse(content).unwrap_or_default();
+    }
     static YRC_DETECT: OnceLock<Regex> = OnceLock::new();
     let re = YRC_DETECT.get_or_init(|| Regex::new(r"\[\d+,\s*\d+\]\(\d+,").unwrap());
     if re.is_match(content) {

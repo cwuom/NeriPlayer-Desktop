@@ -5,13 +5,39 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::sync::Mutex as TokioMutex;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use super::protocol::LtSocketEnvelope;
 
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+/// 单条消息和单帧的上限（对齐 Android ListenTogetherSocketCodec）；超过的连接按读错误断开重连
+const WS_MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+
+fn socket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(WS_MAX_MESSAGE_BYTES),
+        max_frame_size: Some(WS_MAX_MESSAGE_BYTES),
+        ..Default::default()
+    }
+}
+
+/// 解析服务端消息；失败时把原因交给前端，不能让一个字段不对的整条房态更新悄悄消失
+/// （对齐 Android 把 lastError 设为 "Protocol: …"）
+pub(crate) fn decode_envelope(text: &str) -> Result<LtSocketEnvelope, String> {
+    serde_json::from_str::<LtSocketEnvelope>(text).map_err(|error| format!("Protocol: {error}"))
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LtSocketMessage<'a> {
+    connection_id: &'a str,
+    #[serde(flatten)]
+    envelope: &'a LtSocketEnvelope,
+}
 
 /// WebSocket 客户端：管理与一起听服务器的连接
 pub struct LtWsClient {
@@ -26,9 +52,13 @@ pub struct LtWsClient {
 impl LtWsClient {
     /// 建立 WebSocket 连接并启动读写循环
     pub async fn connect(ws_url: &str, app_handle: AppHandle) -> Result<Self, String> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
-            .await
-            .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+        let (ws_stream, _) = tokio::time::timeout(
+            WS_CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(ws_url, Some(socket_config()), false),
+        )
+        .await
+        .map_err(|_| "WebSocket connect timed out".to_string())?
+        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
 
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -117,13 +147,26 @@ impl LtWsClient {
                 let Some(result) = result else { break };
                 match result {
                     Ok(Message::Text(text)) => {
-                        // 尝试解析为 envelope 并转发给前端
-                        match serde_json::from_str::<LtSocketEnvelope>(&text) {
+                        // 解析为 envelope 并转发给前端
+                        match decode_envelope(&text) {
                             Ok(envelope) => {
-                                let _ = handle_r.emit("lt:message", &envelope);
+                                let _ = handle_r.emit(
+                                    "lt:message",
+                                    LtSocketMessage {
+                                        connection_id: &reader_connection_id,
+                                        envelope: &envelope,
+                                    },
+                                );
                             }
-                            Err(e) => {
-                                log::warn!(target: "lt-ws", "parse error: {e}, raw: {text}");
+                            Err(message) => {
+                                log::warn!(target: "lt-ws", "{message}");
+                                let _ = handle_r.emit(
+                                    "lt:protocol_error",
+                                    serde_json::json!({
+                                        "connectionId": reader_connection_id,
+                                        "message": message,
+                                    }),
+                                );
                             }
                         }
                     }
@@ -177,15 +220,16 @@ impl LtWsClient {
             .map_err(|e| format!("send failed: {e}"))
     }
 
-    /// 发送 ping
-    pub fn send_ping(&self, client_time_ms: Option<i64>) -> Result<(), String> {
+    /// 发送 ping；旧版服务端不认识 np_ping 时用 legacy 退回普通 ping（对齐 Android）
+    pub fn send_ping(&self, client_time_ms: Option<i64>, legacy: bool) -> Result<(), String> {
         let timestamp = client_time_ms.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64
         });
-        let payload = format!(r#"{{"type":"np_ping","t":{timestamp}}}"#);
+        let kind = if legacy { "ping" } else { "np_ping" };
+        let payload = format!(r#"{{"type":"{kind}","t":{timestamp}}}"#);
         self.send(&payload)
     }
 
@@ -209,3 +253,44 @@ impl Drop for LtWsClient {
 
 /// 全局 WS 客户端引用（存在 AppState 中）
 pub type SharedWsClient = Arc<TokioMutex<Option<LtWsClient>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unreadable_messages_are_reported_instead_of_dropped_silently() {
+        assert!(decode_envelope(r#"{"type":"pong"}"#).is_ok());
+        for broken in ["not json", r#"{"state":{}}"#, r#"{"type":"room_state_updated","state":{"version":"x"}}"#] {
+            let error = decode_envelope(broken).expect_err(broken);
+            assert!(error.starts_with("Protocol: "), "{error}");
+        }
+        let config = socket_config();
+        assert_eq!(config.max_message_size, Some(2 * 1024 * 1024));
+        assert_eq!(config.max_frame_size, Some(2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn connection_identity_is_added_only_to_local_socket_messages() {
+        let envelope: LtSocketEnvelope = serde_json::from_value(json!({
+            "type": "np_pong",
+            "t": 123,
+            "nowMs": 456
+        }))
+        .unwrap();
+        let payload = serde_json::to_value(LtSocketMessage {
+            connection_id: "connection-1",
+            envelope: &envelope,
+        })
+        .unwrap();
+
+        assert_eq!(payload["connectionId"], "connection-1");
+        assert_eq!(payload["type"], "np_pong");
+        assert_eq!(payload["t"], 123);
+        assert!(serde_json::to_value(envelope)
+            .unwrap()
+            .get("connectionId")
+            .is_none());
+    }
+}

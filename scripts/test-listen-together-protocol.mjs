@@ -1,28 +1,45 @@
 // Listen-together wire protocol helpers (Android-aligned ExoPlayer ints)
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFile } from 'node:fs/promises'
+import ts from 'typescript'
 
-// protocol.ts is TS; reimplement the pure helpers for unit gate without bundler
-const LtRepeatMode = { OFF: 0, ONE: 1, ALL: 2 }
+const source = await readFile(new URL('../src/stores/listenTogether/protocol.ts', import.meta.url), 'utf8')
+const compiled = ts.transpileModule(source, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText
+const { desktopRepeatToWire, wireRepeatToDesktop, isValidLtNickname, parseLtInvite, resolveLocalRoomControlRestriction } = await import(
+  `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`,
+)
 
-function desktopRepeatToWire(mode) {
-  switch (mode) {
-    case 'one': return LtRepeatMode.ONE
-    case 'all': return LtRepeatMode.ALL
-    default: return LtRepeatMode.OFF
-  }
+// 对齐 Android LocalRoomControlRestrictionTest
+assert.equal(resolveLocalRoomControlRestriction('controller_offline', false, true), null, 'the host is never restricted')
+assert.equal(resolveLocalRoomControlRestriction('controller_offline', false, false), 'controller_offline')
+assert.equal(resolveLocalRoomControlRestriction('active', false, false), 'member_control_disabled')
+assert.equal(resolveLocalRoomControlRestriction('active', true, false), null)
+assert.equal(resolveLocalRoomControlRestriction(null, null, false), null)
+
+// 昵称与服务端同一规则：汉字（含 〇、々、扩展区）、ASCII 字母数字，按码点最多 24 个
+for (const valid of ['Tester', '听歌的人', '〇々', '𠀀𠀁', 'a'.repeat(24), '𠀀'.repeat(24)]) {
+  assert.equal(isValidLtNickname(valid), true, valid)
+}
+for (const invalid of ['', '   ', 'a'.repeat(25), 'with-dash', 'emoji😀', 'ｆｕｌｌ', 'カタカナ']) {
+  assert.equal(isValidLtNickname(invalid), false, invalid)
 }
 
-function wireRepeatToDesktop(mode) {
-  if (mode === null || mode === undefined || Number.isNaN(mode)) return null
-  if (mode === LtRepeatMode.ONE) return 'one'
-  if (mode === LtRepeatMode.ALL) return 'all'
-  if (mode === LtRepeatMode.OFF) return 'off'
-  return null
-}
+const invite = 'neriplayer://listen-together/join?inviter=Tom&roomId=abc234&secret=s3cret&baseUrl=https%3A%2F%2Fltw.example.com%2F'
+assert.deepEqual(parseLtInvite(`来一起听吧 ${invite} 这个房间`), {
+  roomId: 'ABC234', joinSecret: 's3cret', baseUrl: 'https://ltw.example.com', inviter: 'Tom', link: invite, hasInvalidBaseUrl: false,
+})
+assert.equal(
+  'inviter' in parseLtInvite('neriplayer://listen-together/join?inviter=bad-name&roomId=ABC234&secret=x'),
+  false,
+  'an inviter that is not a valid nickname is dropped',
+)
+assert.equal(parseLtInvite('neriplayer-debug://listen-together/join?roomId=ABC234&secret=x')?.roomId, 'ABC234')
+assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=ABC234'), null, 'an invite without a secret cannot be used')
+assert.equal(parseLtInvite('myneriplayer://listen-together/join?roomId=ABC234&secret=x'), null, 'no match inside a longer scheme')
+assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=AB&secret=x'), null)
+assert.equal(parseLtInvite('neriplayer://listen-together/join?roomId=ABC234&secret=x&baseUrl=http%3A%2F%2Finsecure.example')?.hasInvalidBaseUrl, true)
 
 assert.equal(desktopRepeatToWire('off'), 0)
 assert.equal(desktopRepeatToWire('one'), 1)

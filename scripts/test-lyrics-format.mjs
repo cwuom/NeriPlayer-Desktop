@@ -23,6 +23,7 @@ const {
   withUpdatedLyricsPayload,
   resolveStoredLyricText,
   resolveStoredLyricStateFromPayload,
+  mergeWordTimedLyricsWithBaseline,
 } = await loadTsModule('../src/modules/lyrics/lyricsFormat.ts')
 
 const wordLine = {
@@ -85,6 +86,14 @@ assert.match(nowPlaying, /commitLyricsToTrack|persistTrackSyncPayload/)
 // CURRENT version 标记
 assert.equal(payload.syncMetadataVersion, 1)
 
+// 用户编辑标记为已编辑，修订号至少是当前时间且严格大于原值，同步时才能盖过别的设备
+assert.equal(payload.lyricSyncEdited, true)
+const reset = { lyricSyncRevision: 9e12, lyricSyncEdited: false }
+const reedited = withUpdatedLyricsPayload(reset, 'x', null, null, 1_000)
+assert.equal(reedited.lyricSyncEdited, true)
+assert.equal(reedited.lyricSyncRevision, 9e12 + 1)
+assert.equal(withUpdatedLyricsPayload({ lyric_sync_revision: 5 }, 'x', null, null, 2_000).lyricSyncRevision, 2_000)
+
 // 有意清空写空串 (CLEARED), 保留 original
 const cleared = withUpdatedLyricsPayload(payload, null, null, null)
 assert.equal(cleared.matchedLyric, '')
@@ -101,5 +110,25 @@ assert.equal(
   resolveStoredLyricStateFromPayload({ originalLyric: '[00:01.00]a' }).kind,
   'present',
 )
+
+const baselineAnnotations = [
+  { startMs: 1000, durationMs: 1000, text: 'Hello', words: [], translation: '你好', roman: 'halo' },
+  { startMs: 3000, durationMs: 1000, text: 'World', words: [], translation: '世界', roman: 'world' },
+]
+const upgradedWords = [
+  { startMs: 1100, durationMs: 1000, text: 'Hello', words: [{ startMs: 1100, durationMs: 600, text: 'Hello' }] },
+  { startMs: 1700, durationMs: 500, text: 'other', words: [] },
+  { startMs: 3100, durationMs: 1000, text: 'World', words: [], translation: '外源翻译', roman: 'external' },
+]
+const mergedUpgrade = mergeWordTimedLyricsWithBaseline(baselineAnnotations, upgradedWords)
+assert.equal(mergedUpgrade[0].translation, '你好')
+assert.equal(mergedUpgrade[0].roman, 'halo')
+assert.equal(mergedUpgrade[1].translation, undefined)
+assert.equal(mergedUpgrade[1].roman, undefined)
+assert.equal(mergedUpgrade[2].translation, '外源翻译')
+assert.equal(mergedUpgrade[2].roman, 'external')
+assert.deepEqual(mergedUpgrade[0].words, upgradedWords[0].words)
+assert.equal(upgradedWords[0].translation, undefined)
+assert.equal(baselineAnnotations[0].translation, '你好')
 
 console.log('lyrics format tests passed')

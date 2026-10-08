@@ -9,6 +9,7 @@ import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import { useIncrementalList } from '@/composables/useIncrementalList'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -25,6 +26,7 @@ const player = usePlayerStore()
 const { t } = useI18n()
 
 const loading = ref(true)
+const loadFailed = ref(false)
 const name = ref('')
 const source = ref('')
 const coverUrl = ref('')
@@ -43,6 +45,7 @@ function platformLabel(value: string): string {
 
 async function load() {
   loading.value = true
+  loadFailed.value = false
   try {
     const raw = await invoke<any[]>('list_favorite_playlists')
     const found = (raw || []).find((item: any) => String(item?.id ?? '') === favoriteId.value)
@@ -62,6 +65,7 @@ async function load() {
   } catch (e) {
     log.error('load favorite playlist failed:', e)
     tracks.value = []
+    loadFailed.value = true
   } finally {
     loading.value = false
   }
@@ -95,9 +99,12 @@ function closeTrackMenu() {
   trackMenu.value.show = false
 }
 
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(() => trackMenu.value.track, closeTrackMenu)
+
 const trackMenuItems = computed<ContextMenuItem[]>(() => [
   createContextMenuItem(t('player.play_next'), { id: 'play-next', icon: 'queue_play_next' }),
   createContextMenuItem(t('player.add_to_queue'), { id: 'add-to-queue', icon: 'add_to_queue' }),
+  downloadMenuItem.value,
 ])
 
 function handleTrackMenuClick(item: ContextMenuActionItem) {
@@ -109,6 +116,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
       break
     case 'add-to-queue':
       player.addToQueueEnd(track)
+      break
+    case 'download':
+      void downloadFromMenu()
       break
   }
   closeTrackMenu()
@@ -145,6 +155,12 @@ onMounted(load)
 
     <div v-if="loading" class="empty-state">
       <span class="material-symbols-rounded spinning">progress_activity</span>
+    </div>
+
+    <div v-else-if="loadFailed" class="empty-state">
+      <span class="material-symbols-rounded">error</span>
+      <p>{{ t('player.load_failed') }}</p>
+      <button class="retry-btn" @click="load">{{ t('player.retry') }}</button>
     </div>
 
     <div v-else-if="tracks.length === 0" class="empty-state">
@@ -190,7 +206,9 @@ onMounted(load)
             <span v-else class="index-num">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
-            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">

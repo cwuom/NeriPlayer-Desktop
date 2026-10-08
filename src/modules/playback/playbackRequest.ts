@@ -62,9 +62,11 @@ export function playbackSessionTrackKey(
 export function shouldResolvePlaybackSourceInParallel(
   _hadPlaybackSession: boolean,
   hasPrefetchedResolution: boolean,
+  hasCompleteCache = false,
 ): boolean {
-  // 缓存检查与 URL 解析并行，避免缓存未命中后才开始网络请求
-  return !hasPrefetchedResolution
+  // 缓存检查与 URL 解析并行，避免缓存未命中后才开始网络请求；
+  // 已有完整缓存时直接离线播放，不再发平台请求（对齐 Android）
+  return !hasPrefetchedResolution && !hasCompleteCache
 }
 
 export function initialPlaybackPrefetchWindow<T>(

@@ -1,10 +1,21 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { TrackInfo } from './player'
+import {
+  LEGACY_HISTORY_DELETIONS_KEY,
+  LEGACY_HISTORY_KEY,
+  persistUserData,
+  preloadedUserData,
+} from '@/modules/persistence/userData'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('history')
 
 export interface PlayedEntry {
   track: TrackInfo
   playedAt: number
+  /** 长音频续播位置；undefined 表示本机还不知道（升级前的条目），同步时沿用存档里的值 */
+  resumePositionMs?: number
 }
 
 export interface HistoryDeletion {
@@ -16,6 +27,13 @@ interface BackendHistoryEntry {
   track?: Record<string, unknown>
   playedAt?: number
   played_at?: number
+  resumePositionMs?: number | null
+  resume_position_ms?: number | null
+}
+
+function resumePosition(raw: any): number | undefined {
+  const value = raw?.resumePositionMs ?? raw?.resume_position_ms
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : undefined
 }
 
 interface BackendHistoryDeletion {
@@ -26,11 +44,41 @@ interface BackendHistoryDeletion {
   deleted_at?: number
 }
 
-const STORAGE_KEY = 'neri:play-history'
-const DELETIONS_STORAGE_KEY = 'neri:play-history-deletions'
-const MAX_ENTRIES = 1000
-const MAX_DELETIONS = 2000
+export type HistorySyncApplyOutcome = 'applied' | 'deferred' | 'skipped'
+
+const STORAGE_KEY = LEGACY_HISTORY_KEY
+const DELETIONS_STORAGE_KEY = LEGACY_HISTORY_DELETIONS_KEY
 export const HISTORY_CHANGED_EVENT = 'neri:history-changed'
+
+/**
+ * 历史条目的身份：曲目 id；同一个 B 站视频的不同分 P 再按 cid 区分（取流选分 P 的同一规则）。
+ * 必须与 Rust `play_history::identity_key` 一致
+ */
+export function historyEntryKey(track: Pick<TrackInfo, 'id' | 'album' | 'syncPayload'>): string {
+  if (!track.id.startsWith('bilibili:')) return track.id
+  const cid = bilibiliPage(track)
+  return cid ? `${track.id}#${cid}` : track.id
+}
+
+function bilibiliPage(track: Pick<TrackInfo, 'album' | 'syncPayload'>): string | undefined {
+  for (const key of ['subAudioId', 'sub_audio_id']) {
+    const value = track.syncPayload?.[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return track.album?.match(/^Bilibili\|(\d+)/i)?.[1]
+}
+
+/** 按身份去重，保留先出现的一条（调用方先按时间从新到旧排好） */
+function uniqueByIdentity<T extends { track: TrackInfo }>(items: T[]): T[] {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    const key = historyEntryKey(item.track)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
 
 function normalizeTrack(raw: any): TrackInfo {
   return {
@@ -115,7 +163,7 @@ function toBackendTrack(track: TrackInfo) {
   }
 }
 
-function emitHistoryChanged(type: 'record' | 'remove' | 'clear' | 'sync') {
+function emitHistoryChanged(type: 'record' | 'progress' | 'remove' | 'clear' | 'sync') {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent(HISTORY_CHANGED_EVENT, {
     detail: { type, at: Date.now() },
@@ -125,39 +173,61 @@ function emitHistoryChanged(type: 'record' | 'remove' | 'clear' | 'sync') {
 export const useHistoryStore = defineStore('history', () => {
   const entries = ref<PlayedEntry[]>([])
   const deletions = ref<HistoryDeletion[]>([])
+  let mutationEpoch = 0
+  // 只统计用户自己的播放/删除/清空，同步应用远端结果时据此判断快照之后有没有新的本地修改
+  let localMutationEpoch = 0
+  const database = preloadedUserData() !== null
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.value))
-      localStorage.setItem(DELETIONS_STORAGE_KEY, JSON.stringify(deletions.value))
-    } catch {
-      // 存储失败忽略
+  /** 数据库模式下每次修改只发出对应命令；浏览器开发模式退回整表写 localStorage */
+  function persist(command: string, args: Record<string, unknown>) {
+    if (!database) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.value))
+        localStorage.setItem(DELETIONS_STORAGE_KEY, JSON.stringify(deletions.value))
+      } catch {
+        // 存储失败忽略
+      }
+      return
     }
+    void persistUserData(command, args).catch((error) => {
+      log.error(`${command} failed:`, error)
+    })
   }
 
   function load() {
+    const preloaded = preloadedUserData()
+    if (preloaded) {
+      applyStored(preloaded.history.entries, preloaded.history.deletions)
+      return
+    }
     try {
       const rawEntries = localStorage.getItem(STORAGE_KEY)
       const rawDeletions = localStorage.getItem(DELETIONS_STORAGE_KEY)
-      const parsedEntries = rawEntries ? JSON.parse(rawEntries) : []
-      const parsedDeletions = rawDeletions ? JSON.parse(rawDeletions) : []
+      applyStored(rawEntries ? JSON.parse(rawEntries) : [], rawDeletions ? JSON.parse(rawDeletions) : [])
+    } catch {
+      entries.value = []
+      deletions.value = []
+    }
+  }
+
+  function applyStored(parsedEntries: unknown, parsedDeletions: unknown) {
+    try {
       entries.value = Array.isArray(parsedEntries)
-        ? parsedEntries
+        ? uniqueByIdentity(parsedEntries
           .map((entry: any) => ({
             track: normalizeTrack(entry?.track),
             playedAt: Number(entry?.playedAt ?? entry?.played_at ?? 0),
+            resumePositionMs: resumePosition(entry),
           }))
-          .filter((entry: PlayedEntry) => entry.track.id && entry.playedAt > 0)
-          .slice(0, MAX_ENTRIES)
+          .filter((entry: PlayedEntry) => entry.track.id && entry.playedAt > 0))
         : []
       deletions.value = Array.isArray(parsedDeletions)
-        ? parsedDeletions
+        ? uniqueByIdentity(parsedDeletions
           .map((deletion: any) => ({
             track: normalizeTrack(deletion?.track),
             deletedAt: Number(deletion?.deletedAt ?? deletion?.deleted_at ?? 0),
           }))
-          .filter((deletion: HistoryDeletion) => deletion.track.id && deletion.deletedAt > 0)
-          .slice(0, MAX_DELETIONS)
+          .filter((deletion: HistoryDeletion) => deletion.track.id && deletion.deletedAt > 0))
         : []
     } catch {
       entries.value = []
@@ -165,39 +235,75 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
+  function markLocalMutation() {
+    mutationEpoch++
+    localMutationEpoch++
+  }
+
+  /** 记一次播放；已记住的续播位置保留（对齐 Android record 只合并曲目信息） */
   function record(track: TrackInfo) {
-    const idx = entries.value.findIndex(entry => entry.track.id === track.id)
+    markLocalMutation()
+    const playedAt = Date.now()
+    const key = historyEntryKey(track)
+    const idx = entries.value.findIndex(entry => historyEntryKey(entry.track) === key)
+    const resumePositionMs = idx >= 0 ? entries.value[idx].resumePositionMs : undefined
     if (idx >= 0) entries.value.splice(idx, 1)
-    deletions.value = deletions.value.filter(deletion => deletion.track.id !== track.id)
-    entries.value.unshift({ track, playedAt: Date.now() })
-    if (entries.value.length > MAX_ENTRIES) entries.value = entries.value.slice(0, MAX_ENTRIES)
-    save()
+    deletions.value = deletions.value.filter(deletion => historyEntryKey(deletion.track) !== key)
+    entries.value.unshift({ track, playedAt, resumePositionMs })
+    persist('record_play_history', { track, playedAt })
     emitHistoryChanged('record')
   }
 
-  function remove(trackId: string) {
-    const removed = entries.value.find(entry => entry.track.id === trackId)?.track
-    const before = entries.value.length
-    entries.value = entries.value.filter(entry => entry.track.id !== trackId)
-    if (removed) {
-      deletions.value = [
-        { track: removed, deletedAt: Date.now() },
-        ...deletions.value.filter(deletion => deletion.track.id !== trackId),
-      ].slice(0, MAX_DELETIONS)
-    }
-    save()
-    if (entries.value.length !== before || Boolean(removed)) emitHistoryChanged('remove')
+  function rememberedPosition(track: TrackInfo): number {
+    const key = historyEntryKey(track)
+    return entries.value.find(entry => historyEntryKey(entry.track) === key)?.resumePositionMs ?? 0
+  }
+
+  /** 记下长音频的续播位置，条目移到最前（对齐 Android updateRememberedPlaybackPosition） */
+  function updateResumePosition(track: TrackInfo, positionMs: number) {
+    const resumePositionMs = Math.max(0, Math.round(positionMs))
+    const now = Date.now()
+    const key = historyEntryKey(track)
+    const idx = entries.value.findIndex(entry => historyEntryKey(entry.track) === key)
+    const existing = idx >= 0 ? entries.value[idx] : undefined
+    if (existing && existing.playedAt > now) return
+    if (!existing && resumePositionMs === 0) return
+    if (existing?.resumePositionMs === resumePositionMs) return
+    markLocalMutation()
+    if (idx >= 0) entries.value.splice(idx, 1)
+    deletions.value = deletions.value.filter(deletion => historyEntryKey(deletion.track) !== key)
+    entries.value.unshift({ track, playedAt: now, resumePositionMs })
+    persist('record_play_history', { track, playedAt: now, resumePositionMs })
+    emitHistoryChanged('progress')
+  }
+
+  /** 按 historyEntryKey 删除单条 */
+  function remove(identityKey: string) {
+    const removed = entries.value.find(entry => historyEntryKey(entry.track) === identityKey)?.track
+    if (!removed) return
+    markLocalMutation()
+    const deletedAt = Date.now()
+    entries.value = entries.value.filter(entry => historyEntryKey(entry.track) !== identityKey)
+    deletions.value = [
+      { track: removed, deletedAt },
+      ...deletions.value.filter(deletion => historyEntryKey(deletion.track) !== identityKey),
+    ]
+    persist('remove_play_history', { identityKey, deletedAt })
+    emitHistoryChanged('remove')
   }
 
   function clear() {
+    markLocalMutation()
     if (entries.value.length === 0) return
     const deletedAt = Date.now()
     const current = entries.value.map(entry => ({ track: entry.track, deletedAt }))
-    const currentIds = new Set(current.map(deletion => deletion.track.id))
-    deletions.value = [...current, ...deletions.value.filter(deletion => !currentIds.has(deletion.track.id))]
-      .slice(0, MAX_DELETIONS)
+    const currentKeys = new Set(current.map(deletion => historyEntryKey(deletion.track)))
+    deletions.value = [
+      ...current,
+      ...deletions.value.filter(deletion => !currentKeys.has(historyEntryKey(deletion.track))),
+    ]
     entries.value = []
-    save()
+    persist('clear_play_history', { deletedAt })
     emitHistoryChanged('clear')
   }
 
@@ -206,6 +312,7 @@ export const useHistoryStore = defineStore('history', () => {
       entries: entries.value.map(entry => ({
         track: toBackendTrack(entry.track),
         playedAt: entry.playedAt,
+        resumePositionMs: entry.resumePositionMs ?? null,
       })),
       deletions: deletions.value.map(deletion => ({
         track: toBackendTrack(deletion.track),
@@ -214,8 +321,28 @@ export const useHistoryStore = defineStore('history', () => {
     }
   }
 
-  async function applySyncPayload(payload: any) {
-    if (!payload || typeof payload !== 'object') return
+  /** 与 getSyncSnapshot 同时取，交给 applySyncPayload 判断快照之后用户是否又改过历史 */
+  function syncSnapshotEpoch() {
+    return localMutationEpoch
+  }
+
+  /**
+   * 应用远端合并结果。快照之后用户又改过历史时返回 'deferred'：这份结果不含那些修改，
+   * 不能覆盖本地，调用方应补一轮同步把它们合并上去（对齐 Android 的延迟应用）
+   */
+  async function applySyncPayload(
+    payload: any,
+    isCurrent: () => boolean = () => true,
+    snapshotEpoch?: number,
+  ): Promise<HistorySyncApplyOutcome> {
+    if (!payload || typeof payload !== 'object' || !isCurrent()) return 'skipped'
+    const startedLocalEpoch = localMutationEpoch
+    if (snapshotEpoch !== undefined && snapshotEpoch !== startedLocalEpoch) return 'deferred'
+    const epoch = ++mutationEpoch
+    const canApply = () => epoch === mutationEpoch && isCurrent()
+    // 被更新的同步结果取代时直接放弃；被用户修改打断时要求补同步
+    const interrupted = (): HistorySyncApplyOutcome =>
+      isCurrent() && localMutationEpoch !== startedLocalEpoch ? 'deferred' : 'skipped'
     const previousEntries = entries.value.map(entry => entry.track)
     const previousDeletions = deletions.value.map(deletion => deletion.track)
     const rawEntries: BackendHistoryEntry[] = Array.isArray(payload.entries) ? payload.entries : []
@@ -224,7 +351,8 @@ export const useHistoryStore = defineStore('history', () => {
     const resolvedDeletions: HistoryDeletion[] = []
 
     for (const rawDeletion of rawDeletions) {
-      const candidate = await findMatchingTrack(candidates, rawDeletion)
+      const candidate = await findMatchingTrack(candidates, rawDeletion, canApply)
+      if (!canApply()) return interrupted()
       if (candidate) {
         resolvedDeletions.push({
           track: candidate,
@@ -237,28 +365,47 @@ export const useHistoryStore = defineStore('history', () => {
       .map(entry => ({
         track: normalizeTrack(entry.track),
         playedAt: Number(entry.playedAt ?? entry.played_at ?? 0),
+        resumePositionMs: resumePosition(entry),
       }))
       .filter(entry => entry.track.id && entry.playedAt > 0)
       .sort((left, right) => right.playedAt - left.playedAt)
 
-    entries.value = nextEntries.slice(0, MAX_ENTRIES)
-    deletions.value = resolvedDeletions
+    // 提交阶段没有异步等待，先复核账号意图和本地修改再一起保存
+    if (!canApply()) return interrupted()
+    mutationEpoch++
+    // 合并结果按同步身份区分，同一曲目可能因专辑名不同出现多条，本地只留最新的一条
+    entries.value = uniqueByIdentity(nextEntries)
+    deletions.value = uniqueByIdentity(resolvedDeletions
       .filter(deletion => deletion.track.id && deletion.deletedAt > 0)
-      .sort((left, right) => right.deletedAt - left.deletedAt)
-      .slice(0, MAX_DELETIONS)
-    save()
+      .sort((left, right) => right.deletedAt - left.deletedAt))
+    persist('replace_play_history', {
+      history: {
+        entries: entries.value.map(entry => ({
+          track: entry.track,
+          playedAt: Math.round(entry.playedAt),
+          resumePositionMs: entry.resumePositionMs ?? null,
+        })),
+        deletions: deletions.value.map(deletion => ({
+          track: deletion.track,
+          deletedAt: Math.round(deletion.deletedAt),
+        })),
+      },
+    })
     emitHistoryChanged('sync')
+    return 'applied'
   }
 
   async function findMatchingTrack(
     candidates: TrackInfo[],
     deletion: BackendHistoryDeletion,
+    isCurrent: () => boolean,
   ): Promise<TrackInfo | undefined> {
     const expectedSongId = String(deletion.songId ?? '')
     const expectedAlbum = String(deletion.album ?? '')
     const expectedMediaUri = String(deletion.mediaUri ?? '')
     for (const candidate of candidates) {
       const identity = await syncIdentity(candidate)
+      if (!isCurrent()) return undefined
       if (
         identity.songId === expectedSongId &&
         (identity.album === expectedAlbum || !expectedAlbum) &&
@@ -274,9 +421,12 @@ export const useHistoryStore = defineStore('history', () => {
     entries,
     deletions,
     record,
+    rememberedPosition,
+    updateResumePosition,
     remove,
     clear,
     getSyncSnapshot,
+    syncSnapshotEpoch,
     applySyncPayload,
   }
 })

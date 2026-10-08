@@ -9,6 +9,7 @@ import {
   tracePlaybackUi,
 } from '@/stores/player'
 import { useDownloadStore } from '@/stores/download'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -18,12 +19,15 @@ import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
+import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
   type ContextMenuItem,
 } from '@/utils/contextMenu'
+import { localPlaylistDisplayName } from '@/modules/library/localPlaylists'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { createLogger } from '@/utils/logger'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -150,8 +154,14 @@ const renderCount = ref(RENDER_CHUNK)
 const visibleTracks = computed(() => filteredTracks.value.slice(0, renderCount.value))
 const hasMoreTracks = computed(() => renderCount.value < filteredTracks.value.length)
 
+// 删除、重排、收藏触发的静默刷新都会替换列表：保留已展开的行数，只有换关键词才回到首批
+let renderedQuery = searchQuery.value
 watch(filteredTracks, (list) => {
-  renderCount.value = Math.min(RENDER_CHUNK, list.length)
+  const queryChanged = searchQuery.value !== renderedQuery
+  renderedQuery = searchQuery.value
+  renderCount.value = queryChanged
+    ? Math.min(RENDER_CHUNK, list.length)
+    : Math.min(list.length, Math.max(renderCount.value, RENDER_CHUNK))
 })
 
 function expandVisibleTracks(extra = RENDER_CHUNK) {
@@ -214,8 +224,8 @@ function formatTotalDuration(ms: number): string {
 }
 
 async function loadDetail(options: { silent?: boolean } = {}) {
-  const id = Number(route.params.id)
-  if (!id) return
+  const id = String(route.params.id || '')
+  if (!/^-?[1-9]\d*$/.test(id)) return
 
   const loadStarted = performance.now()
   const silent = options.silent === true
@@ -233,7 +243,7 @@ async function loadDetail(options: { silent?: boolean } = {}) {
 
   try {
     const listStarted = performance.now()
-    const playlists = await invoke<{ id: number; name: string }[]>('list_playlists')
+    const playlists = await invoke<{ id: string; name: string }[]>('get_home_local_playlists')
     log.info('playlist list returned:', {
       playlistId: id,
       count: playlists.length,
@@ -241,7 +251,9 @@ async function loadDetail(options: { silent?: boolean } = {}) {
       loadingAudio: player.isLoadingAudio,
     })
     const pl = playlists.find(p => p.id === id)
-    playlistName.value = pl?.name || ''
+    playlistName.value = pl
+      ? localPlaylistDisplayName(pl, { favorites: t('library.liked_songs'), localFiles: t('library.local_files') })
+      : ''
 
     const tracksStarted = performance.now()
     const trackList = await invoke<any[]>('get_playlist_tracks', { id })
@@ -252,9 +264,18 @@ async function loadDetail(options: { silent?: boolean } = {}) {
       loadingAudio: player.isLoadingAudio,
     })
     tracks.value = trackList.map(normalizeTrack)
-    // 静默刷新不重复预取，减少 IO
+    // 静默刷新不重复预取，减少 IO；也不算一次打开
     if (!silent) {
       player.prefetchPlaybackTracks(tracks.value)
+      if (pl) {
+        recordPlaylistOpen({
+          source: 'local',
+          id,
+          name: pl.name,
+          coverUrl: tracks.value.find(track => track.coverUrl)?.coverUrl,
+          trackCount: tracks.value.length,
+        })
+      }
     }
     log.info('playlist load committed:', {
       playlistId: id,
@@ -322,6 +343,8 @@ function closeTrackMenu() {
   trackMenu.value.show = false
 }
 
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(() => trackMenu.value.track, closeTrackMenu)
+
 function openAddToPlaylist(track: TrackInfo) {
   closeTrackMenu()
   addToPlaylistTarget.value = track
@@ -358,14 +381,14 @@ function requestBatchRemove() {
 }
 
 async function confirmRemove() {
-  const id = Number(route.params.id)
+  const id = String(route.params.id || '')
   try {
     if (removeMode.value === 'batch') {
       isBatchRemoving.value = true
       const ids = [...selectedIds.value]
       await invoke('remove_tracks_from_playlist', { playlistId: id, trackIds: ids })
       tracks.value = tracks.value.filter(t => !selectedIds.value.has(trackSelectionKey(t)))
-      toast.success(`已移除 ${ids.length} 首歌曲`)
+      toast.success(t('library.removed_tracks', { count: ids.length }))
       leaveSelectionMode()
     } else if (removeTarget.value) {
       const trackKey = trackSelectionKey(removeTarget.value)
@@ -374,6 +397,7 @@ async function confirmRemove() {
     }
   } catch (e) {
     log.error('Remove failed:', e)
+    toast.error(t('library.remove_tracks_failed'))
   } finally {
     isBatchRemoving.value = false
     showRemoveDialog.value = false
@@ -396,6 +420,7 @@ const trackMenuItems = computed<ContextMenuItem[]>(() => [
   createContextMenuItem(t('player.play_next'), { id: 'play-next', icon: 'queue_play_next' }),
   createContextMenuItem(t('player.add_to_queue'), { id: 'add-to-queue', icon: 'add_to_queue' }),
   createContextMenuItem(t('player.add_to_playlist'), { id: 'add-to-playlist', icon: 'playlist_add' }),
+  downloadMenuItem.value,
   createContextMenuItem(t('library.remove_from_playlist'), {
     id: 'remove-from-playlist',
     icon: 'delete',
@@ -408,6 +433,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   if (!track) return
 
   switch (item.id) {
+    case 'download':
+      void downloadFromMenu()
+      break
     case 'select':
       closeTrackMenu()
       enterSelectionMode(track)
@@ -724,14 +752,20 @@ async function onTrackDragPointerUp(e: PointerEvent) {
   try {
     isPersistingTrackOrder.value = true
     await invoke('reorder_playlist_tracks', {
-      playlistId: Number(route.params.id),
+      playlistId: String(route.params.id),
       orderedKeys: nextTracks.map(trackOrderKey),
+      expectedKeys: previousTracks.map(trackOrderKey),
     })
     player.prefetchPlaybackTracks(tracks.value)
   } catch (e) {
     tracks.value = previousTracks
-    log.error('Reorder playlist tracks failed:', e)
-    toast.error(t('player.load_failed'))
+    if (String(e).includes('PLAYLIST_ORDER_CHANGED')) {
+      toast.error(t('library.track_order_changed'))
+      void loadDetail({ silent: true })
+    } else {
+      log.error('Reorder playlist tracks failed:', e)
+      toast.error(t('library.track_order_save_failed'))
+    }
   } finally {
     isPersistingTrackOrder.value = false
   }
@@ -739,26 +773,28 @@ async function onTrackDragPointerUp(e: PointerEvent) {
 
 function playSelected() {
   if (selectedTracks.value.length === 0) return
-  player.playAll(selectedTracks.value)
+  player.playAll(selectedTracks.value, undefined, undefined, String(route.params.id))
 }
 
 function addSelectedToQueueEnd() {
   for (const track of selectedTracks.value) player.addToQueueEnd(track)
-  toast.success(`已添加 ${selectedTracks.value.length} 首到队列`)
+  toast.success(t('player.added_to_queue_count', { count: selectedTracks.value.length }))
 }
 
 function downloadSelected() {
-  for (const track of selectedTracks.value) downloadStore.downloadTrack(track)
+  const targets = [...selectedTracks.value]
+  leaveSelectionMode()
+  for (const track of targets) void downloadStore.downloadTrack(track)
 }
 
 function playAll() {
   if (tracks.value.length === 0) return
-  player.playAll(tracks.value)
+  player.playAll(tracks.value, undefined, undefined, String(route.params.id))
 }
 
 function shufflePlay() {
   if (tracks.value.length === 0) return
-  player.shufflePlay(tracks.value)
+  player.shufflePlay(tracks.value, String(route.params.id))
 }
 
 function playTrack(track: TrackInfo) {
@@ -771,7 +807,7 @@ function playTrack(track: TrackInfo) {
     toggleSelected(trackSelectionKey(track))
     return
   }
-  player.playAll(filteredTracks.value, track.id, trackSelectionKey(track))
+  player.playAll(filteredTracks.value, track.id, trackSelectionKey(track), String(route.params.id))
 }
 
 function prefetchTrack(track: TrackInfo) {
@@ -803,8 +839,6 @@ function schedulePlaylistRefresh() {
 
 onMounted(async () => {
   loadDetail()
-  downloadStore.initEvents()
-  downloadStore.loadDownloads()
   try {
     const unlisten = await listen('playlists-changed', () => {
       schedulePlaylistRefresh()
@@ -887,41 +921,26 @@ onUnmounted(() => {
       </div>
 
       <div v-if="filteredTracks.length === 0" class="state-center">
-        <p>{{ t('player.empty_playlist') }}</p>
+        <p>{{ searchQuery.trim() && tracks.length > 0 ? t('player.no_results') : t('player.empty_playlist') }}</p>
       </div>
       <template v-else>
-        <div v-if="selectionMode" class="selection-toolbar">
-          <div class="selection-count">{{ t('common.selected_count', { count: selectedCount }) }}</div>
-          <button class="selection-btn" @click="toggleSelectAllVisible">
-            <span class="material-symbols-rounded">{{ allVisibleSelected ? 'deselect' : 'select_all' }}</span>
-            {{ allVisibleSelected ? '取消全选' : '全选当前' }}
-          </button>
-          <button class="selection-btn" @click="invertSelectionVisible">
-            <span class="material-symbols-rounded">flip</span>
-            {{ t('common.invert_selection') }}
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="playSelected">
-            <span class="material-symbols-rounded filled">play_arrow</span>
-            播放
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="addSelectedToQueueEnd">
-            <span class="material-symbols-rounded">add_to_queue</span>
-            加到队尾
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="openBatchAddToPlaylist">
-            <span class="material-symbols-rounded">playlist_add</span>
-            加到歌单
-          </button>
-          <button class="selection-btn" :disabled="selectedCount === 0" @click="downloadSelected">
-            <span class="material-symbols-rounded">download</span>
-            下载
-          </button>
-          <button class="selection-btn danger" :disabled="selectedCount === 0" @click="requestBatchRemove">
-            <span class="material-symbols-rounded">delete</span>
-            移除
-          </button>
-          <button class="selection-btn ghost" @click="leaveSelectionMode">取消</button>
-        </div>
+        <TrackSelectionToolbar
+          v-if="selectionMode"
+          class="sticky-selection-toolbar"
+          :selected-count="selectedCount"
+          :visible-selected-count="visibleSelectedCount"
+          :all-visible-selected="allVisibleSelected"
+          show-delete
+          :delete-label="t('common.remove_selected')"
+          @select-all="toggleSelectAllVisible"
+          @invert-selection="invertSelectionVisible"
+          @play="playSelected"
+          @queue="addSelectedToQueueEnd"
+          @playlist="openBatchAddToPlaylist"
+          @download="downloadSelected"
+          @delete="requestBatchRemove"
+          @exit="leaveSelectionMode"
+        />
         <div ref="trackListRef" class="track-list">
         <div
           class="drop-indicator"
@@ -969,7 +988,7 @@ onUnmounted(() => {
           </div>
           <div class="track-info">
             <div class="track-title">{{ track.title }}</div>
-            <div class="track-meta">{{ track.artist }}<template v-if="track.album"> · {{ displayAlbum(track.album) }}</template></div>
+            <div class="track-meta">{{ track.artist }}<template v-if="displayAlbum(track.album)"> · {{ displayAlbum(track.album) }}</template></div>
           </div>
           <span
             v-if="downloadStore.isDownloaded(track.id)"
@@ -1013,14 +1032,14 @@ onUnmounted(() => {
     <!-- 删除确认对话框 -->
     <M3Dialog
       v-model:open="showRemoveDialog"
-      :title="removeMode === 'batch' ? '批量移除歌曲' : t('library.remove_from_playlist')"
+      :title="removeMode === 'batch' ? t('library.batch_remove_title') : t('library.remove_from_playlist')"
       icon="delete"
-      :confirm-text="removeMode === 'batch' ? '移除选中' : t('library.remove_from_playlist')"
+      :confirm-text="removeMode === 'batch' ? t('common.remove_selected') : t('library.remove_from_playlist')"
       :confirm-disabled="isBatchRemoving"
       confirm-danger
       @confirm="confirmRemove"
     >
-      <p class="dialog-msg">{{ removeMode === 'batch' ? `确定要从当前歌单移除选中的 ${selectedCount} 首歌曲吗？` : t('library.remove_confirm_msg', { name: removeTarget?.title || '' }) }}</p>
+      <p class="dialog-msg">{{ removeMode === 'batch' ? t('library.batch_remove_confirm', { count: selectedCount }) : t('library.remove_confirm_msg', { name: removeTarget?.title || '' }) }}</p>
     </M3Dialog>
 
     <AddToPlaylistDialog v-model:open="showAddToPlaylist" :track="addToPlaylistTarget" :tracks="addToPlaylistTargets" />
@@ -1031,65 +1050,11 @@ onUnmounted(() => {
 @use '@/styles/detail-view.scss' as *;
 
 
-.selection-toolbar {
+.sticky-selection-toolbar {
   position: sticky;
   /* 排在常驻 detail-header（56px 高）之下，避免两个 sticky 叠死在同一位置 */
   top: 60px;
   z-index: 10;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 12px;
-  margin: 0 0 10px;
-  border-radius: 18px;
-  /* 与常驻顶栏同一套毛玻璃配方，两块浮动卡片叠放时质感一致 */
-  background: color-mix(in srgb, var(--md-surface-container-high) 70%, transparent);
-  -webkit-backdrop-filter: blur(24px) saturate(1.5);
-  backdrop-filter: blur(24px) saturate(1.5);
-}
-/* Linux WebKitGTK 无 backdrop-filter 时给不透明底色，避免列表穿透 */
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .selection-toolbar {
-    background: var(--md-surface-container-high);
-  }
-}
-
-.selection-count {
-  padding: 0 8px;
-  margin-right: auto;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--md-primary);
-}
-
-.selection-btn {
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 0 12px;
-  border-radius: var(--radius-full);
-  background: var(--md-surface-container-highest);
-  color: var(--md-on-surface-variant);
-  font-size: 12px;
-  font-weight: 700;
-  transition: background var(--duration-short), color var(--duration-short), opacity var(--duration-short), transform var(--duration-short);
-
-  .material-symbols-rounded { font-size: 18px; }
-  &:hover:not(:disabled) { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
-  &:active:not(:disabled) { transform: scale(0.97); }
-  &:disabled { opacity: 0.42; cursor: not-allowed; }
-
-  &.danger {
-    color: var(--md-error);
-    background: color-mix(in srgb, var(--md-error) 10%, transparent);
-  }
-
-  &.ghost {
-    background: transparent;
-  }
 }
 
 .track-select {

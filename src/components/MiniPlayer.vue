@@ -9,6 +9,7 @@ import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { formatTimeMs as formatTime } from '@/utils/timeFormat'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 
 type CoverSnapshot = {
   rect: { left: number; top: number; width: number; height: number }
@@ -126,6 +127,8 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleMiniPlayerPointerDown, true)
 })
+
+useEscapeClose(() => showVolumeSlider.value, () => { showVolumeSlider.value = false })
 
 /** 当前播放时间（ms），拖拽时用拖拽位置 */
 const currentTimeMs = computed(() =>

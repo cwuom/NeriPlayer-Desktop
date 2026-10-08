@@ -8,6 +8,7 @@ use crate::api::youtube::client::YouTubeClient;
 use crate::api::transport::FallbackHttp;
 use crate::error::AppResult;
 use crate::lyrics::parser::{self, LyricLine};
+use crate::lyrics::{FetchedLyrics, LyricSource};
 use std::path::{Path, PathBuf};
 
 pub struct LyricsManager {
@@ -16,6 +17,19 @@ pub struct LyricsManager {
 }
 
 impl LyricsManager {
+    pub async fn fetch_word_timed_lyrics(
+        &self,
+        track_title: &str,
+        track_artist: &str,
+        duration_ms: u64,
+    ) -> AppResult<FetchedLyrics> {
+        Ok(
+            super::external::ExternalLyricsClient::new(self.transport.clone())
+                .fetch(track_title, track_artist, duration_ms, true)
+                .await,
+        )
+    }
+
     pub fn new(http: &reqwest::Client) -> Self {
         Self {
             transport: FallbackHttp::new(http, "lyrics"),
@@ -49,7 +63,7 @@ impl LyricsManager {
         netease_id: Option<u64>,
         qq_song_mid: Option<&str>,
         youtube_video_id: Option<&str>,
-    ) -> AppResult<Vec<LyricLine>> {
+    ) -> AppResult<FetchedLyrics> {
         log::info!(
             target: "lyrics",
             "fetch: title={}, artist={}, dur={}s, netease_id={:?}, qq_song_mid={:?}, yt={:?}",
@@ -64,7 +78,7 @@ impl LyricsManager {
         if let Some(path) = audio_path {
             if let Some(lines) = load_local_sidecar_lyrics(path) {
                 log::info!(target: "lyrics", "found local sidecar: {} lines", lines.len());
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Local, lines));
             }
         }
 
@@ -78,7 +92,7 @@ impl LyricsManager {
             match self.parse_qq_lyrics(&qq, song_mid).await {
                 Ok(Some(lines)) => {
                     if lyrics_duration_acceptable(&lines, target_duration_ms) {
-                        return Ok(lines);
+                        return Ok(FetchedLyrics::from(LyricSource::Qq, lines));
                     }
                     log::info!(
                         target: "lyrics",
@@ -101,7 +115,7 @@ impl LyricsManager {
             let client = NeteaseClient::with_transport(self.transport.clone())
                 .with_csrf(self.netease_csrf.clone());
             if let Some(lines) = self.fetch_netease_lyrics(&client, id, target_duration_ms).await {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Netease, lines));
             }
         }
 
@@ -111,7 +125,7 @@ impl LyricsManager {
                 .fetch_lrclib_lyrics(track_title, track_artist, duration_secs, target_duration_ms)
                 .await
             {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Lrclib, lines));
             }
         }
 
@@ -125,7 +139,7 @@ impl LyricsManager {
                 Some(song_mid) => match self.parse_qq_lyrics(&qq, &song_mid).await {
                     Ok(Some(lines)) => {
                         if lyrics_duration_acceptable(&lines, target_duration_ms) {
-                            return Ok(lines);
+                            return Ok(FetchedLyrics::from(LyricSource::Qq, lines));
                         }
                         log::info!(
                             target: "lyrics",
@@ -163,7 +177,7 @@ impl LyricsManager {
             {
                 if let Some(lines) = self.fetch_netease_lyrics(&client, id, target_duration_ms).await
                 {
-                    return Ok(lines);
+                    return Ok(FetchedLyrics::from(LyricSource::Netease, lines));
                 }
             }
         }
@@ -174,7 +188,7 @@ impl LyricsManager {
                 .fetch_youtube_lyrics(video_id, target_duration_ms)
                 .await
             {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Youtube, lines));
             }
         }
 
@@ -184,8 +198,15 @@ impl LyricsManager {
                 .fetch_lrclib_lyrics(track_title, track_artist, duration_secs, target_duration_ms)
                 .await
             {
-                return Ok(lines);
+                return Ok(FetchedLyrics::from(LyricSource::Lrclib, lines));
             }
+        }
+
+        let external = super::external::ExternalLyricsClient::new(self.transport.clone())
+            .fetch(track_title, track_artist, target_duration_ms, false)
+            .await;
+        if !external.lines.is_empty() {
+            return Ok(external);
         }
 
         log::info!(
@@ -194,7 +215,7 @@ impl LyricsManager {
             track_title,
             track_artist
         );
-        Ok(Vec::new())
+        Ok(FetchedLyrics::default())
     }
 
     async fn fetch_netease_lyrics(
@@ -709,7 +730,7 @@ fn duration_match_bonus(candidate_duration_ms: u64, target_duration_ms: u64) -> 
 }
 
 /// 用歌词时间轴估算总长, 与目标时长比对 (歌词末行常早于音频结束, 允许更宽下限)
-fn lyrics_duration_acceptable(lines: &[LyricLine], target_duration_ms: u64) -> bool {
+pub(crate) fn lyrics_duration_acceptable(lines: &[LyricLine], target_duration_ms: u64) -> bool {
     if target_duration_ms == 0 || lines.is_empty() {
         return true;
     }
@@ -794,19 +815,75 @@ fn normalize_artists(value: &str) -> std::collections::HashSet<String> {
 
 fn load_local_sidecar_lyrics(audio_path: &str) -> Option<Vec<LyricLine>> {
     let path = Path::new(audio_path);
-    let lyric_path = find_nearby_lyric(path)?;
-    let content = std::fs::read_to_string(&lyric_path).ok()?;
-    let mut lines = parse_sidecar_lyrics_text(&content);
-    if lines.is_empty() {
-        return None;
-    }
+    let metadata = crate::commands::download_cmd::metadata::read_metadata(path);
+    let matched = metadata.as_ref().and_then(|metadata| metadata.matched_lyric.as_deref())
+        .map(parse_sidecar_lyrics_text).filter(|lines| !lines.is_empty());
+    let prefer_matched = matched.is_some();
+    let primary = metadata.as_ref().and_then(|metadata| metadata.lyric_path.as_deref())
+        .and_then(|reference| crate::commands::download_cmd::metadata::resolve_asset(path, reference, "Lyrics"))
+        .or_else(|| find_nearby_lyric(path));
+    let fallback = find_nearby_lyric_with_suffixes(path, &["lrc", "txt"]);
+    let mut lines = matched.or_else(|| [primary, fallback].into_iter().flatten().find_map(|lyric_path| {
+        let content = std::fs::read_to_string(&lyric_path).ok()?;
+        let lines = parse_sidecar_lyrics_text(&content);
+        (!lines.is_empty()).then_some(lines)
+    })).or_else(|| metadata.as_ref()
+        .and_then(|metadata| metadata.original_lyric.as_ref())
+        .map(|text| parse_sidecar_lyrics_text(text))
+        .filter(|lines| !lines.is_empty()))
+        .or_else(|| load_embedded_lyrics(path))?;
 
+    if prefer_matched {
+        if let Some(translation) = metadata.as_ref().and_then(|metadata| metadata.matched_translated_lyric.as_deref()) {
+            parser::merge_translation(&mut lines, translation);
+        }
+        if let Some(romanized) = metadata.as_ref().and_then(|metadata| metadata.matched_romanized_lyric.as_deref()) {
+            parser::merge_roman(&mut lines, romanized);
+        }
+        return Some(lines);
+    }
+    let mut translated_from_sidecar = false;
     if let Some(translation_path) = find_nearby_translation(path) {
         if let Ok(translation) = std::fs::read_to_string(&translation_path) {
             parser::merge_translation(&mut lines, &translation);
+            translated_from_sidecar = !parser::parse_lrc(&translation).is_empty();
         }
     }
+    if !translated_from_sidecar {
+        if let Some(translation) = metadata.as_ref().and_then(|metadata| metadata.original_translated_lyric.as_ref()) {
+            parser::merge_translation(&mut lines, translation);
+        }
+    }
+    if let Some(romanized_path) = find_nearby_romanized(path) {
+        if let Ok(romanized) = std::fs::read_to_string(romanized_path) {
+            parser::merge_roman(&mut lines, &romanized);
+        }
+    } else if let Some(romanized) = metadata.as_ref().and_then(|metadata| metadata.original_romanized_lyric.as_ref()) {
+        parser::merge_roman(&mut lines, romanized);
+    }
 
+    Some(lines)
+}
+
+fn load_embedded_lyrics(audio_path: &Path) -> Option<Vec<LyricLine>> {
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::{ItemKey, TagType};
+    // 按内容认格式，扩展名写错的文件（FLAC 存成 .mp3）也能读到内嵌歌词
+    let tagged = lofty::probe::Probe::open(audio_path).ok()?.guess_file_type().ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let custom = |name: &str| {
+        let key = if tag.tag_type() == TagType::Mp4Ilst { format!("----:com.apple.iTunes:{name}") } else { name.to_string() };
+        tag.get_string(&ItemKey::Unknown(key))
+    };
+    let original = custom("NERI_LYRICS_ORIGINAL").or_else(|| tag.get_string(&ItemKey::Lyrics))?;
+    let mut lines = parse_sidecar_lyrics_text(original);
+    if lines.is_empty() { return None; }
+    if let Some(translation) = custom("NERI_LYRICS_TRANSLATED") {
+        parser::merge_translation(&mut lines, translation);
+    }
+    if let Some(romanized) = custom("NERI_LYRICS_ROMANIZED") {
+        parser::merge_roman(&mut lines, romanized);
+    }
     Some(lines)
 }
 
@@ -814,6 +891,10 @@ fn parse_sidecar_lyrics_text(content: &str) -> Vec<LyricLine> {
     let parsed = parser::parse_auto(content);
     if !parsed.is_empty() {
         return parsed;
+    }
+
+    if super::ttml::looks_like(content) {
+        return Vec::new();
     }
 
     content
@@ -833,26 +914,30 @@ fn parse_sidecar_lyrics_text(content: &str) -> Vec<LyricLine> {
 }
 
 fn find_nearby_lyric(audio_path: &Path) -> Option<PathBuf> {
+    find_nearby_lyric_with_suffixes(audio_path, &["ttml", "lrc", "txt"])
+}
+
+fn find_nearby_lyric_with_suffixes(audio_path: &Path, suffixes: &[&str]) -> Option<PathBuf> {
     let parent = audio_path.parent()?;
     let file_name = audio_path.file_name()?;
     let stem = audio_path.file_stem()?.to_str()?;
 
     // 下载器新写入的 sidecar 带完整音频名，例如 Song.m4a.lrc。
     // 先查这一形式，避免 Song.m4a 和 Song.flac 共用旧 Song.lrc 时串词
-    if let Some(path) = find_audio_scoped_sidecar(parent, file_name, &["lrc", "txt"]) {
+    if let Some(path) = find_audio_scoped_sidecar(parent, file_name, suffixes) {
         return Some(path);
     }
 
     let lyrics_dir = parent.join("Lyrics");
-    if let Some(path) = find_audio_scoped_sidecar(&lyrics_dir, file_name, &["lrc", "txt"]) {
+    if let Some(path) = find_audio_scoped_sidecar(&lyrics_dir, file_name, suffixes) {
         return Some(path);
     }
 
     // 保留旧版 stem 命名兼容，已有本地歌词无需迁移
-    if let Some(path) = find_stem_sidecar(parent, stem, &["lrc", "txt"]) {
+    if let Some(path) = find_stem_sidecar(parent, stem, suffixes) {
         return Some(path);
     }
-    if let Some(path) = find_stem_sidecar(&lyrics_dir, stem, &["lrc", "txt"]) {
+    if let Some(path) = find_stem_sidecar(&lyrics_dir, stem, suffixes) {
         return Some(path);
     }
 
@@ -864,6 +949,11 @@ fn find_nearby_translation(audio_path: &Path) -> Option<PathBuf> {
     let file_name = audio_path.file_name()?;
     let stem = audio_path.file_stem()?.to_str()?;
     let suffixes = ["tlrc", "translated.lrc", "translation.lrc"];
+    let metadata = crate::commands::download_cmd::metadata::read_metadata(audio_path);
+    if let Some(translation) = metadata.as_ref().and_then(|metadata| metadata.translated_lyric_path.as_deref())
+        .and_then(|reference| crate::commands::download_cmd::metadata::resolve_asset(audio_path, reference, "Lyrics")) {
+        return Some(translation);
+    }
 
     if let Some(path) = find_audio_scoped_sidecar(parent, file_name, &suffixes) {
         return Some(path);
@@ -879,7 +969,30 @@ fn find_nearby_translation(audio_path: &Path) -> Option<PathBuf> {
     if let Some(path) = find_stem_sidecar(&lyrics_dir, stem, &suffixes) {
         return Some(path);
     }
+    for directory in [parent, lyrics_dir.as_path()] {
+        for suffix in ["_trans.lrc", "_trans.lrc.txt"] {
+            let path = directory.join(format!("{stem}{suffix}"));
+            if path.is_file() { return Some(path); }
+        }
+    }
 
+    None
+}
+
+fn find_nearby_romanized(audio_path: &Path) -> Option<PathBuf> {
+    let metadata = crate::commands::download_cmd::metadata::read_metadata(audio_path);
+    if let Some(path) = metadata.as_ref().and_then(|metadata| metadata.romanized_lyric_path.as_deref())
+        .and_then(|reference| crate::commands::download_cmd::metadata::resolve_asset(audio_path, reference, "Lyrics")) {
+        return Some(path);
+    }
+    let parent = audio_path.parent()?;
+    let stem = audio_path.file_stem()?.to_str()?;
+    for directory in [parent.to_path_buf(), parent.join("Lyrics")] {
+        for suffix in ["_roma.lrc", "_romalrc.lrc", "_romanized.lrc", "_roma.lrc.txt"] {
+            let path = directory.join(format!("{stem}{suffix}"));
+            if path.is_file() { return Some(path); }
+        }
+    }
     None
 }
 
@@ -906,6 +1019,66 @@ fn find_stem_sidecar(dir: &Path, stem: &str, suffixes: &[&str]) -> Option<PathBu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn matched_metadata_lyrics_override_original_sidecars_with_their_own_translation() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        let lyrics = root.path().join("Lyrics");
+        std::fs::create_dir(&lyrics).unwrap();
+        std::fs::write(lyrics.join("Song.lrc"), "[00:01.00]original").unwrap();
+        std::fs::write(lyrics.join("Song_trans.lrc"), "[00:01.00]original translation").unwrap();
+        let mut metadata = crate::commands::download_cmd::metadata::DownloadMetadata {
+            original_lyric: Some("[00:01.00]original".into()),
+            original_translated_lyric: Some("[00:01.00]original translation".into()),
+            matched_lyric: Some("[00:02.00]matched".into()),
+            matched_translated_lyric: Some("[00:02.00]matched translation".into()),
+            matched_romanized_lyric: Some("[00:02.00]matched romanization".into()),
+            ..Default::default()
+        };
+        metadata.write(&audio).unwrap();
+        let lines = super::load_local_sidecar_lyrics(audio.to_str().unwrap()).unwrap();
+        assert_eq!(lines[0].text, "matched");
+        assert_eq!(lines[0].start_ms, 2000);
+        assert_eq!(lines[0].translation.as_deref(), Some("matched translation"));
+        assert_eq!(lines[0].roman.as_deref(), Some("matched romanization"));
+        metadata.matched_translated_lyric = None;
+        metadata.write(&audio).unwrap();
+        let lines = super::load_local_sidecar_lyrics(audio.to_str().unwrap()).unwrap();
+        assert!(lines[0].translation.is_none());
+    }
+    #[test]
+    fn android_lyrics_directory_restores_translation_and_romanization() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        let lyrics = root.path().join("Lyrics");
+        std::fs::create_dir_all(&lyrics).unwrap();
+        std::fs::write(lyrics.join("Song.lrc"), "[00:01.00]你好").unwrap();
+        std::fs::write(lyrics.join("Song_trans.lrc"), "[00:01.00]Hello").unwrap();
+        std::fs::write(lyrics.join("Song_roma.lrc"), "[00:01.00]ni hao").unwrap();
+        let lines = super::load_local_sidecar_lyrics(audio.to_str().unwrap()).unwrap();
+        assert_eq!(lines[0].translation.as_deref(), Some("Hello"));
+        assert_eq!(lines[0].roman.as_deref(), Some("ni hao"));
+    }
+
+    #[test]
+    fn locally_embedded_original_yrc_restores_words_translation_and_romanization() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        std::fs::write(&audio, include_bytes!("../audio/fixtures/hls-silence.aac")).unwrap();
+        let metadata = crate::commands::download_cmd::metadata::DownloadMetadata {
+            name: Some("Song".into()), artist: Some("Artist".into()),
+            original_lyric: Some("[1000,3000](1000,1000,0)你好".into()),
+            original_translated_lyric: Some("[00:01.00]Hello".into()),
+            original_romanized_lyric: Some("[00:01.00]ni hao".into()),
+            ..Default::default()
+        };
+        crate::commands::download_cmd::metadata::prepare_audio_tags(&audio, &metadata, false).unwrap().persist(&audio).unwrap();
+        let lines = super::load_local_sidecar_lyrics(audio.to_str().unwrap()).unwrap();
+        assert_eq!(lines[0].text, "你好");
+        assert_eq!(lines[0].words.len(), 1);
+        assert_eq!(lines[0].translation.as_deref(), Some("Hello"));
+        assert_eq!(lines[0].roman.as_deref(), Some("ni hao"));
+    }
     use super::{
         duration_match_bonus, duration_within_hard_tolerance, lyrics_duration_acceptable,
         score_lyric_candidate, LyricLine,
@@ -1037,5 +1210,15 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_ttml_sidecar_keeps_valid_existing_lrc() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("Song.m4a");
+        std::fs::write(dir.path().join("Song.m4a.ttml"), "<tt><body>unfinished").unwrap();
+        std::fs::write(dir.path().join("Song.m4a.lrc"), "[00:01.00]valid baseline").unwrap();
+        let lines = super::load_local_sidecar_lyrics(audio.to_str().unwrap()).unwrap();
+        assert_eq!(lines[0].text, "valid baseline");
     }
 }

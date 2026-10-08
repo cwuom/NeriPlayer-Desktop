@@ -31,6 +31,23 @@ export function normalizeFloatingPoint(value: number): number {
   return Number(value.toFixed(8))
 }
 
+/**
+ * 输入框提交值按 step 的精度取整，并夹回范围内。
+ * 整数步长的设置（毫秒、MB）在 Rust 端是整数字段，带小数会让整份设置保存失败。
+ */
+export function roundToStepPrecision(value: number, step: number, min: number, max: number): number {
+  let rounded: number
+  if (!Number.isFinite(step) || step <= 0 || /e/i.test(String(step))) {
+    rounded = normalizeFloatingPoint(value)
+  } else if (Number.isInteger(step)) {
+    rounded = Math.round(value)
+  } else {
+    const decimals = Math.min(8, (String(step).split('.')[1] ?? '').length)
+    rounded = Number(value.toFixed(decimals))
+  }
+  return Math.min(max, Math.max(min, rounded))
+}
+
 function trimTrailingZeros(value: string): string {
   return value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1').replace(/\.$/, '')
 }

@@ -5,6 +5,7 @@ use crate::state::TrackSource;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
 
 const AUDIO_EXTENSIONS: &[&str] = &[
@@ -57,6 +58,15 @@ pub struct ScanSkipped {
 
 /// 扫描目录下的所有音频文件，读取元数据
 pub fn scan_directory(dir: &str, name_template: Option<&str>) -> AppResult<ScanResult> {
+    scan_directory_with_control(dir, name_template, &AtomicBool::new(false), |_, _, _, _| {})
+}
+
+pub fn scan_directory_with_control(
+    dir: &str,
+    name_template: Option<&str>,
+    cancelled: &AtomicBool,
+    mut on_progress: impl FnMut(usize, usize, usize, &Path),
+) -> AppResult<ScanResult> {
     let mut tracks = Vec::new();
     let mut skipped: Vec<ScanSkipped> = Vec::new();
     // 扫描会话级封面索引缓存：同目录的封面查找只列举一次目录
@@ -85,7 +95,11 @@ pub fn scan_directory(dir: &str, name_template: Option<&str>) -> AppResult<ScanR
         .follow_links(false)
         .max_depth(MAX_SCAN_DEPTH)
         .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".tmp")
     {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(crate::error::AppError::Other("Scan cancelled".into()));
+        }
         visited_entries = visited_entries.saturating_add(1);
         if visited_entries > MAX_SCAN_ENTRIES {
             skipped.push(ScanSkipped {
@@ -107,6 +121,9 @@ pub fn scan_directory(dir: &str, name_template: Option<&str>) -> AppResult<ScanR
                 continue;
             }
         };
+        if visited_entries == 1 || visited_entries.is_multiple_of(100) {
+            on_progress(visited_entries, tracks.len(), skipped.len(), entry.path());
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -159,6 +176,7 @@ pub fn scan_directory(dir: &str, name_template: Option<&str>) -> AppResult<ScanR
         }
     }
 
+    on_progress(visited_entries, tracks.len(), skipped.len(), &root);
     Ok(ScanResult { tracks, skipped })
 }
 
@@ -170,8 +188,15 @@ fn read_track_info(
     use lofty::prelude::*;
     use lofty::probe::Probe;
 
+    let managed = crate::commands::download_cmd::metadata::read_metadata(path);
+    if managed.as_ref().is_some_and(|metadata| metadata.download_finalized == Some(false)) {
+        return Err(crate::error::AppError::Metadata("下载尚未完成".into()));
+    }
+
+    // 按文件内容认格式：旧版下载把 FLAC 存成了 .mp3，按扩展名当 MP3 解析会跳过或算出几小时的时长
     let tagged = Probe::open(path)
         .map_err(|e| crate::error::AppError::Metadata(e.to_string()))?
+        .guess_file_type()?
         .read()
         .map_err(|e| crate::error::AppError::Metadata(e.to_string()))?;
     let properties = tagged.properties();
@@ -219,8 +244,17 @@ fn read_track_info(
     } else {
         raw_album
     };
-    let cover_url =
-        find_nearby_cover(path, cover_cache).map(|p| p.to_string_lossy().to_string());
+    let title = managed.as_ref().and_then(|metadata| metadata.custom_name.as_ref().or(metadata.name.as_ref())).filter(|value| !value.trim().is_empty()).cloned().unwrap_or(title);
+    let artist = managed.as_ref().and_then(|metadata| metadata.custom_artist.as_ref().or(metadata.artist.as_ref())).filter(|value| !value.trim().is_empty()).cloned().unwrap_or(artist);
+    let album = managed.as_ref().and_then(|metadata| metadata.album.clone()).filter(|value| !value.trim().is_empty()).unwrap_or(album);
+    let cover_url = find_nearby_cover(path, cover_cache)
+        .or_else(|| tag.and_then(|tag| {
+            let picture = tag.pictures().iter().find(|picture| picture.pic_type() == lofty::picture::PictureType::CoverFront)
+                .or_else(|| tag.pictures().first())?;
+            let cache_dir = cover_cache.embedded_dir.clone().or_else(default_embedded_cover_dir)?;
+            cache_embedded_cover(picture.data(), &cache_dir)
+        }))
+        .map(|p| p.to_string_lossy().to_string());
 
     Ok(TrackInfo {
         id: format!("local:{}", path.display()),
@@ -231,9 +265,9 @@ fn read_track_info(
         source: TrackSource::Local,
         url: path.to_string_lossy().to_string(),
         cover_url,
-        added_at: 0,
+        added_at: managed.as_ref().and_then(|metadata| metadata.download_time_ms).unwrap_or(0).min(i64::MAX as u64) as i64,
         sync_payload: None,
-        playlist_key: None,
+        playlist_key: managed.and_then(|metadata| metadata.stable_key),
     })
 }
 
@@ -244,6 +278,36 @@ fn read_track_info(
 #[derive(Default)]
 struct CoverLookupCache {
     dirs: HashMap<PathBuf, DirCoverIndex>,
+    embedded_dir: Option<PathBuf>,
+}
+
+fn default_embedded_cover_dir() -> Option<PathBuf> {
+    static DIRECTORY: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIRECTORY.get_or_init(|| {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).ok()?;
+        let identifier = config.get("identifier")?.as_str()?;
+        Some(dirs_next::data_dir()?.join(identifier).join("local-covers"))
+    }).clone()
+}
+
+fn cache_embedded_cover(bytes: &[u8], directory: &Path) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 { return None; }
+    let suffix = match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::Gif => "gif",
+        image::ImageFormat::WebP => "webp",
+        _ => return None,
+    };
+    let path = directory.join(format!("{}.{suffix}", hex::encode(Sha256::digest(bytes))));
+    static LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = LOCK.get_or_init(|| parking_lot::Mutex::new(())).lock();
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() == bytes.len() as u64) {
+        return Some(path);
+    }
+    crate::fsutil::atomic_write(&path, bytes).ok()?;
+    Some(path)
 }
 
 struct DirCoverIndex {
@@ -350,6 +414,19 @@ fn find_nearby_cover(audio_path: &Path, cache: &mut CoverLookupCache) -> Option<
     let audio_name = audio_path.file_name()?.to_str()?.to_lowercase();
     let stem = audio_path.file_stem()?.to_str()?.to_lowercase();
 
+    let managed = crate::commands::download_cmd::metadata::read_metadata(audio_path);
+    if let Some(cover) = managed.as_ref().and_then(|metadata| metadata.cover_path.as_deref())
+        .and_then(|reference| crate::commands::download_cmd::metadata::resolve_asset(audio_path, reference, "Covers"))
+    {
+        return Some(cover);
+    }
+    if let (Some(sub), Some(stable_key)) = (cache.cover_subdir(dir), managed.as_ref().and_then(|metadata| metadata.stable_key.as_deref())) {
+        let stable_name = format!("{stem}-{}", crate::commands::download_cmd::metadata::cover_suffix(stable_key));
+        if let Some(cover) = cache.find_image(&sub, |name| name == stable_name) {
+            return Some(cover);
+        }
+    }
+
     // 下载器新写入的 sidecar 使用完整音频名，例如 Song.m4a.jpg
     if let Some(cover) = cache.find_image(dir, |name| name == audio_name) {
         return Some(cover);
@@ -410,6 +487,8 @@ fn candidate_templates(active_template: Option<&str>) -> Vec<String> {
     // 的 active → DEFAULT → LEGACY 顺序：否则 "netease - Halsey - Without Me" 会先被
     // "{artist} - {title}" 的非贪婪正则命中，误解析成 artist=netease（SC-6）
     for tpl in [
+        "%title% - %artist% - %album% - %source%",
+        "%title% - %artist% [%hash%]",
         "{source} - {artist} - {title}",
         "%source% - %artist% - %title%",
         "{artist} - {title}",
@@ -435,6 +514,7 @@ fn parse_base_name_with_template(
         Id,
         AudioId,
         SubAudioId,
+        Hash,
     }
 
     let placeholders = [
@@ -442,6 +522,10 @@ fn parse_base_name_with_template(
         ("{artist}", Field::Artist),
         ("{album}", Field::Album),
         ("{source}", Field::Source),
+        ("{id}", Field::Id),
+        ("{audioId}", Field::AudioId),
+        ("{subAudioId}", Field::SubAudioId),
+        ("{hash}", Field::Hash),
         ("%title%", Field::Title),
         ("%artist%", Field::Artist),
         ("%album%", Field::Album),
@@ -449,6 +533,7 @@ fn parse_base_name_with_template(
         ("%id%", Field::Id),
         ("%audioId%", Field::AudioId),
         ("%subAudioId%", Field::SubAudioId),
+        ("%hash%", Field::Hash),
     ];
 
     let mut fields = Vec::new();
@@ -500,7 +585,7 @@ fn parse_base_name_with_template(
             Field::Artist => parsed.artist = value,
             Field::Album => parsed.album = value,
             Field::Source => parsed.source = value,
-            Field::Id | Field::AudioId | Field::SubAudioId => {}
+            Field::Id | Field::AudioId | Field::SubAudioId | Field::Hash => {}
         }
     }
     Some(parsed)
@@ -545,6 +630,87 @@ fn normalize_metadata_value(value: &str) -> String {
 mod tests {
     use super::{find_nearby_cover, scan_directory, CoverLookupCache};
     use std::path::PathBuf;
+
+    /// 回归：旧版下载把 FLAC 存成 .mp3，按扩展名解析时 30/35 首被跳过，其余算出 12 小时这类时长
+    #[test]
+    fn a_flac_saved_with_an_mp3_name_is_read_as_flac() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.mp3");
+        std::fs::write(&audio, include_bytes!("../audio/fixtures/ffmpeg/flac-s16-stereo-0.5s.flac")).unwrap();
+        let result = scan_directory(root.path().to_str().unwrap(), None).unwrap();
+        assert!(result.skipped.is_empty(), "{:?}", result.skipped.iter().map(|s| &s.reason).collect::<Vec<_>>());
+        assert_eq!(result.tracks.len(), 1);
+        assert!((450..=550).contains(&result.tracks[0].duration_ms), "{}", result.tracks[0].duration_ms);
+    }
+
+    #[test]
+    fn managed_android_metadata_restores_display_cover_and_identity_without_audio_tags() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        std::fs::write(&audio, include_bytes!("../audio/fixtures/hls-silence.aac")).unwrap();
+        let covers = root.path().join("Covers");
+        std::fs::create_dir_all(&covers).unwrap();
+        let key = "42|Netease专辑|";
+        let cover = covers.join(format!("Song-{}.jpg", crate::commands::download_cmd::metadata::cover_suffix(key)));
+        std::fs::write(&cover, b"cover").unwrap();
+        let mut metadata = crate::commands::download_cmd::metadata::DownloadMetadata {
+            name: Some("原始歌曲".into()), custom_name: Some("修正歌曲".into()),
+            artist: Some("歌手".into()), album: Some("专辑".into()),
+            stable_key: Some(key.into()), download_finalized: Some(true),
+            download_time_ms: Some(123), cover_path: Some("content://android/unavailable".into()),
+            ..Default::default()
+        };
+        metadata.write(&audio).unwrap();
+        let result = scan_directory(root.path().to_str().unwrap(), None).unwrap();
+        assert_eq!(result.tracks.len(), 1);
+        let track = &result.tracks[0];
+        assert_eq!(track.title, "修正歌曲");
+        assert_eq!(track.artist, "歌手");
+        assert_eq!(track.playlist_key.as_deref(), Some(key));
+        assert_eq!(track.added_at, 123);
+        let cover = cover.canonicalize().unwrap();
+        assert_eq!(track.cover_url.as_deref(), Some(cover.to_str().unwrap()));
+    }
+
+    #[test]
+    fn controlled_scanner_ignores_temporary_audio_reports_progress_and_honors_cancel() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root.path().join(".tmp");
+        std::fs::create_dir_all(&temporary).unwrap();
+        std::fs::write(temporary.join("hidden.aac"), include_bytes!("../audio/fixtures/hls-silence.aac")).unwrap();
+        let mut updates = Vec::new();
+        let result = super::scan_directory_with_control(root.path().to_str().unwrap(), None, &std::sync::atomic::AtomicBool::new(false), |visited, tracks, skipped, _| {
+            updates.push((visited, tracks, skipped));
+        }).unwrap();
+        assert!(result.tracks.is_empty());
+        assert!(result.skipped.is_empty());
+        assert!(updates.len() >= 2);
+        let error = super::scan_directory_with_control(root.path().to_str().unwrap(), None, &std::sync::atomic::AtomicBool::new(true), |_, _, _, _| {}).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn scanner_caches_embedded_cover_when_audio_has_no_sidecars() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        std::fs::write(&audio, include_bytes!("../audio/fixtures/hls-silence.aac")).unwrap();
+        let cover = root.path().join("Covers").join("Song.jpg");
+        std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(2, 2, image::Rgb([40, 80, 120])).save(&cover).unwrap();
+        let metadata = crate::commands::download_cmd::metadata::DownloadMetadata {
+            name: Some("Song".into()), artist: Some("Artist".into()),
+            cover_path: Some(cover.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        crate::commands::download_cmd::metadata::prepare_audio_tags(&audio, &metadata, false).unwrap().persist(&audio).unwrap();
+        std::fs::remove_file(&cover).unwrap();
+        let cache_directory = root.path().join("local-covers");
+        let mut cache = super::CoverLookupCache { embedded_dir: Some(cache_directory.clone()), ..Default::default() };
+        let track = super::read_track_info(&audio, None, &mut cache).unwrap();
+        let cover = PathBuf::from(track.cover_url.unwrap());
+        assert!(cover.starts_with(cache_directory));
+        assert!(image::open(cover).is_ok());
+    }
 
     fn temp_scan_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

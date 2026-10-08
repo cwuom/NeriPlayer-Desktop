@@ -55,6 +55,25 @@ pub fn export_debug_report(app: tauri::AppHandle) -> AppResult<String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioEngineStats {
+    pub output: crate::audio::metrics::OutputMetricsSnapshot,
+    /// 最近的起播/seek 首帧耗时，新的在前
+    pub recent_starts: Vec<crate::audio::metrics::StartTiming>,
+}
+
+/// 播放引擎指标：输出回调计数、欠载与最近的首帧耗时
+///
+/// 只读、不含敏感信息，供基线测量脚本经 CDP 拉取
+#[tauri::command]
+pub fn audio_engine_stats() -> AudioEngineStats {
+    AudioEngineStats {
+        output: crate::audio::metrics::OUTPUT_METRICS.snapshot(),
+        recent_starts: crate::audio::metrics::recent_starts(),
+    }
+}
+
 /// 在系统文件管理器中定位文件（macOS Finder / Windows 资源管理器 / Linux 文件管理器）
 #[tauri::command]
 pub fn reveal_in_file_manager(path: String) -> AppResult<()> {

@@ -23,7 +23,8 @@ const isDragging = ref(false)
 const dragProgress = ref(0)
 
 const WAVE_AMPLITUDE = 2
-const WAVE_FREQ = 0.08
+// 固定 500 坐标的 SVG 约显示 12 个波，与 Android 播放页的可见密度一致
+const WAVE_FREQ = 0.15
 const PHASE_CYCLE = 2000
 const AMP_TRANSITION = 500
 

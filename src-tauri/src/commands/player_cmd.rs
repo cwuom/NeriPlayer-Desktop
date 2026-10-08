@@ -1,4 +1,5 @@
 use crate::audio::growing::GrowingAudioBuffer;
+use crate::api::youtube::client::YtStreamType;
 use crate::audio::player::{
     receive_fade_result, wait_for_play_result, wait_for_seek_result, PlayRequest, PlayerEngine,
 };
@@ -585,16 +586,7 @@ pub async fn play_url(
         duration_hint_ms
     );
 
-    // 根据 URL 域名动态设置 Referer
-    let referer = if url.contains("bilibili.com") || url.contains("bilivideo.") {
-        "https://www.bilibili.com"
-    } else if url.contains("youtube.com") || url.contains("googlevideo.com") {
-        "https://music.youtube.com"
-    } else if url.contains("qqmusic.qq.com") || url.contains("y.qq.com") {
-        "https://y.qq.com"
-    } else {
-        "https://music.163.com"
-    };
+    let referer = playback_referer(&url);
 
     let start = std::time::Instant::now();
     let resp = state.http().get(&url)
@@ -660,16 +652,22 @@ pub async fn play_url(
 #[tauri::command]
 pub async fn play_url_fast(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     start_position_ms: Option<u64>,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, start_position_ms.unwrap_or(0), None, &state, request_generation, cache).await;
+    }
     log::info!(
         target: "play_url_fast",
         "start: url_len={}, hint={}ms",
@@ -683,6 +681,7 @@ pub async fn play_url_fast(
         expected_content_length,
         duration_hint_ms,
     );
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     let path = match cache {
         Some(cache) => download_url_to_playback_cache(
             &url,
@@ -715,11 +714,13 @@ pub async fn play_url_fast(
 #[tauri::command]
 pub async fn play_url_streaming(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     start_position_ms: Option<u64>,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
@@ -727,6 +728,10 @@ pub async fn play_url_streaming(
     let command_started = std::time::Instant::now();
     let host = playback_url_host(&url);
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, start_position_ms.unwrap_or(0), None, &state, request_generation, cache).await;
+    }
     log::info!(
         target: "play_url_streaming",
         "start generation={}, host={}, url_len={}, hint_ms={}, start_ms={}, cache={}",
@@ -746,6 +751,7 @@ pub async fn play_url_streaming(
         duration_hint_ms,
     );
 
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     if let Some(path) = lookup_ready_playback_cache(cache.as_ref(), request_generation).await? {
         log::info!(
             target: "play_url_streaming",
@@ -865,6 +871,111 @@ pub async fn play_url_streaming(
         &state,
     )
     .await
+}
+
+async fn play_hls_url(
+    url: String,
+    duration_hint_ms: u64,
+    start_position_ms: u64,
+    fade: Option<(u32, u32)>,
+    state: &State<'_, AppState>,
+    request_generation: u64,
+    cache: Option<RemoteAudioCache>,
+) -> AppResult<u64> {
+    if let Some(path) = lookup_ready_playback_cache(cache.as_ref(), request_generation).await? {
+        ensure_playback_request(state, request_generation)?;
+        let path = path.to_string_lossy().to_string();
+        let result = run_player_play(Arc::clone(&state.player), move |player| {
+            if let Some((fade_out_ms, fade_in_ms)) = fade {
+                player.request_crossfade_file_with_hint(
+                    &path,
+                    duration_hint_ms,
+                    fade_out_ms,
+                    fade_in_ms,
+                    request_generation,
+                )
+            } else {
+                player.request_play_file_at_with_hint(
+                    &path,
+                    duration_hint_ms,
+                    start_position_ms,
+                    request_generation,
+                )
+            }
+        })
+        .await;
+        match result {
+            Ok(duration) => {
+                return Ok(if duration > 0 {
+                    duration
+                } else {
+                    duration_hint_ms
+                })
+            }
+            Err(_) => {
+                ensure_playback_request(state, request_generation)?;
+                if let Some(cache) = &cache {
+                    cache.bypass_ready_for_session();
+                }
+            }
+        }
+    }
+    let stream = crate::audio::hls::start_hls_stream(
+        state.hls_transport(),
+        url,
+        Arc::clone(&state.playback_generation),
+        request_generation,
+        cache,
+    )
+    .await?;
+    let startup = stream.buffer.clone();
+    let ready =
+        tokio::task::spawn_blocking(move || startup.wait_for_buffer(1, STREAM_START_TIMEOUT))
+            .await
+            .map_err(|error| AppError::Other(error.to_string()))
+            .and_then(|result| result.map_err(AppError::Audio));
+    if let Err(error) = ready {
+        stream.buffer.abort();
+        return Err(error);
+    }
+    if let Err(error) = ensure_playback_request(state, request_generation) {
+        stream.buffer.abort();
+        return Err(error);
+    }
+    let reader = stream.buffer.reader();
+    let result = run_player_play(Arc::clone(&state.player), move |player| {
+        if let Some((fade_out_ms, fade_in_ms)) = fade {
+            player.request_crossfade_stream(
+                reader,
+                duration_hint_ms,
+                fade_out_ms,
+                fade_in_ms,
+                request_generation,
+            )
+        } else {
+            player.request_play_stream_at(
+                reader,
+                duration_hint_ms,
+                start_position_ms,
+                request_generation,
+            )
+        }
+    })
+    .await;
+    match result {
+        Ok(duration) => {
+            stream.commit();
+            Ok(if duration > 0 {
+                duration
+            } else {
+                duration_hint_ms
+            })
+        }
+        Err(error) => {
+            stream.buffer.abort();
+            Err(error)
+        }
+    }
 }
 
 async fn play_url_streaming_fallback(
@@ -989,6 +1100,20 @@ pub async fn set_volume(level: f32, state: State<'_, AppState>) -> AppResult<()>
 }
 
 #[tauri::command]
+pub async fn list_audio_output_devices() -> AppResult<Vec<crate::audio::player::AudioOutputDevice>> {
+    tokio::task::spawn_blocking(crate::audio::player::list_audio_output_devices)
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_audio_output_device(name: Option<String>, state: State<'_, AppState>) -> AppResult<()> {
+    let request = state.player.lock().request_output_device(name)?;
+    tokio::task::spawn_blocking(move || request.wait())
+        .await.map_err(|error| AppError::Other(error.to_string()))?
+}
+
+#[tauri::command]
 pub async fn seek(
     position_ms: u64,
     request_generation: u64,
@@ -1009,6 +1134,53 @@ pub async fn stop(state: State<'_, AppState>) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) async fn release_player_file(
+    player: Arc<Mutex<PlayerEngine>>,
+    path: String,
+) -> AppResult<bool> {
+    tokio::task::spawn_blocking(move || {
+        let request = player.lock().request_file_release(path)?;
+        let released = request.wait()?;
+        Ok(player.lock().complete_file_release(released))
+    }).await.map_err(|error| AppError::Other(error.to_string()))?
+}
+
+#[tauri::command]
+pub async fn release_audio_file(path: String, state: State<'_, AppState>) -> AppResult<bool> {
+    release_player_file(Arc::clone(&state.player), path).await
+}
+
+#[tauri::command]
+pub async fn get_playback_audio_info(
+    request_generation: u64,
+    state: State<'_, AppState>,
+) -> AppResult<Option<crate::audio::remote::SourceAudioInfo>> {
+    run_player_blocking(Arc::clone(&state.player), move |player| {
+        Ok(player.playback_audio_info(request_generation))
+    }).await
+}
+
+/// 当前能解码的编码：前端据此决定能否选择 Opus、杜比等音轨
+#[tauri::command]
+pub async fn get_decoder_capabilities() -> AppResult<crate::audio::decoder::DecoderCapabilities> {
+    // 首次调用可能要加载 FFmpeg 动态库，不能占用异步运行时的线程
+    tokio::task::spawn_blocking(crate::audio::decoder::decoder_capabilities)
+        .await
+        .map_err(|error| AppError::Audio(format!("Could not query decoder capabilities: {error}")))
+}
+
+/// 多声道（AC-3/E-AC-3）音轨是否保留码流自带的动态范围压缩；对之后打开的音轨生效
+#[tauri::command]
+pub async fn set_multichannel_drc(enabled: bool) -> AppResult<()> {
+    crate::audio::decoder::set_keep_dynamic_range_compression(enabled);
+    log::info!(
+        target: "audio-decoder",
+        "multichannel dynamic range compression {}",
+        if enabled { "kept" } else { "off" },
+    );
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_speed(speed: f32, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_speed(speed);
@@ -1025,6 +1197,20 @@ pub async fn set_loudness_gain(gain_mb: i32, state: State<'_, AppState>) -> AppR
 pub async fn set_normalize_volume(enabled: bool, state: State<'_, AppState>) -> AppResult<()> {
     state.player.lock().set_normalize_volume(enabled);
     Ok(())
+}
+
+/// 声道平衡，-1（只剩左声道）～1（只剩右声道），按 0.01 取整
+#[tauri::command]
+pub async fn set_volume_balance(balance: f32, state: State<'_, AppState>) -> AppResult<()> {
+    state.player.lock().set_balance(balance_centi(balance)?);
+    Ok(())
+}
+
+fn balance_centi(balance: f32) -> AppResult<i32> {
+    if !balance.is_finite() {
+        return Err(AppError::Audio(format!("Invalid channel balance: {balance}")));
+    }
+    Ok((balance.clamp(-1.0, 1.0) * 100.0).round() as i32)
 }
 
 #[tauri::command]
@@ -1115,17 +1301,23 @@ pub async fn crossfade_url(
 #[tauri::command]
 pub async fn crossfade_url_fast(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     fade_out_ms: u32,
     fade_in_ms: u32,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, 0, Some((fade_out_ms, fade_in_ms)), &state, request_generation, cache).await;
+    }
     let cache = playback_cache(
         &app,
         cache_key.as_deref(),
@@ -1133,6 +1325,7 @@ pub async fn crossfade_url_fast(
         expected_content_length,
         duration_hint_ms,
     );
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     let path = match cache {
         Some(cache) => download_url_to_playback_cache(
             &url,
@@ -1164,17 +1357,23 @@ pub async fn crossfade_url_fast(
 #[tauri::command]
 pub async fn crossfade_url_streaming(
     url: String,
+    stream_type: Option<YtStreamType>,
     duration_hint_ms: u64,
     fade_out_ms: u32,
     fade_in_ms: u32,
     cache_key: Option<String>,
     cache_limit_bytes: Option<u64>,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     request_generation: u64,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     claim_playback_request(&state, request_generation)?;
+    if stream_type == Some(YtStreamType::Hls) {
+        let cache = playback_cache(&app, cache_key.as_deref(), cache_limit_bytes, None, duration_hint_ms);
+        return play_hls_url(url, duration_hint_ms, 0, Some((fade_out_ms, fade_in_ms)), &state, request_generation, cache).await;
+    }
     log::info!(
         target: "crossfade_url_streaming",
         "start: url_len={}, hint={}ms",
@@ -1189,6 +1388,7 @@ pub async fn crossfade_url_streaming(
         duration_hint_ms,
     );
 
+    let cache = cache.map(|cache| cache.with_expected_md5(expected_content_md5.as_deref())).transpose()?;
     if let Some(path) = lookup_ready_playback_cache(cache.as_ref(), request_generation).await? {
         log::info!(
             target: "crossfade_url_streaming",
@@ -1377,8 +1577,22 @@ pub async fn crossfade_file(
     .await
 }
 
-fn playback_referer(url: &str) -> &'static str {
-    if url.contains("bilibili.com") || url.contains("bilivideo.") {
+/// B 站音频流：bilivideo CDN 与 `*.mountaintoys.cn` 边缘节点（对齐 Android BiliStreamUrls）
+fn is_bili_stream_url(url: &str) -> bool {
+    if url.contains("bilibili.com") {
+        return true;
+    }
+    match reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    {
+        Some(host) => host.contains("bilivideo.") || host.ends_with(".mountaintoys.cn"),
+        None => url.contains("bilivideo."),
+    }
+}
+
+pub(crate) fn playback_referer(url: &str) -> &'static str {
+    if is_bili_stream_url(url) {
         "https://www.bilibili.com"
     } else if url.contains("youtube.com") || url.contains("googlevideo.com") {
         "https://music.youtube.com"
@@ -1457,6 +1671,34 @@ fn playback_cache_root(app: &AppHandle) -> Option<PathBuf> {
         .app_cache_dir()
         .ok()
         .map(|dir| dir.join("playback-audio"))
+}
+
+/// 任一缓存键已有完整副本时返回 true（对齐 Android：完整缓存直接离线播放，不发网络解析）
+#[tauri::command]
+pub async fn has_cached_audio(cache_keys: Vec<String>, app: AppHandle) -> AppResult<bool> {
+    let Some(root) = playback_cache_root(&app) else {
+        return Ok(false);
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        cache_keys.iter().any(|key| {
+            RemoteAudioCache::new(root.clone(), key, 0, None, 0)
+                .is_ok_and(|cache| cache.has_published_entry())
+        })
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))
+}
+
+/// 按当前上限裁剪音频与封面缓存：启动时与调小缓存上限后执行（对齐 Android 启动即裁剪），
+/// 否则要等下一首下载完成才会裁剪
+pub fn prune_media_caches(app: &AppHandle, max_cache_size_mb: i32) {
+    let max_bytes = (max_cache_size_mb.max(0) as u64).saturating_mul(1024 * 1024);
+    if let Some(root) = playback_cache_root(app) {
+        crate::audio::remote::prune_remote_audio_cache(&root, max_bytes);
+    }
+    if let Ok(cache_dir) = app.path().app_cache_dir() {
+        super::image_cmd::prune_cover_cache_dir(&cache_dir);
+    }
 }
 
 async fn download_url_bytes(
@@ -1924,10 +2166,36 @@ pub async fn cycle_repeat(state: State<'_, AppState>) -> AppResult<crate::state:
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_generation, is_generation_current, playback_trace_field, stream_length_matches,
-        CachedAudioPlaybackRequest, PlaybackUiTraceRequest,
+        balance_centi, claim_generation, is_generation_current, playback_referer,
+        playback_trace_field, stream_length_matches, CachedAudioPlaybackRequest,
+        PlaybackUiTraceRequest,
     };
     use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn balance_is_rounded_to_hundredths_and_rejects_non_finite_values() {
+        assert_eq!(balance_centi(0.0).unwrap(), 0);
+        assert_eq!(balance_centi(0.354).unwrap(), 35);
+        assert_eq!(balance_centi(-0.35).unwrap(), -35);
+        assert_eq!(balance_centi(2.5).unwrap(), 100);
+        assert_eq!(balance_centi(-7.0).unwrap(), -100);
+        assert!(balance_centi(f32::NAN).is_err());
+        assert!(balance_centi(f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn bilibili_edge_hosts_get_the_bilibili_referer() {
+        for url in [
+            "https://b-demo.edge.mountaintoys.cn/upgcxcode/demo.m4s",
+            "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/a.m4s",
+            "https://xy1x2x3x4xy.mcdn.bilivideo.cn:4483/upgcxcode/a.m4s",
+        ] {
+            assert_eq!(playback_referer(url), "https://www.bilibili.com", "{url}");
+        }
+        // 只看主机名：路径里出现 mountaintoys 的其他站点不算
+        assert_eq!(playback_referer("https://m701.music.126.net/x.mountaintoys.cn.flac"), "https://music.163.com");
+        assert_eq!(playback_referer("https://rr1.googlevideo.com/videoplayback"), "https://music.youtube.com");
+    }
 
     #[test]
     fn playback_generation_never_moves_backwards() {

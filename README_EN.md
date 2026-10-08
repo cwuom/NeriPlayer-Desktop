@@ -18,7 +18,7 @@
     <img alt="CI" src="https://github.com/cwuom/NeriPlayer-Desktop/actions/workflows/build.yml/badge.svg" />
   </a>
   <a href="./LICENSE">
-    <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
+    <img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
   </a>
   <a href="https://t.me/ouom_pub">
     <img alt="Telegram" src="https://img.shields.io/badge/Telegram-@ouom__pub-blue" />
@@ -160,7 +160,8 @@ Current positioning:
 - **Cross-device sync is field-level interop, not just "both speak
   WebDAV"**: the Rust ProtoBuf models align tag-by-tag with the Android
   app's `SyncDataModels.kt` `@ProtoNumber`s, merging is three-way against
-  a base snapshot, and the data-saver format is ProtoBuf + GZIP + Base64.
+  a base snapshot. New writes use Android V4 ProtoBuf manifests and Zstd chunks;
+  legacy JSON, GZIP, and V3 archives remain readable.
   The same remote can be read and written alternately by both apps.
 - **Listen Together speaks the Android protocol**: the desktop client
   connects to the same Cloudflare Workers server, with rooms, roles,
@@ -227,7 +228,7 @@ Build steps:
 git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
-pnpm tauri dev      # development run (Vite :1420 + Rust shell)
+pnpm tauri dev      # development run (Vite :1420, or the next free port if it is taken + Rust shell)
 pnpm tauri build    # production bundle -> src-tauri/target/release/bundle/
 ```
 
@@ -268,13 +269,28 @@ the sidebar.
   playback speed, loudness gain, per-track loudness normalization, and a
   5-band EQ (presets + manual).
 - ⬇️ **In-app downloads**:
-  multi-platform audio downloads with lyric / translated-lyric / cover
-  sidecars, filename templates, a custom download directory, progress
-  events, bulk cancel, corruption validation, and reveal-in-file-manager.
+  the Library Downloads tab shows queued, resolving, transferring and
+  metadata-processing tasks, with live byte counts and percentages when
+  available, individual/bulk cancellation, and retries for failed tasks.
+  Concurrency is adjustable from Downloads or Settings: 1-8 tasks, default 6.
+  Download quality follows playback by default, or can be configured per platform.
+  Audio stays in the selected download directory; lyrics, translations and
+  romanization go in `Lyrics/`, covers in `Covers/`, and temporary files in `.tmp/`.
+  Each adjacent `<audio filename>.npmeta.json` stores NP metadata, source identity
+  and sidecar references. Metadata completion is enabled by default; standardized
+  lyric embedding is disabled by default. Original lyrics remain in sidecars and
+  NP metadata when standardization is enabled. Filename templates, custom paths,
+  corruption validation and reveal-in-file-manager are also supported.
 - 🩷 **Local playlists and favorites**:
   create/rename/delete/reorder, multi-select bulk actions, pointer drag
   reordering, NetEase like/unlike, and favorites that open via their
   source-platform routes.
+  The Local Files category provides directory scan previews, scan progress and
+  cancellation, search, multi-select, and filters for files already in playlists
+  or with duplicate metadata. Selected files are manually added to an existing
+  or new playlist; scanning does not create a default Local Files playlist.
+  Title, artist and album tags can be saved to the audio file after verifying
+  that existing lyrics, covers and other tags survive the write.
 - 🧑‍🎤 **NetEase artists**:
   artist detail with paged top songs and albums, plus an artists category
   on the favorites tab.
@@ -285,7 +301,7 @@ the sidebar.
   a dedicated page; deletions sync across devices without resurrection.
 - ☁️ **GitHub / WebDAV sync**:
   playlists, favorites, recent plays, and stats with three-way merging
-  and a data-saver format; playlist JSON and full-config import/export.
+  and Android V4 chunked archives; playlist JSON and full-config import/export.
 - 🎧 **Listen Together**:
   create or join rooms with real-time WebSocket sync, member-control
   switch, auto-pause on member changes, repeat/shuffle sync, stream-link
@@ -430,8 +446,9 @@ file an issue when the two apps disagree.
 - `merge.rs` performs a three-way merge against a base snapshot (never
   last-write-wins); songs carry causal membership tokens so deletions
   and restores don't cancel each other across devices.
-- Data-saver format is ProtoBuf + GZIP + Base64; JSON otherwise. Both
-  interoperate with Android.
+- New cloud writes use V4 manifests and Zstd chunks; legacy JSON, GZIP, and
+  V3 archives remain readable. Existing legacy archives require confirmation
+  in Settings before migration; update clients on other devices first.
 - The GitHub token and WebDAV password live in app-side encrypted
   storage (below), never in plaintext config.
 
@@ -441,8 +458,13 @@ file an issue when the two apps disagree.
   password) in app-side encrypted files, matching the Android
   EncryptedSharedPreferences threat model; legacy keychain entries are
   migrated on first read.
-- Local data is JSON on disk, always written through an atomic-write
-  helper (temp file + rename) to survive crashes.
+- Playlists, favorites, play history, the playback queue, playback stats,
+  the download catalog, sync metadata and detail/lyrics caches live in the
+  SQLite user database `neri_user_data.db` (tables mirror Android's
+  `NeriUserDataDatabase`; WAL with an fsync per commit). Legacy JSON files and
+  WebView localStorage data are imported once per domain on first launch and
+  the originals are moved to `legacy-json-backup/`. Settings, sign-in state
+  and sync configuration stay in key-value stores.
 - Logs are sanitized before hitting the file log (level and switch
   configurable); crash reports are stored separately.
 
@@ -485,11 +507,14 @@ Details:
 - 🧩 **Conflict handling**: three-way merging against a base snapshot for
   playlists, favorites, history, deletions, and stats; songs carry causal
   tokens so restored content is not re-deleted by stale records.
-- 🪶 **Data-saver mode**: ProtoBuf + GZIP `backup.bin`; JSON when off.
+- 🪶 **Chunked archives**: Android V4 `neriplayer-sync-v3.manifest` and Zstd
+  objects; migration approval is bound to each backend's current target and content.
 - 🔄 **Cross-device interop**: the same remote can be read and written
   alternately by the desktop and Android apps.
 - 🚫 **Sync boundary**: audio files, downloads, cookies, and playback
   tokens are never uploaded.
+- 🧪 **Alignment evidence**: `scripts/test-sync-android-interop.ps1` checks Kotlin
+  decoding. Automated codec tests do not replace real-account, provider, or device tests.
 - 📦 **Remote format**: GitHub repos / WebDAV files are not end-to-end
   encrypted backups; you are responsible for the remote.
 
@@ -538,6 +563,7 @@ feedback; no fixed schedule is promised.
 
 ### Recently landed
 
+- [x] User data moved to a SQLite database (aligned with Android Room) with automatic legacy import
 - [x] NetEase artist detail page and a favorites artists category
 - [x] YouTube Music home shelves first in internationalization mode
 - [x] Layered ESC close, cursor-anchored menus, and menu polish
@@ -660,12 +686,14 @@ feedback; no fixed schedule is promised.
 
 ## License
 
-NeriPlayer Desktop is released under the **MIT** license. See
-[LICENSE](./LICENSE) for the full terms.
+NeriPlayer Desktop is released under the **GPL-3.0** license
+(GPL-3.0-or-later), the same as the Android app. See [LICENSE](./LICENSE)
+for the full terms.
 
-> The Android app is licensed under GPL-3.0; the two repositories are
-> licensed independently. The `vendor/applemusic-like-lyrics` submodule
-> follows its own license.
+> Code committed before 2026-10-07 was released under the MIT license; that
+> notice is kept in [LICENSES/MIT.txt](./LICENSES/MIT.txt). The
+> `vendor/applemusic-like-lyrics` submodule is AGPL-3.0, and the parts shipped
+> with the app follow its own license.
 
 ---
 

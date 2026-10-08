@@ -1,9 +1,14 @@
 pub mod analyzer;
 pub mod buffered;
+pub mod decoder;
 pub mod effects;
+pub mod ffmpeg;
 pub mod growing;
+pub mod hls;
 pub mod media_session;
+pub mod metrics;
 pub mod pcm;
 pub mod player;
 pub mod queue;
 pub mod remote;
+pub mod stretch;

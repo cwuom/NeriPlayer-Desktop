@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{self, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, SeekedTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
@@ -54,8 +54,8 @@ const MAX_DECODE_RETRIES: usize = 3;
 const MAX_VIRTUAL_BODY_SKIP_PACKETS: usize = 256;
 /// virtual-body 拼接 demux：最多吞掉的 moov 假样本数（stco 指向文件头 mdat）
 const MAX_VIRTUAL_BODY_SKIP_MOOV_SAMPLES: usize = 4096;
-// 超长 YouTube 首包探测 2s 容易假失败，放宽到 6s
-const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+// 首包探测含建连、TLS 与首段下载；经代理时单是 TLS 握手就要 2-3 秒，6 秒常常假超时
+const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// per-request 超时下限：15s 在实机上被 512KB 块贴脸打穿（成功请求已到
 /// 12.4s），抬到 20s 并按块大小/吞吐向上缩放，避免"块越大越必超时"
 const REMOTE_REQUEST_TIMEOUT_FLOOR: Duration = Duration::from_secs(20);
@@ -117,6 +117,7 @@ pub struct RemoteAudioCache {
     staging: Arc<Mutex<CacheStaging>>,
     ready_path: PathBuf,
     expected_content_length: Option<u64>,
+    expected_content_md5: Option<String>,
     expected_duration_ms: Option<u64>,
     max_cache_bytes: u64,
     published_path: Arc<Mutex<Option<PathBuf>>>,
@@ -185,7 +186,7 @@ impl RemoteReadCancellation {
         self
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         if self.session_cancelled.load(Ordering::Acquire) {
             return true;
         }
@@ -524,7 +525,23 @@ impl RemoteAudioSource {
         };
         let probe_started = Instant::now();
         let range_result = {
-            let range_probe = probe_range_len(&client, &url, &referer, initial_block);
+            // 连接层失败（重置、超时）只说明这条链路一时不通，换条连接再试一次；
+            // 状态码或 Range 不受支持则直接交给调用方走兜底
+            let range_probe = async {
+                match probe_range_len(&client, &url, &referer, initial_block).await {
+                    Err(AppError::Network(error)) if error.is_connect() || error.is_timeout() => {
+                        log::warn!(
+                            target: "remote-audio",
+                            "range probe transport failure host={}, elapsed_ms={}, retrying: {}",
+                            host,
+                            probe_started.elapsed().as_millis(),
+                            error.without_url(),
+                        );
+                        probe_range_len(&client, &url, &referer, initial_block).await
+                    }
+                    result => result,
+                }
+            };
             tokio::pin!(range_probe);
             tokio::select! {
                 result = &mut range_probe => result,
@@ -1476,11 +1493,38 @@ impl RemoteAudioCache {
             staging: Arc::new(Mutex::new(CacheStaging { path: None })),
             ready_path: dir.join(format!("{}.ready", digest)),
             expected_content_length: expected_content_length.filter(|length| *length > 0),
+            expected_content_md5: None,
             expected_duration_ms: (expected_duration_ms > 0).then_some(expected_duration_ms),
             max_cache_bytes,
             published_path: Arc::new(Mutex::new(None)),
             bypass_ready: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn with_expected_md5(mut self, value: Option<&str>) -> AppResult<Self> {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(AppError::Api("Playback source checksum is invalid".into()));
+            }
+            self.expected_content_md5 = Some(value.to_ascii_lowercase());
+        }
+        Ok(self)
+    }
+
+    fn validate_expected_md5(&self, path: &Path) -> io::Result<()> {
+        let Some(expected) = self.expected_content_md5.as_deref() else { return Ok(()) };
+        let mut file = File::open(path)?;
+        let mut digest = md5::Md5::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break }
+            digest.update(&buffer[..count]);
+        }
+        if hex::encode(digest.finalize()) != expected {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "cache MD5 does not match playback source"));
+        }
+        Ok(())
     }
 
     pub fn ready_path(&self) -> Option<PathBuf> {
@@ -1561,9 +1605,15 @@ impl RemoteAudioCache {
             return None;
         }
 
+        if self.validate_expected_md5(&path).is_err() {
+            log::warn!(target: "remote-cache", "lookup miss digest={} reason=source_checksum", digest_prefix);
+            return None;
+        }
         if let Ok(mut published) = self.published_path.lock() {
             *published = Some(path.clone());
         }
+        // 刷新 .ready 的修改时间实现最近使用淘汰；不碰 .audio，其校验戳按路径和修改时间记忆
+        crate::fsutil::touch_modified(&self.ready_path);
         log::info!(
             target: "remote-cache",
             "lookup hit digest={} bytes={} elapsed_ms={}",
@@ -1590,6 +1640,7 @@ impl RemoteAudioCache {
             staging: Arc::new(Mutex::new(CacheStaging { path: None })),
             ready_path: self.ready_path.clone(),
             expected_content_length: self.expected_content_length,
+            expected_content_md5: self.expected_content_md5.clone(),
             expected_duration_ms: self.expected_duration_ms,
             max_cache_bytes: self.max_cache_bytes,
             published_path: Arc::new(Mutex::new(None)),
@@ -1725,6 +1776,7 @@ impl RemoteAudioCache {
             return Ok(());
         }
         let staging_path = self.staging_path()?;
+        self.validate_expected_md5(&staging_path)?;
         let validated = validate_cache_file(
             &staging_path,
             std::fs::metadata(&staging_path)?.len(),
@@ -1733,7 +1785,8 @@ impl RemoteAudioCache {
             None,
         )
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        File::open(&staging_path)?.sync_all()?;
+        // Windows 的 FlushFileBuffers 需要可写句柄
+        std::fs::OpenOptions::new().read(true).write(true).open(&staging_path)?.sync_all()?;
 
         let staging_stem = staging_path
             .file_stem()
@@ -1789,6 +1842,20 @@ impl RemoteAudioCache {
             return None;
         }
         Some(self.cache_dir.join(path))
+    }
+
+    /// 只看 .ready 标记与已发布文件长度、不做哈希校验的快速判断：
+    /// 用来决定是否值得先发网络解析。真正播放前仍走 ready_path 的完整校验
+    pub fn has_published_entry(&self) -> bool {
+        let Ok(marker) = std::fs::read_to_string(&self.ready_path) else {
+            return false;
+        };
+        let Some(CacheMarker::Validated { content_length, file_name, .. }) = parse_cache_marker(marker.trim()) else {
+            return false;
+        };
+        self.resolve_marker_file(&file_name)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .is_some_and(|metadata| metadata.is_file() && metadata.len() == content_length)
     }
 }
 
@@ -1924,10 +1991,12 @@ fn validate_published_cache_file(
     )
     .is_none()
     {
-        // 文件名已包含 SHA-256，长度也与 marker 一致
-        // 完整性已由下载流程保证，跳过昂贵的 symphonia
-        // probe that reopens and parses the entire container (very slow for large
-        // ISO-MP4 files in debug builds).
+        // 冷启动或文件已变化时重新检查内容，文件名不能证明文件仍然完整
+        // 校验摘要即可，无需再次解析整个音频容器
+        let actual = sha256_file(path).map_err(|err| format!("cache hash failed: {err}"))?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err("cache SHA-256 mismatch".into());
+        }
     }
     let validated = ValidatedCacheFile {
         content_length,
@@ -2070,12 +2139,13 @@ fn prune_disk_cache(root: &PathBuf, max_cache_bytes: u64, keep_digest: &str) {
         return;
     }
 
+    // 按每组最新的修改时间排序：命中会刷新 .ready，常听的曲目排在后面（对齐 Android LRU 淘汰）
     let mut ordered = groups.into_iter().collect::<Vec<_>>();
     ordered.sort_by_key(|(_, files)| {
         files
             .iter()
             .map(|(_, _, modified)| *modified)
-            .min()
+            .max()
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
     for (_, files) in ordered {
@@ -2088,6 +2158,11 @@ fn prune_disk_cache(root: &PathBuf, max_cache_bytes: u64, keep_digest: &str) {
             }
         }
     }
+}
+
+/// 按上限裁剪整个音频缓存（启动时、调小缓存上限后调用；平时只在新文件发布时裁剪）
+pub fn prune_remote_audio_cache(root: &Path, max_cache_bytes: u64) {
+    prune_disk_cache(&root.to_path_buf(), max_cache_bytes, "");
 }
 
 fn collect_disk_cache_files(
@@ -2168,6 +2243,17 @@ impl MediaSource for RemoteAudioSource {
     }
 }
 
+impl crate::audio::ffmpeg::ByteInput for RemoteAudioSource {
+    // FFmpeg 靠 sidx/Cues 定位，不会像 symphonia 那样扫描全部顶层 atom，可以直接给出总长
+    fn byte_len(&mut self) -> Option<u64> {
+        Some(self.logical_len())
+    }
+
+    fn interrupted(&self) -> bool {
+        self.read_cancelled()
+    }
+}
+
 fn is_fragmented_mp4_url(value: &str) -> bool {
     url::Url::parse(value)
         .ok()
@@ -2239,6 +2325,51 @@ fn detect_fragmented_mp4(data: &[u8]) -> bool {
     false
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAudioInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sample_rate_hz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channel_count: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bit_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bitrate: Option<u32>,
+}
+
+impl SourceAudioInfo {
+    pub(crate) fn from_parts(
+        sample_rate_hz: Option<u32>,
+        channel_count: Option<u16>,
+        bit_depth: Option<u32>,
+        codec: Option<String>,
+        bitrate_kbps: Option<u32>,
+    ) -> Self {
+        Self {
+            sample_rate_hz: sample_rate_hz.filter(|value| *value > 0),
+            channel_count: channel_count.filter(|value| *value > 0),
+            bit_depth: bit_depth.filter(|value| *value > 0),
+            codec: codec.filter(|value| !value.is_empty()),
+            bitrate: bitrate_kbps.filter(|value| *value > 0),
+        }
+    }
+
+    pub(crate) fn with_encoded_bitrate(mut self, byte_length: Option<u64>, duration: Option<Duration>) -> Self {
+        if self.bitrate.is_none() {
+            if let (Some(bytes), Some(duration)) = (byte_length.filter(|bytes| *bytes > 0), duration.filter(|duration| !duration.is_zero())) {
+                // 压缩音频只能按完整编码文件和真实时长算平均码率，不能用解码后的 PCM 大小
+                let nanos = duration.as_nanos();
+                let kbps = (u128::from(bytes) * 8 * 1_000_000 + nanos / 2) / nanos;
+                self.bitrate = u32::try_from(kbps).ok().filter(|value| *value > 0);
+            }
+        }
+        self
+    }
+}
+
 pub struct SymphoniaAudioDecoder {
     decoder: Box<dyn Decoder>,
     current_frame_offset: usize,
@@ -2247,9 +2378,42 @@ pub struct SymphoniaAudioDecoder {
     total_duration: Option<Time>,
     buffer: SampleBuffer<f32>,
     spec: SignalSpec,
+    retry_virtual_body_edges: bool,
 }
 
 impl SymphoniaAudioDecoder {
+    pub fn source_audio_info(&self) -> SourceAudioInfo {
+        let params = self.decoder.codec_params();
+        let sample_rate_hz = Some(self.spec.rate).filter(|value| *value > 0);
+        let channel_count = u16::try_from(self.spec.channels.count()).ok().filter(|value| *value > 0);
+        let encoded_width = match params.codec {
+            codecs::CODEC_TYPE_PCM_S8 | codecs::CODEC_TYPE_PCM_U8
+            | codecs::CODEC_TYPE_PCM_ALAW | codecs::CODEC_TYPE_PCM_MULAW => Some(8u32),
+            codecs::CODEC_TYPE_PCM_S16LE | codecs::CODEC_TYPE_PCM_S16BE
+            | codecs::CODEC_TYPE_PCM_U16LE | codecs::CODEC_TYPE_PCM_U16BE => Some(16),
+            codecs::CODEC_TYPE_PCM_S24LE | codecs::CODEC_TYPE_PCM_S24BE
+            | codecs::CODEC_TYPE_PCM_U24LE | codecs::CODEC_TYPE_PCM_U24BE => Some(24),
+            codecs::CODEC_TYPE_PCM_S32LE | codecs::CODEC_TYPE_PCM_S32BE
+            | codecs::CODEC_TYPE_PCM_U32LE | codecs::CODEC_TYPE_PCM_U32BE
+            | codecs::CODEC_TYPE_PCM_F32LE | codecs::CODEC_TYPE_PCM_F32BE => Some(32),
+            codecs::CODEC_TYPE_PCM_F64LE | codecs::CODEC_TYPE_PCM_F64BE => Some(64),
+            _ => None,
+        };
+        let bitrate = encoded_width.and_then(|width| {
+            sample_rate_hz.zip(channel_count).and_then(|(rate, channels)| {
+                let bps = u64::from(rate) * u64::from(channels) * u64::from(width);
+                u32::try_from((bps + 500) / 1_000).ok().filter(|value| *value > 0)
+            })
+        });
+        SourceAudioInfo {
+            sample_rate_hz,
+            channel_count,
+            bit_depth: params.bits_per_sample.filter(|value| *value > 0),
+            codec: get_codecs().get_codec(params.codec).map(|descriptor| descriptor.short_name.to_string()),
+            bitrate,
+        }
+    }
+
     pub fn new(source: Box<dyn MediaSource>, extension: Option<&str>) -> Result<Self, String> {
         let options = MediaSourceStreamOptions {
             buffer_len: REMOTE_DECODER_BUFFER_BYTES,
@@ -2419,6 +2583,7 @@ impl SymphoniaAudioDecoder {
             total_duration,
             buffer,
             spec,
+            retry_virtual_body_edges: false,
         })
     }
 
@@ -2520,6 +2685,7 @@ impl SymphoniaAudioDecoder {
             total_duration,
             buffer,
             spec,
+            retry_virtual_body_edges: enable_seek_after_probe.is_some(),
         })
     }
 
@@ -2645,6 +2811,7 @@ impl SymphoniaAudioDecoder {
             total_duration,
             buffer,
             spec,
+            retry_virtual_body_edges: true,
         })
     }
 
@@ -2745,7 +2912,8 @@ impl Iterator for SymphoniaAudioDecoder {
                         continue;
                     }
                     Err(SymphoniaError::IoError(err))
-                        if consecutive_io < MAX_VIRTUAL_BODY_SKIP_PACKETS
+                        if self.retry_virtual_body_edges
+                            && consecutive_io < MAX_VIRTUAL_BODY_SKIP_PACKETS
                             // Interrupted 一律是取消令牌（superseded/停会话），对本次
                             // 操作是永久态：重试 3 次只是把新 seek 的接管拖慢 60ms，
                             // 还会在日志里刷出误导性的 retry 噪音
@@ -2766,6 +2934,8 @@ impl Iterator for SymphoniaAudioDecoder {
                         std::thread::sleep(Duration::from_millis(20));
                         continue;
                     }
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == io::ErrorKind::UnexpectedEof => return None,
                     Err(err) => {
                         log::warn!(
                             target: "remote-audio",
@@ -4208,6 +4378,19 @@ fn seek_error(message: String) -> PcmSeekError {
 
 #[cfg(test)]
 mod tests {
+    use crate::audio::pcm::PcmSource;
+
+    #[test]
+    fn android_alignment_completed_aac_reaches_eof_without_virtual_body_waits() {
+        let started = std::time::Instant::now();
+        let decoder = super::SymphoniaAudioDecoder::new(
+            Box::new(std::io::Cursor::new(include_bytes!("fixtures/hls-silence.aac").as_slice())),
+            Some("aac"),
+        ).unwrap();
+        assert_eq!(decoder.count(), 9216);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "normal EOF must not retry for 5.12 seconds");
+    }
+
     use super::{
         adaptive_block_bytes, cache_duration_is_suspicious, ewma_bps_after_failure,
         ewma_bps_after_success, format_cache_marker, halved_fetch_len, is_fragmented_mp4_url,
@@ -4228,13 +4411,162 @@ mod tests {
     };
     use reqwest::header::HeaderValue;
     use std::collections::HashMap;
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, Read, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use symphonia::core::units::{Time, TimeBase};
+
+    fn silent_flac_24bit_stereo() -> Vec<u8> {
+        use symphonia::core::checksum::{Crc16Ansi, Crc8Ccitt};
+        use symphonia::core::io::Monitor;
+        // 单帧常量零 PCM，素材在测试中生成，不读取外部歌曲
+        let mut data = b"fLaC\x80\x00\x00\x22".to_vec();
+        data.extend_from_slice(&16u16.to_be_bytes());
+        data.extend_from_slice(&16u16.to_be_bytes());
+        data.extend_from_slice(&[0; 6]);
+        let stream_info = (96_000u64 << 44) | (1u64 << 41) | (23u64 << 36) | 16;
+        data.extend_from_slice(&stream_info.to_be_bytes());
+        data.extend_from_slice(&[0; 16]);
+        let mut frame = vec![0xff, 0xf8, 0x60, 0x10, 0x00, 0x0f];
+        let mut crc8 = Crc8Ccitt::new(0);
+        crc8.process_buf_bytes(&frame);
+        frame.push(crc8.crc());
+        frame.extend_from_slice(&[0; 8]);
+        let mut crc16 = Crc16Ansi::new(0);
+        crc16.process_buf_bytes(&frame);
+        frame.extend_from_slice(&crc16.crc().to_be_bytes());
+        data.extend(frame);
+        data
+    }
+
+    fn assert_flac_source_info(mut decoder: SymphoniaAudioDecoder) {
+        let info = serde_json::to_value(decoder.source_audio_info()).unwrap();
+        assert_eq!(info["sampleRateHz"], 96_000);
+        assert_eq!(info["channelCount"], 2);
+        assert_eq!(info["bitDepth"], 24);
+        assert_eq!(info["codec"], "flac");
+        assert!(!info.as_object().unwrap().contains_key("bitrate"));
+        let samples: Vec<f32> = decoder.by_ref().collect();
+        assert_eq!(samples.len(), 32);
+        assert!(samples.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn stream_audio_info_flac_bytes_preserves_source_bits_before_f32_conversion() {
+        let decoder = SymphoniaAudioDecoder::new(Box::new(Cursor::new(silent_flac_24bit_stereo())), None).unwrap();
+        assert_flac_source_info(decoder);
+    }
+
+    #[test]
+    fn stream_audio_info_file_and_growing_flac_match_the_source_header() {
+        let bytes = silent_flac_24bit_stereo();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.audio");
+        std::fs::write(&path, &bytes).unwrap();
+        let decoder = SymphoniaAudioDecoder::new_file(&path).unwrap();
+        let cache_info = decoder.source_audio_info().with_encoded_bitrate(
+            Some(std::fs::metadata(&path).unwrap().len()), decoder.total_duration(),
+        );
+        assert_eq!(serde_json::to_value(cache_info).unwrap()["bitrate"], 2_832);
+        assert_flac_source_info(decoder);
+        let growing = crate::audio::growing::GrowingAudioBuffer::new();
+        for chunk in bytes.chunks(7) { growing.append(chunk); }
+        growing.finish();
+        assert_flac_source_info(SymphoniaAudioDecoder::new(Box::new(growing.reader()), None).unwrap());
+    }
+
+    #[test]
+    fn stream_audio_info_aac_reports_channels_and_rate_without_inventing_bit_depth() {
+        let growing = crate::audio::growing::GrowingAudioBuffer::new();
+        growing.append(include_bytes!("fixtures/hls-silence.aac"));
+        growing.finish();
+        let decoder = SymphoniaAudioDecoder::new(Box::new(growing.reader()), None).unwrap();
+        let info = serde_json::to_value(decoder.source_audio_info()).unwrap();
+        assert_eq!(info["sampleRateHz"], 48_000);
+        assert_eq!(info["channelCount"], 1);
+        assert_eq!(info["codec"], "aac");
+        assert!(!info.as_object().unwrap().contains_key("bitDepth"));
+        assert!(!info.as_object().unwrap().contains_key("bitrate"));
+        assert_eq!(decoder.count(), 9_216);
+    }
+
+    #[test]
+    fn stream_audio_info_pcm_bitrate_uses_encoded_width_instead_of_f32_output() {
+        let decoder = SymphoniaAudioDecoder::new(Box::new(Cursor::new(pcm_wav(8))), None).unwrap();
+        let info = serde_json::to_value(decoder.source_audio_info()).unwrap();
+        assert_eq!(info["sampleRateHz"], 8_000);
+        assert_eq!(info["channelCount"], 1);
+        assert_eq!(info["bitDepth"], 16);
+        assert_eq!(info["bitrate"], 128);
+        assert_eq!(info["codec"], "pcm_s16le");
+    }
+
+    #[test]
+    fn stream_audio_info_average_bitrate_requires_known_length_and_actual_duration() {
+        let decoder = SymphoniaAudioDecoder::new(Box::new(Cursor::new(silent_flac_24bit_stereo())), None).unwrap();
+        let source_info = decoder.source_audio_info();
+        for (length, duration) in [
+            (Some(59), None),
+            (None, Some(Duration::from_secs(1))),
+            (Some(59), Some(Duration::ZERO)),
+            (Some(0), Some(Duration::from_secs(1))),
+        ] {
+            let info = serde_json::to_value(source_info.clone().with_encoded_bitrate(length, duration)).unwrap();
+            assert!(!info.as_object().unwrap().contains_key("bitrate"));
+        }
+        let info = source_info.with_encoded_bitrate(Some(59), decoder.total_duration());
+        assert_eq!(serde_json::to_value(info).unwrap()["bitrate"], 2_832);
+        let pcm = SymphoniaAudioDecoder::new(Box::new(Cursor::new(pcm_wav(8))), None).unwrap();
+        let info = pcm.source_audio_info().with_encoded_bitrate(Some(1_000_000), Some(Duration::from_secs(1)));
+        assert_eq!(serde_json::to_value(info).unwrap()["bitrate"], 128);
+    }
+
+    #[test]
+    fn stream_audio_info_http_range_flac_uses_the_decoded_source() {
+        let body = silent_flac_24bit_stereo();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/source.flac", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("loopback range server did not receive a request: {error}"),
+                }
+            };
+            // Windows 上 accept 出来的连接继承监听端的非阻塞模式，读超时只对阻塞套接字生效
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("range: bytes=0-"));
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len() - 1, body.len(), body.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let source = runtime.block_on(RemoteAudioSource::open(
+            reqwest::Client::builder().no_proxy().build().unwrap(), url,
+            String::new(), None, 0, Arc::new(AtomicU64::new(1)), 1,
+        ));
+        server.join().unwrap();
+        assert_flac_source_info(SymphoniaAudioDecoder::new_remote(source.unwrap()).unwrap());
+    }
 
     fn pcm_wav(sample_count: u32) -> Vec<u8> {
         let data_len = sample_count * 2;
@@ -6041,6 +6373,39 @@ mod tests {
     }
 
     #[test]
+    fn published_entry_check_needs_no_validation_or_staging() {
+        let root = tempfile::tempdir().expect("temp cache root");
+        let wav = pcm_wav(800);
+        let probe = || RemoteAudioCache::new(root.path().to_path_buf(), "quick-check", 0, None, 0).expect("probe");
+        assert!(!probe().has_published_entry());
+
+        let writer = RemoteAudioCache::new(
+            root.path().to_path_buf(),
+            "quick-check",
+            1024 * 1024,
+            Some(wav.len() as u64),
+            100,
+        )
+        .expect("writer cache");
+        writer.publish_complete_bytes(&wav).expect("publish cached audio");
+        drop(writer);
+
+        let published = probe();
+        assert!(published.has_published_entry());
+        assert!(published.staging.lock().expect("staging lock").path.is_none());
+
+        // 文件被截断后不再视为完整缓存
+        let audio = std::fs::read_dir(root.path().join(&published.digest[..2]))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("audio"))
+            .expect("published audio file");
+        std::fs::write(&audio, &wav[..wav.len() / 2]).unwrap();
+        assert!(!probe().has_published_entry());
+    }
+
+    #[test]
     fn cache_lookup_miss_does_not_create_a_shard_directory() {
         let root = tempfile::tempdir().expect("cache root");
         let cache = RemoteAudioCache::new(
@@ -6124,6 +6489,49 @@ mod tests {
             Some(&sha256),
         )
         .is_none());
+    }
+
+    #[test]
+    fn android_alignment_published_cache_rejects_same_length_corruption_without_a_stamp() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().expect("temporary cache");
+        let original = b"abcdefgh";
+        let hash = hex::encode(Sha256::digest(original));
+        let name = format!("cached.{hash}.audio");
+        let path = root.path().join(&name);
+        std::fs::write(&path, b"ABCDEFGH").expect("corrupted file");
+        assert!(super::validate_published_cache_file(&path, 8, Some(8), None, &hash, &name).is_err());
+    }
+
+    #[test]
+    fn android_alignment_published_cache_accepts_a_verified_cold_file_without_reprobing_audio() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().expect("temporary cache");
+        let bytes = b"abcdefgh";
+        let hash = hex::encode(Sha256::digest(bytes));
+        let name = format!("cached.{hash}.audio");
+        let path = root.path().join(&name);
+        std::fs::write(&path, bytes).expect("published file");
+        assert!(super::validate_published_cache_file(&path, 8, Some(8), None, &hash, &name).is_ok());
+    }
+
+    #[test]
+    fn android_alignment_source_md5_is_checked_before_publication_and_reuse() {
+        use sha2::Digest;
+        let root = tempfile::tempdir().expect("temporary cache");
+        let wav = pcm_wav(800);
+        let checksum = hex::encode(md5::Md5::digest(&wav));
+        let cache = RemoteAudioCache::new(root.path().to_path_buf(), "md5-source", 1024 * 1024, Some(wav.len() as u64), 100)
+            .unwrap().with_expected_md5(Some(&checksum)).unwrap();
+        cache.publish_complete_bytes(&wav).unwrap();
+        assert!(cache.ready_path().is_some());
+        let wrong = "00".repeat(16);
+        assert!(cache.clone().with_expected_md5(Some(&wrong)).unwrap().ready_path().is_none());
+        let bad = RemoteAudioCache::new(root.path().to_path_buf(), "md5-mismatch", 1024 * 1024, Some(wav.len() as u64), 100)
+            .unwrap().with_expected_md5(Some(&wrong)).unwrap();
+        assert!(bad.publish_complete_bytes(&wav).is_err());
+        assert!(!bad.ready_path.exists());
+        assert!(cache.with_expected_md5(Some("invalid")).is_err());
     }
 
     #[test]

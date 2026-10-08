@@ -10,13 +10,17 @@ import {
   type TrackStat,
 } from '@/stores/playbackStats'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import { useEscapeClose } from '@/composables/useEscapeClose'
+import { useToastStore } from '@/stores/toast'
 
 const router = useRouter()
 const player = usePlayerStore()
 const stats = usePlaybackStatsStore()
+const toast = useToastStore()
 const { t } = useI18n()
 
 const showClearConfirm = ref(false)
+useEscapeClose(() => showClearConfirm.value, () => { showClearConfirm.value = false })
 const TOP_CHART_SIZE = 5
 
 const summary = computed(() => stats.current)
@@ -41,8 +45,21 @@ function barScale(item: TrackStat): number {
   return Math.max(0.04, item.playCount / chartMax.value)
 }
 
+function isFilesystemPath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('/') || value.startsWith('\\\\')
+}
+
+// 本地歌曲要有文件路径才能播放：优先统计里记下的位置，旧记录从 local:<路径> 身份里取；
+// 其他设备同步来的 content:// 等地址在桌面端无法打开
+function localPlaybackPath(item: TrackStat): string {
+  const fromId = item.id.startsWith('local:') ? item.id.slice('local:'.length) : ''
+  return [item.mediaUri ?? '', fromId].find(isFilesystemPath) ?? ''
+}
+
 function statToTrack(item: TrackStat): TrackInfo | null {
   if (!item.id) return null
+  const prefix = item.id.split(':')[0]
+  const source = (['netease', 'qq', 'bilibili', 'youtube'].includes(prefix) ? prefix : 'local') as TrackInfo['source']
   return {
     id: item.id,
     title: item.name,
@@ -50,7 +67,8 @@ function statToTrack(item: TrackStat): TrackInfo | null {
     album: item.album,
     durationMs: item.durationMs,
     coverUrl: item.coverUrl ?? undefined,
-    source: (item.id.split(':')[0] as TrackInfo['source']) || 'local',
+    audioUrl: source === 'local' ? localPlaybackPath(item) : '',
+    source,
     addedAt: 0,
   } as TrackInfo
 }
@@ -58,6 +76,10 @@ function statToTrack(item: TrackStat): TrackInfo | null {
 function playStat(item: TrackStat) {
   const track = statToTrack(item)
   if (!track) return
+  if (track.source === 'local' && !track.audioUrl) {
+    toast.show(t('stats.local_file_unavailable'), 'info')
+    return
+  }
   void player.play(track, 'local')
 }
 
@@ -155,7 +177,9 @@ onUnmounted(() => {
             <span class="index-num" :class="{ top: index < 3 }">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
-            <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">

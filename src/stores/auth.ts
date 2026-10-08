@@ -5,6 +5,8 @@ import { useToastStore } from './toast'
 import { useRecommendStore } from './recommend'
 import i18n from '@/i18n'
 import { createLogger } from '@/utils/logger'
+import { playbackUrlResolver } from '@/modules/playback/playbackSource'
+import { playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
 
 /// 登录态变化事件：库页等已挂载页面据此重新拉取平台数据
 export const AUTH_CHANGED_EVENT = 'neri:auth-changed'
@@ -41,6 +43,8 @@ export const useAuthStore = defineStore('auth', () => {
 
   // 正在登录的平台（用于 loading 状态）
   const loggingIn = ref<string | null>(null)
+  // 启动时的登录态检查是否已经返回（无论成败）；返回前各平台 loggedIn 都还是默认的 false
+  const statusChecked = ref(false)
   const youtubeProfileRefreshAttempted = ref(false)
   const youtubeProfileRefreshing = ref(false)
 
@@ -60,6 +64,8 @@ export const useAuthStore = defineStore('auth', () => {
       }
     } catch (e) {
       log.error('Failed to check auth status:', e)
+    } finally {
+      statusChecked.value = true
     }
   }
 
@@ -106,6 +112,8 @@ export const useAuthStore = defineStore('auth', () => {
   /// 不广播的话，库页在 onMounted 时才判断是否需要拉数据，
   /// 用户在设置页登录完切回去看到的仍然是空列表。
   function notifyAuthChanged(platform: string) {
+    playbackUrlResolver.clear()
+    playbackPrefetchManager.clear()
     useRecommendStore().invalidatePlatform(platform)
     window.dispatchEvent(new CustomEvent(AUTH_CHANGED_EVENT, { detail: { platform } }))
   }
@@ -201,7 +209,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    netease, bilibili, youtube, loggingIn, isAnyLoggedIn,
+    netease, bilibili, youtube, loggingIn, statusChecked, isAnyLoggedIn,
     checkStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, logout,
   }
 })

@@ -85,6 +85,13 @@ pub fn quarantine_corrupt_file(path: impl AsRef<Path>) -> Option<PathBuf> {
     }
 }
 
+/// 把文件修改时间刷新为现在（缓存命中时标记最近使用）；失败不影响调用方
+pub fn touch_modified(path: impl AsRef<Path>) {
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path.as_ref()) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

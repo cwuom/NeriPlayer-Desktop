@@ -110,6 +110,14 @@ pub struct ProtoSyncSong {
     pub sync_metadata_version: i32,
     #[prost(int64, optional, tag = "29")]
     pub legacy_added_at: Option<i64>,
+    #[prost(int64, tag = "30")]
+    pub lyric_sync_revision: i64,
+    #[prost(bool, optional, tag = "31")]
+    pub lyric_sync_edited: Option<bool>,
+    #[prost(string, optional, tag = "32")]
+    pub matched_romanized_lyric: Option<String>,
+    #[prost(string, optional, tag = "33")]
+    pub original_romanized_lyric: Option<String>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -122,6 +130,8 @@ pub struct ProtoSyncRecentPlay {
     pub played_at: i64,
     #[prost(string, tag = "4")]
     pub device_id: String,
+    #[prost(int64, tag = "5")]
+    pub resume_position_ms: i64,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]

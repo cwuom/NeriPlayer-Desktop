@@ -21,7 +21,8 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "transparent": false,
-        "visible": false
+        "visible": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling --disable-background-timer-throttling"
       }
     ],
     "security": {
@@ -59,7 +60,8 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "hardenedRuntime": true,
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
     },
     "category": "Music",
     "linux": {

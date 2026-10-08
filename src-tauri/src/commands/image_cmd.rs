@@ -10,11 +10,12 @@ use tauri::{AppHandle, Manager, State};
 use url::Url;
 
 use crate::error::{AppError, AppResult};
-use crate::settings::store;
 use crate::state::AppState;
 
 const MAX_COVER_BYTES: u64 = 8 * 1024 * 1024;
 const IMAGE_CACHE_DIRECTORY: &str = "image_cache";
+/// 封面缓存独立上限（对齐 Android Coil 磁盘缓存 250 MB 封顶），不跟随音频缓存大小
+const IMAGE_CACHE_MAX_BYTES: u64 = 250 * 1024 * 1024;
 const COVER_CACHE_MARKER_VERSION: &str = "v1";
 const BILIBILI_REFERER: &str = "https://www.bilibili.com/";
 const QQ_REFERER: &str = "https://y.qq.com/";
@@ -58,23 +59,19 @@ pub async fn fetch_bilibili_cover(
     let app_for_setup = app.clone();
     let cache_key_url = cover_url.clone();
     let setup_host = cover_host.clone();
-    let (settings, cache) = tokio::task::spawn_blocking(move || {
+    let cache = tokio::task::spawn_blocking(move || {
         log::info!(
             target: "cover-cache",
             "setup worker started host={}, queued_ms={}",
             setup_host,
             cache_setup_queued_at.elapsed().as_millis(),
         );
-        let settings = store::load_settings(&app_for_setup)?.settings;
-        let cache_limit_mb = settings.max_cache_size as u64;
-        let cache_limit_bytes = cache_limit_mb.saturating_mul(1024 * 1024);
         let cache_root = app_for_setup
             .path()
             .app_cache_dir()
             .map_err(|err| AppError::Other(err.to_string()))?
             .join(IMAGE_CACHE_DIRECTORY);
-        let cache = CoverDiskCache::new(cache_root, cache_key_url.as_str(), cache_limit_bytes)?;
-        Ok::<_, AppError>((settings, cache))
+        CoverDiskCache::new(cache_root, cache_key_url.as_str(), IMAGE_CACHE_MAX_BYTES)
     })
     .await
     .map_err(|err| AppError::Other(err.to_string()))??;
@@ -135,7 +132,7 @@ pub async fn fetch_bilibili_cover(
                 attempt.follow()
             }
         }));
-    if settings.bypass_proxy {
+    if state.bypasses_system_proxy() {
         client_builder = client_builder.no_proxy();
     }
     let client = client_builder
@@ -284,7 +281,10 @@ impl CoverDiskCache {
         let marker = parse_cover_cache_marker(marker.trim())?;
         let path = self.resolve_marker_file(&marker.file_name)?;
         match validate_cached_cover(&path, &marker) {
-            Ok(cached) => Some(cached),
+            Ok(cached) => {
+                crate::fsutil::touch_modified(&self.ready_path);
+                Some(cached)
+            }
             Err(err) => {
                 log::warn!(
                     target: "cover-cache",
@@ -456,12 +456,13 @@ fn prune_cover_cache(root: &Path, max_cache_bytes: u64, keep_digest: &str) {
         return;
     }
 
+    // 最近使用（命中会刷新 .ready 的修改时间）的排在后面，最久未用的先删
     let mut ordered = groups.into_iter().collect::<Vec<_>>();
     ordered.sort_by_key(|(_, files)| {
         files
             .iter()
             .map(|(_, _, modified)| *modified)
-            .min()
+            .max()
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
     for (_, files) in ordered {
@@ -474,6 +475,11 @@ fn prune_cover_cache(root: &Path, max_cache_bytes: u64, keep_digest: &str) {
             }
         }
     }
+}
+
+/// 启动时按封面上限裁剪一次（之前只有新封面写入时才会裁剪）
+pub fn prune_cover_cache_dir(app_cache_dir: &Path) {
+    prune_cover_cache(&app_cache_dir.join(IMAGE_CACHE_DIRECTORY), IMAGE_CACHE_MAX_BYTES, "");
 }
 
 fn collect_cover_cache_files(
@@ -615,6 +621,31 @@ mod tests {
     use super::{
         detect_image_mime, normalize_cover_url, parse_cover_cache_marker, CoverDiskCache,
     };
+
+    #[test]
+    fn pruning_keeps_recently_used_covers() {
+        let root = tempfile::tempdir().unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let mut files = Vec::new();
+        for digest in ["a".repeat(64), "b".repeat(64)] {
+            let directory = root.path().join(&digest[..2]);
+            std::fs::create_dir_all(&directory).unwrap();
+            let image = directory.join(format!("{digest}.x.image"));
+            let marker = directory.join(format!("{digest}.ready"));
+            std::fs::write(&image, vec![0; 100]).unwrap();
+            std::fs::write(&marker, b"marker").unwrap();
+            for path in [&image, &marker] {
+                std::fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(hour_ago).unwrap();
+            }
+            files.push((image, marker));
+        }
+        // a 先下载但刚被播放过：命中刷新了它的 .ready
+        crate::fsutil::touch_modified(&files[0].1);
+
+        super::prune_cover_cache(root.path(), 150, "");
+        assert!(files[0].0.exists(), "recently used cover survives");
+        assert!(!files[1].0.exists(), "least recently used cover is evicted");
+    }
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     fn valid_png() -> Vec<u8> {

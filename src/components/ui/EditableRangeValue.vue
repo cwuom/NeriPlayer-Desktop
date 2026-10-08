@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { formatEditableNumber, parseEditableNumber } from '@/utils/editableRange'
+import { formatEditableNumber, parseEditableNumber, roundToStepPrecision } from '@/utils/editableRange'
 
 const props = withDefaults(defineProps<{
   modelValue: number
@@ -89,13 +89,13 @@ function commitEditing() {
   }
 
   const previousValue = props.modelValue
-  const nextValue = parseEditableNumber(
+  const parsedValue = parseEditableNumber(
     draftValue.value,
     props.min,
     props.max,
     props.inputScale,
   )
-  if (nextValue === null) {
+  if (parsedValue === null) {
     hasError.value = true
     void nextTick(() => {
       inputRef.value?.focus()
@@ -103,6 +103,7 @@ function commitEditing() {
     })
     return
   }
+  const nextValue = roundToStepPrecision(parsedValue, props.step, props.min, props.max)
 
   suppressCardClick()
   cancelEditing()

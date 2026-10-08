@@ -21,9 +21,10 @@ import {
 } from '@/utils/contextMenu'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
 const route = useRoute()
@@ -110,18 +111,17 @@ async function loadDetail() {
   if (!mediaId) return
 
   const cacheKey = playlistDetailCacheKey('bilibili-favorite', mediaId)
-  const cached = readPlaylistDetailCache<BiliDetailCache>(cacheKey)
-  if (cached) {
-    applyDetailCache(cached)
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<BiliDetailCache>(cacheKey, (detail) => {
+    applyDetailCache(detail)
+    isLoading.value = false
+  })
 
   try {
     // 获取收藏夹信息
     const infoData = await invoke<any>('get_bili_fav_folder_info', { mediaId })
+    cached.markFresh()
     const info = infoData?.data || {}
     folderName.value = info.title || ''
     coverUrl.value = info.cover || ''
@@ -153,8 +153,18 @@ async function loadDetail() {
         audioUrl: '',
       }))
     saveDetailCache(cacheKey)
+    // 收藏夹归属（决定 CREATED/COLLECTED）只有新鲜的文件夹信息里有，缓存预览不记
+    recordPlaylistOpen({
+      source: 'bili',
+      id: mediaId,
+      mid: info.mid ?? info.upper?.mid,
+      fid: info.fid,
+      name: folderName.value,
+      coverUrl: coverUrl.value,
+      trackCount: mediaCount.value || tracks.value.length,
+    })
   } catch (e: any) {
-    if (!cached) {
+    if (!(await cached.shown())) {
       error.value = e?.toString() || t('player.load_failed')
     }
   } finally {
@@ -274,10 +284,7 @@ function trackDownloadLabel(track: TrackInfo) {
 }
 
 function isTrackDownloadDisabled(track: TrackInfo) {
-  if (downloadStore.isDownloading(track.id)) return true
-  return downloadStore.isDownloaded(track.id)
-    && player.currentTrack?.id === track.id
-    && player.isPlayingFromDownload
+  return downloadStore.isDownloading(track.id)
 }
 
 async function handleTrackDownload(track: TrackInfo) {
@@ -391,7 +398,7 @@ onMounted(() => {
       </div>
 
       <div v-if="filteredTracks.length === 0" class="state-center">
-        <p>{{ t('player.empty_playlist') }}</p>
+        <p>{{ searchQuery.trim() && tracks.length > 0 ? t('player.no_results') : t('player.empty_playlist') }}</p>
       </div>
       <div v-else>
         <TrackSelectionToolbar

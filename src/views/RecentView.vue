@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
-import { useHistoryStore } from '@/stores/history'
+import { historyEntryKey, useHistoryStore } from '@/stores/history'
 import { useDownloadStore } from '@/stores/download'
 import { useI18n } from 'vue-i18n'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
@@ -11,8 +11,9 @@ import ContextMenu from '@/components/ui/ContextMenu.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
-import { useIncrementalList } from '@/composables/useIncrementalList'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -24,10 +25,11 @@ const router = useRouter()
 const player = usePlayerStore()
 const history = useHistoryStore()
 const downloadStore = useDownloadStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const searchQuery = ref('')
 const showClearConfirm = ref(false)
+useEscapeClose(() => showClearConfirm.value, () => { showClearConfirm.value = false })
 const trackMenu = ref<{ show: boolean; x: number; y: number; track: TrackInfo | null }>({
   show: false, x: 0, y: 0, track: null,
 })
@@ -58,26 +60,46 @@ const {
   toggleSelected,
   toggleSelectAllVisible,
   invertSelectionVisible,
-} = useTrackSelection(allHistoryTracks, visibleHistoryTracks)
+} = useTrackSelection(allHistoryTracks, visibleHistoryTracks, historyEntryKey)
 
-// 大列表分块渲染（最近播放可能很长）
-const { visibleItems: visibleEntries, onScroll: onTrackListScroll, ensureIndex: ensureEntryIndex } =
-  useIncrementalList(() => filteredEntries.value)
+// 历史不设上限：首屏只画一批，滚动接近底部再扩
+const RENDER_CHUNK = 100
+const renderCount = ref(RENDER_CHUNK)
+const renderedEntries = computed(() => filteredEntries.value.slice(0, renderCount.value))
+let renderedQuery = searchQuery.value
+watch(filteredEntries, (list) => {
+  const queryChanged = searchQuery.value !== renderedQuery
+  renderedQuery = searchQuery.value
+  renderCount.value = queryChanged
+    ? Math.min(RENDER_CHUNK, list.length)
+    : Math.min(list.length, Math.max(renderCount.value, RENDER_CHUNK))
+})
+
+function onViewScroll(e: Event) {
+  const el = e.currentTarget as HTMLElement | null
+  if (!el || renderCount.value >= filteredEntries.value.length) return
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2400) {
+    renderCount.value = Math.min(filteredEntries.value.length, renderCount.value + RENDER_CHUNK)
+  }
+}
 
 // 定位到当前播放
 const viewRef = ref<HTMLElement | null>(null)
+const currentHistoryKey = computed(() => player.currentTrack ? historyEntryKey(player.currentTrack) : null)
 const currentRowKey = computed(() => {
-  const id = player.currentTrack?.id
-  if (!id) return null
-  return filteredEntries.value.some(entry => entry.track.id === id) ? id : null
+  const key = currentHistoryKey.value
+  if (!key) return null
+  return filteredEntries.value.some(entry => historyEntryKey(entry.track) === key) ? key : null
 })
 const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCurrentTrack({
   containerRef: viewRef,
   currentKey: currentRowKey,
   suppressed: selectionMode,
   ensureRendered: key => {
-    const index = filteredEntries.value.findIndex(entry => entry.track.id === key)
-    return ensureEntryIndex(index)
+    const index = filteredEntries.value.findIndex(entry => historyEntryKey(entry.track) === key)
+    if (index < 0) return false
+    if (index >= renderCount.value) renderCount.value = Math.min(filteredEntries.value.length, index + 20)
+    return true
   },
 })
 
@@ -90,7 +112,7 @@ function formatRelativeTime(timestamp: number): string {
   if (hours < 24) return t('recent.hours_ago', { count: hours })
   const days = Math.floor(hours / 24)
   if (days < 7) return t('recent.days_ago', { count: days })
-  return new Date(timestamp).toLocaleDateString()
+  return new Date(timestamp).toLocaleDateString(locale.value)
 }
 
 function playAll() {
@@ -107,7 +129,7 @@ function shufflePlay() {
 
 function playEntry(index: number) {
   if (selectionMode.value) {
-    toggleSelected(filteredEntries.value[index].track.id)
+    toggleSelected(historyEntryKey(filteredEntries.value[index].track))
     return
   }
   const tracks = filteredEntries.value.map(e => e.track)
@@ -122,7 +144,7 @@ function clearHistory() {
 
 function openTrackMenu(e: MouseEvent, track: TrackInfo) {
   if (selectionMode.value) {
-    toggleSelected(track.id)
+    toggleSelected(historyEntryKey(track))
     return
   }
   const btn = e.currentTarget as HTMLElement
@@ -134,7 +156,7 @@ function openTrackMenu(e: MouseEvent, track: TrackInfo) {
 
 function openTrackContextMenu(e: MouseEvent, track: TrackInfo) {
   if (selectionMode.value) {
-    toggleSelected(track.id)
+    toggleSelected(historyEntryKey(track))
     return
   }
   trackMenu.value = { show: true, x: e.clientX, y: e.clientY, track }
@@ -143,6 +165,8 @@ function openTrackContextMenu(e: MouseEvent, track: TrackInfo) {
 function closeTrackMenu() {
   trackMenu.value.show = false
 }
+
+const { downloadMenuItem, downloadFromMenu } = useTrackDownloadMenu(() => trackMenu.value.track, closeTrackMenu)
 
 function addToQueueNext(track: TrackInfo) {
   closeTrackMenu()
@@ -192,6 +216,7 @@ const trackMenuItems = computed<ContextMenuItem[]>(() => [
   createContextMenuItem(t('player.play_next'), { id: 'play-next', icon: 'queue_play_next' }),
   createContextMenuItem(t('player.add_to_queue'), { id: 'add-to-queue', icon: 'add_to_queue' }),
   createContextMenuItem(t('player.add_to_playlist'), { id: 'add-to-playlist', icon: 'playlist_add' }),
+  downloadMenuItem.value,
 ])
 
 function handleTrackMenuClick(item: ContextMenuActionItem) {
@@ -212,12 +237,15 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
     case 'add-to-playlist':
       openAddToPlaylist(track)
       break
+    case 'download':
+      void downloadFromMenu()
+      break
   }
 }
 </script>
 
 <template>
-  <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
+  <div ref="viewRef" class="detail-view" @scroll.passive="onViewScroll">
     <header class="detail-header">
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
@@ -265,25 +293,28 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
         @download="downloadSelected"
         @exit="leaveSelectionMode"
       />
+      <div v-if="filteredEntries.length === 0" class="search-empty">{{ t('player.no_results') }}</div>
       <div class="track-list">
         <div
-          v-for="(entry, index) in visibleEntries"
-          :key="entry.track.id + entry.playedAt"
+          v-for="(entry, index) in renderedEntries"
+          :key="historyEntryKey(entry.track)"
           class="track-item"
-          :class="{ active: player.currentTrack?.id === entry.track.id, selected: selectionMode && selectedIds.has(entry.track.id), 'selection-mode': selectionMode }"
-          :data-track-key="entry.track.id"
+          :class="{ active: currentHistoryKey === historyEntryKey(entry.track), selected: selectionMode && selectedIds.has(historyEntryKey(entry.track)), 'selection-mode': selectionMode }"
+          :data-track-key="historyEntryKey(entry.track)"
           @click="playEntry(index)"
           @contextmenu.prevent.stop="openTrackContextMenu($event, entry.track)"
         >
-          <button v-if="selectionMode" class="track-select" @click.stop="toggleSelected(entry.track.id)">
-            <span class="material-symbols-rounded filled">{{ selectedIds.has(entry.track.id) ? 'check_circle' : 'radio_button_unchecked' }}</span>
+          <button v-if="selectionMode" class="track-select" @click.stop="toggleSelected(historyEntryKey(entry.track))">
+            <span class="material-symbols-rounded filled">{{ selectedIds.has(historyEntryKey(entry.track)) ? 'check_circle' : 'radio_button_unchecked' }}</span>
           </button>
           <div v-else class="track-index">
-            <div v-if="player.currentTrack?.id === entry.track.id && player.isPlaying" class="equalizer-bars"><span class="bar"/><span class="bar"/><span class="bar"/></div>
+            <div v-if="currentHistoryKey === historyEntryKey(entry.track) && player.isPlaying" class="equalizer-bars"><span class="bar"/><span class="bar"/><span class="bar"/></div>
             <span v-else class="index-num">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
-            <BilibiliCoverImage v-if="entry.track.coverUrl" :src="entry.track.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="entry.track.coverUrl" :src="entry.track.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">
@@ -295,7 +326,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
           <button v-if="!selectionMode" class="track-more" @click.stop="openTrackMenu($event, entry.track)">
             <span class="material-symbols-rounded">more_vert</span>
           </button>
-          <button v-if="!selectionMode" class="track-remove" @click.stop="history.remove(entry.track.id)">
+          <button v-if="!selectionMode" class="track-remove" @click.stop="history.remove(historyEntryKey(entry.track))">
             <span class="material-symbols-rounded">close</span>
           </button>
         </div>
@@ -349,6 +380,13 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   align-items: center;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.search-empty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--md-on-surface-variant);
 }
 
 .action-btn {

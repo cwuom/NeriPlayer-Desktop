@@ -4,6 +4,8 @@ export interface StorageUsageItem {
   fileCount: number
   path?: string | null
   cacheKind?: string | null
+  /** 存在用户数据库中的条目按记录数展示 */
+  recordCount?: number | null
 }
 
 export interface StorageUsageSection {
@@ -23,11 +25,13 @@ export interface StorageCacheClearOptions {
   downloadStaging: boolean
   sharedMedia: boolean
   platformList: boolean
+  lyricsCache: boolean
 }
 
+// 歌单详情与歌词缓存已迁入用户数据库，由后端统计；这里只剩首屏用的推荐快照
 const BROWSER_CACHE_KEYS = {
-  platformList: ['neri:playlist-detail-cache:v1', 'neri:recommend:cache'],
-  other: ['neri:lyrics-cache:v3', 'neri:lyrics-cache:v2', 'neri:lyrics-cache:v1'],
+  platformList: ['neri:recommend:cache', 'neri:home-feed:v1'],
+  other: [],
 } as const
 
 export function mergeBrowserCacheUsage(summary: StorageUsageSummary): StorageUsageSummary {

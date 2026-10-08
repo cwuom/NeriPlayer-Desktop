@@ -18,7 +18,7 @@
     <img alt="CI" src="https://github.com/cwuom/NeriPlayer-Desktop/actions/workflows/build.yml/badge.svg" />
   </a>
   <a href="./LICENSE">
-    <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
+    <img alt="License" src="https://img.shields.io/badge/License-GPL--3.0-blue" />
   </a>
   <a href="https://t.me/ouom_pub">
     <img alt="Telegram" src="https://img.shields.io/badge/Telegram-@ouom__pub-blue" />
@@ -140,7 +140,7 @@ NeriPlayer Desktop 是一个 **Tauri 2** 桌面应用：**Vue 3** 前端与 **Ru
 - **跨端同步是字段级互通，不是"都能连 WebDAV"**：
   Rust 侧的 ProtoBuf 模型字段号与 Android 端 `SyncDataModels.kt` 的
   `@ProtoNumber` 逐一对齐，三路合并对照基准快照裁决冲突，
-  省流格式为 ProtoBuf + GZIP + Base64；同一份远端数据可被两端交替读写。
+  当前写入 Android V4 的 ProtoBuf 清单和 Zstd 分块归档，兼容读取旧 JSON、GZIP 和 V3 归档。
 - **一起听与 Android 端同协议**：
   桌面客户端连接同一套 Cloudflare Workers 服务端，
   支持房间、角色权限、队列同步、循环/随机模式同步、
@@ -204,7 +204,7 @@ NeriPlayer Desktop 是一个 **Tauri 2** 桌面应用：**Vue 3** 前端与 **Ru
 git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
-pnpm tauri dev      # 开发运行（Vite :1420 + Rust shell）
+pnpm tauri dev      # 开发运行（Vite :1420，被占用时自动换用下一个空闲端口 + Rust shell）
 pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
 ```
 
@@ -233,21 +233,45 @@ pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
   本地 / 收藏（歌单 + 已关注艺术家）/ 下载 / 网易云（歌单 + 专辑）/
   Bilibili 收藏夹 / YouTube Music 歌单，每个分类独立搜索，
   关键词切换分类后仍保留。
+  收藏歌手按网易云 / B站 / YouTube 分平台展示，同步完成后自动刷新；
+  支持站内歌手详情、作品分页与关注，网易云和 YouTube 可拉取远端关注。
 - 🧠 **播放核心**：
   队列管理、随机/循环模式、播放请求代际防串扰、失败恢复、
   进度与播放模式记忆（可关）。
+  `设置 → 播放源` 可选择 YouTube 首选客户端，失败时继续尝试其它来源；
+  网易云仅有试听或无播放权限时，可独立开启匹配本地音频或 B站兜底，
+  本地匹配优先，原歌曲的队列与同步身份保留，下载不使用替代音源。
 - 🌊 **流式播放**：
   渐进式缓冲、自适应 Range 拉流、分片音频快速 seek、
   暂停时静默拖动、在途请求去重与预取。
 - 🎚️ **播放音效**：
   倍速、响度增益、按歌曲实时响度均衡、5 频段均衡器（预设 + 手动）。
 - ⬇️ **应用内下载**：
-  多平台音频下载、歌词/翻译歌词/封面 sidecar 落盘、
-  文件名模板、自定义下载目录、进度事件、批量取消、
-  损坏校验与失效清理、在文件管理器中显示。
+  音乐库「下载」Tab 展示排队、音源解析、传输和元数据处理状态，
+  实时更新已下载字节与可用的百分比，支持单项/批量取消和失败重试。
+  并发数量可在下载页或设置中调整为 1-8，默认 6；
+  下载音质默认跟随播放，也可按平台独立设置。
+  音频保存在选定下载目录，歌词与翻译/罗马字放入 `Lyrics/`，
+  封面放入 `Covers/`，临时文件放入 `.tmp/`；
+  音频旁的 `<音频文件名>.npmeta.json` 保存 NP 元数据、来源与 sidecar 引用。
+  设置中的元数据补齐默认开启，标准化歌词嵌入默认关闭；
+  开启标准化后，原始歌词仍保留在 sidecar 与 NP 元数据中。
+  另支持文件名模板、自定义目录、损坏校验与在文件管理器中显示。
+  歌曲右键支持下载，多选下载后退出选择；播放中的下载文件也可删除或重新下载，
+  操作前等待本地解码器释放文件，完成后按最新播放意图恢复，删除后可转为在线播放。
+- ℹ️ **播放音频信息**：
+  下载播放显示无框对勾，新默认展示实际码率和格式；声道、采样率和位深
+  可在「设置 → 个性化」独立开启，码率和格式也可单独关闭，同一组开关也适用于流媒体，未知参数省略。
+  流媒体和缓存播放会补齐原生解码器读出的声道、采样率、位深与编码；
+  缺少码率时可由完整编码文件长度和真实音频时长补充平均码率，已有平台或文件码率优先保留。
+  已有音频信息展示偏好会保留，在线音质仍可从播放页更多菜单切换。
 - 🩷 **本地歌单与收藏**：
   创建/重命名/删除/排序歌单、多选批量操作、指针拖拽排序、
   网易云歌曲喜欢/取消喜欢，收藏歌单按来源平台跳转详情。
+  本地「本地文件」分类提供目录扫描预览、扫描进度与取消、搜索和多选，
+  可隐藏已在歌单中的文件及重复元数据；选中后手动导入现有或新歌单，
+  扫描不会自动创建默认本地文件歌单。支持编辑标题、歌手、专辑并保存到音频文件，
+  写入前验证原有歌词、封面和其他标签仍可读回。
 - 🧑‍🎤 **网易云艺术家**：
   艺术家详情、热门歌曲与专辑分页浏览，收藏页提供艺术家分类入口。
 - 📊 **播放统计**：
@@ -257,7 +281,7 @@ pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
   独立页面浏览与管理，删除记录参与云同步（跨端删除不复活）。
 - ☁️ **GitHub / WebDAV 同步**：
   同步本地歌单、收藏、最近播放与播放统计，三路合并，
-  支持省流格式；另有歌单 JSON 与完整配置的导入/导出。
+  使用与 Android 对齐的 V4 分块归档；另有歌单 JSON 与完整配置的导入/导出。
 - 🎧 **一起听**：
   创建/加入房间，WebSocket 实时同步播放状态与队列，
   支持成员控制开关、成员进出自动暂停、循环/随机模式同步、
@@ -300,6 +324,7 @@ pnpm tauri build    # 生产打包，产物在 src-tauri/target/release/bundle/
 - **YouTube Music**：
   WebView 登录、首页 Feed、歌单浏览与详情、搜索、取流、下载、
   账号资料刷新。
+  取流仅处理音频签名，网页令牌短等待后尝试其它客户端，快速切歌会取消旧解析。
 - **本地音频**：
   目录扫描导入、本地歌单管理、本地艺术家聚合与详情页。
 - **LRCLIB**：
@@ -387,8 +412,8 @@ SAF 目录、安全模式等）不在桌面端范围内；桌面端仍在持续�
   播放统计（含每日桶与清空标记）、歌单歌曲删除记录与同步日志。
 - `merge.rs` 对照基准快照做三路合并（不是 last-write-wins）；
   歌曲成员携带因果 token，跨端删除/恢复不会互相覆盖。
-- 省流格式为 ProtoBuf + GZIP + Base64，关闭省流时为 JSON；
-  两种格式均与 Android 端互通。
+- 当前云端写入 V4 清单和 Zstd 分块归档，兼容读取旧 JSON、GZIP 和 V3；
+  迁移已有旧归档前需要在设置页确认升级，并先更新其它设备的客户端。
 - GitHub Token 与 WebDAV 密码保存在应用侧加密存储中
   （见下节），不落明文配置。
 
@@ -398,8 +423,11 @@ SAF 目录、安全模式等）不在桌面端范围内；桌面端仍在持续�
   WebDAV 密码），与 Android 端 EncryptedSharedPreferences 的
   威胁模型一致：防「文件被拷走后可读」；
   旧版系统钥匙串中的凭据会在首次读取时自动迁移。
-- 歌单等本地数据以 JSON 落盘，统一走原子写入工具（临时文件 + rename），
-  避免断电/崩溃导致文件损坏。
+- 歌单、收藏、播放历史、播放队列、播放统计、下载目录、同步元数据以及
+  详情/歌词缓存存放在 SQLite 用户数据库 `neri_user_data.db`（表结构对齐
+  Android `NeriUserDataDatabase`，WAL 且每次提交 fsync）；旧版 JSON 文件与
+  WebView localStorage 数据在首次启动时按数据域导入一次，原文件移入
+  `legacy-json-backup/`。设置、登录态与同步配置仍为键值存储。
 - 日志经脱敏处理后写入文件（可配置级别与开关），
   崩溃报告独立落盘。
 
@@ -441,11 +469,13 @@ NeriPlayer Desktop 支持将本地元数据同步到 **用户自己的 GitHub �
 - 🧩 **冲突处理**：三路合并对照基准快照裁决歌单、收藏、历史、
   删除记录与播放统计；歌曲成员携带因果 token，
   从备份恢复的内容不会被旧删除记录再次删掉。
-- 🪶 **省流模式**：ProtoBuf + GZIP 的 `backup.bin`；
-  关闭省流模式时使用 JSON。
+- 🪶 **分块归档**：使用 Android V4 的 `neriplayer-sync-v3.manifest` 清单和 Zstd 对象；
+  旧格式可读取，升级确认分别绑定 GitHub 或 WebDAV 的当前目标与内容。
 - 🔄 **跨端互通**：与 Android 端共用同一数据模型，
   同一远端可被两端交替读写。
 - 🚫 **同步边界**：不会上传音频文件、下载内容、Cookie 或播放 Token。
+- 🧪 **对齐验证**：Kotlin 反向解码脚本为 `scripts/test-sync-android-interop.ps1`；
+  自动编解码测试不代替真实账号、provider 与跨设备交替同步验收。
 - 📦 **远端格式**：GitHub 仓库 / WebDAV 文件不是端到端加密备份，
   远端文件由用户自行保管。
 
@@ -489,6 +519,7 @@ NeriPlayer Desktop 支持将本地元数据同步到 **用户自己的 GitHub �
 
 ### 近期已落地
 
+- [x] 用户数据迁移到 SQLite 数据库（对齐 Android Room），旧数据自动导入
 - [x] 网易云艺术家详情页与收藏页艺术家分类
 - [x] 国际化模式下 YouTube Music 首页货架优先
 - [x] 分层 ESC 关闭、光标锚定菜单与菜单细节打磨
@@ -605,11 +636,11 @@ NeriPlayer Desktop 支持将本地元数据同步到 **用户自己的 GitHub �
 
 ## 许可证 / License
 
-NeriPlayer Desktop 使用 **MIT** 开源许可证发布，
+NeriPlayer Desktop 使用 **GPL-3.0** 开源许可证（GPL-3.0-or-later）发布，与 Android 端一致，
 详细条款请参阅 [LICENSE](./LICENSE)。
 
-> Android 端使用 GPL-3.0，两个仓库的许可证相互独立；
-> 子模块 `vendor/applemusic-like-lyrics` 遵循其自身许可证。
+> 2026-10-07 之前的代码以 MIT 许可发布，原许可声明保留在 [LICENSES/MIT.txt](./LICENSES/MIT.txt)；
+> 子模块 `vendor/applemusic-like-lyrics` 使用 AGPL-3.0，随应用分发的部分遵循其自身许可证。
 
 ---
 

@@ -1,7 +1,9 @@
 import type { TrackInfo } from '@/stores/player'
 import {
+  getPlaybackSourceKind,
   isRemotePlaybackTrack,
   playbackPrefetchCacheId,
+  playbackResolutionExpiresAt,
   type PlaybackSourceSettings,
   type PlaybackUrlResolver,
   type ResolvedPlaybackSource,
@@ -13,21 +15,43 @@ interface PrefetchEntry {
   expiresAt: number
 }
 
-const DEFAULT_TTL_MS = 90_000
+interface QueuedPrefetch {
+  cacheKey: string
+  token: symbol
+  run: () => Promise<void>
+}
+
 const DEFAULT_MAX_ENTRIES = 16
+const GENERIC_PREFETCH_TTL_FALLBACK_MS = 90_000
+const GENERIC_PREFETCH_TTL_PADDING_MS = 30_000
+const GENERIC_PREFETCH_TTL_MAX_MS = 10 * 60_000
+
+/**
+ * 下一首预取结果的有效期：当前曲目时长 + 30s，最长 10 分钟（对齐 Android resolveGenericUrlPrefetchTtlMs）。
+ * 固定 90s 时，任何超过 90s 的曲目播完前预取就过期了。YouTube 仍受签名 expire 限制。
+ */
+export function genericUrlPrefetchTtlMs(currentDurationMs: number): number {
+  if (!Number.isFinite(currentDurationMs) || currentDurationMs <= 0) return GENERIC_PREFETCH_TTL_FALLBACK_MS
+  return Math.max(1, Math.min(currentDurationMs + GENERIC_PREFETCH_TTL_PADDING_MS, GENERIC_PREFETCH_TTL_MAX_MS))
+}
 
 export class PlaybackPrefetchManager {
   readonly demandArbiter = new PlaybackDemandArbiter()
 
   private readonly entries = new Map<string, PrefetchEntry>()
   // 使用令牌而不是仅保存 Promise，清除后已在途的解析结果不能重新写回缓存
-  private readonly jobs = new Map<string, symbol>()
-  private readonly ttlMs: number
+  private readonly jobs = new Map<string, { token: symbol; requestGeneration?: number }>()
+  private readonly ttlMs: number | undefined
   private readonly maxEntries: number
   private currentDemandKey: string | null = null
+  // YouTube 预取串行执行（对齐 Android 单许可的预取闸门），避免抢在用户要听的曲目前面排队取 PoToken；
+  // 被取代或清除的任务立即让出名额
+  private readonly youtubeQueue: QueuedPrefetch[] = []
+  private youtubeSlot: { cacheKey: string; token: symbol } | null = null
 
-  constructor(ttlMs = DEFAULT_TTL_MS, maxEntries = DEFAULT_MAX_ENTRIES) {
-    this.ttlMs = Math.max(1, ttlMs)
+  /** ttlMs 省略时按来源的解析有效期（YouTube 8 分钟，其余 90 秒） */
+  constructor(ttlMs?: number, maxEntries = DEFAULT_MAX_ENTRIES) {
+    this.ttlMs = ttlMs === undefined ? undefined : Math.max(1, ttlMs)
     this.maxEntries = Math.max(1, maxEntries)
   }
 
@@ -40,34 +64,49 @@ export class PlaybackPrefetchManager {
     track: TrackInfo,
     settings: PlaybackSourceSettings,
     resolver: PlaybackUrlResolver,
+    requestGeneration?: number,
+    ttlMs?: number,
   ): void {
     if (!isRemotePlaybackTrack(track)) return
     const cacheKey = playbackPrefetchCacheId(track, settings)
     if (this.demandArbiter.shouldYieldPrefetch(cacheKey)) return
     if (this.hasFresh(cacheKey)) return
-    if (this.jobs.has(cacheKey)) return
+    const existing = this.jobs.get(cacheKey)
+    if (existing && existing.requestGeneration === requestGeneration) return
 
     const token = Symbol(cacheKey)
-    this.jobs.set(cacheKey, token)
-    void resolver.resolve(track, settings).then((resolution) => {
+    this.jobs.set(cacheKey, { token, requestGeneration })
+    const run = () => resolver.resolve(track, settings, { requestGeneration }).then((resolution) => {
       if (resolution.type !== 'success') return
       if (this.demandArbiter.shouldYieldPrefetch(cacheKey)) return
       // clearForTrack/clear 可能在解析完成前删除了令牌，此时丢弃旧结果
-      if (this.jobs.get(cacheKey) !== token) return
-      this.put(cacheKey, resolution)
+      if (this.jobs.get(cacheKey)?.token !== token) return
+      this.put(cacheKey, resolution, ttlMs)
     }).catch(() => {
       // 预热失败不影响当前播放
     }).finally(() => {
-      if (this.jobs.get(cacheKey) === token) this.jobs.delete(cacheKey)
+      if (this.jobs.get(cacheKey)?.token === token) this.jobs.delete(cacheKey)
     })
+
+    if (getPlaybackSourceKind(track) !== 'youtube') {
+      void run()
+      return
+    }
+    for (let index = this.youtubeQueue.length - 1; index >= 0; index--) {
+      if (this.youtubeQueue[index].cacheKey === cacheKey) this.youtubeQueue.splice(index, 1)
+    }
+    this.youtubeQueue.push({ cacheKey, token, run })
+    this.pumpYoutubeQueue()
   }
 
   prefetchWindow(
     tracks: TrackInfo[],
     settings: PlaybackSourceSettings,
     resolver: PlaybackUrlResolver,
+    requestGeneration?: number,
+    ttlMs?: number,
   ): void {
-    for (const track of tracks) this.prefetch(track, settings, resolver)
+    for (const track of tracks) this.prefetch(track, settings, resolver, requestGeneration, ttlMs)
   }
 
   take(track: TrackInfo, settings: PlaybackSourceSettings): ResolvedPlaybackSource | null {
@@ -82,11 +121,37 @@ export class PlaybackPrefetchManager {
     const cacheKey = playbackPrefetchCacheId(track, settings)
     this.entries.delete(cacheKey)
     this.jobs.delete(cacheKey)
+    this.pumpYoutubeQueue()
   }
 
   clear(): void {
     this.entries.clear()
     this.jobs.clear()
+    this.youtubeQueue.length = 0
+    this.youtubeSlot = null
+  }
+
+  private youtubeSlotBusy(): boolean {
+    const slot = this.youtubeSlot
+    return !!slot && this.jobs.get(slot.cacheKey)?.token === slot.token
+  }
+
+  private pumpYoutubeQueue(): void {
+    while (!this.youtubeSlotBusy() && this.youtubeQueue.length > 0) {
+      const next = this.youtubeQueue.shift()!
+      if (this.jobs.get(next.cacheKey)?.token !== next.token) continue
+      // 排队期间这首已成为当前播放需求：前台解析自己处理，不再预取
+      if (this.demandArbiter.shouldYieldPrefetch(next.cacheKey)) {
+        this.jobs.delete(next.cacheKey)
+        continue
+      }
+      const slot = { cacheKey: next.cacheKey, token: next.token }
+      this.youtubeSlot = slot
+      void next.run().finally(() => {
+        if (this.youtubeSlot === slot) this.youtubeSlot = null
+        this.pumpYoutubeQueue()
+      })
+    }
   }
 
   private hasFresh(cacheKey: string): boolean {
@@ -97,15 +162,23 @@ export class PlaybackPrefetchManager {
     return false
   }
 
-  private put(cacheKey: string, result: ResolvedPlaybackSource): void {
+  private put(cacheKey: string, result: ResolvedPlaybackSource, ttlMs?: number): void {
     this.removeExpired()
     if (!this.entries.has(cacheKey) && this.entries.size >= this.maxEntries) {
-      const oldestKey = this.entries.keys().next().value as string | undefined
-      if (oldestKey) this.entries.delete(oldestKey)
+      // 满了淘汰最快过期的一条
+      let soonestKey: string | null = null
+      let soonestExpiry = Infinity
+      for (const [key, entry] of this.entries) {
+        if (entry.expiresAt < soonestExpiry) {
+          soonestExpiry = entry.expiresAt
+          soonestKey = key
+        }
+      }
+      if (soonestKey) this.entries.delete(soonestKey)
     }
     this.entries.set(cacheKey, {
       result,
-      expiresAt: Date.now() + this.ttlMs,
+      expiresAt: playbackResolutionExpiresAt(result, Date.now(), ttlMs ?? this.ttlMs),
     })
   }
 
@@ -116,3 +189,5 @@ export class PlaybackPrefetchManager {
     }
   }
 }
+
+export const playbackPrefetchManager = new PlaybackPrefetchManager()

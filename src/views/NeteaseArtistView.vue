@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -7,12 +7,14 @@ import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 import { resolveNeteaseCover } from '@/utils/neteaseCover'
 import { createLogger } from '@/utils/logger'
+import { useToastStore } from '@/stores/toast'
+import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 
 const log = createLogger('netease-artist-view')
 
@@ -20,6 +22,7 @@ const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
 const { t } = useI18n()
+const toast = useToastStore()
 
 interface ArtistHeader {
   name: string
@@ -51,20 +54,51 @@ const header = ref<ArtistHeader | null>(null)
 const tracks = ref<TrackInfo[]>([])
 const albums = ref<ArtistAlbum[]>([])
 const activeTab = ref<'songs' | 'albums'>('songs')
+const query = ref('')
+const search = computed(() => query.value.trim().toLocaleLowerCase())
+const filteredTracks = computed(() => {
+  const keyword = search.value
+  if (!keyword) return tracks.value
+  return tracks.value.filter(track =>
+    [track.title, track.artist, track.album].some(value => value.toLocaleLowerCase().includes(keyword)))
+})
+const filteredAlbums = computed(() => {
+  const keyword = search.value
+  if (!keyword) return albums.value
+  return albums.value.filter(album =>
+    [album.name, album.publishYear].some(value => value.toLocaleLowerCase().includes(keyword)))
+})
 
 const artistId = computed(() => Number(route.params.id) || 0)
+let generation = 0
+const { following, changing, toggle } = useArtistFavorite(computed(() => ({
+  source: 'neteaseArtist', id: String(artistId.value),
+  name: header.value?.name || String(route.query.name || ''),
+  coverUrl: header.value?.avatarUrl || header.value?.coverUrl || String(route.query.cover || ''),
+  trackCount: header.value?.musicSize || tracks.value.length,
+  subtitle: header.value?.alias || String(route.query.subtitle || ''),
+})))
+async function toggleFollow() {
+  try { await toggle() } catch (cause) { toast.error(String(cause)) }
+}
 
 // 大列表窗口渲染, 与歌单详情页同策略
 const RENDER_CHUNK = 100
 const renderCount = ref(RENDER_CHUNK)
-const visibleTracks = computed(() => tracks.value.slice(0, renderCount.value))
-const hasMoreTracks = computed(() => renderCount.value < tracks.value.length)
+const visibleTracks = computed(() => filteredTracks.value.slice(0, renderCount.value))
+const hasMoreTracks = computed(() => renderCount.value < filteredTracks.value.length)
+
+watch(query, () => { renderCount.value = RENDER_CHUNK })
+watch(activeTab, () => {
+  query.value = ''
+  renderCount.value = RENDER_CHUNK
+})
 
 function onViewScroll(e: Event) {
   const el = e.currentTarget as HTMLElement | null
   if (!el || !hasMoreTracks.value || activeTab.value !== 'songs') return
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2400) {
-    renderCount.value = Math.min(tracks.value.length, renderCount.value + RENDER_CHUNK)
+    renderCount.value = Math.min(filteredTracks.value.length, renderCount.value + RENDER_CHUNK)
   }
 }
 
@@ -73,7 +107,7 @@ function parseHeader(raw: any): ArtistHeader {
   const aliasList = Array.isArray(artist.alias) ? artist.alias.filter(Boolean) : []
   return {
     name: String(artist.name || route.query.name || ''),
-    alias: aliasList.join(' / '),
+    alias: aliasList.join(' / ') || String(route.query.subtitle || ''),
     coverUrl: resolveNeteaseCover(artist.cover, artist.picUrl) || String(route.query.cover || ''),
     avatarUrl: resolveNeteaseCover(artist.avatar, artist.img1v1Url),
     briefDesc: String(artist.briefDesc || ''),
@@ -85,18 +119,21 @@ function parseHeader(raw: any): ArtistHeader {
 async function load() {
   const id = artistId.value
   if (!id) return
+  const request = ++generation
 
   const cacheKey = playlistDetailCacheKey('netease-artist-v2', id)
-  const cached = readPlaylistDetailCache<ArtistDetailCache>(cacheKey)
-  if (cached) {
-    header.value = cached.header
-    tracks.value = cached.tracks
-    albums.value = cached.albums
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  header.value = parseHeader(null)
+  tracks.value = []
+  albums.value = []
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<ArtistDetailCache>(cacheKey, (detail) => {
+    if (request !== generation) return false
+    header.value = detail.header
+    tracks.value = detail.tracks
+    albums.value = detail.albums
+    isLoading.value = false
+  })
 
   try {
     // 头部/歌曲/专辑并行加载 (对齐 Android loadInitial)
@@ -105,6 +142,8 @@ async function load() {
       invoke<any>('get_netease_artist_songs', { artistId: id }),
       invoke<any>('get_netease_artist_albums', { artistId: id }),
     ])
+    cached.markFresh()
+    if (request !== generation) return
 
     if (detailRes.status === 'fulfilled') {
       header.value = parseHeader(detailRes.value)
@@ -139,7 +178,7 @@ async function load() {
         }))
     }
 
-    if (songsRes.status === 'rejected' && albumsRes.status === 'rejected' && !cached) {
+    if (songsRes.status === 'rejected' && albumsRes.status === 'rejected' && !(await cached.shown())) {
       error.value = String(songsRes.reason || albumsRes.reason)
       return
     }
@@ -152,10 +191,11 @@ async function load() {
       })
     }
   } catch (e: any) {
-    if (!cached) error.value = e?.toString() || t('player.load_failed')
+    if (request !== generation) return
+    if (!(await cached.shown())) error.value = e?.toString() || t('player.load_failed')
     log.error('load artist failed:', e)
   } finally {
-    isLoading.value = false
+    if (request === generation) isLoading.value = false
   }
 }
 
@@ -163,8 +203,8 @@ function playAll() {
   if (tracks.value.length) player.playAll(tracks.value)
 }
 
-function playTrack(index: number) {
-  player.playAll(tracks.value, tracks.value[index]?.id)
+function playTrack(track: TrackInfo) {
+  player.playAll(filteredTracks.value, track.id)
 }
 
 function openAlbum(album: ArtistAlbum) {
@@ -176,7 +216,13 @@ const songCountLabel = computed(() =>
 const albumCountLabel = computed(() =>
   t('player.artist_album_count', { count: header.value?.albumSize || albums.value.length }))
 
-onMounted(load)
+watch(artistId, () => {
+  query.value = ''
+  activeTab.value = 'songs'
+  renderCount.value = RENDER_CHUNK
+  void load()
+}, { immediate: true })
+onUnmounted(() => { generation++ })
 </script>
 
 <template>
@@ -186,6 +232,10 @@ onMounted(load)
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
       <div class="artist-header-title">{{ header?.name || String(route.query.name || '') }}</div>
+      <div class="header-search">
+        <span class="material-symbols-rounded search-icon">search</span>
+        <input v-model="query" class="search-input" :placeholder="t('library.tab_search_hint')" :aria-label="t('library.tab_search_hint')" />
+      </div>
     </header>
 
     <div v-if="isLoading && !header" class="state-center">
@@ -236,6 +286,10 @@ onMounted(load)
               <span class="material-symbols-rounded filled">play_arrow</span>
               {{ t('player.play_all') }}
             </button>
+            <button class="artist-follow-btn" :class="{ active: following }" :disabled="changing || !header?.name" @click="toggleFollow">
+              <span class="material-symbols-rounded">{{ following ? 'check' : 'person_add' }}</span>
+              {{ t(following ? 'player.artist_unsubscribe' : 'player.artist_subscribe') }}
+            </button>
           </div>
         </div>
       </div>
@@ -263,15 +317,15 @@ onMounted(load)
       <Transition name="fade" mode="out-in">
       <!-- 歌曲列表 -->
       <div v-if="activeTab === 'songs'" key="artist-songs" class="track-list">
-        <div v-if="tracks.length === 0" class="state-center">
-          <p>{{ t('player.artist_songs_empty') }}</p>
+        <div v-if="filteredTracks.length === 0" class="state-center">
+          <p>{{ t(search ? 'player.no_results' : 'player.artist_songs_empty') }}</p>
         </div>
         <div
           v-for="(track, index) in visibleTracks"
           :key="track.id"
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
-          @click="playTrack(index)"
+          @click="playTrack(track)"
         >
           <div class="track-index">
             <div
@@ -283,7 +337,9 @@ onMounted(load)
             <span v-else class="index-num">{{ index + 1 }}</span>
           </div>
           <div class="track-cover">
-            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">music_note</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">
@@ -296,11 +352,11 @@ onMounted(load)
 
       <!-- 专辑列表 -->
       <div v-else key="artist-albums" class="artist-album-list">
-        <div v-if="albums.length === 0" class="state-center">
-          <p>{{ t('player.artist_albums_empty') }}</p>
+        <div v-if="filteredAlbums.length === 0" class="state-center">
+          <p>{{ t(search ? 'player.no_results' : 'player.artist_albums_empty') }}</p>
         </div>
         <div
-          v-for="album in albums"
+          v-for="album in filteredAlbums"
           :key="album.id"
           class="artist-album-item"
           role="button"
@@ -309,7 +365,9 @@ onMounted(load)
           @keydown.enter="openAlbum(album)"
         >
           <div class="artist-album-cover">
-            <BilibiliCoverImage v-if="album.coverUrl" :src="album.coverUrl" loading="lazy" />
+            <BilibiliCoverImage v-if="album.coverUrl" :src="album.coverUrl" loading="lazy">
+              <span class="material-symbols-rounded filled">album</span>
+            </BilibiliCoverImage>
             <span v-else class="material-symbols-rounded filled">album</span>
           </div>
           <div class="artist-album-info">
@@ -329,13 +387,24 @@ onMounted(load)
 
 <style scoped lang="scss">
 @use '@/styles/detail-view.scss' as *;
+@use '@/modules/library/artistTabs.scss' as *;
 
 .artist-header-title {
+  flex: 1;
+  min-width: 0;
   font-size: 18px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.header-search {
+  flex: 0 1 320px;
+  max-width: 50%;
+  min-width: 0;
+
+  .search-input { min-width: 0; }
 }
 
 // Hero 卡片
@@ -474,36 +543,19 @@ onMounted(load)
   .play-all-btn:disabled { opacity: 0.4; pointer-events: none; }
 }
 
-// 歌曲 / 专辑 Tab
-.artist-tabs {
-  display: flex;
-  padding: 4px;
-  border-radius: 24px;
-  background: var(--md-surface-container);
-  margin-bottom: 12px;
-}
-
-.artist-tab {
-  flex: 1;
+.artist-follow-btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  height: 42px;
-  border-radius: 20px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--md-on-surface-variant);
-  transition: background var(--duration-short, 150ms), color var(--duration-short, 150ms);
+  padding: 10px 18px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  color: var(--md-primary);
 
-  .material-symbols-rounded { font-size: 19px; }
-
-  &:hover { background: color-mix(in srgb, var(--md-on-surface) 6%, transparent); }
-
-  &.active {
-    background: var(--md-secondary-container);
-    color: var(--md-on-secondary-container);
-  }
+  &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+  &:disabled { opacity: 0.5; }
+  .material-symbols-rounded { font-size: 18px; }
 }
 
 // 专辑行

@@ -158,6 +158,19 @@ body:
       required: false
 
   - type: textarea
+    id: playback-sync-context
+    attributes:
+      label: 播放、网络与同步环境 / Playback, network, and sync context
+      description: >-
+        相关时填写来源与音质、输出设备、是否绕过系统代理、同步后端，以及 Android 是否正常。
+        跨端问题请填写两端构建版本；不要填写 Cookie、Token、带签名的取流链接或私有服务器地址 /
+        When relevant, include source and quality, output device, proxy bypass setting, sync backend,
+        and Android behavior. Include both build versions for cross-platform issues.
+        Do not include cookies, tokens, signed stream links, or private server addresses
+    validations:
+      required: false
+
+  - type: textarea
     id: additional-information
     attributes:
       label: 补充说明 / Additional information

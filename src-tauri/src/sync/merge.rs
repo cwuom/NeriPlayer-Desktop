@@ -3,14 +3,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::models::*;
 
-const MAX_RECENT_PLAYS: usize = 500;
-const MAX_DELETIONS: usize = 500;
 const MAX_SYNC_LOG: usize = 100;
-// 统计裁剪上限, 与 docs/SYNC-MODEL-CONTRACT.md §4 一致
-// 无上限时 playbackStatBuckets 按「天 × 曲目」无限增长, 备份最终撑爆传输通道
-const MAX_PLAYBACK_STATS: usize = 2_000;
-const MAX_STAT_BUCKETS: usize = 8_000;
-const STAT_BUCKET_RETENTION_DAYS: i64 = 400;
+#[cfg(test)]
 const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
 
 pub fn three_way_merge(
@@ -19,8 +13,14 @@ pub fn three_way_merge(
     last_sync_time: i64,
     base_snapshot: &HashMap<String, HashSet<String>>,
 ) -> SyncData {
-    let local = local.normalized_for_sync();
-    let remote = remote.normalized_for_sync();
+    let mut local = local.normalized_for_sync();
+    let mut remote = remote.normalized_for_sync();
+    // 先收集各候选的歌词版本，展示元数据的选择不能丢掉独立歌词修改
+    for data in [&mut local, &mut remote] {
+        if let Err(error) = super::archive::capture_legacy_lyrics(data).and_then(|_|converge_lyrics(data,false)) {
+            log::warn!(target:"sync","invalid lyric metadata will be rejected before publication: {error}");
+        }
+    }
     let playlist_deletions = merge_playlist_song_deletions(
         &local.playlist_song_deletions,
         &remote.playlist_song_deletions,
@@ -55,10 +55,10 @@ pub fn three_way_merge(
         &remote.playback_stats,
         playback_stats_cleared_at,
     );
-    // 先用未裁剪的全量分桶抬升聚合值, 再裁剪, 保证「总 >= 年」永远成立
+    // 全量分桶抬升聚合值，历史数据由归档预算保护，不能靠裁剪绕过预算
     let playback_stats = lift_stats_to_bucket_totals(&playback_stats, &stat_buckets);
 
-    SyncData {
+    let mut result = SyncData {
         version: "2.0".into(),
         device_id: local.device_id.clone(),
         device_name: local.device_name.clone(),
@@ -68,11 +68,379 @@ pub fn three_way_merge(
         recent_plays: recent,
         sync_log: merge_sync_log(&local.sync_log, &remote.sync_log),
         recent_play_deletions: recent_deletions,
-        playback_stats: trim_playback_stats(playback_stats),
+        playback_stats,
         playback_stats_cleared_at,
-        playback_stat_buckets: trim_stat_buckets(stat_buckets),
+        playback_stat_buckets: stat_buckets,
         playlist_song_deletions: playlist_deletions,
+        extensions: merge_extensions(&local.extensions, &remote.extensions),
+    };
+    // 歌词版本独立于歌单重排和歌曲展示元数据
+    let _ = converge_lyrics(&mut result, false);
+    result
+}
+
+pub fn converge_lyrics(data: &mut SyncData, validate_references: bool) -> crate::error::AppResult<()> {
+    let mut overrides: HashMap<String, SyncSong> = HashMap::new();
+    if let Some(values) = data.extensions.get("lyricOverrides").and_then(serde_json::Value::as_array) {
+        for value in values {
+            let song: SyncSong = serde_json::from_value(value.clone()).map_err(|error| crate::error::AppError::Other(format!("Invalid lyric override: {error}")))?;
+            select_lyric_override(&mut overrides, normalize_lyric_state(&song));
+        }
     }
+    if validate_references {
+        for song in data.playlists.iter().flat_map(|playlist|playlist.songs.iter()).chain(data.favorite_playlists.iter().flat_map(|playlist|playlist.songs.iter())).chain(data.recent_plays.iter().map(|play|&play.song)) {
+            if song.lyric_sync_edited.is_some() && (song.lyric_sync_revision>0 || song.lyric_sync_edited==Some(true)) && overrides.get(&song.identity().stable_key()).is_none_or(|item|item.lyric_sync_revision<song.lyric_sync_revision) {
+                return Err(crate::error::AppError::Other("Sync lyric reference has no committed override".into()));
+            }
+        }
+    }
+    for song in data.playlists.iter().flat_map(|playlist|playlist.songs.iter()).chain(data.favorite_playlists.iter().flat_map(|playlist|playlist.songs.iter())).chain(data.recent_plays.iter().map(|play|&play.song)) {
+        select_lyric_override(&mut overrides, normalize_lyric_state(song));
+    }
+    for song in data.playlists.iter_mut().flat_map(|playlist|playlist.songs.iter_mut()).chain(data.favorite_playlists.iter_mut().flat_map(|playlist|playlist.songs.iter_mut())).chain(data.recent_plays.iter_mut().map(|play|&mut play.song)) {
+        let mut normalized=normalize_lyric_state(song);
+        if let Some(latest)=overrides.get(&song.identity().stable_key()) {copy_lyric_state(&mut normalized,latest);}
+        *song=normalized;
+    }
+    let mut values: Vec<_> = overrides.into_iter().collect(); values.sort_by(|left,right|left.0.cmp(&right.0));
+    let values=values.into_iter().map(|(_,song)|serde_json::to_value(lyric_override_record(&song))).collect::<Result<Vec<_>,_>>().map_err(|error|crate::error::AppError::Other(format!("Serialize lyric overrides: {error}")))?;
+    if !values.is_empty() || data.extensions.contains_key("lyricOverrides") {data.extensions.insert("lyricOverrides".into(),serde_json::Value::Array(values));}
+    Ok(())
+}
+
+/// 把一首歌当前的歌词状态并入覆盖记录，修订号更高才替换（对齐 Android SyncLyricOverrideStore）
+pub fn record_lyric_override(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+    song: &SyncSong,
+) -> crate::error::AppResult<()> {
+    let mut data = SyncData {
+        extensions: std::mem::take(extensions),
+        playlists: vec![SyncPlaylist {
+            id: String::new(),
+            name: String::new(),
+            songs: vec![song.clone()],
+            created_at: 0,
+            modified_at: 0,
+            is_deleted: false,
+            song_order_version: DISPLAY_ORDER_SONG_ORDER_VERSION,
+        }],
+        ..Default::default()
+    };
+    let result = converge_lyrics(&mut data, false);
+    *extensions = data.extensions;
+    result
+}
+
+/// 记一次歌单打开（对齐 Android PlaylistUsageRepository.recordOpen）
+///
+/// 只增加本机的计数分片（epoch 0），其它设备的分片原样保留，同步时按分片相加；
+/// 歌单已经没有歌曲时移除记录。返回扩展段是否有变化
+pub(crate) fn record_playlist_open(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+    open: &crate::library::playlist_usage::PlaylistUsageOpen,
+    device_id: &str,
+    now: i64,
+) -> bool {
+    let mut stats = extensions
+        .get("playlistUsageStats")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let index = stats.iter().position(|entry| entry["playlistKey"].as_str() == Some(open.key.as_str()));
+    if open.track_count <= 0 {
+        let Some(index) = index else { return false };
+        stats.remove(index);
+        extensions.insert("playlistUsageStats".into(), serde_json::Value::Array(stats));
+        return true;
+    }
+
+    // 在其它设备被移除过的歌单要带上已见过的删除令牌，否则合并时会被当成删除前的旧记录丢掉
+    let observed = normalize_sync_causal_tokens(
+        &extensions
+            .get("playlistUsageDeletions")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|deletion| deletion["playlistKey"].as_str() == Some(open.key.as_str()))
+            .flat_map(usage_deletion_tokens)
+            .collect::<Vec<_>>(),
+    );
+    let previous = index.map(|index| &stats[index]).filter(|entry| {
+        let tokens = json_tokens(entry, "observedDeletionTokens");
+        observed.iter().all(|token| tokens.contains(token))
+    });
+    let mut entry = match previous {
+        Some(previous) => {
+            let mut entry = previous.clone();
+            if let Some(cover) = &open.cover_url {
+                entry["coverUrl"] = cover.clone().into();
+            }
+            if let Some(subtitle) = &open.subtitle {
+                entry["subtitle"] = subtitle.clone().into();
+            }
+            let tokens = [json_tokens(previous, "observedDeletionTokens"), observed].concat();
+            entry["observedDeletionTokens"] = serde_json::json!(normalize_sync_causal_tokens(&tokens));
+            entry
+        }
+        None => serde_json::json!({
+            "playlistKey": open.key,
+            "source": open.source,
+            "id": open.id,
+            "coverUrl": open.cover_url,
+            "subtitle": open.subtitle,
+            "firstOpenedAt": now,
+            "lastOpenedAt": now,
+            "openCount": 0,
+            "counterBaseOpenCount": 0,
+            "counterShards": [],
+            "observedDeletionTokens": observed,
+        }),
+    };
+    entry["name"] = open.name.clone().into();
+    entry["trackCount"] = open.track_count.min(i64::from(i32::MAX)).into();
+    entry["fid"] = open.fid.into();
+    entry["mid"] = open.mid.into();
+    entry["browseId"] = serde_json::json!(open.browse_id);
+    entry["playlistId"] = serde_json::json!(open.playlist_id);
+    entry["subtype"] = serde_json::json!(open.subtype);
+
+    count_on_device_shard(&mut entry, ("openCount", "counterBaseOpenCount"), device_id, now, i64::from(i32::MAX));
+    entry["firstOpenedAt"] = min_positive(json_i64(&entry, "firstOpenedAt"), now).into();
+    entry["lastOpenedAt"] = json_i64(&entry, "lastOpenedAt").max(now).into();
+
+    match index {
+        Some(index) => stats[index] = entry,
+        None => stats.push(entry),
+    }
+    extensions.insert("playlistUsageStats".into(), serde_json::Value::Array(stats));
+    true
+}
+
+/// 记一次本地歌单播放（对齐 Android LocalPlaylistPlaybackStatsRepository.recordPlayNow）：
+/// 歌单总数和当天分桶各在本机分片上加一
+pub(crate) fn record_local_playlist_play(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+    playlist_id: i64,
+    day_start_at: i64,
+    device_id: &str,
+    played_at: i64,
+) -> bool {
+    if playlist_id == 0 {
+        return false;
+    }
+    let record = |section: &str, matches: &dyn Fn(&serde_json::Value) -> bool, empty: serde_json::Value, count_key: &str| {
+        let mut items = extensions.get(section).and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        let index = items.iter().position(matches);
+        let mut item = index.map_or(empty, |index| items[index].clone());
+        count_on_device_shard(&mut item, (count_key, "counterBasePlayCount"), device_id, played_at, i64::MAX);
+        item["firstPlayedAt"] = min_positive(json_i64(&item, "firstPlayedAt"), played_at).into();
+        item["lastPlayedAt"] = json_i64(&item, "lastPlayedAt").max(played_at).into();
+        match index {
+            Some(index) => items[index] = item,
+            None => items.push(item),
+        }
+        (section.to_string(), serde_json::Value::Array(items))
+    };
+    let stats = record(
+        "localPlaylistPlaybackStats",
+        &|stat| json_i64(stat, "playlistId") == playlist_id,
+        serde_json::json!({"playlistId": playlist_id, "totalPlayCount": 0, "lastPlayedAt": 0, "firstPlayedAt": 0, "counterBasePlayCount": 0, "counterShards": []}),
+        "totalPlayCount",
+    );
+    let buckets = record(
+        "localPlaylistPlaybackBuckets",
+        &|bucket| json_i64(bucket, "playlistId") == playlist_id && json_i64(bucket, "dayStartAt") == day_start_at,
+        serde_json::json!({"dayStartAt": day_start_at, "playlistId": playlist_id, "playCount": 0, "lastPlayedAt": 0, "firstPlayedAt": 0, "counterBasePlayCount": 0, "counterShards": []}),
+        "playCount",
+    );
+    for (section, items) in [stats, buckets] {
+        extensions.insert(section, items);
+    }
+    true
+}
+
+/// 本机分片（epoch 0）加一，总数取原值与「基数 + 各分片之和」的较大者，其它设备的分片原样保留
+/// （对齐 Android UsageEntry.recordOpen / updateLocalPlaylistCounter）
+fn count_on_device_shard(
+    record: &mut serde_json::Value,
+    (count_key, base_key): (&str, &str),
+    device_id: &str,
+    at: i64,
+    count_limit: i64,
+) {
+    let shards: Vec<SyncPlaybackCounterShard> =
+        serde_json::from_value(record["counterShards"].clone()).unwrap_or_default();
+    let mut shards = merge_counter_shards(&shards, &[]);
+    let shard_total = |shards: &[SyncPlaybackCounterShard]| {
+        shards.iter().fold(0_i64, |total, shard| total.saturating_add(i64::from(shard.play_count.max(0))))
+    };
+    let count = json_i64(record, count_key).max(0);
+    let base = if shards.is_empty() {
+        count
+    } else {
+        json_i64(record, base_key).max(0).max(count.saturating_sub(shard_total(&shards)))
+    };
+    match shards.iter_mut().find(|shard| shard.device_id == device_id && shard.epoch_started_at == 0) {
+        Some(shard) => {
+            shard.play_count = shard.play_count.saturating_add(1);
+            shard.first_played_at = min_positive(shard.first_played_at, at);
+            shard.last_played_at = shard.last_played_at.max(at);
+        }
+        None => shards.push(SyncPlaybackCounterShard {
+            device_id: device_id.to_string(),
+            play_count: 1,
+            first_played_at: at,
+            last_played_at: at,
+            ..Default::default()
+        }),
+    }
+    let shards = merge_counter_shards(&shards, &[]);
+    record[count_key] = count.max(base.saturating_add(shard_total(&shards))).min(count_limit).into();
+    record[base_key] = base.into();
+    record["counterShards"] = serde_json::json!(shards);
+}
+
+fn normalize_lyric_state(song: &SyncSong) -> SyncSong {
+    let mut song=song.clone();
+    let has_text=[song.matched_lyric.as_ref(),song.matched_translated_lyric.as_ref(),song.matched_romanized_lyric.as_ref(),song.original_lyric.as_ref(),song.original_translated_lyric.as_ref(),song.original_romanized_lyric.as_ref()].iter().any(|value|value.is_some());
+    let channel=song.channel_id.as_deref().unwrap_or_default().trim();
+    let bilibili=if channel.is_empty(){song.identity().album.to_ascii_lowercase().starts_with("bilibili")}else{channel.eq_ignore_ascii_case("bilibili")};
+    if has_text && (song.lyric_sync_edited.is_none() || (song.lyric_sync_edited==Some(false) && song.lyric_sync_revision<=0 && bilibili)) {
+        song.lyric_sync_edited=Some(true); song.lyric_sync_revision=1;
+        if song.matched_lyric.is_none() {song.matched_lyric=song.original_lyric.clone();}
+        if song.matched_translated_lyric.is_none() {song.matched_translated_lyric=song.original_translated_lyric.clone();}
+        if song.matched_romanized_lyric.is_none() {song.matched_romanized_lyric=song.original_romanized_lyric.clone();}
+    } else if song.lyric_sync_edited==Some(true) {song.lyric_sync_revision=song.lyric_sync_revision.max(1);}
+    else if song.lyric_sync_edited==Some(false) || song.lyric_sync_revision!=0 {
+        if song.lyric_sync_edited.is_none(){song.lyric_sync_revision=0;}else{song.lyric_sync_revision=song.lyric_sync_revision.max(0);}
+        song.lyric_sync_edited=Some(false);
+        song.matched_lyric=None; song.matched_translated_lyric=None; song.matched_romanized_lyric=None;
+        song.original_lyric=None; song.original_translated_lyric=None; song.original_romanized_lyric=None;
+    }
+    song
+}
+
+fn lyric_payload_key(song:&SyncSong)->Vec<u16> {
+    let key:String=[song.matched_lyric.as_ref(),song.matched_translated_lyric.as_ref(),song.matched_romanized_lyric.as_ref(),song.original_lyric.as_ref(),song.original_translated_lyric.as_ref(),song.original_romanized_lyric.as_ref(),song.matched_lyric_source.as_ref(),song.matched_song_id.as_ref()].iter().map(|value|match value {Some(value)=>format!("{}:{value}",value.encode_utf16().count()),None=>"-1:".into()}).collect();
+    key.encode_utf16().collect()
+}
+
+fn lyric_override_record(song:&SyncSong)->SyncSong {
+    let mut record=SyncSong {id:song.id.clone(),album:song.album.clone(),media_uri:song.media_uri.clone(),channel_id:song.channel_id.clone(),audio_id:song.audio_id.clone(),sub_audio_id:song.sub_audio_id.clone(),..Default::default()};
+    copy_lyric_state(&mut record,song);record
+}
+
+fn select_lyric_override(overrides:&mut HashMap<String,SyncSong>,song:SyncSong) {
+    if song.lyric_sync_revision<=0 {return;}
+    let key=song.identity().stable_key();
+    let incoming=(song.lyric_sync_revision,song.lyric_sync_edited==Some(false),lyric_payload_key(&song));
+    let replace=overrides.get(&key).is_none_or(|previous|incoming>(previous.lyric_sync_revision,previous.lyric_sync_edited==Some(false),lyric_payload_key(previous)));
+    if replace {overrides.insert(key,song);}
+}
+
+fn copy_lyric_state(target:&mut SyncSong,source:&SyncSong) {
+    target.matched_lyric=source.matched_lyric.clone(); target.matched_translated_lyric=source.matched_translated_lyric.clone(); target.matched_romanized_lyric=source.matched_romanized_lyric.clone();
+    target.original_lyric=source.original_lyric.clone(); target.original_translated_lyric=source.original_translated_lyric.clone(); target.original_romanized_lyric=source.original_romanized_lyric.clone();
+    target.matched_lyric_source=source.matched_lyric_source.clone(); target.matched_song_id=source.matched_song_id.clone(); target.lyric_sync_revision=source.lyric_sync_revision; target.lyric_sync_edited=source.lyric_sync_edited;
+}
+
+fn merge_extensions(local:&serde_json::Map<String,serde_json::Value>,remote:&serde_json::Map<String,serde_json::Value>)->serde_json::Map<String,serde_json::Value> {
+    let mut result=remote.clone();
+    for (key,value) in local {
+        if let Some(items)=value.as_array() {
+            let mut merged=items.clone(); merged.extend(remote.get(key).and_then(serde_json::Value::as_array).into_iter().flatten().cloned());
+            merged.sort_by_key(serde_json::Value::to_string); merged.dedup();
+            result.insert(key.clone(),serde_json::Value::Array(merged));
+        } else {result.entry(key.clone()).or_insert_with(||value.clone());}
+    }
+    for (section,keys,timestamp) in [
+        ("playlistUsageDeletions",&["playlistKey"][..],"deletedAt"),
+        ("playlistUsageStats",&["playlistKey"][..],"lastOpenedAt"),
+        ("localPlaylistPlaybackStats",&["playlistId"][..],"lastPlayedAt"),
+        ("localPlaylistPlaybackBuckets",&["playlistId","dayStartAt"][..],"lastPlayedAt"),
+        ("biliVideoSkipRules",&["bvid","cid"][..],"modifiedAt"),
+    ] {
+        let mut groups:BTreeMap<String,serde_json::Value>=BTreeMap::new();
+        let Some(items)=result.get(section).and_then(serde_json::Value::as_array).cloned() else {continue;};
+        for item in items {
+            if matches!(section,"localPlaylistPlaybackStats"|"localPlaylistPlaybackBuckets") && (json_i64(&item,"playlistId")==0 || (section=="localPlaylistPlaybackBuckets" && json_i64(&item,"dayStartAt")<0)) {continue;}
+            let key=keys.iter().map(|key|item[*key].to_string()).collect::<Vec<_>>().join("|");
+            if section=="playlistUsageStats" && !usage_observes_deletions(&item,&result) {continue;}
+            groups.entry(key).and_modify(|previous|*previous=merge_metadata_record(section,previous,&item,timestamp)).or_insert_with(||merge_metadata_record(section,&item,&item,timestamp));
+        }
+        result.insert(section.into(),serde_json::Value::Array(groups.into_values().collect()));
+    }
+    lift_local_playlist_stats(&mut result);
+    result
+}
+
+fn lift_local_playlist_stats(extensions:&mut serde_json::Map<String,serde_json::Value>) {
+    let mut totals:BTreeMap<i64,(i64,i64,i64)>=BTreeMap::new();
+    for bucket in extensions.get("localPlaylistPlaybackBuckets").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        let value=totals.entry(json_i64(bucket,"playlistId")).or_default();
+        value.0=value.0.saturating_add(json_i64(bucket,"playCount").max(0));
+        value.1=min_positive(value.1,json_i64(bucket,"firstPlayedAt"));
+        value.2=value.2.max(json_i64(bucket,"lastPlayedAt"));
+    }
+    if totals.is_empty() {return;}
+    let mut stats=extensions.get("localPlaylistPlaybackStats").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    for stat in &mut stats {
+        if let Some((count,first,last))=totals.remove(&json_i64(stat,"playlistId")) {
+            stat["totalPlayCount"]=json_i64(stat,"totalPlayCount").max(count).into();
+            stat["firstPlayedAt"]=min_positive(json_i64(stat,"firstPlayedAt"),first).into();
+            stat["lastPlayedAt"]=json_i64(stat,"lastPlayedAt").max(last).into();
+        }
+    }
+    stats.extend(totals.into_iter().map(|(id,(count,first,last))|serde_json::json!({"playlistId":id,"totalPlayCount":count,"firstPlayedAt":first,"lastPlayedAt":last,"counterBasePlayCount":0,"counterShards":[]})));
+    stats.sort_by_key(|stat|json_i64(stat,"playlistId"));
+    extensions.insert("localPlaylistPlaybackStats".into(),serde_json::Value::Array(stats));
+}
+
+fn json_i64(value:&serde_json::Value,key:&str)->i64 {value[key].as_i64().or_else(||value[key].as_str()?.parse().ok()).unwrap_or(0)}
+fn json_tokens(value:&serde_json::Value,key:&str)->Vec<SyncCausalToken> {serde_json::from_value(value[key].clone()).map(|tokens:Vec<SyncCausalToken>|normalize_sync_causal_tokens(&tokens)).unwrap_or_default()}
+
+fn usage_deletion_tokens(value:&serde_json::Value)->Vec<SyncCausalToken> {
+    let tokens=json_tokens(value,"deletionTokens");
+    if !tokens.is_empty() || json_i64(value,"deletedAt")<=0 {return tokens;}
+    let encoded=value["playlistKey"].as_str().unwrap_or_default().trim().encode_utf16().map(|code|format!("{code:04x}")).collect::<String>();
+    vec![SyncCausalToken{device_id:format!("usage-legacy:{encoded}"),counter:json_i64(value,"deletedAt").max(1)}]
+}
+
+fn usage_observes_deletions(value:&serde_json::Value,extensions:&serde_json::Map<String,serde_json::Value>)->bool {
+    let observed=json_tokens(value,"observedDeletionTokens");
+    extensions.get("playlistUsageDeletions").and_then(serde_json::Value::as_array).into_iter().flatten().filter(|deletion|deletion["playlistKey"]==value["playlistKey"]).all(|deletion|usage_deletion_tokens(deletion).iter().all(|token|observed.contains(token)))
+}
+
+fn merge_metadata_record(section:&str,left:&serde_json::Value,right:&serde_json::Value,timestamp:&str)->serde_json::Value {
+    let newer=if (json_i64(left,timestamp),left.to_string())>=(json_i64(right,timestamp),right.to_string()){left}else{right};
+    let mut result=newer.clone();
+    if section=="playlistUsageDeletions" {
+        let tokens=normalize_sync_causal_tokens(&[usage_deletion_tokens(left),usage_deletion_tokens(right)].concat());
+        result["deletionTokens"]=serde_json::json!(tokens); result["deletedAt"]=json_i64(left,"deletedAt").max(json_i64(right,"deletedAt")).max(0).into(); return result;
+    }
+    if section=="biliVideoSkipRules" {
+        if json_i64(left,timestamp)!=json_i64(right,timestamp) {return result;}
+        let left_deleted=left["isDeleted"].as_bool().unwrap_or(false); let right_deleted=right["isDeleted"].as_bool().unwrap_or(false);
+        if left_deleted && right_deleted {result["intervals"]=serde_json::json!([]); return result;}
+        if left_deleted {return right.clone();}
+        if right_deleted {return left.clone();}
+        let mut intervals:Vec<(i64,i64)>=left["intervals"].as_array().into_iter().flatten().chain(right["intervals"].as_array().into_iter().flatten()).map(|value|(json_i64(value,"startMs").max(0),json_i64(value,"endMs").max(0))).filter(|(start,end)|end>start).collect(); intervals.sort_unstable();
+        let mut merged:Vec<(i64,i64)>=Vec::new(); for (start,end) in intervals {if let Some(previous)=merged.last_mut().filter(|previous|start<=previous.1){previous.1=previous.1.max(end);}else{merged.push((start,end));}}
+        result["intervals"]=serde_json::json!(merged.into_iter().map(|(start,end)|serde_json::json!({"startMs":start,"endMs":end})).collect::<Vec<_>>()); return result;
+    }
+    let (count,base,first,last)=if section=="playlistUsageStats" {("openCount","counterBaseOpenCount","firstOpenedAt","lastOpenedAt")}else if section=="localPlaylistPlaybackStats" {("totalPlayCount","counterBasePlayCount","firstPlayedAt","lastPlayedAt")}else{("playCount","counterBasePlayCount","firstPlayedAt","lastPlayedAt")};
+    let left_shards:Vec<SyncPlaybackCounterShard>=serde_json::from_value(left["counterShards"].clone()).unwrap_or_default();
+    let right_shards:Vec<SyncPlaybackCounterShard>=serde_json::from_value(right["counterShards"].clone()).unwrap_or_default();
+    let shards=merge_counter_shards(&left_shards,&right_shards); let shard_count=shards.iter().fold(0_i64,|total,shard|total.saturating_add(i64::from(shard.play_count.max(0))));
+    let effective_base=|value:&serde_json::Value,empty:bool|json_i64(value,base).max(0).max(if empty{json_i64(value,count).max(0)}else{json_i64(value,count).saturating_sub(shard_count).max(0)});
+    let base_count=if shards.is_empty(){0}else{effective_base(left,left_shards.is_empty()).max(effective_base(right,right_shards.is_empty()))};
+    let total=json_i64(left,count).max(json_i64(right,count)).max(base_count.saturating_add(shard_count)).max(0);
+    result[count]=if section=="playlistUsageStats"{total.min(i64::from(i32::MAX))}else{total}.into(); result[base]=base_count.into();
+    result[first]=min_positive(json_i64(left,first),json_i64(right,first)).into(); result[last]=json_i64(left,last).max(json_i64(right,last)).into();
+    if section!="playlistUsageStats" {result[first]=shards.iter().fold(json_i64(&result,first),|value,shard|min_positive(value,shard.first_played_at)).into();result[last]=shards.iter().fold(json_i64(&result,last),|value,shard|value.max(shard.last_played_at)).into();}
+    result["counterShards"]=serde_json::json!(shards);
+    if section=="playlistUsageStats" {result["observedDeletionTokens"]=serde_json::json!(normalize_sync_causal_tokens(&[json_tokens(left,"observedDeletionTokens"),json_tokens(right,"observedDeletionTokens")].concat()));}
+    result
 }
 
 /// 聚合统计不得小于同曲目日分桶之和
@@ -80,7 +448,7 @@ pub fn three_way_merge(
 /// Android 的「总」读聚合值, 「日/周/月/年」读日分桶求和; 两者用了不同的合并代数
 /// (聚合取 max, 分桶按天取 max 后再求和), 于是会出现「年 > 总」。
 /// 这里只做单调抬升: 结果只增不减, 因此与对端的 max 合并天然收敛, 不会产生回声。
-fn lift_stats_to_bucket_totals(
+pub(super) fn lift_stats_to_bucket_totals(
     stats: &[SyncTrackStat],
     buckets: &[SyncPlaybackStatBucket],
 ) -> Vec<SyncTrackStat> {
@@ -110,51 +478,6 @@ fn lift_stats_to_bucket_totals(
         .collect()
 }
 
-/// 聚合统计裁剪: 保留最近播放的条目, 排序稳定以保证幂等
-fn trim_playback_stats(mut stats: Vec<SyncTrackStat>) -> Vec<SyncTrackStat> {
-    if stats.len() <= MAX_PLAYBACK_STATS {
-        return stats;
-    }
-    stats.sort_by(|left, right| {
-        right
-            .last_played_at
-            .cmp(&left.last_played_at)
-            .then_with(|| left.identity_key.cmp(&right.identity_key))
-    });
-    stats.truncate(MAX_PLAYBACK_STATS);
-    stats
-}
-
-/// 日分桶裁剪: 保留窗口锚定在数据集内最新的一天(而非墙钟), 保证双端结果一致且幂等
-fn trim_stat_buckets(buckets: Vec<SyncPlaybackStatBucket>) -> Vec<SyncPlaybackStatBucket> {
-    let newest_day = buckets
-        .iter()
-        .map(|bucket| bucket.day_start_at)
-        .max()
-        .unwrap_or(0);
-    let mut kept: Vec<SyncPlaybackStatBucket> = if newest_day > 0 {
-        let cutoff = newest_day.saturating_sub(STAT_BUCKET_RETENTION_DAYS * MILLIS_PER_DAY);
-        buckets
-            .into_iter()
-            .filter(|bucket| bucket.day_start_at >= cutoff)
-            .collect()
-    } else {
-        buckets
-    };
-
-    if kept.len() > MAX_STAT_BUCKETS {
-        kept.sort_by(|left, right| {
-            right
-                .day_start_at
-                .cmp(&left.day_start_at)
-                .then_with(|| right.play_count.cmp(&left.play_count))
-                .then_with(|| left.identity_key.cmp(&right.identity_key))
-        });
-        kept.truncate(MAX_STAT_BUCKETS);
-    }
-    kept
-}
-
 fn merge_playlists(
     local: &[SyncPlaylist],
     remote: &[SyncPlaylist],
@@ -182,8 +505,12 @@ fn merge_playlists(
             (Some(local_playlist), None) => apply_deletions_to_playlist(local_playlist, deletions),
             (None, Some(remote_playlist)) => apply_deletions_to_playlist(remote_playlist, deletions),
             (Some(local_playlist), Some(remote_playlist)) => {
-                if local_playlist.is_deleted || remote_playlist.is_deleted {
+                if should_keep_playlist_deleted(local_playlist, remote_playlist) {
                     merge_deleted_playlist(local_playlist, remote_playlist)
+                } else if local_playlist.is_deleted || remote_playlist.is_deleted {
+                    // 另一端在删除之后又改过（或 Android 撤销了删除），活着的那份赢
+                    let active = if local_playlist.is_deleted { remote_playlist } else { local_playlist };
+                    apply_deletions_to_playlist(active, deletions)
                 } else {
                     merge_single_playlist(
                         local_playlist,
@@ -215,6 +542,19 @@ fn apply_deletions_to_playlist(
     let mut merged = playlist.clone();
     merged.songs = apply_playlist_song_deletions(&playlist.id, &playlist.songs, deletions);
     merged
+}
+
+/// 对齐 Android SyncPlaylistDeletionPolicy.shouldKeepPlaylistDeleted：
+/// 一端删除、另一端还在时，只有删除不早于那份歌单的最后修改才保留墓碑
+fn should_keep_playlist_deleted(left: &SyncPlaylist, right: &SyncPlaylist) -> bool {
+    match (left.is_deleted, right.is_deleted) {
+        (false, false) => false,
+        (true, true) => true,
+        _ => {
+            let (deleted, active) = if left.is_deleted { (left, right) } else { (right, left) };
+            deleted.modified_at >= active.modified_at
+        }
+    }
 }
 
 fn merge_deleted_playlist(local: &SyncPlaylist, remote: &SyncPlaylist) -> SyncPlaylist {
@@ -984,21 +1324,34 @@ fn merge_favorite_playlists(
     result
 }
 
-fn merge_single_favorite(left: &SyncFavoritePlaylist, right: &SyncFavoritePlaylist) -> SyncFavoritePlaylist {
+fn merge_single_favorite(
+    left: &SyncFavoritePlaylist,
+    right: &SyncFavoritePlaylist,
+) -> SyncFavoritePlaylist {
     let left = left.normalized_for_sync();
     let right = right.normalized_for_sync();
-    let newer = if right.modified_at > left.modified_at { &right } else { &left };
-    let older = if std::ptr::eq(newer, &left) { &right } else { &left };
+    let newer = if right.modified_at > left.modified_at {
+        &right
+    } else {
+        &left
+    };
+    let older = if std::ptr::eq(newer, &left) {
+        &right
+    } else {
+        &left
+    };
     if left.is_deleted != right.is_deleted {
         if left.modified_at == right.modified_at {
-            let mut result = newer.clone();
-            if result.is_deleted {
-                result.songs.clear();
-                result.track_count = 0;
+            let mut result = if left.is_deleted {
+                left.clone()
             } else {
-                result.songs = deduplicate_songs(&[left.songs.clone(), right.songs.clone()].concat());
-                result.track_count = left.track_count.max(right.track_count).max(result.songs.len() as i32);
-            }
+                right.clone()
+            };
+            result.songs.clear();
+            result.track_count = 0;
+            result.added_time = left.added_time.max(right.added_time);
+            result.modified_at = left.modified_at.max(right.modified_at);
+            result.sort_order = left.sort_order.max(right.sort_order);
             return result;
         }
         if newer.is_deleted {
@@ -1010,8 +1363,13 @@ fn merge_single_favorite(left: &SyncFavoritePlaylist, right: &SyncFavoritePlayli
         }
         let mut result = newer.clone();
         result.songs = deduplicate_songs(&[left.songs.clone(), right.songs.clone()].concat());
-        result.track_count = left.track_count.max(right.track_count).max(result.songs.len() as i32);
-        if result.sort_order == 0 { result.sort_order = older.sort_order; }
+        result.track_count = left
+            .track_count
+            .max(right.track_count)
+            .max(result.songs.len() as i32);
+        if result.sort_order == 0 {
+            result.sort_order = older.sort_order;
+        }
         return result;
     }
     if newer.is_deleted {
@@ -1029,15 +1387,20 @@ fn merge_single_favorite(left: &SyncFavoritePlaylist, right: &SyncFavoritePlayli
         older.cover_url.clone()
     };
     result.songs = deduplicate_songs(&[left.songs.clone(), right.songs.clone()].concat());
-    result.track_count = left.track_count.max(right.track_count).max(result.songs.len() as i32);
+    result.track_count = left
+        .track_count
+        .max(right.track_count)
+        .max(result.songs.len() as i32);
     result.added_time = left.added_time.max(right.added_time);
     result.modified_at = left.modified_at.max(right.modified_at);
-    if result.sort_order == 0 { result.sort_order = older.sort_order; }
+    if result.sort_order == 0 {
+        result.sort_order = older.sort_order;
+    }
     result.is_deleted = false;
     result
 }
 
-fn merge_recent_plays(
+pub(super) fn merge_recent_plays(
     local: &[SyncRecentPlay],
     remote: &[SyncRecentPlay],
     deletions: &[SyncRecentPlayDeletion],
@@ -1047,6 +1410,7 @@ fn merge_recent_plays(
         right
             .played_at
             .cmp(&left.played_at)
+            .then_with(|| right.resume_position_ms.cmp(&left.resume_position_ms))
             .then_with(|| right.device_id.cmp(&left.device_id))
             .then_with(|| recent_song_key(left).cmp(&recent_song_key(right)))
     });
@@ -1060,7 +1424,6 @@ fn merge_recent_plays(
         }
         result.push(recent);
     }
-    result.truncate(MAX_RECENT_PLAYS);
     result
 }
 
@@ -1074,11 +1437,11 @@ fn recent_is_deleted(song: &SyncSong, played_at: i64, deletions: &[SyncRecentPla
             .identity_keys()
             .iter()
             .any(|key| song.identity_keys().iter().any(|song_key| song_key == key));
-        matches && deletion.deleted_at > played_at
+        matches && deletion.deleted_at >= played_at
     })
 }
 
-fn merge_recent_play_deletions(
+pub(super) fn merge_recent_play_deletions(
     local: &[SyncRecentPlayDeletion],
     remote: &[SyncRecentPlayDeletion],
 ) -> Vec<SyncRecentPlayDeletion> {
@@ -1100,7 +1463,6 @@ fn merge_recent_play_deletions(
             .then_with(|| right.device_id.cmp(&left.device_id))
             .then_with(|| left.identity().stable_key().cmp(&right.identity().stable_key()))
     });
-    result.truncate(MAX_DELETIONS);
     result
 }
 
@@ -1128,7 +1490,6 @@ fn prune_recent_play_deletions(
         .cloned()
         .collect();
     result.sort_by(|left, right| right.deleted_at.cmp(&left.deleted_at).then_with(|| right.device_id.cmp(&left.device_id)));
-    result.truncate(MAX_DELETIONS);
     result
 }
 
@@ -1197,7 +1558,6 @@ fn merge_playlist_song_deletions(
         if let Some(causal) = causal { result.push(causal); }
     }
     result.sort_by(deletion_order_cmp);
-    result.truncate(MAX_DELETIONS);
     result
 }
 
@@ -1243,7 +1603,6 @@ fn prune_playlist_song_deletions(
         .cloned()
         .collect();
     result.sort_by(deletion_order_cmp);
-    result.truncate(MAX_DELETIONS);
     result
 }
 
@@ -1291,48 +1650,96 @@ fn merge_counter_shards(
     grouped.into_values().collect()
 }
 
-fn normalize_stat_after_clear(stat: &SyncTrackStat, cleared_at: i64) -> Option<SyncTrackStat> {
-    if cleared_at > 0 && stat.last_played_at < cleared_at {
+fn retained_counter_shards(
+    shards: &[SyncPlaybackCounterShard],
+    first: i64,
+    last: i64,
+    cleared_at: i64,
+) -> Option<Vec<SyncPlaybackCounterShard>> {
+    let mut normalized = merge_counter_shards(shards, &[]);
+    if cleared_at <= 0 {
+        return Some(normalized);
+    }
+    if last < cleared_at {
         return None;
     }
+    if normalized.is_empty() {
+        return (cleared_at..=last).contains(&first).then_some(normalized);
+    }
+    // 旧 epoch 无法拆出清除后的增量，最后一次播放更新不能让旧累计值复活
+    normalized.retain(|shard| {
+        shard.epoch_started_at >= cleared_at && shard.first_played_at >= cleared_at
+    });
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn counters_after_clear(shards: &[SyncPlaybackCounterShard]) -> MergedCounters {
+    MergedCounters {
+        total_listen_ms: shards.iter().fold(0_i64, |total, shard| {
+            total.saturating_add(shard.total_listen_ms)
+        }),
+        play_count: shards
+            .iter()
+            .fold(0_i32, |total, shard| total.saturating_add(shard.play_count)),
+        first_played_at: shards
+            .iter()
+            .map(|shard| shard.first_played_at)
+            .min()
+            .unwrap_or(0),
+        last_played_at: shards
+            .iter()
+            .map(|shard| shard.last_played_at)
+            .max()
+            .unwrap_or(0),
+        ..Default::default()
+    }
+}
+
+fn normalize_stat_after_clear(stat: &SyncTrackStat, cleared_at: i64) -> Option<SyncTrackStat> {
+    let shards = retained_counter_shards(
+        &stat.counter_shards,
+        stat.first_played_at,
+        stat.last_played_at,
+        cleared_at,
+    )?;
     let mut normalized = stat.clone();
     normalized.total_listen_ms = normalized.total_listen_ms.max(0);
     normalized.play_count = normalized.play_count.max(0);
-    normalized.counter_shards = merge_counter_shards(&stat.counter_shards, &[]);
-    if cleared_at > 0 {
-        normalized.counter_shards.retain(|shard| shard.last_played_at >= cleared_at);
-        normalized.counter_shards = merge_counter_shards(&normalized.counter_shards, &[]);
-        if !normalized.counter_shards.is_empty() {
-            normalized.counter_base_listen_ms = 0;
-            normalized.counter_base_play_count = 0;
-        }
-        normalized.first_played_at = normalized
-            .first_played_at
-            .max(cleared_at)
-            .min(normalized.last_played_at.max(cleared_at));
+    normalized.counter_shards = shards;
+    if cleared_at > 0 && !normalized.counter_shards.is_empty() {
+        let totals = counters_after_clear(&normalized.counter_shards);
+        normalized.total_listen_ms = totals.total_listen_ms;
+        normalized.play_count = totals.play_count;
+        normalized.first_played_at = totals.first_played_at;
+        normalized.last_played_at = totals.last_played_at;
+        normalized.counter_base_listen_ms = 0;
+        normalized.counter_base_play_count = 0;
     }
     Some(normalized)
 }
 
-fn normalize_bucket_after_clear(bucket: &SyncPlaybackStatBucket, cleared_at: i64) -> Option<SyncPlaybackStatBucket> {
-    if cleared_at > 0 && bucket.last_played_at < cleared_at {
-        return None;
-    }
+fn normalize_bucket_after_clear(
+    bucket: &SyncPlaybackStatBucket,
+    cleared_at: i64,
+) -> Option<SyncPlaybackStatBucket> {
+    let shards = retained_counter_shards(
+        &bucket.counter_shards,
+        bucket.first_played_at,
+        bucket.last_played_at,
+        cleared_at,
+    )?;
     let mut normalized = bucket.clone();
     normalized.total_listen_ms = normalized.total_listen_ms.max(0);
     normalized.play_count = normalized.play_count.max(0);
-    normalized.counter_shards = merge_counter_shards(&bucket.counter_shards, &[]);
-    if cleared_at > 0 {
-        normalized.counter_shards.retain(|shard| shard.last_played_at >= cleared_at);
-        normalized.counter_shards = merge_counter_shards(&normalized.counter_shards, &[]);
-        if !normalized.counter_shards.is_empty() {
-            normalized.counter_base_listen_ms = 0;
-            normalized.counter_base_play_count = 0;
-        }
-        normalized.first_played_at = normalized
-            .first_played_at
-            .max(cleared_at)
-            .min(normalized.last_played_at.max(cleared_at));
+    normalized.counter_shards = shards;
+    if cleared_at > 0 && !normalized.counter_shards.is_empty() {
+        let totals = counters_after_clear(&normalized.counter_shards);
+        normalized.total_listen_ms = totals.total_listen_ms;
+        normalized.play_count = totals.play_count;
+        normalized.first_played_at = totals.first_played_at;
+        normalized.last_played_at = totals.last_played_at;
+        normalized.counter_base_listen_ms = 0;
+        normalized.counter_base_play_count = 0;
     }
     Some(normalized)
 }
@@ -1393,8 +1800,8 @@ fn merge_counter_values(local: CounterSide<'_>, remote: CounterSide<'_>) -> Merg
     let base_count = local
         .effective_base_play_count()
         .max(remote.effective_base_play_count());
-    let sharded_total = base_total.saturating_add(shards.iter().map(|shard| shard.total_listen_ms).sum::<i64>());
-    let sharded_count = base_count.saturating_add(shards.iter().map(|shard| shard.play_count).sum::<i32>());
+    let sharded_total = shards.iter().fold(base_total, |total, shard| total.saturating_add(shard.total_listen_ms));
+    let sharded_count = shards.iter().fold(base_count, |total, shard| total.saturating_add(shard.play_count));
     MergedCounters {
         total_listen_ms: sharded_total
             .max(local.total_listen_ms)
@@ -1418,7 +1825,7 @@ fn merge_counter_values(local: CounterSide<'_>, remote: CounterSide<'_>) -> Merg
     }
 }
 
-fn merge_playback_stats(
+pub(super) fn merge_playback_stats(
     local: &[SyncTrackStat],
     remote: &[SyncTrackStat],
     cleared_at: i64,
@@ -1464,7 +1871,7 @@ fn merge_playback_stats(
     grouped.into_values().collect()
 }
 
-fn merge_stat_buckets(
+pub(super) fn merge_stat_buckets(
     local: &[SyncPlaybackStatBucket],
     remote: &[SyncPlaybackStatBucket],
     cleared_at: i64,
@@ -1563,6 +1970,7 @@ pub fn has_data_changed(remote: &SyncData, merged: &SyncData) -> bool {
                 left.song_id != right.song_id
                     || left.played_at != right.played_at
                     || left.device_id != right.device_id
+                    || left.resume_position_ms != right.resume_position_ms
                     || !same_song(&left.song, &right.song)
             }) {
                 return true;
@@ -1615,6 +2023,7 @@ pub fn has_data_changed(remote: &SyncData, merged: &SyncData) -> bool {
     {
         return true;
     }
+    if remote.extensions != merged.extensions { return true; }
     false
 }
 
@@ -1666,6 +2075,10 @@ fn same_song(left: &SyncSong, right: &SyncSong) -> bool {
         && left.original_cover_url == right.original_cover_url
         && left.original_lyric == right.original_lyric
         && left.original_translated_lyric == right.original_translated_lyric
+        && left.matched_romanized_lyric == right.matched_romanized_lyric
+        && left.original_romanized_lyric == right.original_romanized_lyric
+        && left.lyric_sync_revision == right.lyric_sync_revision
+        && left.lyric_sync_edited == right.lyric_sync_edited
         && left.channel_id == right.channel_id
         && left.audio_id == right.audio_id
         && left.sub_audio_id == right.sub_audio_id
@@ -1740,6 +2153,156 @@ fn min_positive(left: i64, right: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_open(track_count: i64) -> crate::library::playlist_usage::PlaylistUsageOpen {
+        crate::library::playlist_usage::PlaylistUsageOpen {
+            key: "netease:7".into(),
+            source: "netease".into(),
+            id: 7,
+            subtype: None,
+            name: "Mix".into(),
+            cover_url: Some("https://example.test/cover.jpg".into()),
+            track_count,
+            fid: 0,
+            mid: 0,
+            browse_id: None,
+            playlist_id: None,
+            subtitle: None,
+        }
+    }
+
+    #[test]
+    fn playlist_opens_count_this_device_and_add_up_with_other_devices() {
+        let mut extensions = serde_json::Map::new();
+        assert!(record_playlist_open(&mut extensions, &usage_open(10), "desktop", 100));
+        assert!(record_playlist_open(&mut extensions, &usage_open(11), "desktop", 200));
+        let entry = extensions["playlistUsageStats"][0].clone();
+        assert_eq!(
+            [json_i64(&entry, "openCount"), json_i64(&entry, "firstOpenedAt"), json_i64(&entry, "lastOpenedAt"), json_i64(&entry, "trackCount")],
+            [2, 100, 200, 11]
+        );
+        assert_eq!(entry["counterShards"][0]["deviceId"], "desktop");
+        assert_eq!(entry["counterShards"][0]["playCount"], 2);
+        crate::sync::archive::prepare(&SyncData { extensions: extensions.clone(), ..Default::default() }, None)
+            .expect("the record must satisfy the strict archive schema");
+
+        let mut android = entry.clone();
+        android["counterShards"] = serde_json::json!([{"deviceId": "android", "epochStartedAt": 0, "totalListenMs": 0, "playCount": 3, "firstPlayedAt": 50, "lastPlayedAt": 60}]);
+        android["openCount"] = 3.into();
+        android["lastOpenedAt"] = 60.into();
+        let remote = serde_json::Map::from_iter([("playlistUsageStats".to_string(), serde_json::json!([android]))]);
+        let merged = merge_extensions(&extensions, &remote);
+        assert_eq!(json_i64(&merged["playlistUsageStats"][0], "openCount"), 5, "opens on both devices add up");
+
+        assert!(record_playlist_open(&mut extensions, &usage_open(0), "desktop", 300), "an emptied playlist is removed");
+        assert!(extensions["playlistUsageStats"].as_array().unwrap().is_empty());
+        assert!(!record_playlist_open(&mut extensions, &usage_open(0), "desktop", 400));
+    }
+
+    #[test]
+    fn local_playlist_plays_count_the_total_and_the_day_on_this_device() {
+        let day = 86_400_000;
+        let mut extensions = serde_json::Map::new();
+        assert!(record_local_playlist_play(&mut extensions, 7, day, "desktop", day + 100));
+        assert!(record_local_playlist_play(&mut extensions, 7, day, "desktop", day + 200));
+        assert!(record_local_playlist_play(&mut extensions, 7, 2 * day, "desktop", 2 * day + 100));
+        assert!(!record_local_playlist_play(&mut extensions, 0, day, "desktop", day));
+        let stat = extensions["localPlaylistPlaybackStats"][0].clone();
+        assert_eq!(
+            [json_i64(&stat, "totalPlayCount"), json_i64(&stat, "firstPlayedAt"), json_i64(&stat, "lastPlayedAt")],
+            [3, day + 100, 2 * day + 100]
+        );
+        let buckets: Vec<(i64, i64)> = extensions["localPlaylistPlaybackBuckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| (json_i64(bucket, "dayStartAt"), json_i64(bucket, "playCount")))
+            .collect();
+        assert_eq!(buckets, [(day, 2), (2 * day, 1)]);
+        crate::sync::archive::prepare(&SyncData { extensions: extensions.clone(), ..Default::default() }, None)
+            .expect("the records must satisfy the strict archive schema");
+
+        let mut android = stat.clone();
+        android["counterShards"] = serde_json::json!([{"deviceId": "android", "epochStartedAt": 0, "totalListenMs": 0, "playCount": 4, "firstPlayedAt": 10, "lastPlayedAt": 20}]);
+        android["totalPlayCount"] = 4.into();
+        let remote = serde_json::Map::from_iter([("localPlaylistPlaybackStats".to_string(), serde_json::json!([android]))]);
+        let merged = merge_extensions(&extensions, &remote);
+        assert_eq!(json_i64(&merged["localPlaylistPlaybackStats"][0], "totalPlayCount"), 7, "plays on both devices add up");
+    }
+
+    #[test]
+    fn reopening_a_playlist_removed_elsewhere_starts_a_record_that_survives_the_merge() {
+        let mut extensions = serde_json::Map::from_iter([
+            (
+                "playlistUsageDeletions".to_string(),
+                serde_json::json!([{"playlistKey": "netease:7", "deletionTokens": [{"deviceId": "android", "counter": 4}], "deletedAt": 90}]),
+            ),
+            (
+                "playlistUsageStats".to_string(),
+                serde_json::json!([{"playlistKey": "netease:7", "source": "netease", "id": 7, "name": "Old", "trackCount": 5, "firstOpenedAt": 10, "lastOpenedAt": 20, "openCount": 9, "counterBaseOpenCount": 9, "counterShards": [], "fid": 0, "mid": 0, "observedDeletionTokens": []}]),
+            ),
+        ]);
+        assert!(record_playlist_open(&mut extensions, &usage_open(10), "desktop", 100));
+        let entry = &extensions["playlistUsageStats"][0];
+        assert_eq!(json_i64(entry, "openCount"), 1, "counts from before the removal are dropped");
+        assert_eq!(entry["observedDeletionTokens"], serde_json::json!([{"deviceId": "android", "counter": 4}]));
+        let merged = merge_extensions(&extensions, &serde_json::Map::new());
+        assert_eq!(merged["playlistUsageStats"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lyric_versions_reset_and_utf16_ties_match_android_independent_of_input_order() {
+        let unknown=SyncSong{id:"1".into(),lyric_sync_revision:5,..Default::default()};
+        assert_eq!(normalize_lyric_state(&unknown).lyric_sync_revision,0);
+        let edit=SyncSong{id:"1".into(),lyric_sync_edited:Some(true),lyric_sync_revision:7,matched_lyric:Some("edit".into()),..Default::default()};
+        let reset=SyncSong{id:"1".into(),lyric_sync_edited:Some(false),lyric_sync_revision:7,..Default::default()};
+        let supplementary=SyncSong{matched_lyric:Some("\u{10000}".into()),..edit.clone()};
+        let bmp=SyncSong{matched_lyric:Some("\u{e000}\u{e000}".into()),..edit.clone()};
+        for (first,second) in [(supplementary.clone(),bmp.clone()),(bmp.clone(),supplementary.clone())] {
+            let mut registry=HashMap::new();select_lyric_override(&mut registry,first);select_lyric_override(&mut registry,second);
+            assert_eq!(registry.values().next().unwrap().matched_lyric,bmp.matched_lyric);
+        }
+        for songs in [vec![edit.clone(),reset.clone()],vec![reset,edit]] {
+            let mut registry=HashMap::new();for song in songs {select_lyric_override(&mut registry,normalize_lyric_state(&song));}
+            assert_eq!(registry.values().next().unwrap().lyric_sync_edited,Some(false));
+            assert!(registry.values().next().unwrap().matched_lyric.is_none());
+        }
+    }
+
+    #[test]
+    fn latest_lyric_survives_older_selected_display_metadata_and_registry_stays_minimal() {
+        let mut local=sync_data(vec![playlist(vec![SyncSong{id:"1".into(),name:"desktop title".into(),added_at:20,sync_metadata_version:1,lyric_sync_edited:Some(true),lyric_sync_revision:2,matched_lyric:Some("old".into()),..Default::default()}])]);
+        let mut remote=local.clone();local.playlists[0].modified_at=30;remote.playlists[0].modified_at=10;
+        remote.playlists[0].songs[0].lyric_sync_revision=3;remote.playlists[0].songs[0].matched_lyric=Some("new\n".into());
+        let merged=three_way_merge(&local,&remote,0,&HashMap::new());
+        assert_eq!(merged.playlists[0].songs[0].matched_lyric.as_deref(),Some("new\n"));
+        assert_eq!(merged.extensions["lyricOverrides"][0]["name"],"");
+        assert_eq!(merged.extensions["lyricOverrides"][0]["addedAt"],0);
+    }
+
+    #[test]
+    fn usage_deletion_proofs_are_checked_per_candidate_before_union() {
+        let deletion=serde_json::json!({"playlistKey":"key","deletionTokens":[{"deviceId":"a","counter":1},{"deviceId":"b","counter":1}],"deletedAt":10});
+        let left=serde_json::json!({"playlistKey":"key","openCount":1,"observedDeletionTokens":[{"deviceId":"a","counter":1}]});
+        let right=serde_json::json!({"playlistKey":"key","openCount":2,"observedDeletionTokens":[{"deviceId":"b","counter":1}]});
+        let local=serde_json::Map::from_iter([("playlistUsageStats".into(),serde_json::json!([left])),("playlistUsageDeletions".into(),serde_json::json!([deletion]))]);
+        let remote=serde_json::Map::from_iter([("playlistUsageStats".into(),serde_json::json!([right]))]);
+        assert!(merge_extensions(&local,&remote)["playlistUsageStats"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_playlist_aggregate_is_lifted_to_all_day_buckets_without_losing_shards() {
+        let local=serde_json::Map::from_iter([("localPlaylistPlaybackStats".into(),serde_json::json!([{"playlistId":1,"totalPlayCount":1,"firstPlayedAt":30,"lastPlayedAt":40,"counterShards":[{"deviceId":"phone","epochStartedAt":1,"playCount":1,"firstPlayedAt":30,"lastPlayedAt":40}]}]))]);
+        let remote=serde_json::Map::from_iter([("localPlaylistPlaybackBuckets".into(),serde_json::json!([{"playlistId":1,"dayStartAt":1,"playCount":3,"firstPlayedAt":10,"lastPlayedAt":20},{"playlistId":1,"dayStartAt":2,"playCount":4,"firstPlayedAt":50,"lastPlayedAt":60},{"playlistId":2,"dayStartAt":1,"playCount":5,"firstPlayedAt":2,"lastPlayedAt":4}]))]);
+        for merged in [merge_extensions(&local,&remote),merge_extensions(&remote,&local)] {
+            assert_eq!(merged["localPlaylistPlaybackStats"][0]["totalPlayCount"],7);
+            assert_eq!(merged["localPlaylistPlaybackStats"][0]["firstPlayedAt"],10);
+            assert_eq!(merged["localPlaylistPlaybackStats"][0]["lastPlayedAt"],60);
+            assert_eq!(merged["localPlaylistPlaybackStats"][0]["counterShards"][0]["deviceId"],"phone");
+            assert_eq!(merged["localPlaylistPlaybackStats"][1]["playlistId"],2);
+            assert_eq!(merged["localPlaylistPlaybackStats"][1]["totalPlayCount"],5);
+        }
+    }
 
     #[test]
     fn remote_phone_reorder_keeps_remote_added_at_values_and_order() {
@@ -1883,6 +2446,63 @@ mod tests {
         );
         assert!(merged.playlists[0].is_deleted);
         assert!(merged.playlists[0].songs.is_empty());
+    }
+
+    fn edited_lyrics(revision: i64, text: &str) -> SyncSong {
+        SyncSong {
+            lyric_sync_edited: Some(true),
+            lyric_sync_revision: revision,
+            matched_lyric: Some(text.into()),
+            ..song("1", 10)
+        }
+    }
+
+    #[test]
+    fn recorded_lyric_overrides_keep_the_highest_revision() {
+        let mut extensions = serde_json::Map::new();
+        record_lyric_override(&mut extensions, &edited_lyrics(10, "first")).unwrap();
+        record_lyric_override(&mut extensions, &edited_lyrics(5, "older")).unwrap();
+        assert_eq!(extensions["lyricOverrides"][0]["matchedLyric"], "first");
+        record_lyric_override(&mut extensions, &edited_lyrics(20, "newer")).unwrap();
+        assert_eq!(extensions["lyricOverrides"].as_array().unwrap().len(), 1);
+        assert_eq!(extensions["lyricOverrides"][0]["matchedLyric"], "newer");
+    }
+
+    #[test]
+    fn a_desktop_lyric_edit_after_the_phone_edit_wins_the_merge() {
+        let phone = edited_lyrics(5, "phone");
+        let desk = edited_lyrics(1_800_000_000_000, "desk");
+        for (local, remote) in [(&desk, &phone), (&phone, &desk)] {
+            let merged = three_way_merge(
+                &sync_data(vec![playlist(vec![local.clone()])]),
+                &sync_data(vec![playlist(vec![remote.clone()])]),
+                0,
+                &HashMap::new(),
+            );
+            assert_eq!(merged.playlists[0].songs[0].matched_lyric.as_deref(), Some("desk"));
+        }
+    }
+
+    #[test]
+    fn a_playlist_edited_after_its_deletion_survives_the_merge() {
+        let mut tombstone = playlist(Vec::new());
+        tombstone.is_deleted = true;
+        tombstone.modified_at = 100;
+        let mut edited = playlist(vec![song("42", 150)]);
+        edited.modified_at = 200;
+        for (local, remote) in [(&tombstone, &edited), (&edited, &tombstone)] {
+            let merged = three_way_merge(
+                &sync_data(vec![local.clone()]),
+                &sync_data(vec![remote.clone()]),
+                50,
+                &HashMap::new(),
+            );
+            assert!(!merged.playlists[0].is_deleted, "the newer live copy wins on either side");
+            assert_eq!(merged.playlists[0].songs.len(), 1);
+        }
+        edited.modified_at = 100;
+        let merged = three_way_merge(&sync_data(vec![tombstone]), &sync_data(vec![edited]), 50, &HashMap::new());
+        assert!(merged.playlists[0].is_deleted, "a deletion at the same time as the last edit is kept");
     }
 
     #[test]
@@ -2150,6 +2770,256 @@ mod tests {
     }
 
     #[test]
+    fn favorite_deletion_ties_win_in_both_merge_directions() {
+        let deleted = SyncFavoritePlaylist {
+            id: "7".into(),
+            name: "Deleted favorite".into(),
+            cover_url: String::new(),
+            source: "netease".into(),
+            songs: vec![song("1", 10)],
+            track_count: 1,
+            added_time: 40,
+            modified_at: 100,
+            is_deleted: true,
+            sort_order: 9,
+            browse_id: None,
+            playlist_id: None,
+            subtitle: None,
+        };
+        let active = SyncFavoritePlaylist {
+            name: "Active favorite".into(),
+            songs: vec![song("2", 10)],
+            added_time: 80,
+            is_deleted: false,
+            sort_order: 4,
+            ..deleted.clone()
+        };
+
+        for (left, right) in [(&active, &deleted), (&deleted, &active)] {
+            let merged =
+                merge_favorite_playlists(std::slice::from_ref(left), std::slice::from_ref(right));
+            assert_eq!(merged.len(), 1);
+            let favorite = &merged[0];
+            assert!(favorite.is_deleted);
+            assert_eq!(favorite.name, "Deleted favorite");
+            assert!(favorite.songs.is_empty());
+            assert_eq!(favorite.track_count, 0);
+            assert_eq!(favorite.modified_at, 100);
+            assert_eq!(favorite.added_time, 80);
+            assert_eq!(favorite.sort_order, 9);
+        }
+    }
+
+    #[test]
+    fn favorite_restore_after_deletion_is_retained() {
+        let deleted = SyncFavoritePlaylist {
+            id: "7".into(),
+            name: String::new(),
+            cover_url: String::new(),
+            source: "netease".into(),
+            songs: Vec::new(),
+            track_count: 0,
+            added_time: 0,
+            modified_at: 100,
+            is_deleted: true,
+            sort_order: 9,
+            browse_id: None,
+            playlist_id: None,
+            subtitle: None,
+        };
+        let restored = SyncFavoritePlaylist {
+            modified_at: 110,
+            is_deleted: false,
+            songs: vec![song("2", 110)],
+            sort_order: 4,
+            ..deleted.clone()
+        };
+        for (left, right) in [(&restored, &deleted), (&deleted, &restored)] {
+            let merged =
+                merge_favorite_playlists(std::slice::from_ref(left), std::slice::from_ref(right));
+            assert_eq!(merged.len(), 1);
+            assert!(!merged[0].is_deleted);
+            assert_eq!(merged[0].songs.len(), 1);
+            assert_eq!(merged[0].songs[0].id, "2");
+            assert_eq!(merged[0].track_count, 1);
+            assert_eq!(merged[0].sort_order, 4);
+        }
+    }
+
+    #[test]
+    fn playback_clear_rejects_old_epoch_despite_a_new_last_play() {
+        let shard = SyncPlaybackCounterShard {
+            device_id: "android".into(),
+            epoch_started_at: 0,
+            first_played_at: 50,
+            last_played_at: 110,
+            total_listen_ms: 1_000,
+            play_count: 10,
+        };
+        let stat = SyncTrackStat {
+            identity_key: "k".into(),
+            first_played_at: 50,
+            last_played_at: 110,
+            total_listen_ms: 1_000,
+            play_count: 10,
+            counter_shards: vec![shard],
+            ..Default::default()
+        };
+        let bucket = bucket_from_clear_stat(&stat);
+
+        assert!(merge_playback_stats(std::slice::from_ref(&stat), &[], 100).is_empty());
+        assert!(merge_playback_stats(&[], std::slice::from_ref(&stat), 100).is_empty());
+        assert!(merge_stat_buckets(std::slice::from_ref(&bucket), &[], 100).is_empty());
+        assert!(merge_stat_buckets(&[], std::slice::from_ref(&bucket), 100).is_empty());
+    }
+
+    #[test]
+    fn playback_clear_recomputes_totals_from_only_current_epoch_shards() {
+        let shards = vec![
+            SyncPlaybackCounterShard {
+                device_id: "old".into(),
+                epoch_started_at: 0,
+                first_played_at: 50,
+                last_played_at: 150,
+                total_listen_ms: 1_000,
+                play_count: 10,
+            },
+            SyncPlaybackCounterShard {
+                device_id: "cross-clear".into(),
+                epoch_started_at: 100,
+                first_played_at: 90,
+                last_played_at: 145,
+                total_listen_ms: 20,
+                play_count: 2,
+            },
+            SyncPlaybackCounterShard {
+                device_id: "current-a".into(),
+                epoch_started_at: 100,
+                first_played_at: 100,
+                last_played_at: 130,
+                total_listen_ms: 300,
+                play_count: 3,
+            },
+            SyncPlaybackCounterShard {
+                device_id: "current-b".into(),
+                epoch_started_at: 110,
+                first_played_at: 115,
+                last_played_at: 140,
+                total_listen_ms: 400,
+                play_count: 4,
+            },
+        ];
+        let stat = SyncTrackStat {
+            identity_key: "k".into(),
+            first_played_at: 50,
+            last_played_at: 150,
+            total_listen_ms: 2_620,
+            play_count: 28,
+            counter_base_listen_ms: 900,
+            counter_base_play_count: 9,
+            counter_shards: shards,
+            ..Default::default()
+        };
+        let bucket = bucket_from_clear_stat(&stat);
+        let merged = merge_playback_stats(
+            std::slice::from_ref(&stat),
+            std::slice::from_ref(&stat),
+            100,
+        );
+        let buckets = merge_stat_buckets(
+            std::slice::from_ref(&bucket),
+            std::slice::from_ref(&bucket),
+            100,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(buckets.len(), 1);
+        for (total, count, first, last, base_total, base_count, retained) in [
+            (
+                merged[0].total_listen_ms,
+                merged[0].play_count,
+                merged[0].first_played_at,
+                merged[0].last_played_at,
+                merged[0].counter_base_listen_ms,
+                merged[0].counter_base_play_count,
+                &merged[0].counter_shards,
+            ),
+            (
+                buckets[0].total_listen_ms,
+                buckets[0].play_count,
+                buckets[0].first_played_at,
+                buckets[0].last_played_at,
+                buckets[0].counter_base_listen_ms,
+                buckets[0].counter_base_play_count,
+                &buckets[0].counter_shards,
+            ),
+        ] {
+            assert_eq!((total, count, first, last), (700, 7, 100, 140));
+            assert_eq!((base_total, base_count), (0, 0));
+            assert_eq!(retained.len(), 2);
+            assert_eq!(retained[0].device_id, "current-a");
+            assert_eq!(retained[1].device_id, "current-b");
+        }
+        let again = merge_playback_stats(&merged, &merged, 100);
+        let buckets_again = merge_stat_buckets(&buckets, &buckets, 100);
+        assert_eq!((again[0].total_listen_ms, again[0].play_count), (700, 7));
+        assert_eq!(again[0].counter_shards.len(), 2);
+        assert_eq!(
+            (
+                buckets_again[0].total_listen_ms,
+                buckets_again[0].play_count
+            ),
+            (700, 7)
+        );
+        assert_eq!(buckets_again[0].counter_shards.len(), 2);
+    }
+
+    #[test]
+    fn playback_clear_accepts_legacy_counters_only_when_all_plays_follow_clear() {
+        for (first, last, retained) in [
+            (50, 110, false),
+            (100, 110, true),
+            (110, 110, true),
+            (100, 99, false),
+        ] {
+            let stat = SyncTrackStat {
+                identity_key: "legacy".into(),
+                first_played_at: first,
+                last_played_at: last,
+                total_listen_ms: 600,
+                play_count: 6,
+                ..Default::default()
+            };
+            let bucket = bucket_from_clear_stat(&stat);
+            let merged = merge_playback_stats(std::slice::from_ref(&stat), &[], 100);
+            let buckets = merge_stat_buckets(std::slice::from_ref(&bucket), &[], 100);
+            assert_eq!(!merged.is_empty(), retained, "first={first}, last={last}");
+            assert_eq!(!buckets.is_empty(), retained, "first={first}, last={last}");
+            if retained {
+                assert_eq!((merged[0].total_listen_ms, merged[0].play_count), (600, 6));
+                assert_eq!(
+                    (buckets[0].total_listen_ms, buckets[0].play_count),
+                    (600, 6)
+                );
+            }
+        }
+    }
+
+    fn bucket_from_clear_stat(stat: &SyncTrackStat) -> SyncPlaybackStatBucket {
+        SyncPlaybackStatBucket {
+            day_start_at: 0,
+            identity_key: stat.identity_key.clone(),
+            total_listen_ms: stat.total_listen_ms,
+            play_count: stat.play_count,
+            first_played_at: stat.first_played_at,
+            last_played_at: stat.last_played_at,
+            counter_base_listen_ms: stat.counter_base_listen_ms,
+            counter_base_play_count: stat.counter_base_play_count,
+            counter_shards: stat.counter_shards.clone(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
     fn playlist_reordering_alone_is_not_a_data_change() {
         let first = playlist(vec![song("1", 10)]);
         let second = SyncPlaylist { id: "2".into(), ..playlist(vec![song("2", 20)]) };
@@ -2198,41 +3068,16 @@ mod tests {
     }
 
     #[test]
-    fn stat_bucket_trim_drops_out_of_window_days_and_is_idempotent() {
-        let newest = 1_000 * MILLIS_PER_DAY;
-        let buckets = vec![
-            stat_bucket(newest, "recent"),
-            stat_bucket(newest - STAT_BUCKET_RETENTION_DAYS * MILLIS_PER_DAY, "edge"),
-            stat_bucket(
-                newest - (STAT_BUCKET_RETENTION_DAYS + 1) * MILLIS_PER_DAY,
-                "stale",
-            ),
-        ];
-
-        let trimmed = trim_stat_buckets(buckets);
-        let keys: Vec<&str> = trimmed.iter().map(|b| b.identity_key.as_str()).collect();
-
-        assert!(keys.contains(&"recent"));
-        assert!(keys.contains(&"edge"));
-        assert!(!keys.contains(&"stale"));
-        assert_eq!(trim_stat_buckets(trimmed.clone()).len(), trimmed.len());
-    }
-
-    #[test]
-    fn playback_stats_trim_keeps_most_recent_entries() {
-        let stats: Vec<SyncTrackStat> = (0..(MAX_PLAYBACK_STATS + 10))
-            .map(|index| SyncTrackStat {
-                identity_key: format!("k{index:05}"),
-                last_played_at: index as i64,
-                ..Default::default()
-            })
-            .collect();
-
-        let trimmed = trim_playback_stats(stats);
-
-        assert_eq!(trimmed.len(), MAX_PLAYBACK_STATS);
-        assert!(trimmed.iter().all(|stat| stat.last_played_at >= 10));
-        assert_eq!(trim_playback_stats(trimmed.clone()).len(), MAX_PLAYBACK_STATS);
+    fn archive_merge_preserves_old_buckets_and_all_stats() {
+        let mut local=sync_data(vec![]);
+        local.playback_stats=(0..2010).map(|index|SyncTrackStat{identity_key:format!("key{index}"),last_played_at:index, ..Default::default()}).collect();
+        local.playback_stat_buckets=vec![stat_bucket(MILLIS_PER_DAY,"old"),stat_bucket(1000*MILLIS_PER_DAY,"new")];
+        let merged=three_way_merge(&local,&SyncData::default(),0,&HashMap::new());
+        assert_eq!(merged.playback_stats.len(),2010);
+        assert_eq!(merged.playback_stat_buckets.len(),2);
+        let again=three_way_merge(&merged,&merged,0,&HashMap::new());
+        assert_eq!(again.playback_stats.len(),2010);
+        assert_eq!(again.playback_stat_buckets.len(),2);
     }
 
     /// Y2 回归：legacy 迁移合成的 addedAt（无 membership token）不得据此裁墓碑，
@@ -2274,6 +3119,42 @@ mod tests {
         let pruned = prune_playlist_song_deletions(&[deletion], &[playlist(vec![readded])]);
 
         assert!(pruned.is_empty(), "带 token 且 added_at 更晚才算真正重新添加");
+    }
+
+    #[test]
+    fn counter_shard_totals_saturate_before_overflow() {
+        for (listen, count) in [(i64::MAX, 1), (1, i32::MAX)] {
+            let local = SyncTrackStat {
+                identity_key: "k".into(),
+                total_listen_ms: listen,
+                play_count: count,
+                first_played_at: 100,
+                last_played_at: 100,
+                counter_shards: vec![SyncPlaybackCounterShard {
+                    device_id: "desktop".into(),
+                    total_listen_ms: listen,
+                    play_count: count,
+                    first_played_at: 100,
+                    last_played_at: 100,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut remote = local.clone();
+            remote.counter_shards[0].device_id = "android".into();
+            let stats = merge_playback_stats(std::slice::from_ref(&local), std::slice::from_ref(&remote), 0);
+            let buckets = merge_stat_buckets(&[bucket_from_clear_stat(&local)], &[bucket_from_clear_stat(&remote)], 0);
+            let expected_listen = listen.saturating_add(listen);
+            let expected_count = count.saturating_add(count);
+            assert_eq!(stats[0].total_listen_ms, expected_listen);
+            assert_eq!(stats[0].play_count, expected_count);
+            assert_eq!(buckets[0].total_listen_ms, expected_listen);
+            assert_eq!(buckets[0].play_count, expected_count);
+            assert_eq!(stats[0].counter_shards.len(), 2);
+            let again = merge_playback_stats(&stats, &stats, 0);
+            assert_eq!(again[0].total_listen_ms, expected_listen);
+            assert_eq!(again[0].play_count, expected_count);
+        }
     }
 
     /// Y3 回归：合并后分片为空时 counter_base 必须归零（对齐 Android），

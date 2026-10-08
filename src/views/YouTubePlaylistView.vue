@@ -21,9 +21,10 @@ import {
 } from '@/utils/contextMenu'
 import {
   playlistDetailCacheKey,
-  readPlaylistDetailCache,
+  previewCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
+import { recordPlaylistOpen, youtubePlaylistIdFromBrowseId } from '@/modules/library/playlistUsage'
 import { parseYouTubePlaylistTracks, parseYouTubePlaylistMeta } from '@/modules/youtube/youtubePlaylistParse'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -127,17 +128,16 @@ async function loadDetail() {
 
   // v3：时长解析修复后必须废弃旧缓存，否则 durationMs=0 的旧详情会一直钉死列表
   const cacheKey = playlistDetailCacheKey('youtube-playlist-v3', browseId)
-  const cached = readPlaylistDetailCache<YouTubeDetailCache>(cacheKey)
-  if (cached) {
-    applyDetailCache(cached)
-    isLoading.value = false
-  } else {
-    isLoading.value = true
-  }
+  isLoading.value = true
   error.value = null
+  const cached = previewCachedDetail<YouTubeDetailCache>(cacheKey, (detail) => {
+    applyDetailCache(detail)
+    isLoading.value = false
+  })
 
   try {
     const data = await invoke<any>('get_youtube_playlist_detail', { browseId })
+    cached.markFresh()
     tracks.value = parsePlaylistTracks(data)
     // header 封面偶发缺失时用首曲封面兜底, 避免大图占位空白
     if (!coverUrl.value) {
@@ -145,13 +145,25 @@ async function loadDetail() {
       if (firstCover) coverUrl.value = firstCover
     }
     saveDetailCache(cacheKey)
+    recordOpen(browseId)
   } catch (e: any) {
-    if (!cached) {
-      error.value = e?.toString() || t('player.load_failed')
-    }
+    if (await cached.shown()) recordOpen(browseId)
+    else error.value = e?.toString() || t('player.load_failed')
   } finally {
     isLoading.value = false
   }
+}
+
+function recordOpen(browseId: string) {
+  recordPlaylistOpen({
+    source: 'youtubeMusic',
+    browseId,
+    playlistId: youtubePlaylistIdFromBrowseId(browseId),
+    name: playlistName.value,
+    subtitle: subtitle.value,
+    coverUrl: coverUrl.value,
+    trackCount: tracks.value.length,
+  })
 }
 
 function playAll() {
@@ -266,10 +278,7 @@ function trackDownloadLabel(track: TrackInfo) {
 }
 
 function isTrackDownloadDisabled(track: TrackInfo) {
-  if (downloadStore.isDownloading(track.id)) return true
-  return downloadStore.isDownloaded(track.id)
-    && player.currentTrack?.id === track.id
-    && player.isPlayingFromDownload
+  return downloadStore.isDownloading(track.id)
 }
 
 async function handleTrackDownload(track: TrackInfo) {
@@ -359,7 +368,9 @@ onMounted(() => {
     <template v-else>
       <div class="detail-hero">
         <div class="hero-cover">
-          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl" />
+          <BilibiliCoverImage v-if="coverUrl" :src="coverUrl">
+            <span class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
+          </BilibiliCoverImage>
           <span v-else class="material-symbols-rounded filled" style="font-size: 48px; opacity: 0.3">queue_music</span>
         </div>
         <div class="hero-info">
@@ -382,7 +393,7 @@ onMounted(() => {
       </div>
 
       <div v-if="filteredTracks.length === 0" class="state-center">
-        <p>{{ t('player.empty_playlist') }}</p>
+        <p>{{ searchQuery.trim() && tracks.length > 0 ? t('player.no_results') : t('player.empty_playlist') }}</p>
       </div>
       <div v-else>
         <TrackSelectionToolbar
@@ -416,7 +427,9 @@ onMounted(() => {
               <span v-else class="index-num">{{ index + 1 }}</span>
             </div>
             <div class="track-cover">
-              <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+              <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy">
+                <span class="material-symbols-rounded filled">music_note</span>
+              </BilibiliCoverImage>
               <span v-else class="material-symbols-rounded filled">music_note</span>
             </div>
             <div class="track-info">

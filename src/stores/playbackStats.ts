@@ -44,6 +44,8 @@ export interface StatsSummary {
 
 interface TrackedPlayback extends StatsTrackKey {
   track: TrackInfo
+  /** 开始播放时队列来源的本地歌单；中途换了队列也算回原歌单 */
+  localPlaylistId: string | null
 }
 
 function emptySummary(period: StatsPeriod): StatsSummary {
@@ -77,6 +79,7 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
           track: toBackendTrack(snapshot.track.track),
           listenedMs: snapshot.listenedMs,
           playCountIncrement: snapshot.playCountIncrement,
+          localPlaylistId: snapshot.track.localPlaylistId,
         },
       })
     } catch (e) {
@@ -92,6 +95,7 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
       identityKey: `${track.source}:${track.id}`,
       durationMs: track.durationMs || 0,
       track,
+      localPlaylistId: usePlayerStore().localPlaylistIdFor(track),
     }
   }
 

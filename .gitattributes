@@ -1,0 +1,9 @@
+# 保留 Android challenge 资源原始 CRLF 字节和记录的校验摘要
+src-tauri/src/api/youtube/assets/yt.solver.*.min.js -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# shell 脚本在 Linux/macOS 与 WSL 里执行，任何平台检出都必须是 LF
+*.sh text eol=lf
+# 音频测试素材的 README 记录了 SHA-256，必须原样检出
+src-tauri/src/audio/fixtures/** binary
+src-tauri/src/audio/fixtures/**/*.md text diff merge
+src-tauri/src/audio/fixtures/**/*.ps1 text diff merge
+src-tauri/src/audio/fixtures/**/*.py text diff merge

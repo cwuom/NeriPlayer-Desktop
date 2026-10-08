@@ -36,6 +36,7 @@ const clearOptions = reactive<StorageCacheClearOptions>({
   downloadStaging: false,
   sharedMedia: false,
   platformList: false,
+  lyricsCache: false,
 })
 
 type CacheOptionKey = keyof StorageCacheClearOptions
@@ -57,6 +58,7 @@ function openClearDialog() {
   clearOptions.downloadStaging = false
   clearOptions.sharedMedia = false
   clearOptions.platformList = false
+  clearOptions.lyricsCache = false
   showClearDialog.value = true
 }
 
@@ -116,7 +118,8 @@ function cacheOptionDescription(kind: string) {
             </div>
             <div class="storage-row-value">
               <strong>{{ formatStorageSize(item.sizeBytes) }}</strong>
-              <span>{{ t('settings.storage_file_count', { count: item.fileCount }) }}</span>
+              <span v-if="item.recordCount != null">{{ t('settings.storage_record_count', { count: item.recordCount }) }}</span>
+              <span v-else>{{ t('settings.storage_file_count', { count: item.fileCount }) }}</span>
             </div>
           </div>
         </div>
@@ -206,6 +209,18 @@ function cacheOptionDescription(kind: string) {
           <span v-if="clearOptions.platformList" class="material-symbols-rounded">check</span>
         </span>
         <span class="storage-check-copy"><strong>{{ cacheOptionTitle('platform_list_cache') }}</strong><small>{{ cacheOptionDescription('platform_list_cache') }}</small></span>
+      </button>
+      <button
+        class="storage-check-row"
+        type="button"
+        role="checkbox"
+        :aria-checked="clearOptions.lyricsCache"
+        @click="toggleCacheOption('lyricsCache')"
+      >
+        <span class="storage-checkbox" :class="{ checked: clearOptions.lyricsCache }" aria-hidden="true">
+          <span v-if="clearOptions.lyricsCache" class="material-symbols-rounded">check</span>
+        </span>
+        <span class="storage-check-copy"><strong>{{ cacheOptionTitle('lyrics_cache') }}</strong><small>{{ cacheOptionDescription('lyrics_cache') }}</small></span>
       </button>
     </div>
   </M3Dialog>

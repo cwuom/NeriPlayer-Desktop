@@ -166,9 +166,16 @@ jobs:
           }
           NODE
 
+  ffmpeg:
+    name: FFmpeg
+    needs: validate
+    uses: ./.github/workflows/ffmpeg.yml
+    with:
+      ref: ${{ needs.validate.outputs.target_sha }}
+
   build:
     name: Build (${{ matrix.artifact_name }})
-    needs: validate
+    needs: [validate, ffmpeg]
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 90
     env:
@@ -182,11 +189,13 @@ jobs:
           - platform: windows-2025
             os: windows
             target: x86_64-pc-windows-msvc
+            ffmpeg_target: windows-x86_64
             bundles: nsis,msi
             artifact_name: windows-x86_64
           - platform: macos-15
             os: macos
             target: aarch64-apple-darwin
+            ffmpeg_target: macos-aarch64
             bundles: dmg
             deployment_target: '11.0'
             expected_arch: arm64
@@ -194,6 +203,7 @@ jobs:
           - platform: macos-15
             os: macos
             target: x86_64-apple-darwin
+            ffmpeg_target: macos-x86_64
             bundles: dmg
             deployment_target: '10.15'
             expected_arch: x86_64
@@ -201,6 +211,7 @@ jobs:
           - platform: ubuntu-22.04
             os: linux
             target: x86_64-unknown-linux-gnu
+            ffmpeg_target: linux-x86_64
             bundles: deb,rpm,appimage
             artifact_name: linux-x86_64
 
@@ -250,12 +261,23 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Download FFmpeg
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ffmpeg-${{ matrix.ffmpeg_target }}
+          path: .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
+
+      # 核对动态库与 BUILDINFO.txt 一致，生成合并进安装包的配置
+      - name: Prepare FFmpeg bundle config
+        run: node scripts/ffmpeg/bundle-config.mjs ${{ matrix.ffmpeg_target }}
+
       - name: Build Windows and Linux packages
         if: matrix.os != 'macos'
         run: >-
           pnpm tauri build --ci
           --target ${{ matrix.target }}
           --bundles "${{ matrix.bundles }}"
+          --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
           -- --locked
 
       - name: Build ad-hoc signed macOS package
@@ -267,6 +289,7 @@ jobs:
           pnpm tauri build --ci
           --target ${{ matrix.target }}
           --bundles dmg
+          --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
           --config '{"bundle":{"macOS":{"minimumSystemVersion":"${{ matrix.deployment_target }}"}}}'
           -- --locked
 
@@ -295,6 +318,15 @@ jobs:
           (( ${#apps[@]} == 1 ))
           delivered_app="${apps[0]}"
           codesign --verify --deep --strict --verbose=4 "$delivered_app"
+
+          # 随包的 FFmpeg 在 Frameworks 里且签名有效（Apple Silicon 不加载无效签名的代码）
+          for library in .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/*.dylib; do
+            bundled="$delivered_app/Contents/Frameworks/$(basename "$library")"
+            test -f "$bundled"
+            codesign --verify --strict "$bundled"
+            [[ "$(lipo -archs "$bundled")" == '${{ matrix.expected_arch }}' ]]
+          done
+          test -f "$delivered_app/Contents/Resources/ffmpeg/LICENSE.txt"
 
           signature_info="$(codesign -dvvv "$delivered_app" 2>&1)"
           grep -Fq 'Signature=adhoc' <<< "$signature_info"
@@ -345,6 +377,24 @@ jobs:
           if ($packages.Count -eq 0) {
             throw "No Windows installer was generated"
           }
+
+          # 两种安装包都要带上随包的 FFmpeg
+          $libraries = Get-ChildItem ".cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/*.dll" | ForEach-Object Name
+          foreach ($installer in Get-ChildItem "$bundleRoot/nsis/*.exe") {
+            $listing = & 7z l $installer.FullName
+            foreach ($library in $libraries) {
+              if (-not ($listing -match [regex]::Escape("ffmpeg\$library"))) { throw "$($installer.Name) is missing ffmpeg\$library" }
+            }
+          }
+          foreach ($msi in Get-ChildItem "$bundleRoot/msi/*.msi") {
+            $extracted = Join-Path $env:RUNNER_TEMP "msi-$($msi.BaseName)"
+            Start-Process msiexec.exe -ArgumentList '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$extracted`"" -Wait -NoNewWindow
+            foreach ($library in $libraries) {
+              if (-not (Get-ChildItem $extracted -Recurse -Filter $library | Where-Object { $_.Directory.Name -eq 'ffmpeg' })) {
+                throw "$($msi.Name) is missing ffmpeg\$library"
+              }
+            }
+          }
           $packages | Copy-Item -Destination $destination
 
       - name: Validate and stage Linux artifacts
@@ -365,13 +415,24 @@ jobs:
           (( ${#rpm_packages[@]} > 0 ))
           (( ${#app_images[@]} > 0 ))
 
+          # 每种包都要带上随包的 FFmpeg
+          libraries=()
+          for library in .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/*.so.*; do
+            libraries+=("$(basename "$library")")
+          done
+          (( ${#libraries[@]} > 0 ))
+
           for package in "${deb_packages[@]}"; do
             dpkg-deb --info "$package" >/dev/null
+            contents="$(dpkg-deb -c "$package")"
+            for library in "${libraries[@]}"; do grep -q "ffmpeg/$library\$" <<< "$contents"; done
             cp "$package" "$destination/"
           done
 
           for package in "${rpm_packages[@]}"; do
             rpm -qip "$package" >/dev/null
+            contents="$(rpm -qlp "$package")"
+            for library in "${libraries[@]}"; do grep -q "ffmpeg/$library\$" <<< "$contents"; done
             cp "$package" "$destination/"
           done
 
@@ -380,6 +441,9 @@ jobs:
             chmod +x "$app_image_path"
             extract_dir="$(mktemp -d)"
             (cd "$extract_dir" && "$app_image_path" --appimage-extract >/dev/null)
+            for library in "${libraries[@]}"; do
+              find "$extract_dir/squashfs-root" -path "*/ffmpeg/$library" | grep -q .
+            done
             rm -rf "$extract_dir"
             tar -C "$(dirname "$app_image_path")" -czf \
               "$destination/$(basename "$app_image_path").tar.gz" \
@@ -417,6 +481,19 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      # 安装包里带着 FFmpeg 的 LGPL 动态库：同一发布附上构建它们的完整源码
+      - name: Attach FFmpeg source
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^readonly FFMPEG_VERSION=//p' scripts/ffmpeg/build-ffmpeg.sh)"
+          sha256="$(sed -n 's/^readonly FFMPEG_SHA256=//p' scripts/ffmpeg/build-ffmpeg.sh)"
+          [[ -n "$version" && -n "$sha256" ]]
+          archive="release-assets/ffmpeg-${version}.tar.xz"
+          curl -fsSL --retry 3 -o "$archive" "https://ffmpeg.org/releases/ffmpeg-${version}.tar.xz"
+          echo "$sha256  $archive" | sha256sum -c -
+          cp scripts/ffmpeg/build-ffmpeg.sh release-assets/ffmpeg-build.sh
+
       - name: Verify release asset set
         shell: bash
         run: |
@@ -430,6 +507,7 @@ jobs:
             '*.deb'
             '*.rpm'
             '*.AppImage.tar.gz'
+            'ffmpeg-*.tar.xz'
           )
 
           for pattern in "${required_patterns[@]}"; do

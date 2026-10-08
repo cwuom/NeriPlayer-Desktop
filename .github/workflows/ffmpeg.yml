@@ -1,0 +1,77 @@
+name: FFmpeg
+
+# 构建随包分发的精简 FFmpeg（scripts/ffmpeg/build-ffmpeg.sh），供 CI、产物与发布工作流下载
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build the libraries from (defaults to the triggering ref)
+        required: false
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: FFmpeg (${{ matrix.target }})
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: linux-x86_64
+          # 在 Linux 上用 llvm-mingw 交叉编译：DLL 只依赖系统自带的 UCRT
+          - platform: ubuntu-22.04
+            target: windows-x86_64
+          - platform: macos-15
+            target: macos-aarch64
+          - platform: macos-15
+            target: macos-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
+
+      - name: Install llvm-mingw
+        if: matrix.target == 'windows-x86_64'
+        shell: bash
+        env:
+          LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20261006/llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64.tar.xz
+          LLVM_MINGW_SHA256: 5f9c6ed95b2d4bdb2869a488c5fd5857fbdabcf288a0aa3eb1da43f6a08d8ab4
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/llvm-mingw.tar.xz"
+          curl -fsSL --retry 3 -o "$archive" "$LLVM_MINGW_URL"
+          echo "$LLVM_MINGW_SHA256  $archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/llvm-mingw"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/llvm-mingw" --strip-components=1
+          echo "$RUNNER_TEMP/llvm-mingw/bin" >> "$GITHUB_PATH"
+          echo "CROSS_CC=x86_64-w64-mingw32-clang" >> "$GITHUB_ENV"
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install nasm
+
+      - name: Build FFmpeg
+        shell: bash
+        run: bash scripts/ffmpeg/build-ffmpeg.sh "${{ matrix.target }}"
+
+      - name: Upload FFmpeg
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: .cache/ffmpeg-build/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 14

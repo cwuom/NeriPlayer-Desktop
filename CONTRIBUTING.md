@@ -37,6 +37,8 @@
     同步与隐私。
 - `CONTRIBUTING.md` / `CONTRIBUTING_EN.md`
   - 面向开发者，说明真实模块边界、扩展路径、测试和提交要求。
+- `scripts/test-sync-android-interop.ps1`
+  - 使用只读 Android 源码和已有 Gradle 缓存验证桌面归档的 Kotlin 反向解码。
 - `CODE_OF_CONDUCT.md`
   - 社区行为准则。
 - `CLAUDE.md` / `AGENTS.md`
@@ -86,7 +88,7 @@ git clone --recursive https://github.com/cwuom/NeriPlayer-Desktop.git
 cd NeriPlayer-Desktop
 pnpm install
 
-pnpm tauri dev      # 完整应用（Vite :1420 + Rust shell）
+pnpm tauri dev      # 完整应用（Vite :1420，被占用时自动换用下一个空闲端口 + Rust shell）
 pnpm dev            # 仅前端（无 Tauri 后端，IPC 调用会失败）
 pnpm build          # vue-tsc 类型检查 + vite build -> dist/
 pnpm tauri build    # 生产打包 -> src-tauri/target/release/bundle/
@@ -112,9 +114,15 @@ cargo clippy         # lint（交付要求零警告）
   `src-tauri/target/release/bundle/`
   （Windows：`msi/` + `nsis/`；macOS：`dmg/`；
   Linux：`deb/` + `rpm/` + `appimage/`）。
+- 安装包随附精简 FFmpeg（Opus、E-AC-3 等格式靠它解码）：
+  先 `bash scripts/ffmpeg/build-ffmpeg.sh <target>`（Windows 版在 Linux / WSL 里交叉编译），
+  再 `node scripts/ffmpeg/bundle-config.mjs <target>`，
+  打包时加 `--config .cache/ffmpeg-build/<target>/tauri.bundle.json`。
+  不加这一步打出的包没有 FFmpeg，那些格式会被前端避开。
+  详见 `src-tauri/native/ffmpeg/README.md`。
 - CI：推送 `v*` 标签触发 `.github/workflows/release.yml`，
   在 Windows x64 / macOS arm64 / macOS x64 / Linux x64
-  四个矩阵上构建并发布 GitHub Release；
+  四个矩阵上构建并发布 GitHub Release（同时附上 FFmpeg 源码包）；
   macOS 产物为 ad-hoc 签名（文件名带 `-adhoc` 后缀）。
 - main 分支推送会触发 `Artifacts` 工作流产出同矩阵的测试包。
 
@@ -184,6 +192,23 @@ cargo clippy         # lint（交付要求零警告）
   - 按域分组的命令实现：player / library / search / lyrics /
     settings / auth / recommend / sync / download / listen_together /
     stats / storage / image / debug。
+- `commands/download_cmd.rs`、`commands/download_metadata.rs`
+  - 前端 `stores/download.ts` 与 `modules/download/downloadQueue.ts` 调度任务，
+    `DownloadsView.vue` 在下载 Tab 展示排队/解析/传输/元数据处理进度、取消与失败重试。
+    并发设置限制为 1-8，默认 6；默认跟随播放音质，也可使用平台独立下载音质。
+  - 音频位于选定根目录，`Lyrics/` 存歌词、翻译与罗马字，`Covers/` 存封面，
+    `.tmp/` 存临时文件；`<音频文件名>.npmeta.json` 保存 NP 元数据与关联资源引用。
+    元数据补齐默认开启，标准化歌词嵌入默认关闭；标准化不覆盖 sidecar/NP 中的原文。
+    写标签后更新 manifest 的最终文件大小，避免将标签造成的大小变化误判为损坏。
+- `commands/local_files_cmd.rs`、`library/local_file_tags.rs`
+  - `LocalFilesView.vue` 与 `stores/library.ts` 提供可取消的扫描预览，搜索、多选与
+    已入歌单/元数据重复筛选；扫描不写歌单，由用户手动导入现有或新歌单。
+    标题/歌手/专辑先在副本写入，读回验证原有歌词、图片和其他标签后原子替换，
+    保留 NP sidecar 未修改字段；已下载文件的标签修改同时更新下载清单并发送
+    `downloads-changed`，提交失败时回滚。
+  - 针对性测试：`node scripts/test-local-scan-preview.mjs`、
+    `node scripts/test-local-scan-store.mjs` 与
+    `cargo test --manifest-path src-tauri/Cargo.toml --lib library::local_file_tags::tests`。
 - `audio/`
   - `player.rs`（`PlayerEngine`，播放/seek/淡入淡出/交叉淡入淡出）、
     `queue.rs`（随机/循环）、`effects.rs`（5 频段 EQ、响度均衡、
@@ -198,8 +223,9 @@ cargo clippy         # lint（交付要求零警告）
 - `sync/`
   - `models.rs`（同步载荷）、`proto_models.rs`（ProtoBuf 模型，
     字段号对齐 Android）、`merge.rs`（三路合并）、`serializer.rs`
-    （JSON / 省流格式）、`github_api.rs`、`webdav_api.rs`、
-    `manager.rs`。
+    （旧 JSON / GZIP）、`archive/`（V4 清单与分块编码）、
+    `cloud.rs`（归档发布）、`github_api.rs`、`webdav_archive.rs`、
+    `webdav_gc.rs` 与 `manager.rs`。
 - `listen_together/`
   - `protocol.rs`（事件与模型）、`session.rs`、`ws_client.rs`。
 - `library/`（本地扫描、歌单存储）、`lyrics/`（多源歌词管理与解析）、
@@ -238,6 +264,8 @@ cargo clippy         # lint（交付要求零警告）
 - **播放代际与 seek 采纳**：
   播放请求与 seek 结果都带 generation，改动播放链路时
   不能让旧请求的结果覆盖新请求。
+  YouTube 等待令牌的任务必须随旧解析取消；首选客户端应进入解析和预取缓存键。
+  网易云兜底保留队列身份，但缓存、格式和时长按实际候选记录，下载禁止使用兜底。
 - **签名/加密逻辑精确匹配**：
   WEAPI / EAPI / linuxapi、WBI、SAPISIDHASH 是平台请求的
   脆弱点，修改平台请求时必须与现有 scheme 完全一致。
@@ -254,6 +282,8 @@ cargo clippy         # lint（交付要求零警告）
 - **本地数据原子写**：
   所有 JSON 落盘走 `fsutil.rs` 的原子写入，
   不要直接 `fs::write` 覆盖用户数据。
+  收藏歌手的修改通过 `manager::update_favorite_playlists` 串行读改写，
+  保留删除记录并推进同步 epoch，远端关注拉取不可覆盖拉取期间的取消关注。
 - **UI 状态变化必须有过渡**：
   本项目的硬性体验要求——任何可见状态切换（页面、面板、封面、
   主题色）都要有过渡动画，不能闪变；
@@ -314,6 +344,13 @@ cargo clippy         # lint（交付要求零警告）
    修改删除/恢复语义时，必须用「两端交替同步」场景自测：
    桌面写 → Android 读 → Android 写 → 桌面读。
 3. 凭据统一走 `security.rs`，不要放回明文配置。
+4. V4 迁移授权必须绑定后端、目标、凭据指纹和当前远端内容。GitHub 使用分支 HEAD
+   条件更新；WebDAV V4 清单使用强 ETag 或经过验证的有限排他集合租约，旧单文件
+   升级必须取得有限集合租约。不要用重定向、
+   无条件覆盖或本地对象缓存替代远端完整性校验。
+5. 执行 `pnpm test:sync-protocol-upgrade` 与 Rust `sync` 模块测试；
+   Android JVM 反向解码运行 `./scripts/test-sync-android-interop.ps1 -AndroidRoot <Android仓库> -ExportFixtures`。
+   此检查不代替整仓 Gradle、provider 或设备互通验收。
 
 #### 6. 修改一起听
 
@@ -323,6 +360,15 @@ cargo clippy         # lint（交付要求零警告）
    事件语义）以 Worker 实现为准，不要只改 UI 校验。
 3. 相关测试：`pnpm test:listen-together-mapper` 与
    `node scripts/test-listen-together-protocol.mjs`。
+4. 当前对照 Android `3e1abcb7` 及其 Worker `31d55c60`：
+   schemaVersion >= 2 使用带 `baseRoomVersion` 的队列操作，重复曲目以
+   `stableKey` + `occurrence` 定位；旧服务端回退完整队列。
+   `streamUrls` 按平台白名单过滤，并保留 `streamUrl` 供旧客户端读取。
+5. 播放同步策略在 `playbackSync.ts`，队列操作在 `queue.ts`。
+   修改后执行 `pnpm test:listen-together-queue`、
+   `pnpm test:listen-together-sync`、`pnpm test:listen-together-store`，
+   Rust 侧执行 `cargo test --manifest-path src-tauri/Cargo.toml --locked --lib listen_together`。
+   本地测试不代替 Android 与桌面端实际同房的联调。
 
 ---
 
@@ -383,12 +429,12 @@ Commit 信息遵循 Conventional Commits，
 ### 法律与许可 / Legal & License
 
 - 项目仅供学习与研究使用，请勿用于非法用途。
-- 本项目使用 **MIT** 协议；提交贡献即表示你同意
-  以 MIT 分发你的修改。
-- 子模块 `vendor/applemusic-like-lyrics` 遵循其自身许可证。
-- Android 端仓库使用 GPL-3.0，两仓库许可证相互独立；
-  从 Android 端移植代码（Kotlin → Rust/TS 重写）时
-  请保持行为对齐即可，不要直接复制受 GPL 约束的实现文本。
+- 本项目使用 **GPL-3.0** 协议（GPL-3.0-or-later）；提交贡献即表示你同意
+  以 GPL-3.0-or-later 分发你的修改。2026-10-07 之前以 MIT 提交的代码，
+  原许可声明保留在 `LICENSES/MIT.txt`。
+- 子模块 `vendor/applemusic-like-lyrics` 使用 AGPL-3.0，遵循其自身许可证。
+- Android 端同样使用 GPL-3.0；移植 Android 端实现时请保留原有版权声明，
+  并在提交正文中注明来源。
 
 ---
 

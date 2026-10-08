@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useListenTogetherStore } from '@/stores/listenTogether'
+import {
+  LT_NICKNAME_MAX_LENGTH,
+  parseLtInvite,
+  type ListenTogetherRoomSettings,
+} from '@/stores/listenTogether/protocol'
 import { useI18n } from 'vue-i18n'
 
 const props = defineProps<{ open: boolean }>()
@@ -20,8 +25,24 @@ function handleKeydown(event: KeyboardEvent) {
   close()
 }
 
-const joinRoomId = ref('')
-const pendingInvite = ref<{ roomId: string; joinSecret?: string } | null>(null)
+// 服务端只认带密钥的邀请，单独的房间号无法加入，因此入口只收邀请信息
+const inviteText = ref('')
+let autoFilledInvite = ''
+const invite = computed(() => parseLtInvite(inviteText.value))
+const inviteInvalid = computed(() => inviteText.value.trim() !== '' && !invite.value)
+
+type RoomSettingKey = keyof ListenTogetherRoomSettings
+
+const roomSettingOptions: { key: RoomSettingKey; title: string; desc: string }[] = [
+  { key: 'allowMemberControl', title: 'listen_together.allow_member_control', desc: 'listen_together.allow_member_control_desc' },
+  { key: 'autoPauseOnMemberChange', title: 'listen_together.auto_pause_on_change', desc: 'listen_together.auto_pause_on_change_desc' },
+  { key: 'shareAudioLinks', title: 'listen_together.share_audio_links', desc: 'listen_together.share_audio_links_desc' },
+]
+
+function toggleRoomSetting(key: RoomSettingKey, event: Event) {
+  lt.updateRoomSettings({ [key]: (event.target as HTMLInputElement).checked })
+}
+
 const nowTick = ref(Date.now())
 let nowTimer: ReturnType<typeof setInterval> | null = null
 const CONTROLLER_GRACE_PERIOD_MS = 10 * 60 * 1000
@@ -121,28 +142,22 @@ function handleCreate() {
 }
 
 function handleJoin() {
-  if (!joinRoomId.value.trim()) return
-  const normalizedRoomId = joinRoomId.value.trim().toUpperCase()
-  const joinSecret = pendingInvite.value?.roomId === normalizedRoomId
-    ? pendingInvite.value.joinSecret
-    : undefined
-  lt.joinRoom(joinRoomId.value.trim(), joinSecret)
+  const target = invite.value
+  if (!target) return
+  // 邀请里的服务器只用于这次加入，不改写设置里的服务器地址
+  lt.joinRoom(target.roomId, target.joinSecret, target.baseUrl)
 }
 
 function handleLeave() {
   lt.leaveRoom()
 }
 
-// 剪贴板检测
+// 剪贴板里的新邀请只替换上次自动填入的内容，不覆盖用户手动输入
 async function checkClipboard() {
-  const invite = await lt.checkClipboardInvite()
-  pendingInvite.value = invite
-  if (invite) {
-    joinRoomId.value = invite.roomId
-    if (invite.baseUrl) {
-      lt.baseUrl = invite.baseUrl
-    }
-  }
+  if (inviteText.value.trim() && inviteText.value !== autoFilledInvite) return
+  const detected = await lt.checkClipboardInvite()
+  if (!detected || (inviteText.value.trim() && inviteText.value !== autoFilledInvite)) return
+  inviteText.value = autoFilledInvite = detected.link
 }
 
 function formatRelativeTime(timestamp?: number | null) {
@@ -204,6 +219,9 @@ onUnmounted(() => {
         <div class="lt-status">
           <span class="lt-status-dot" :style="{ background: statusColor }" />
           <span class="lt-status-text">{{ statusText }}</span>
+          <span v-if="lt.isConnected" class="lt-role-badge" :class="lt.role || ''">
+            {{ lt.isController ? t('listen_together.role_controller') : t('listen_together.role_listener') }}
+          </span>
         </div>
       </div>
       <button class="lt-close" @click="close">
@@ -214,18 +232,38 @@ onUnmounted(() => {
     <!-- 未连接状态 -->
     <div v-if="!lt.isConnected && lt.connectionState !== 'connecting'" class="lt-body">
       <div class="lt-field">
-        <label>{{ t('listen_together.nickname') }}</label>
-        <input v-model="lt.nickname" type="text" class="lt-input" maxlength="20" />
+        <label for="lt-nickname">{{ t('listen_together.nickname') }}</label>
+        <input
+          id="lt-nickname"
+          v-model.trim="lt.nickname"
+          type="text"
+          class="lt-input"
+          :maxlength="LT_NICKNAME_MAX_LENGTH"
+          :placeholder="t('listen_together.nickname_placeholder')"
+        />
       </div>
 
       <div class="lt-field">
-        <label>{{ t('listen_together.room_id') }}</label>
-        <input
-          v-model="joinRoomId"
-          type="text"
-          class="lt-input"
-          :placeholder="t('listen_together.room_id_placeholder')"
+        <label for="lt-invite">{{ t('listen_together.invite') }}</label>
+        <textarea
+          id="lt-invite"
+          v-model="inviteText"
+          class="lt-input lt-textarea"
+          rows="3"
+          spellcheck="false"
+          :placeholder="t('listen_together.invite_placeholder')"
+          :aria-invalid="inviteInvalid"
+          aria-describedby="lt-invite-hint"
         />
+        <small v-if="inviteInvalid" id="lt-invite-hint" class="lt-field-hint error">
+          {{ t('listen_together.invite_invalid') }}
+        </small>
+        <small v-else-if="invite" id="lt-invite-hint" class="lt-field-hint ready">
+          <span class="material-symbols-rounded">check_circle</span>
+          {{ invite.inviter
+            ? t('listen_together.invite_ready_from', { inviter: invite.inviter })
+            : t('listen_together.invite_ready') }}
+        </small>
       </div>
 
       <div class="lt-actions">
@@ -233,7 +271,7 @@ onUnmounted(() => {
           <span class="material-symbols-rounded">add</span>
           {{ t('listen_together.create_room') }}
         </button>
-        <button class="lt-btn" :disabled="!joinRoomId.trim()" @click="handleJoin">
+        <button class="lt-btn" :disabled="!invite" @click="handleJoin">
           <span class="material-symbols-rounded">login</span>
           {{ t('listen_together.join_room') }}
         </button>
@@ -253,19 +291,16 @@ onUnmounted(() => {
 
     <!-- 已连接状态 -->
     <div v-else class="lt-body">
-      <div class="lt-room-info">
-        <div class="lt-room-id">
-          <span class="lt-label">{{ t('listen_together.room_id') }}</span>
-          <span class="lt-value">{{ lt.roomId }}</span>
-          <button class="lt-icon-btn" @click="lt.copyInviteLink()" :title="t('listen_together.copy_invite')">
-            <span class="material-symbols-rounded">content_copy</span>
-          </button>
+      <div class="lt-invite-card">
+        <span class="material-symbols-rounded lt-invite-icon">group_add</span>
+        <div class="lt-invite-text">
+          <strong>{{ t('listen_together.invite_friends') }}</strong>
+          <small>{{ t('listen_together.invite_hint') }}</small>
         </div>
-        <div class="lt-role">
-          <span class="lt-role-badge" :class="lt.role || ''">
-            {{ lt.isController ? t('listen_together.role_controller') : t('listen_together.role_listener') }}
-          </span>
-        </div>
+        <button class="lt-btn primary compact" @click="lt.copyInviteLink()">
+          <span class="material-symbols-rounded">content_copy</span>
+          {{ t('listen_together.copy_invite') }}
+        </button>
       </div>
 
       <div v-if="connectedBanner" class="lt-banner" :class="connectedBanner.tone">
@@ -322,33 +357,27 @@ onUnmounted(() => {
       <!-- 房间设置（仅房主） -->
       <div v-if="lt.isController" class="lt-section">
         <h4>{{ t('listen_together.settings') }}</h4>
-        <div class="lt-setting-row">
-          <span>{{ t('listen_together.allow_member_control') }}</span>
-          <input
-            type="checkbox"
-            :checked="lt.roomSettings.allowMemberControl"
-            @change="lt.updateRoomSettings({ allowMemberControl: ($event.target as HTMLInputElement).checked })"
-          />
-        </div>
-        <div class="lt-setting-row">
-          <span>{{ t('listen_together.auto_pause_on_change') }}</span>
-          <input
-            type="checkbox"
-            :checked="lt.roomSettings.autoPauseOnMemberChange"
-            @change="lt.updateRoomSettings({ autoPauseOnMemberChange: ($event.target as HTMLInputElement).checked })"
-          />
-        </div>
-        <div class="lt-setting-row">
-          <span>{{ t('listen_together.share_audio_links') }}</span>
-          <input
-            type="checkbox"
-            :checked="lt.roomSettings.shareAudioLinks"
-            @change="lt.updateRoomSettings({ shareAudioLinks: ($event.target as HTMLInputElement).checked })"
-          />
+        <div class="lt-setting-list">
+          <label v-for="option in roomSettingOptions" :key="option.key" class="lt-setting-row">
+            <span class="lt-setting-text">
+              <span class="lt-setting-title">{{ t(option.title) }}</span>
+              <span class="lt-setting-desc">{{ t(option.desc) }}</span>
+            </span>
+            <span class="m3-switch">
+              <input
+                type="checkbox"
+                :checked="lt.roomSettings[option.key]"
+                @change="toggleRoomSetting(option.key, $event)"
+              />
+              <span class="track"><span class="thumb">
+                <span v-if="lt.roomSettings[option.key]" class="material-symbols-rounded">check</span>
+              </span></span>
+            </span>
+          </label>
         </div>
       </div>
 
-      <button class="lt-btn danger" @click="handleLeave">
+      <button class="lt-btn danger lt-leave" @click="handleLeave">
         <span class="material-symbols-rounded">logout</span>
         {{ t('listen_together.leave_room') }}
       </button>
@@ -423,8 +452,11 @@ onUnmounted(() => {
 
 .lt-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+
+  .lt-role-badge { margin-left: 2px; }
 }
 
 .lt-status-dot {
@@ -459,6 +491,9 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+
+  // 内容超出时由 body 滚动，子项保持自身高度
+  > * { flex-shrink: 0; }
 }
 
 .lt-center {
@@ -503,16 +538,41 @@ onUnmounted(() => {
     border-color: var(--md-primary);
     background: var(--md-surface-container-low);
   }
+  &[aria-invalid='true'] { border-color: var(--md-error); }
+}
+
+.lt-textarea {
+  height: auto;
+  min-height: 72px;
+  padding: 11px 16px;
+  font-family: inherit;
+  line-height: 1.45;
+  resize: none;
+  overflow-wrap: anywhere;
+}
+
+.lt-field-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--md-on-surface-variant);
+
+  .material-symbols-rounded { font-size: 15px; }
+  &.ready { color: var(--md-primary); }
+  &.error { color: var(--md-error); }
 }
 
 .lt-actions {
   display: flex;
   gap: 10px;
   margin-top: 4px;
+
+  .lt-btn { flex: 1; }
 }
 
 .lt-btn {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -543,7 +603,18 @@ onUnmounted(() => {
     color: var(--md-on-error-container);
     &:hover { filter: brightness(1.04); }
   }
+
+  &.compact {
+    flex-shrink: 0;
+    height: 36px;
+    padding: 0 14px;
+    font-size: 13px;
+
+    .material-symbols-rounded { font-size: 17px; }
+  }
 }
+
+.lt-leave { margin-top: 2px; }
 
 .lt-error {
   font-size: 12px;
@@ -553,39 +624,35 @@ onUnmounted(() => {
   border-radius: 8px;
 }
 
-.lt-room-info {
+.lt-invite-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 12px 14px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--md-primary-container) 72%, transparent);
+  color: var(--md-on-primary-container);
+}
+
+.lt-invite-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+.lt-invite-text {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
+  gap: 2px;
 
-.lt-room-id {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+  strong { font-size: 13px; }
 
-.lt-label {
-  font-size: 12px;
-  color: var(--md-on-surface-variant);
-}
-
-.lt-value {
-  font-size: 14px;
-  font-weight: 600;
-  font-family: monospace;
-}
-
-.lt-icon-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-full);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--md-on-surface-variant);
-  &:hover { background: var(--md-surface-variant); }
-  .material-symbols-rounded { font-size: 16px; }
+  small {
+    font-size: 11px;
+    line-height: 1.4;
+    opacity: 0.8;
+  }
 }
 
 .lt-role-badge {
@@ -664,6 +731,9 @@ onUnmounted(() => {
   background: var(--md-surface-container-low);
   border: 1px solid var(--md-outline-variant);
 
+  // 奇数张时最后一张占满一行，避免右侧留空
+  &:last-child:nth-child(odd) { grid-column: 1 / -1; }
+
   small {
     font-size: 11px;
     color: var(--md-on-surface-variant);
@@ -730,6 +800,46 @@ onUnmounted(() => {
 
 .lt-member-role {
   font-size: 11px;
+  color: var(--md-on-surface-variant);
+}
+
+.lt-setting-list {
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  background: var(--md-surface-container-low);
+  border: 1px solid var(--md-outline-variant);
+  overflow: hidden;
+}
+
+.lt-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background var(--duration-short, 150ms);
+
+  & + & { border-top: 1px solid var(--md-outline-variant); }
+  &:hover { background: var(--md-surface-container); }
+}
+
+.lt-setting-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lt-setting-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lt-setting-desc {
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--md-on-surface-variant);
 }
 

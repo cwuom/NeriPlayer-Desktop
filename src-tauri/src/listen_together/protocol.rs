@@ -14,6 +14,8 @@ pub struct LtTrack {
     pub media_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_url: Option<String>,
+    #[serde(default)]
+    pub stream_urls: Vec<String>,
     pub name: String,
     pub artist: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,6 +180,8 @@ pub struct LtInitialSnapshot {
     pub repeat_mode: i32,
     #[serde(default)]
     pub shuffle_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shuffle_restore_queue: Option<Vec<LtTrack>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,10 +283,46 @@ pub struct LtEvent {
     pub repeat_mode: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shuffle_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_mutation: Option<LtQueueMutation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_track_stable_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_refresh: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_track_stable_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LtQueueReference {
+    pub stable_key: String,
+    pub occurrence: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LtQueueOperation {
+    pub r#type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<LtQueueReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<LtQueueReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<LtTrack>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<LtQueueReference>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LtQueueMutation {
+    pub base_room_version: i64,
+    pub operations: Vec<LtQueueOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_current: Option<LtQueueReference>,
 }
 
 /// 服务端实际落地的事件（对齐 Android ListenTogetherAppliedEvent）
@@ -375,6 +415,8 @@ pub struct LtSocketEnvelope {
     pub repeat_mode: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shuffle_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_mutation: Option<LtQueueMutation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_time_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,6 +431,16 @@ pub struct LtSocketEnvelope {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn track_json() -> serde_json::Value {
+        json!({
+            "stableKey": "netease:42",
+            "channelId": "netease",
+            "audioId": "42",
+            "name": "Song",
+            "artist": "Artist"
+        })
+    }
 
     #[test]
     fn room_join_credentials_use_the_android_wire_contract() {
@@ -411,5 +463,102 @@ mod tests {
         .unwrap();
         assert_eq!(response.member_secret.as_deref(), Some("member-secret"));
         assert_eq!(response.join_secret.as_deref(), Some("join-secret"));
+    }
+
+    #[test]
+    fn track_stream_candidates_survive_the_ipc_round_trip() {
+        let mut payload = track_json();
+        payload["streamUrl"] = json!("https://audio.example/primary");
+        payload["streamUrls"] = json!([
+            "https://audio.example/primary",
+            "https://audio.example/backup"
+        ]);
+
+        let track: LtTrack = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(track.stream_urls.len(), 2);
+        let encoded = serde_json::to_value(track).unwrap();
+        assert_eq!(encoded["streamUrl"], payload["streamUrl"]);
+        assert_eq!(encoded["streamUrls"], payload["streamUrls"]);
+
+        let legacy: LtTrack = serde_json::from_value(track_json()).unwrap();
+        assert!(legacy.stream_urls.is_empty());
+    }
+
+    #[test]
+    fn forwarded_queue_mutation_preserves_duplicate_track_references() {
+        let mutation = json!({
+            "baseRoomVersion": 12,
+            "operations": [{
+                "type": "remove",
+                "target": { "stableKey": "netease:42", "occurrence": 1 }
+            }, {
+                "type": "insert",
+                "anchor": { "stableKey": "netease:42", "occurrence": 0 },
+                "placement": "after",
+                "track": track_json()
+            }, {
+                "type": "reorder",
+                "order": [
+                    { "stableKey": "netease:42", "occurrence": 1 },
+                    { "stableKey": "netease:42", "occurrence": 0 }
+                ]
+            }],
+            "targetCurrent": { "stableKey": "netease:42", "occurrence": 0 }
+        });
+        let envelope: LtSocketEnvelope = serde_json::from_value(json!({
+            "type": "member_control_requested",
+            "causedBy": { "type": "REQUEST_SET_QUEUE" },
+            "queueMutation": mutation,
+            "requestSequence": 7
+        }))
+        .unwrap();
+
+        let encoded = serde_json::to_value(envelope).unwrap();
+        let actual = &encoded["queueMutation"];
+        assert_eq!(actual["baseRoomVersion"], 12);
+        assert_eq!(actual["operations"][0]["target"]["occurrence"], 1);
+        assert_eq!(actual["operations"][1]["placement"], "after");
+        assert_eq!(
+            actual["operations"][2]["order"],
+            mutation["operations"][2]["order"]
+        );
+        assert_eq!(actual["targetCurrent"], mutation["targetCurrent"]);
+        assert_eq!(encoded["requestSequence"], 7);
+
+        let event: LtEvent = serde_json::from_value(json!({
+            "type": "SET_QUEUE",
+            "queueMutation": mutation
+        }))
+        .unwrap();
+        assert!(event.queue_mutation.is_some());
+        assert_eq!(
+            serde_json::to_value(event).unwrap()["queueMutation"]["baseRoomVersion"],
+            12
+        );
+    }
+
+    #[test]
+    fn shuffle_snapshot_and_forced_link_refresh_use_android_fields() {
+        let snapshot: LtInitialSnapshot = serde_json::from_value(json!({
+            "shuffleEnabled": true,
+            "shuffleRestoreQueue": [track_json()]
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(encoded["shuffleRestoreQueue"][0]["stableKey"], "netease:42");
+
+        let event: LtEvent = serde_json::from_value(json!({
+            "type": "REQUEST_TRACK_LINK",
+            "requestTrackStableKey": "netease:42",
+            "forceRefresh": true
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap()["forceRefresh"], true);
+
+        let legacy: LtInitialSnapshot = serde_json::from_value(json!({})).unwrap();
+        assert!(legacy.shuffle_restore_queue.is_none());
+        let legacy_event: LtEvent = serde_json::from_value(json!({"type": "PLAY"})).unwrap();
+        assert!(legacy_event.queue_mutation.is_none());
+        assert!(legacy_event.force_refresh.is_none());
     }
 }

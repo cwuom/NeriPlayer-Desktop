@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
 import { createLogger } from '@/utils/logger'
-import { parseYouTubeLibraryPlaylists as parseYouTubeLibraryPlaylistsShared } from '@/modules/youtube/youtubePlaylistParse'
+import { parseYouTubeLibraryPlaylists as parseYouTubeLibraryPlaylistsShared, parseYouTubeHomeFeed } from '@/modules/youtube/youtubePlaylistParse'
 
 const log = createLogger('recommend')
 
@@ -27,6 +27,8 @@ export interface HomeFeedItem {
   coverUrl: string
   browseId?: string
   videoId?: string
+  pageType?: string
+  durationMs?: number
 }
 
 export interface HomeRecommendationSong {
@@ -43,6 +45,18 @@ export interface HomeSongSection {
   items: HomeRecommendationSong[]
   loading: boolean
   error: string | null
+}
+
+/** 云端列表（用户歌单、收藏专辑）的拉取状态；有缓存时 loading 表示在后台刷新 */
+export interface CloudListStatus {
+  loading: boolean
+  /** 最近一次拉取失败的原因，成功后清空 */
+  error: string | null
+}
+
+export interface CloudListLoadOptions {
+  /** 后台预取：失败只记在状态里，不弹提示 */
+  quiet?: boolean
 }
 
 type HomeSongSectionKey = 'hot' | 'radar'
@@ -67,12 +81,25 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   // YouTube 首页 shelf
   const homeFeedShelves = ref<HomeFeedShelf[]>([])
+  let homeFeedRequestGeneration = 0
+  const homeFeedLoading = ref(false)
 
   // 用户歌单
   const userPlaylists = ref<Record<string, PlaylistInfo[]>>({})
+  const userPlaylistsStatus = ref<Record<string, CloudListStatus>>({})
 
   // 用户收藏专辑（网易云）
   const userAlbums = ref<any[]>([])
+  const userAlbumsStatus = ref<CloudListStatus>({ loading: false, error: null })
+
+  // 同一平台同时只发一个请求；登录态变化时代际递增，换账号前发出的请求回来也不写入
+  const cloudRequests = new Map<string, Promise<void>>()
+  const cloudGenerations = new Map<string, number>()
+  // 本次启动已向平台确认过的列表：缓存先顶上，每次启动后第一次用到时在后台刷新一次
+  const revalidatedCloudLists = new Set<string>()
+  // 有页面在等结果的请求；只有后台预取在等时失败不弹提示，页面上的状态照样会显示失败
+  const cloudRequestsToNotify = new Set<string>()
+  const ALBUMS_KEY = 'netease-albums'
 
   // 用户喜欢的歌曲 ID 集合
   const likedSongIds = ref<Set<number>>(new Set())
@@ -93,7 +120,6 @@ export const useRecommendStore = defineStore('recommend', () => {
       if (cache.userPlaylists && Object.keys(cache.userPlaylists).length) userPlaylists.value = cache.userPlaylists
       // 专辑与歌单同样入缓存，重启后无需等网络即可显示
       if (cache.userAlbums?.length) userAlbums.value = cache.userAlbums
-      if (cache.homeFeedShelves?.length) homeFeedShelves.value = cache.homeFeedShelves
       if (cache.homeHotSongs?.items?.length) homeHotSongs.value = { ...emptyHomeSongSection(), ...cache.homeHotSongs }
       if (cache.homeRadarSongs?.items?.length) homeRadarSongs.value = { ...emptyHomeSongSection(), ...cache.homeRadarSongs }
     } catch { /* 缓存损坏则忽略 */ }
@@ -105,7 +131,6 @@ export const useRecommendStore = defineStore('recommend', () => {
         recommendedPlaylists: recommendedPlaylists.value,
         userPlaylists: userPlaylists.value,
         userAlbums: userAlbums.value,
-        homeFeedShelves: homeFeedShelves.value,
         homeHotSongs: homeHotSongs.value,
         homeRadarSongs: homeRadarSongs.value,
         timestamp: Date.now(),
@@ -121,12 +146,76 @@ export const useRecommendStore = defineStore('recommend', () => {
     const next = { ...userPlaylists.value }
     delete next[platform]
     userPlaylists.value = next
+    forgetCloudList(platform)
+    const status = { ...userPlaylistsStatus.value }
+    delete status[platform]
+    userPlaylistsStatus.value = status
     if (platform === 'netease') {
       userAlbums.value = []
+      forgetCloudList(ALBUMS_KEY)
+      userAlbumsStatus.value = { loading: false, error: null }
       likedSongIds.value = new Set()
+    } else if (platform === 'youtube') {
+      homeFeedRequestGeneration++
+      homeFeedShelves.value = []
+      if (homeFeedLoading.value) {
+        homeFeedLoading.value = false
+        isLoading.value = false
+      }
     }
     // 内存清了也要落盘，否则重启后 loadCache 又把旧数据恢复回来
     saveCache()
+  }
+
+  function forgetCloudList(key: string) {
+    cloudGenerations.set(key, cloudGeneration(key) + 1)
+    cloudRequests.delete(key)
+    cloudRequestsToNotify.delete(key)
+    revalidatedCloudLists.delete(key)
+  }
+
+  function cloudGeneration(key: string): number {
+    return cloudGenerations.get(key) ?? 0
+  }
+
+  /// 拉取一个云端列表：同一列表合并成一个请求，拉取期间换了账号则丢弃结果
+  ///
+  /// 失败时保留已有的列表（缓存或上次结果），把原因记在状态里由页面显示；
+  /// 页面上什么都没有时再弹提示，免得失败看起来像「暂无歌单」。
+  function loadCloudList(
+    key: string,
+    setStatus: (status: CloudListStatus) => void,
+    hasData: () => boolean,
+    load: () => Promise<(() => void) | undefined>,
+    { quiet = false }: CloudListLoadOptions = {},
+  ): Promise<void> {
+    if (!quiet) cloudRequestsToNotify.add(key)
+    const pending = cloudRequests.get(key)
+    if (pending) return pending
+    const generation = cloudGeneration(key)
+    revalidatedCloudLists.add(key)
+    setStatus({ loading: true, error: null })
+    const request: Promise<void> = (async () => {
+      try {
+        const commit = await load()
+        if (generation !== cloudGeneration(key)) return
+        commit?.()
+        setStatus({ loading: false, error: null })
+        saveCache()
+      } catch (e) {
+        if (generation !== cloudGeneration(key)) return
+        log.error(`load ${key}:`, e)
+        error.value = String(e)
+        setStatus({ loading: false, error: String(e) })
+        if (!hasData() && cloudRequestsToNotify.has(key)) useToastStore().error(String(e))
+      }
+    })().finally(() => {
+      if (cloudRequests.get(key) !== request) return
+      cloudRequests.delete(key)
+      cloudRequestsToNotify.delete(key)
+    })
+    cloudRequests.set(key, request)
+    return request
   }
 
   function isCacheFresh(): boolean {
@@ -220,8 +309,27 @@ export const useRecommendStore = defineStore('recommend', () => {
     saveCache()
   }
 
-  /** 获取用户歌单 */
-  async function fetchUserPlaylists(platform: string) {
+  /** 向平台拉取用户歌单；正在拉时返回同一个请求 */
+  function fetchUserPlaylists(platform: string, options?: CloudListLoadOptions): Promise<void> {
+    return loadCloudList(
+      platform,
+      (status) => { userPlaylistsStatus.value = { ...userPlaylistsStatus.value, [platform]: status } },
+      () => (userPlaylists.value[platform]?.length ?? 0) > 0,
+      async () => {
+        const playlists = await requestUserPlaylists(platform)
+        return () => { userPlaylists.value = { ...userPlaylists.value, [platform]: playlists } }
+      },
+      options,
+    )
+  }
+
+  /** 先显示缓存的歌单；本次启动还没向平台确认过时在后台刷新一次 */
+  function ensureUserPlaylists(platform: string, options?: CloudListLoadOptions): Promise<void> {
+    if (revalidatedCloudLists.has(platform) && !cloudRequests.has(platform)) return Promise.resolve()
+    return fetchUserPlaylists(platform, options)
+  }
+
+  async function requestUserPlaylists(platform: string): Promise<PlaylistInfo[]> {
     isLoading.value = true
     try {
       const data = await invoke<any>('get_user_playlists', { platform })
@@ -266,14 +374,7 @@ export const useRecommendStore = defineStore('recommend', () => {
         // YouTube browse 响应需要解析 sectionListRenderer
         playlists = parseYouTubeLibraryPlaylistsShared(data)
       }
-
-      userPlaylists.value[platform] = playlists
-      saveCache()
-    } catch (e) {
-      // 静默失败会渲染成"暂无云端歌单"，把登录失效之类的问题藏起来
-      log.error(`fetchUserPlaylists(${platform}):`, e)
-      error.value = String(e)
-      useToastStore().error(String(e))
+      return playlists
     } finally {
       isLoading.value = false
     }
@@ -281,15 +382,21 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   /** 获取 YouTube 首页信息流 */
   async function fetchHomeFeed() {
+    const requestGeneration = ++homeFeedRequestGeneration
+    homeFeedLoading.value = true
     isLoading.value = true
     try {
       const data = await invoke<any>('get_home_feed')
+      if (requestGeneration !== homeFeedRequestGeneration) return
       homeFeedShelves.value = parseYouTubeHomeFeed(data)
       saveCache()
     } catch (e) {
-      log.error('fetchHomeFeed:', e)
+      if (requestGeneration === homeFeedRequestGeneration) log.error('fetchHomeFeed:', e)
     } finally {
-      isLoading.value = false
+      if (requestGeneration === homeFeedRequestGeneration) {
+        homeFeedLoading.value = false
+        isLoading.value = false
+      }
     }
   }
 
@@ -367,22 +474,32 @@ export const useRecommendStore = defineStore('recommend', () => {
     }
   }
 
-  /** 获取用户收藏的专辑列表（网易云） */
-  async function fetchUserAlbums() {
-    try {
-      const data = await invoke<any>('get_user_stared_albums', {})
-      const list = data?.data || []
-      userAlbums.value = list.map((a: any) => ({
-        id: a.id,
-        name: a.name,
-        coverUrl: a.picUrl || '',
-        artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
-        trackCount: a.size || 0,
-      }))
-      saveCache()
-    } catch (e) {
-      log.error('fetchUserAlbums:', e)
-    }
+  /** 向网易云拉取用户收藏的专辑；正在拉时返回同一个请求 */
+  function fetchUserAlbums(options?: CloudListLoadOptions): Promise<void> {
+    return loadCloudList(
+      ALBUMS_KEY,
+      (status) => { userAlbumsStatus.value = status },
+      () => userAlbums.value.length > 0,
+      async () => {
+        const data = await invoke<any>('get_user_stared_albums', {})
+        const list = data?.data || []
+        const albums = list.map((a: any) => ({
+          id: a.id,
+          name: a.name,
+          coverUrl: a.picUrl || '',
+          artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
+          trackCount: a.size || 0,
+        }))
+        return () => { userAlbums.value = albums }
+      },
+      options,
+    )
+  }
+
+  /** 先显示缓存的专辑；本次启动还没向网易云确认过时在后台刷新一次 */
+  function ensureUserAlbums(options?: CloudListLoadOptions): Promise<void> {
+    if (revalidatedCloudLists.has(ALBUMS_KEY) && !cloudRequests.has(ALBUMS_KEY)) return Promise.resolve()
+    return fetchUserAlbums(options)
   }
 
   /** 获取 B站收藏夹内容 */
@@ -406,45 +523,13 @@ export const useRecommendStore = defineStore('recommend', () => {
 
   return {
     recommendedPlaylists, recommendedSongs, homeHotSongs, homeRadarSongs,
-    homeFeedShelves, userPlaylists,
-    userAlbums, likedSongIds, isLoading, error, isCacheFresh,
-    fetchRecommendedPlaylists, fetchRecommendedSongs, fetchUserPlaylists,
+    homeFeedShelves, homeFeedLoading, userPlaylists, userPlaylistsStatus,
+    userAlbums, userAlbumsStatus, likedSongIds, isLoading, error, isCacheFresh,
+    fetchRecommendedPlaylists, fetchRecommendedSongs, fetchUserPlaylists, ensureUserPlaylists,
     fetchHomeSearchRecommendations, clearHomeSearchRecommendations,
     fetchHomeFeed, fetchHighQualityPlaylists, fetchHighQualityTags,
-    fetchLikedSongIds, toggleLikeSong, fetchAlbumDetail, fetchUserAlbums,
+    fetchLikedSongIds, toggleLikeSong, fetchAlbumDetail, fetchUserAlbums, ensureUserAlbums,
     invalidatePlatform,
     fetchBiliFavoriteItems, validateAuth,
   }
 })
-
-// YouTube InnerTube 响应解析
-function parseYouTubeHomeFeed(data: any): HomeFeedShelf[] {
-  const shelves: HomeFeedShelf[] = []
-  try {
-    const tabs = data?.contents?.singleColumnBrowseResultsRenderer?.tabs || []
-    const contents = tabs[0]?.tabRenderer?.content?.sectionListRenderer?.contents || []
-    for (const section of contents) {
-      const shelf = section?.musicCarouselShelfRenderer
-      if (!shelf) continue
-      const title = shelf?.header?.musicCarouselShelfBasicHeaderRenderer?.title?.runs?.[0]?.text || ''
-      const items: HomeFeedItem[] = []
-      for (const item of (shelf?.contents || [])) {
-        const renderer = item?.musicTwoRowItemRenderer || item?.musicResponsiveListItemRenderer
-        if (!renderer) continue
-        items.push({
-          title: renderer?.title?.runs?.[0]?.text || '',
-          subtitle: renderer?.subtitle?.runs?.map((r: any) => r.text).join('') || '',
-          coverUrl: renderer?.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails?.slice(-1)?.[0]?.url || '',
-          browseId: renderer?.navigationEndpoint?.browseEndpoint?.browseId,
-          videoId: renderer?.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId,
-        })
-      }
-      if (title && items.length > 0) {
-        shelves.push({ title, items })
-      }
-    }
-  } catch {
-    // 解析失败返回空
-  }
-  return shelves
-}

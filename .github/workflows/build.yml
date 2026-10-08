@@ -76,7 +76,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Type-check and build frontend
-        run: pnpm build
+        run: pnpm test && pnpm build
 
   rust:
     name: Rust (${{ matrix.target }})
@@ -124,3 +124,67 @@ jobs:
       - name: Check Rust backend
         working-directory: src-tauri
         run: cargo check --locked --target ${{ matrix.target }}
+
+  ffmpeg:
+    name: FFmpeg
+    uses: ./.github/workflows/ffmpeg.yml
+
+  # 用随包分发的那份 FFmpeg 跑解码测试：缺解码器、解封装器或动态库加载不上都会失败
+  decoders:
+    name: Decoders (${{ matrix.target }})
+    needs: ffmpeg
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-2025
+            target: x86_64-pc-windows-msvc
+            ffmpeg_target: windows-x86_64
+          - platform: macos-15
+            target: aarch64-apple-darwin
+            ffmpeg_target: macos-aarch64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            ffmpeg_target: linux-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+          shared-key: test-${{ matrix.target }}
+
+      - name: Download FFmpeg
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ffmpeg-${{ matrix.ffmpeg_target }}
+          path: .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
+
+      - name: Test decoders against the bundled FFmpeg
+        working-directory: src-tauri
+        shell: bash
+        env:
+          NERI_FFMPEG_DIR: ${{ github.workspace }}/.cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
+          NERI_REQUIRE_FFMPEG: '1'
+        run: cargo test --locked --target ${{ matrix.target }} --lib -- audio::ffmpeg audio::decoder

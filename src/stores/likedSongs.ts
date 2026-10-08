@@ -6,6 +6,7 @@ import type { TrackInfo } from '@/stores/player'
 import { useRecommendStore } from '@/stores/recommend'
 import { useToastStore } from '@/stores/toast'
 import i18n from '@/i18n'
+import { FAVORITES_PLAYLIST_NAMES, isFavoritesPlaylist } from '@/modules/library/localPlaylists'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('liked-songs')
@@ -13,16 +14,10 @@ const log = createLogger('liked-songs')
 interface PlaylistInfo {
   id: number
   name: string
+  track_count?: number
 }
 
-const DEFAULT_LIKED_PLAYLIST_NAME = '我喜欢的音乐'
-const LIKED_PLAYLIST_NAMES = [
-  DEFAULT_LIKED_PLAYLIST_NAME,
-  '我喜歡的音樂',
-  'お気に入りの曲',
-  'Liked Songs',
-  'My Favorite Music',
-]
+const DEFAULT_LIKED_PLAYLIST_NAME = FAVORITES_PLAYLIST_NAMES[0]
 
 export const useLikedSongsStore = defineStore('likedSongs', () => {
   const likedPlaylistId = ref<number | null>(null)
@@ -80,7 +75,7 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
       isLoading.value = true
       try {
         const playlists = await invoke<PlaylistInfo[]>('list_playlists')
-        const liked = playlists.find(p => LIKED_PLAYLIST_NAMES.includes(p.name))
+        const liked = playlists.find(isFavoritesPlaylist)
         if (!liked) {
           likedPlaylistId.value = null
           likedTrackIds.value = new Set()
@@ -106,10 +101,17 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
     await loadLikedPlaylist()
     if (likedPlaylistId.value !== null) return likedPlaylistId.value
 
-    const created = await invoke<PlaylistInfo>('create_playlist', { name: DEFAULT_LIKED_PLAYLIST_NAME })
-    likedPlaylistId.value = created.id
-    likedTrackIds.value = new Set()
-    return created.id
+    // 后端以固定 id -1001 创建，和 Android 的"我喜欢的音乐"是同一个同步歌单
+    const favorites = await invoke<PlaylistInfo>('ensure_favorites_playlist', { name: DEFAULT_LIKED_PLAYLIST_NAME })
+    likedPlaylistId.value = favorites.id
+    // 期间完成的同步可能已经带来了收藏，有曲目时重新读取，免得已收藏的歌显示成未收藏
+    if (favorites.track_count) {
+      const tracks = await invoke<Array<{ id?: string }>>('get_playlist_tracks', { id: favorites.id })
+      likedTrackIds.value = new Set(tracks.map(t => t.id || '').filter(Boolean))
+    } else {
+      likedTrackIds.value = new Set()
+    }
+    return favorites.id
   }
 
   function isTrackLiked(track?: TrackInfo | null) {

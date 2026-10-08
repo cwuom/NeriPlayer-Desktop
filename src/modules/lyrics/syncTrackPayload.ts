@@ -99,3 +99,13 @@ export async function persistTrackSyncPayload(
     return 0
   }
 }
+
+/** 歌词编辑另记一份覆盖记录：不在任何歌单里的歌也能同步出去（对齐 Android SyncLyricOverrideStore） */
+export async function recordLyricOverride(track: TrackInfo | null | undefined): Promise<void> {
+  if (!track?.id) return
+  try {
+    await invoke('record_lyric_override', { track: toBackendTrack(track) })
+  } catch (e) {
+    log.warn('recordLyricOverride failed:', e)
+  }
+}

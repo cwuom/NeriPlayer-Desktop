@@ -21,14 +21,21 @@ export function localArtistStableKey(name: string): string {
 }
 
 /// 多歌手字段按常见分隔符拆开，避免「A/B」被当成一个独立歌手
-const ARTIST_SEPARATORS = /[/、,;&]|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b/i
+const ARTIST_SEPARATORS = /[/、,;&]|\b(?:feat|ft|vs)\b\.?/i
 
 export function splitArtistNames(raw: string): string[] {
+  const seen = new Set<string>()
   const names = raw
     .split(ARTIST_SEPARATORS)
     .map((name) => name.trim())
     .filter(Boolean)
-  return names.length ? names : []
+    .filter((name) => {
+      const key = localArtistStableKey(name)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  return names
 }
 
 export function groupLocalArtists(

@@ -19,22 +19,47 @@ import {
   normalizeBitrateKbps,
   playbackCacheReadCandidates,
   playbackCacheWriteOptions,
+  selectPlaybackCandidate,
   playbackPrefetchCacheId,
   playbackUrlResolver,
   resolvePlaybackResult,
   isDirectStreamUrl,
+  setDecodableCodecs,
   type PlaybackAudioSource,
   type PlaybackCacheReadCandidate,
   type PlaybackSourceSettings,
   type PlaybackResolution,
   type ResolvedPlaybackSource,
 } from '@/modules/playback/playbackSource'
-import { PlaybackPrefetchManager } from '@/modules/playback/playbackPrefetch'
+import {
+  PlaybackFailure,
+  playbackFailureMessageKey,
+  shouldThrottlePlaybackRefresh,
+} from '@/modules/playback/playbackFailure'
+import { genericUrlPrefetchTtlMs, playbackPrefetchManager } from '@/modules/playback/playbackPrefetch'
+import { recallPlayedQuality, rememberPlayedQuality } from '@/modules/playback/playedQualityMemory'
+import {
+  shouldRefreshUrlBeforeResume,
+  shouldRefreshUrlBeforeSeek,
+} from '@/modules/playback/youtubeSeekRefreshPolicy'
 import {
   PlaybackStartupWatchdog,
   resolvePlaybackFailureAdvanceAction,
 } from '@/modules/playback/playbackPolicy'
 import { resolvePlaybackQueueStartIndex } from '@/modules/playback/playbackQueue'
+import {
+  biliShareQualityOrder,
+  decorateLtStreamUrl,
+  hasLtStreamQuality,
+  LT_SHARE_LIMITS,
+  ltChannelForSource,
+  neteaseShareQualityGroups,
+} from '@/stores/listenTogether/streamQuality'
+import {
+  LONG_FORM_MIN_DURATION_MS,
+  longFormPositionForPersistence,
+  resolveLongFormResumePosition,
+} from '@/modules/playback/longFormProgress'
 import {
   isPlaybackSeekCompletionCurrent,
   resolvePlaybackLoadStart,
@@ -51,6 +76,14 @@ import {
   restorePersistedPlaybackQueue,
 } from '@/modules/playback/playerState'
 import { summarizeLogError } from '@/utils/logSanitizer'
+import {
+  finishLegacyPlayerStateCleanup,
+  LEGACY_PLAYER_STATE_KEY,
+  persistUserData,
+  preloadedUserData,
+} from '@/modules/persistence/userData'
+import { loadLocalAudioInfo } from '@/modules/playback/localAudioInfo'
+import { loadPlaybackAudioInfo, type PlaybackAudioProperties } from '@/modules/playback/playbackAudioInfo'
 
 const log = createLogger('player')
 const uiLog = createLogger('playback-ui')
@@ -121,12 +154,7 @@ export function tracePlaybackUi(
   })
 }
 
-/** UI 显示用的专辑名：清理 B站 "Bilibili|{cid}" 等内部格式 */
-export function displayAlbum(album: string): string {
-  if (album.startsWith('Bilibili|') || album === 'Bilibili') return 'Bilibili'
-  if (album.startsWith('Netease')) return album.replace(/^Netease/, '').trim() || album
-  return album
-}
+export { displayAlbum } from '@/modules/library/albumDisplay'
 
 export interface LyricWord {
   startMs: number
@@ -144,7 +172,15 @@ export interface LyricLine {
 }
 
 export type RepeatMode = 'off' | 'all' | 'one'
-export type PlaybackCommandSource = 'local' | 'remote_sync'
+
+/** 后端 get_decoder_capabilities 的结果 */
+export interface DecoderCapabilities {
+  ffmpeg: { directory: string; avutil: string; avcodec: string; avformat: string } | null
+  ffmpegError?: string | null
+  codecs: string[]
+}
+/** local_safety：睡眠定时、失败跳过、自动推进等内部操作，不受一起听的成员控制限制（对齐 Android LOCAL_SAFETY） */
+export type PlaybackCommandSource = 'local' | 'local_safety' | 'remote_sync'
 
 export interface SeekCommandSnapshot {
   seq: number
@@ -198,7 +234,15 @@ const BILI_QUALITY_I18N: Record<string, string> = {
   high: '较好',
   lossless: '无损',
   hires: 'Hi-Res',
-  dolby: '杜比全景声',
+  dolby: '多声道（E-AC-3）',
+}
+
+// 取流失败按原因给出与 Android 一致的提示；其他错误（解码、设备）保留原始信息
+function playbackFailureText(reason: PlaybackFailure['reason'] | null, message: string): string {
+  const t = (i18n.global as any).t
+  if (!reason) return t('player.play_failed', { msg: message })
+  if (reason === 'url_error') return t('player.playback_url_error', { msg: summarizeLogError(message) })
+  return t(playbackFailureMessageKey(reason))
 }
 
 function qualityLabelFromKey(source?: string | null, key?: string | null): string | undefined {
@@ -279,8 +323,11 @@ const PAUSE_BACKWARD_TOLERANCE_MS = 250
 // 连续失败熔断
 let consecutivePlayFailures = 0
 const MAX_CONSECUTIVE_FAILURES = 10
+// 需要登录的曲目直接跳过、不计入失败（对齐 Android）；整个队列都需要登录时停下
+let consecutiveLoginSkips = 0
 let _isAutoSkipping = false
 let _stallRecovering = false
+let _lastStallRecovery: { key: string; at: number } | null = null
 
 // Shuffle 三栈模型
 let shuffleBag: number[] = []       // 未播放索引池
@@ -299,16 +346,17 @@ let lastTrackEndedId: string | null = null
 let lastTrackEndedTime = 0
 
 // 播放抽象层：解析缓存、预热仲裁、启动看门狗
-const playbackPrefetchManager = new PlaybackPrefetchManager()
 const playbackStartupWatchdog = new PlaybackStartupWatchdog()
 let startupRecoveryAttempts = 0
 const MAX_STARTUP_RECOVERY_ATTEMPTS = 2
 const STARTUP_WATCHDOG_REMOTE_MS = 8_000
 const STARTUP_WATCHDOG_YOUTUBE_MS = 12_000
 
-// 状态持久化
-const PLAYER_STATE_KEY = 'neri:player-state'
+// 状态持久化：正常运行写用户数据库，浏览器开发模式退回 localStorage
+const PLAYER_STATE_KEY = LEGACY_PLAYER_STATE_KEY
 let _persistDebounceTimer: ReturnType<typeof setTimeout> | null = null
+// 上次成功落库的队列序列化结果；队列不变时只更新播放状态行
+let _lastPersistedQueueJson: string | null = null
 let _progressPersistTime = 0
 const PERSIST_DEBOUNCE_MS = 250
 const PROGRESS_PERSIST_INTERVAL_MS = 15000
@@ -317,7 +365,25 @@ let _needsReload = false
 let _remoteSyncGuardUntil = 0
 let _currentLoadedFromDownloadPath: string | null = null
 
+function audioFilePathKey(path: string | undefined | null) {
+  const key = (path || '').replace(/\\/g, '/').trim()
+  return /^[a-z]:\//i.test(key) || key.startsWith('//') ? key.toLowerCase() : key
+}
+
 export const usePlayerStore = defineStore('player', () => {
+  const audioFileMutations = new Map<string, {
+    trackId: string | null
+    requestToken: number | null
+    shouldResume: boolean
+    releasesCurrentPlayback: boolean
+    positionMs: number
+    finished: Promise<void>
+  }>()
+
+  function currentAudioFileMutation() {
+    return [...audioFileMutations.values()].find(mutation =>
+      mutation.trackId === currentTrack.value?.id && mutation.requestToken === playbackRequestToken)
+  }
   const settings = useSettingsStore()
   const isPlaying = ref(false)
   const currentTrack = ref<TrackInfo | null>(null)
@@ -358,6 +424,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   // 当前音频质量信息
   const audioInfo = ref<AudioInfo | null>(null)
+  let decodedAudioInfo: { requestGeneration: number; properties: PlaybackAudioProperties } | null = null
   const isPlayingFromDownload = ref(false)
   // 当前会话是否命中播放缓存 (非下载文件)
   const isPlayingFromCache = ref(false)
@@ -385,7 +452,7 @@ export const usePlayerStore = defineStore('player', () => {
       const now = Date.now()
       sleepTimerNowMs.value = now
       if (now >= sleepTimerEndMs.value) {
-        pause()
+        void pause('local_safety')
         cancelSleepTimer()
       }
     }, 1000)
@@ -457,6 +524,35 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  /**
+   * 一起听里听众没有控制权（房主离线或关闭了成员控制）时，用户操作在执行前就拦下并提示，
+   * 不再先改本地、再被服务端拒绝而和房间分叉（对齐 Android shouldBlockLocalRoomControl）
+   */
+  function blockedByListenTogether(commandSource: PlaybackCommandSource): boolean {
+    if (commandSource !== 'local') return false
+    const restriction = useListenTogetherStore().localControlRestriction
+    if (!restriction) return false
+    useToastStore().error((i18n.global as any).t(restriction === 'controller_offline'
+      ? 'listen_together.control_blocked_controller_offline'
+      : 'listen_together.control_blocked_member_control'))
+    return true
+  }
+
+  /** 播放器替用户做的后续动作（恢复、失败跳过）：跟随房间的同步仍按同步处理，其余都不算用户操作 */
+  function internalFollowUpSource(commandSource: PlaybackCommandSource): PlaybackCommandSource {
+    return commandSource === 'remote_sync' ? 'remote_sync' : 'local_safety'
+  }
+
+  /** 一起听期间不能切到本地文件：其它成员没法播放它（对齐 Android shouldBlockLocalSongSwitch） */
+  function blocksLocalSongInRoom(track: TrackInfo, commandSource: PlaybackCommandSource): boolean {
+    if (commandSource !== 'local' || !useListenTogetherStore().roomId) return false
+    if (track.source !== 'local' && !track.id.startsWith('local:')) return false
+    // 重新加载当前这首（例如继续播放时需要重载）不是切歌
+    if (track.id === currentTrack.value?.id) return false
+    useToastStore().error((i18n.global as any).t('listen_together.local_playback_blocked'))
+    return true
+  }
+
   function isRemoteSyncGuardActive() {
     return Date.now() < _remoteSyncGuardUntil
   }
@@ -484,11 +580,36 @@ export const usePlayerStore = defineStore('player', () => {
     return state
   }
 
+  async function persistPlayerStateToDatabase() {
+    const state = persistedPlayerState()
+    const queueJson = JSON.stringify(state.queue)
+    const queueUnchanged = queueJson === _lastPersistedQueueJson
+    try {
+      await persistUserData('save_playback_state', {
+        state: queueUnchanged ? { ...state, queue: null } : state,
+      })
+      _lastPersistedQueueJson = queueJson
+      finishLegacyPlayerStateCleanup()
+      uiLog.info('state persisted', {
+        queueSize: queue.value.length,
+        queueIndex: queueIndex.value,
+        trackId: currentTrack.value?.id,
+        queueWritten: !queueUnchanged,
+      })
+    } catch (error) {
+      uiLog.error('state persistence failed:', error)
+    }
+  }
+
   /** 退出前立即落盘，避免防抖定时器尚未执行 */
-  function flushPlayerState() {
+  async function flushPlayerState(): Promise<void> {
     if (_persistDebounceTimer) {
       clearTimeout(_persistDebounceTimer)
       _persistDebounceTimer = null
+    }
+    if (preloadedUserData()) {
+      await persistPlayerStateToDatabase()
+      return
     }
     try {
       localStorage.setItem(PLAYER_STATE_KEY, JSON.stringify(persistedPlayerState()))
@@ -516,21 +637,28 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  /** 保存播放器状态到 localStorage（250ms debounce） */
+  /** 保存播放器状态（250ms debounce） */
   function savePlayerState() {
     if (_persistDebounceTimer) clearTimeout(_persistDebounceTimer)
     _persistDebounceTimer = setTimeout(() => {
-      flushPlayerState()
+      void flushPlayerState()
     }, PERSIST_DEBOUNCE_MS)
   }
 
-  /** 从 localStorage 恢复播放器状态（store 初始化时调用，不自动播放） */
+  /** 启动前预取的数据库快照；没有后端时读取 localStorage */
+  function readPersistedPlayerState(): any | null {
+    const preloaded = preloadedUserData()
+    if (preloaded) return preloaded.playbackState
+    const raw = localStorage.getItem(PLAYER_STATE_KEY)
+    return raw ? JSON.parse(raw) : null
+  }
+
+  /** 恢复播放器状态（store 初始化时调用，不自动播放） */
   function loadPlayerState() {
     try {
       hasPlaybackSession.value = false
-      const raw = localStorage.getItem(PLAYER_STATE_KEY)
-      if (!raw) return
-      const state = JSON.parse(raw)
+      const state = readPersistedPlayerState()
+      if (!state) return
       const settings = useSettingsStore()
 
       const restored = restorePersistedPlaybackQueue(
@@ -587,7 +715,27 @@ export const usePlayerStore = defineStore('player', () => {
     if (now - _progressPersistTime >= PROGRESS_PERSIST_INTERVAL_MS) {
       _progressPersistTime = now
       savePlayerState()
+      persistCurrentLongFormProgress()
     }
+  }
+
+  /** 长音频进度写进播放历史，随同步在其它设备续播（对齐 Android PlaybackProgressOwner） */
+  function persistLongFormProgress(track: TrackInfo | null, trackPositionMs: number) {
+    if (!track) return
+    const settings = useSettingsStore()
+    const trackDurationMs = Math.max(track.durationMs || 0, currentTrack.value === track ? durationMs.value : 0)
+    const remembered = longFormPositionForPersistence(settings.rememberLongFormProgress, trackDurationMs, trackPositionMs)
+    if (remembered !== null) useHistoryStore().updateResumePosition(track, remembered)
+  }
+
+  function persistCurrentLongFormProgress() {
+    persistLongFormProgress(currentTrack.value, currentRenderedPosition())
+  }
+
+  function rememberedLongFormStart(track: TrackInfo): number {
+    const settings = useSettingsStore()
+    if (!settings.rememberLongFormProgress || track.durationMs < LONG_FORM_MIN_DURATION_MS) return 0
+    return resolveLongFormResumePosition(true, track.durationMs, 0, useHistoryStore().rememberedPosition(track))
   }
 
   // Shuffle 三栈辅助函数
@@ -625,6 +773,9 @@ export const usePlayerStore = defineStore('player', () => {
       qqMusicQuality: settings.qqMusicQuality,
       biliQuality: settings.biliQuality,
       youtubeQuality: settings.youtubeQuality,
+      youtubePlaybackSource: settings.youtubePlaybackSource,
+      neteaseAutoSourceSwitch: settings.neteaseAutoSourceSwitch,
+      neteaseLocalSourceFallback: settings.neteaseLocalSourceFallback,
     }
   }
 
@@ -638,7 +789,8 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function nextPrefetchTracks(): TrackInfo[] {
-    if (!queue.value.length) return []
+    // 单曲循环不会切到下一首，预取只会浪费请求（对齐 Android）
+    if (!queue.value.length || repeatMode.value === 'one') return []
 
     const firstIndex = (() => {
       if (shuffleEnabled.value) {
@@ -653,8 +805,9 @@ export const usePlayerStore = defineStore('player', () => {
     if (firstIndex < 0) return []
 
     const tracks: TrackInfo[] = []
+    // YouTube 只预取后两首（对齐 Android），更多会在 PoToken 队列里挤占当前请求
     const maxWindow = getPlaybackSourceKindForPrefetch(queue.value[firstIndex]) === 'youtube'
-      ? 6
+      ? 2
       : 1
     let index = firstIndex
     for (let count = 0; count < maxWindow; count += 1) {
@@ -675,16 +828,23 @@ export const usePlayerStore = defineStore('player', () => {
     return track ? getPlaybackSourceKind(track) : null
   }
 
-  /** 预热后续曲目的解析结果，当前播放需求始终拥有优先级 */
+  /**
+   * 预热后续曲目的解析结果，当前播放需求始终拥有优先级。
+   * 预取不带播放代际：切歌不会作废它，按下一首时前台解析直接等它完成（对齐 Android join）。
+   */
   function maybePrefetchNext() {
     const tracks = nextPrefetchTracks()
     if (tracks.length === 0) return
-
-    playbackPrefetchManager.prefetchWindow(
-      tracks,
-      playbackSourceSettings(),
-      playbackUrlResolver,
-    )
+    const settings = playbackSourceSettings()
+    const ttlMs = genericUrlPrefetchTtlMs(Math.max(durationMs.value, currentTrack.value?.durationMs ?? 0))
+    // 已完整缓存的曲目播放时直接离线起播，不必预取地址
+    void Promise.all(tracks.map(async track => (
+      await hasCompleteCachedAudio(playbackCacheReadCandidates(track, settings)) ? null : track
+    ))).then((pending) => {
+      const uncached = pending.filter((track): track is TrackInfo => track !== null)
+      if (uncached.length === 0) return
+      playbackPrefetchManager.prefetchWindow(uncached, settings, playbackUrlResolver, undefined, ttlMs)
+    })
   }
 
   function prefetchPlaybackTracks(tracks: readonly TrackInfo[]) {
@@ -702,16 +862,28 @@ export const usePlayerStore = defineStore('player', () => {
     track: TrackInfo,
     forceRefresh = false,
     qualityOverride?: string,
+    avoidDirect = false,
   ): Promise<PlaybackResolution> {
     return resolvePlaybackResult(track, playbackSourceSettings(), {
       forceRefresh,
       qualityOverride,
+      avoidDirect,
       requestGeneration: playbackRequestToken,
     })
   }
 
   function takePrefetchedPlaybackUrl(track: TrackInfo): ResolvedPlaybackSource | null {
     return playbackPrefetchManager.take(track, playbackSourceSettings())
+  }
+
+  /** 是否已有完整的磁盘缓存（只查标记与长度，不做完整校验） */
+  async function hasCompleteCachedAudio(candidates: readonly PlaybackCacheReadCandidate[]): Promise<boolean> {
+    if (candidates.length === 0) return false
+    try {
+      return await invoke<boolean>('has_cached_audio', { cacheKeys: candidates.map(candidate => candidate.cacheKey) })
+    } catch {
+      return false
+    }
   }
 
   function schedulePlaybackStartupWatchdog(
@@ -735,18 +907,19 @@ export const usePlayerStore = defineStore('player', () => {
         && !isLoadingAudio.value,
       onStall: () => {
         if (token !== playbackRequestToken) return
+        const recoverySource = internalFollowUpSource(commandSource)
         if (startupRecoveryAttempts >= MAX_STARTUP_RECOVERY_ATTEMPTS) {
           playbackStartupWatchdog.cancel()
           consecutivePlayFailures += 1
           _isAutoSkipping = true
-          void next(true, commandSource).finally(() => {
+          void next(true, recoverySource).finally(() => {
             _isAutoSkipping = false
           })
           return
         }
         startupRecoveryAttempts += 1
         const resumePositionMs = currentRenderedPosition()
-        void play(track, commandSource, resumePositionMs, true)
+        void play(track, recoverySource, resumePositionMs, true)
       },
     })
   }
@@ -905,6 +1078,18 @@ export const usePlayerStore = defineStore('player', () => {
     return accepted
   }
 
+  /// 此刻的播放位置，按插值锚点现算
+  ///
+  /// interpolatedPositionMs 由 rAF 推进，窗口最小化后页面不可见、rAF 暂停，它会停在最后一帧；
+  /// 桌面歌词这类窗口不可见时仍要跟着走的地方用这个。
+  function livePositionMs(): number {
+    if (pendingSeek) return Math.round(pendingSeek.targetMs)
+    if (!_interpIsPlaying) return Math.round(_interpRenderedMs)
+    const predicted = _interpAnchorMs + (performance.now() - _interpAnchorTime) * _interpSpeed
+    const clamped = Math.max(0, Math.min(predicted, _interpDurationMs))
+    return Math.round(Math.max(_interpRenderedMs, clamped))
+  }
+
   /** 按需启动 rAF 插值循环：暂停且无待确认 seek 时自动停表，状态恢复时重启 */
   function _startInterpolationLoop() {
     if (_interpLoopStarted) return
@@ -987,13 +1172,30 @@ export const usePlayerStore = defineStore('player', () => {
       if (e.payload.requestGeneration !== playbackRequestToken) return
       const track = currentTrack.value
       if (!track || _stallRecovering) return
+      // 同一首在冷却期内再次断流：不再原地重试（否则每次重启都会清零失败计数而无限循环），
+      // 按失败处理并跳到下一首（对齐 Android URL_REFRESH_COOLDOWN_MS）
+      const now = Date.now()
+      if (shouldThrottlePlaybackRefresh(_lastStallRecovery, track.id, now)) {
+        _lastStallRecovery = null
+        consecutivePlayFailures++
+        useToastStore().error((i18n.global as any).t('player.playback_network_error'))
+        if (consecutivePlayFailures >= MAX_CONSECUTIVE_FAILURES) {
+          void pause('local_safety')
+          useToastStore().error((i18n.global as any).t('player.too_many_failures'))
+        } else if (!_isAutoSkipping) {
+          _isAutoSkipping = true
+          void next(true, 'local_safety').finally(() => { _isAutoSkipping = false })
+        }
+        return
+      }
+      _lastStallRecovery = { key: track.id, at: now }
       _stallRecovering = true
       const resumeAt = Math.max(0, Math.round(e.payload.positionMs))
-      void play(track, 'local', resumeAt, true)
+      void play(track, 'local_safety', resumeAt, true)
         .catch(() => {
           if (!_isAutoSkipping) {
             _isAutoSkipping = true
-            void next(true, 'local').finally(() => { _isAutoSkipping = false })
+            void next(true, 'local_safety').finally(() => { _isAutoSkipping = false })
           }
         })
         .finally(() => { _stallRecovering = false })
@@ -1024,12 +1226,70 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  function readLocalAudioInfo(path: string, requestGeneration: number) {
+    void loadLocalAudioInfo(
+      path,
+      () => requestGeneration === playbackRequestToken && hasPlaybackSession.value,
+      info => {
+        // 文件属性探测可能晚于解码器信息返回，保留当前会话的真实参数
+        const decoded = decodedAudioInfo?.requestGeneration === requestGeneration
+          ? decodedAudioInfo.properties
+          : undefined
+        if (decoded && typeof info.bitrate === 'number' && Number.isFinite(info.bitrate) && info.bitrate > 0) {
+          delete decoded.bitrate
+        }
+        audioInfo.value = { ...info, ...decoded }
+      },
+    ).catch(error => log.warn('local audio properties unavailable:', error))
+  }
+
+  function readPlaybackAudioInfo(requestGeneration: number) {
+    void loadPlaybackAudioInfo(
+      requestGeneration,
+      () => requestGeneration === playbackRequestToken
+        && requestGeneration === loadedPlaybackRequestToken
+        && hasPlaybackSession.value && !isLoadingAudio.value && !_needsReload,
+      info => {
+        const properties = { ...info }
+        const existingBitrate = audioInfo.value?.bitrate
+        if (typeof existingBitrate === 'number' && Number.isFinite(existingBitrate) && existingBitrate > 0) {
+          delete properties.bitrate
+        }
+        decodedAudioInfo = { requestGeneration, properties }
+        audioInfo.value = { ...audioInfo.value, ...properties }
+      },
+    ).catch(error => log.warn('decoded audio properties unavailable:', error))
+  }
+
+  /**
+   * @param allowRememberedPosition 用户点播时长音频从记住的位置继续；上一首/下一首、
+   *   恢复会话等调用方传 false（对齐 Android allowRememberedLongFormPosition）
+   */
   async function play(
     track: TrackInfo,
     commandSource: PlaybackCommandSource = 'local',
     startPositionMs = 0,
     forceResolve = false,
+    allowRememberedPosition = true,
   ) {
+    if (blockedByListenTogether(commandSource) || blocksLocalSongInRoom(track, commandSource)) return
+    const fileMutation = !isRemotePlaybackTrack(track) && audioFileMutations.get(audioFilePathKey(track.audioUrl))
+    if (fileMutation) {
+      const waitingToken = ++playbackRequestToken
+      fileMutation.requestToken = waitingToken
+      fileMutation.trackId = currentTrack.value?.id || track.id
+      fileMutation.shouldResume = true
+      fileMutation.positionMs = Math.max(0, Math.round(startPositionMs))
+      playbackStartupWatchdog.cancel()
+      await fileMutation.finished
+      if (waitingToken === playbackRequestToken && fileMutation.shouldResume) {
+        await play(track, commandSource, fileMutation.positionMs, forceResolve, allowRememberedPosition)
+      }
+      return
+    }
+    if (startPositionMs <= 0 && allowRememberedPosition && !forceResolve && commandSource === 'local') {
+      startPositionMs = rememberedLongFormStart(track)
+    }
     initEvents()
     markCommandSource(commandSource)
     const token = ++playbackRequestToken
@@ -1064,10 +1324,15 @@ export const usePlayerStore = defineStore('player', () => {
     replacePlaybackDemand(track)
     playbackStartupWatchdog.cancel()
     const previousTrack = currentTrack.value
+    if (previousTrack && (previousTrack.id !== track.id || previousTrack.album !== track.album)) {
+      persistLongFormProgress(previousTrack, currentRenderedPosition())
+    }
     // 直链只在本次请求确认有效时共享，切歌或强制刷新先清掉旧 URL
     currentStreamUrl.value = !forceResolve && isDirectStreamUrl(track.audioUrl)
       ? track.audioUrl.trim()
       : null
+    currentResolvedStreamUrls = currentStreamUrl.value ? [currentStreamUrl.value] : []
+    rememberStreamQualities(null)
     const wasPlayingBeforeSwitch = isPlaying.value
     const hadPlaybackSessionBeforeRequest = hasPlaybackSession.value
     const isSwitchingTrack = !!previousTrack && previousTrack.id !== track.id
@@ -1081,7 +1346,7 @@ export const usePlayerStore = defineStore('player', () => {
       ? Math.max(0, Math.round(settings.crossfadeOutDuration))
       : fadeOutDurationMs
     const useOverlapCrossfade = wasPlayingBeforeSwitch && isSwitchingTrack
-      && (settings.crossfadeNext || settings.crossfade)
+      && settings.crossfadeNext
       && overlapFadeOutDurationMs > 0
       && overlapFadeInDurationMs > 0
     const useTrackSwitchFadeIn = settings.fadeIn
@@ -1181,13 +1446,15 @@ export const usePlayerStore = defineStore('player', () => {
       let dur = 0
       let playedFromDownloadedFile = false
       let playedFromPlaybackCache = false
+      let playingPreviewClip = false
       playError.value = null
       audioInfo.value = null
+      decodedAudioInfo = null
       isPlayingFromDownload.value = false
       isPlayingFromCache.value = false
 
       const downloaded = useDownloadStore().getDownloadedTrack(track.id)
-      if (downloaded?.filePath && isRemotePlaybackTrack(track)) {
+      if (downloaded?.filePath && !audioFileMutations.has(audioFilePathKey(downloaded.filePath)) && isRemotePlaybackTrack(track)) {
         try {
           const startPlan = currentLoadStartPlan()
           dur = await playDownloadedFile(
@@ -1213,32 +1480,23 @@ export const usePlayerStore = defineStore('player', () => {
       }
 
       if (playedFromDownloadedFile) {
-        // 本地下载：不展示 Local/download 占位；格式从扩展名推断，码率有则显示
-        const ext = downloaded?.filePath
-          ?.split(/[\\/]/)
-          .pop()
-          ?.split('.')
-          .pop()
-          ?.toLowerCase()
-        const formatFromExt = ext && ext.length <= 5 ? ext : undefined
-        audioInfo.value = {
-          // 不写 codec: Local，避免进度条下出现 Local · download
-          format: formatFromExt,
-          // getPlaybackSourceKind 已覆盖远程源；仅当明确是 local 时回退
-          source: getPlaybackSourceKind(track)
-            ?? (track.source === 'local' ? 'local' : undefined),
-          qualityKey: undefined,
-        }
+        if (downloaded?.filePath) readLocalAudioInfo(downloaded.filePath, token)
         lastUrlResolveTime = 0
       } else if (isRemotePlaybackTrack(track)) {
         _currentLoadedFromDownloadPath = null
         isPlayingFromDownload.value = false
         // 进入在线解析前默认非缓存; 命中缓存时会再置 true
         isPlayingFromCache.value = false
-        let prefetchedResolution = takePrefetchedPlaybackUrl(track)
+        // 强制重新解析（切换音质、断流恢复）不读缓存、不用预取结果，否则会重播刚要替换掉的那份
+        let prefetchedResolution = forceResolve ? null : takePrefetchedPlaybackUrl(track)
+        const qualityMemoryKey = playbackCacheReadCandidates(track, playbackSourceSettings())[0]?.cacheKey ?? ''
+        const cacheCandidates = forceResolve ? [] : playbackCacheReadCandidates(track, playbackSourceSettings())
+        const hasCompleteCache = await hasCompleteCachedAudio(cacheCandidates)
+        if (token !== playbackRequestToken) return
         const resolveInParallel = shouldResolvePlaybackSourceInParallel(
           hadPlaybackSessionBeforeRequest,
           !!prefetchedResolution,
+          hasCompleteCache,
         )
         const coldResolution = resolveInParallel
           ? resolvePlaybackUrl(track, forceResolve).catch((error): PlaybackResolution => ({
@@ -1247,7 +1505,6 @@ export const usePlayerStore = defineStore('player', () => {
               retryable: true,
             }))
           : null
-        const cacheCandidates = playbackCacheReadCandidates(track, playbackSourceSettings())
         tracePlaybackUi(
           'remote_pipeline_start',
           track,
@@ -1285,6 +1542,18 @@ export const usePlayerStore = defineStore('player', () => {
               qualityLabel: qualityLabelFromKey(cached.source, cached.qualityKey),
               qualityOptions: qualityOptionsFromSource(cached.source),
             }
+            // 缓存键是首选音质，实际写入的可能是降级流：换成记录下来的实际音质
+            void recallPlayedQuality(qualityMemoryKey).then((played) => {
+              if (!played?.qualityKey || token !== playbackRequestToken || !audioInfo.value) return
+              audioInfo.value = {
+                ...audioInfo.value,
+                qualityKey: played.qualityKey,
+                qualityLabel: qualityLabelFromKey(cached.source, played.qualityKey),
+                codec: audioInfo.value.codec ?? played.codecLabel,
+                bitrate: audioInfo.value.bitrate ?? played.bitrateKbps,
+                mimeType: audioInfo.value.mimeType ?? played.mimeType,
+              }
+            })
             tracePlaybackUi(
               'cache_lookup_hit',
               track,
@@ -1324,12 +1593,12 @@ export const usePlayerStore = defineStore('player', () => {
             )
             if (resolution.type !== 'success') {
               if (resolution.type === 'requires_login') {
-                throw new Error(resolution.message || 'Playback requires login')
+                throw new PlaybackFailure('requires_login', resolution.message || 'Playback requires login')
               }
               if (resolution.type === 'waiting_for_authoritative_stream') {
                 throw new Error('Waiting for authoritative playback stream')
               }
-              throw new Error(resolution.message)
+              throw new PlaybackFailure(resolution.reason ?? 'url_error', resolution.message)
             }
             result = resolution
           }
@@ -1350,6 +1619,7 @@ export const usePlayerStore = defineStore('player', () => {
               const candidateStarted = performance.now()
               try {
                 const cacheWrite = playbackCacheWriteOptions(resolved, candidateIndex)
+                const selected = selectPlaybackCandidate(resolved, candidateIndex)
                   const startPlan = currentLoadStartPlan()
                   tracePlaybackUi(
                     'backend_stream_start',
@@ -1357,9 +1627,17 @@ export const usePlayerStore = defineStore('player', () => {
                     `candidate=${candidateIndex}, startMs=${startPlan.positionMs}, crossfade=${startPlan.useCrossfade}, elapsedMs=${Math.round(performance.now() - requestStarted)}`,
                     token,
                   )
-                  const duration = await playRemoteUrl(
+                  const duration = selected.source === 'local' ? await playDownloadedFile(
+                    candidateUrl,
+                    selected.durationMs || track.durationMs,
+                    startPlan.useCrossfade,
+                    transitionFadeOutMs,
+                    transitionFadeInMs,
+                    token,
+                    startPlan.positionMs,
+                  ) : await playRemoteUrl(
                   candidateUrl,
-                  track.durationMs,
+                  selected.durationMs || track.durationMs,
                   startPlan.useCrossfade,
                   transitionFadeOutMs,
                   transitionFadeInMs,
@@ -1367,8 +1645,15 @@ export const usePlayerStore = defineStore('player', () => {
                   startPlan.positionMs,
                   cacheWrite.cacheKey,
                   cacheWrite.expectedContentLength,
+                  cacheWrite.expectedContentMd5,
+                  selected.streamType,
                   )
-                  if (token === playbackRequestToken) currentStreamUrl.value = candidateUrl
+                  if (token === playbackRequestToken) {
+                    currentStreamUrl.value = resolved.source === 'local' ? null : candidateUrl
+                    currentResolvedStreamUrls = resolved.source === 'local' ? [] : candidates.slice(candidateIndex)
+                    rememberStreamQualities(resolved)
+                    result = selectPlaybackCandidate(resolved, candidateIndex)
+                  }
                   markLoadStartApplied(startPlan)
                   tracePlaybackUi(
                     'backend_stream_ready',
@@ -1403,9 +1688,28 @@ export const usePlayerStore = defineStore('player', () => {
             )
             if (refreshed.type !== 'success') throw firstError
             result = refreshed
-            dur = await playResolvedSource(result)
+            try {
+              dur = await playResolvedSource(result)
+            } catch (refreshError) {
+              if (token !== playbackRequestToken) return
+              if (getPlaybackSourceKind(track) !== 'youtube' || result.streamType === 'hls') throw refreshError
+              const hls = await resolvePlaybackUrl(track, true, undefined, true)
+              if (hls.type !== 'success') throw refreshError
+              result = hls
+              dur = await playResolvedSource(result)
+            }
           }
           if (token !== playbackRequestToken) return
+          // 直链（一起听）也标记 isPreview 以免进缓存，不能据此提示试听
+          playingPreviewClip = result.source === 'netease' && result.isPreview === true && !result.cacheKey.endsWith('|direct')
+          if (!result.isPreview && result.source !== 'local') {
+            rememberPlayedQuality(qualityMemoryKey, {
+              qualityKey: result.audioInfo?.qualityKey ?? result.qualityKey,
+              codecLabel: result.audioInfo?.codecLabel ?? result.codec,
+              bitrateKbps: result.audioInfo?.bitrateKbps ?? normalizeBitrateKbps(result.bitrate),
+              mimeType: result.audioInfo?.mimeType,
+            })
+          }
           {
             const qKey = result.audioInfo?.qualityKey ?? result.qualityKey
             const rawLabel = result.audioInfo?.qualityLabel
@@ -1465,6 +1769,7 @@ export const usePlayerStore = defineStore('player', () => {
         }
         if (token !== playbackRequestToken) return
         markLoadStartApplied(startPlan)
+        readLocalAudioInfo(track.audioUrl, token)
       }
 
       commitTrack()
@@ -1543,7 +1848,11 @@ export const usePlayerStore = defineStore('player', () => {
 
       // 重置连续失败计数
       consecutivePlayFailures = 0
+      consecutiveLoginSkips = 0
       startupRecoveryAttempts = 0
+      if (playingPreviewClip) {
+        useToastStore().show((i18n.global as any).t('player.playback_preview_only'), 'info')
+      }
       // 记录 URL 解析时间（用于过期检测）
       if (playedFromPlaybackCache) {
         lastUrlResolveTime = 0
@@ -1552,9 +1861,11 @@ export const usePlayerStore = defineStore('player', () => {
       }
       // 标记已加载（取消 restore 重载标记）
       _needsReload = false
+      readPlaybackAudioInfo(token)
 
       // 记录播放历史
-      if (commandSource === 'local') {
+      // 跟随房间的远端同步不记历史；用户操作和自动推进都记
+      if (commandSource !== 'remote_sync') {
         const history = useHistoryStore()
         history.record(track)
       }
@@ -1595,9 +1906,11 @@ export const usePlayerStore = defineStore('player', () => {
       if (shouldRestorePreviousPlaybackState) {
         try {
           const state = await invoke<{ is_playing?: boolean }>('get_player_state')
+          if (token !== playbackRequestToken) return
           isPlaying.value = !!state?.is_playing
           _interpIsPlaying = isPlaying.value
         } catch {
+          if (token !== playbackRequestToken) return
           isPlaying.value = true
           _interpIsPlaying = true
         }
@@ -1609,10 +1922,14 @@ export const usePlayerStore = defineStore('player', () => {
       isLoadingAudio.value = false
 
       const toast = useToastStore()
-      toast.error((i18n.global as any).t('player.play_failed', { msg }))
+      const failureReason = e instanceof PlaybackFailure ? e.reason : null
+      toast.error(playbackFailureText(failureReason, msg))
 
-      // 连续失败熔断 + 自动 skip
-      consecutivePlayFailures++
+      // 连续失败熔断 + 自动 skip；需要登录的曲目只跳过不计失败，但整队列都跳过一轮后停下
+      const loginSkip = failureReason === 'requires_login'
+      if (loginSkip) consecutiveLoginSkips++
+      else consecutivePlayFailures++
+      const loginSkipsExhausted = loginSkip && consecutiveLoginSkips >= Math.max(1, queue.value.length)
       const failureAction = resolvePlaybackFailureAdvanceAction({
         currentIndex: queueIndex.value,
         queueSize: queue.value.length,
@@ -1623,11 +1940,12 @@ export const usePlayerStore = defineStore('player', () => {
       })
       if (
         consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES
+        && !loginSkipsExhausted
         && failureAction !== 'stop'
       ) {
         _isAutoSkipping = true
         try {
-          await next(failureAction === 'wrap', commandSource)
+          await next(failureAction === 'wrap', internalFollowUpSource(commandSource))
         } finally {
           _isAutoSkipping = false
         }
@@ -1638,6 +1956,18 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function togglePlayPause(commandSource: PlaybackCommandSource = 'local') {
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      markCommandSource(commandSource)
+      mutation.shouldResume = !isPlaying.value
+      isPlaying.value = mutation.shouldResume
+      if (!mutation.shouldResume && !mutation.releasesCurrentPlayback) {
+        _interpIsPlaying = false
+        freezeRenderedPosition()
+        await invoke('pause')
+      }
+      return
+    }
     markCommandSource(commandSource)
     log.info('togglePlayPause:', { source: commandSource, wasPlaying: isPlaying.value, trackId: currentTrack.value?.id })
     if (isLoadingAudio.value && shouldDeferPlaybackSeek(
@@ -1651,7 +1981,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (!isPlaying.value && currentTrack.value && _needsReload) {
       _needsReload = false
       const savedPos = positionMs.value
-      await play(currentTrack.value, commandSource, savedPos)
+      await play(currentTrack.value, commandSource, savedPos, false, false)
       return
     }
 
@@ -1664,13 +1994,14 @@ export const usePlayerStore = defineStore('player', () => {
     } else {
       _interpIsPlaying = false
       freezeRenderedPosition()
+      persistCurrentLongFormProgress()
     }
 
     try {
       const settings = useSettingsStore()
       if (optimistic) {
         if (settings.fadeIn && settings.fadeInDuration > 0) {
-          await invoke('resume_with_fade', { durationMs: settings.fadeInDuration })
+          await invoke('resume_with_fade', { durationMs: Math.round(settings.fadeInDuration) })
         } else {
           await invoke('resume')
         }
@@ -1678,7 +2009,7 @@ export const usePlayerStore = defineStore('player', () => {
         lastSeekedMs = null
       } else if (settings.fadeIn && settings.fadeOutDuration > 0) {
         playbackStartupWatchdog.cancel()
-        await invoke('pause_with_fade', { durationMs: settings.fadeOutDuration })
+        await invoke('pause_with_fade', { durationMs: Math.round(settings.fadeOutDuration) })
       } else {
         playbackStartupWatchdog.cancel()
         await invoke('pause')
@@ -1695,12 +2026,26 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function pause(commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      markCommandSource(commandSource)
+      mutation.shouldResume = false
+      isPlaying.value = false
+      if (!mutation.releasesCurrentPlayback) {
+        _interpIsPlaying = false
+        freezeRenderedPosition()
+        await invoke('pause')
+      }
+      return
+    }
     markCommandSource(commandSource)
     playbackStartupWatchdog.cancel()
     // 乐观更新
     isPlaying.value = false
     _interpIsPlaying = false
     freezeRenderedPosition()
+    persistCurrentLongFormProgress()
     if (isLoadingAudio.value && shouldDeferPlaybackSeek(
       playbackRequestToken,
       loadedPlaybackRequestToken,
@@ -1729,7 +2074,7 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       const settings = useSettingsStore()
       if (settings.fadeIn && settings.fadeOutDuration > 0) {
-        await invoke('pause_with_fade', { durationMs: settings.fadeOutDuration })
+        await invoke('pause_with_fade', { durationMs: Math.round(settings.fadeOutDuration) })
       } else {
         await invoke('pause')
       }
@@ -1738,6 +2083,14 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function resume(commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      markCommandSource(commandSource)
+      mutation.shouldResume = true
+      isPlaying.value = true
+      return
+    }
     markCommandSource(commandSource)
     if (!currentTrack.value) return
     if (isLoadingAudio.value && shouldDeferPlaybackSeek(
@@ -1750,14 +2103,19 @@ export const usePlayerStore = defineStore('player', () => {
     if (_needsReload) {
       _needsReload = false
       const savedPos = positionMs.value
-      await play(currentTrack.value, commandSource, savedPos)
+      await play(currentTrack.value, commandSource, savedPos, false, false)
       return
     }
 
-    // URL 过期检测（10min）：在线来源 URL 过期后需重新解析
+    // URL 过期检测（10min）：在线来源 URL 过期后需重新解析；
+    // YouTube 另按地址本身判断（缺 PoToken、签名即将过期，对齐 Android shouldRefreshUrlBeforeResume）
     const isOnlineSource = isRemotePlaybackTrack(currentTrack.value)
-    if (isOnlineSource && lastUrlResolveTime > 0
-      && Date.now() - lastUrlResolveTime > URL_EXPIRY_MS) {
+    const youtubeNeedsRefresh = shouldRefreshUrlBeforeResume(
+      getPlaybackSourceKind(currentTrack.value) === 'youtube',
+      currentStreamUrl.value,
+    )
+    if (isOnlineSource && (youtubeNeedsRefresh || (lastUrlResolveTime > 0
+      && Date.now() - lastUrlResolveTime > URL_EXPIRY_MS))) {
       // URL 已过期，重新解析
       await play(currentTrack.value, commandSource, currentRenderedPosition(), true)
       return
@@ -1769,7 +2127,7 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       const settings = useSettingsStore()
       if (settings.fadeIn && settings.fadeInDuration > 0) {
-        await invoke('resume_with_fade', { durationMs: settings.fadeInDuration })
+        await invoke('resume_with_fade', { durationMs: Math.round(settings.fadeInDuration) })
       } else {
         await invoke('resume')
       }
@@ -1777,11 +2135,18 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function seekTo(ms: number, commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     markCommandSource(commandSource)
     const roundedMs = Math.max(0, Math.round(ms))
     const maxSeekMs = durationMs.value || currentTrack.value?.durationMs || 0
     const posMs = maxSeekMs > 0 ? Math.min(roundedMs, maxSeekMs) : roundedMs
     const safePosMs = markOptimisticSeek(posMs, commandSource, { durationMs: maxSeekMs })
+    const mutation = currentAudioFileMutation()
+    if (mutation) {
+      mutation.positionMs = safePosMs
+      return
+    }
+    persistLongFormProgress(currentTrack.value, safePosMs)
     const seekSeq = lastSeekCommand.value.seq
     const requestGeneration = playbackRequestToken
 
@@ -1791,6 +2156,15 @@ export const usePlayerStore = defineStore('player', () => {
         positionMs: safePosMs,
         seekSeq,
       }
+      return
+    }
+
+    // YouTube 直链缺 PoToken、快过期或无法按范围读取时，先换新地址再从目标位置起播（对齐 Android）；
+    // 下方 403 的被动重解析保留为兜底
+    const seekTrack = currentTrack.value
+    if (seekTrack && shouldRefreshUrlBeforeSeek(getPlaybackSourceKind(seekTrack) === 'youtube', currentStreamUrl.value)) {
+      log.info('Refreshing YouTube stream URL before seek')
+      void play(seekTrack, commandSource, safePosMs, true)
       return
     }
 
@@ -1805,6 +2179,8 @@ export const usePlayerStore = defineStore('player', () => {
       // 后端确认后才钉死目标位置；失败时 catch 会回滚
       setRenderedPosition(safePosMs)
       seekGuardUntil = Math.max(seekGuardUntil, Date.now() + SEEK_EVENT_GUARD_MS)
+      // 长时间停留后跳转，之前的下一首预取可能已过期：跳转成功后重新预热（对齐 Android STATE_READY 重新预取）
+      maybePrefetchNext()
     }).catch((e) => {
       if (!isPlaybackSeekCompletionCurrent(
         requestGeneration,
@@ -1865,26 +2241,30 @@ export const usePlayerStore = defineStore('player', () => {
     }
     lastTrackEndedId = trackId
     lastTrackEndedTime = Date.now()
+    // 播完即清掉记住的位置
+    const finishedTrack = currentTrack.value
+    if (finishedTrack) persistLongFormProgress(finishedTrack, Math.max(finishedTrack.durationMs || 0, durationMs.value))
 
     // 一起听会话激活时听众不本地推进: 暂停并上报 TRACK_FINISHED, 由房主/服务端决定切歌,
-    // 避免因流时长差异先于房主播完而反向拖动整个房间（LB-02/LT-08）
+    // 避免因流时长差异先于房主播完而反向拖动整个房间（LB-02/LT-08）。
+    // 重连途中也一样：上报会走 HTTP 或在重连后补发（对齐 Android）
     const lt = useListenTogetherStore()
-    if (lt.isConnected && lt.roomId && !lt.isController) {
+    if (lt.roomId && !lt.isController) {
       await pause('remote_sync')
       lt.reportTrackFinished(trackId)
       return
     }
 
-    // 睡眠定时器
+    // 睡眠定时器；以下都是播放器自己的推进，不是用户操作
     const isLast = !shuffleEnabled.value && queueIndex.value >= queue.value.length - 1
     if (sleepTimerMode.value === 'end_of_track') {
-      await pause()
+      await pause('local_safety')
       cancelSleepTimer()
       return
     }
     if (sleepTimerMode.value === 'end_of_queue') {
       if (isLast && repeatMode.value !== 'all') {
-        await pause()
+        await pause('local_safety')
         cancelSleepTimer()
         return
       }
@@ -1893,18 +2273,18 @@ export const usePlayerStore = defineStore('player', () => {
     if (repeatMode.value === 'one') {
       // 单曲循环：重新播放当前曲目
       if (currentTrack.value) {
-        await play(currentTrack.value)
+        await play(currentTrack.value, 'local_safety')
       }
     } else if (repeatMode.value === 'all') {
       // 列表循环：强制推进到下一首（到末尾回到开头）
-      await next(true)
+      await next(true, 'local_safety')
     } else {
       // 顺序播放：还有下一首则推进，否则停止
       if (shuffleEnabled.value || queueIndex.value < queue.value.length - 1) {
-        await next(false)
+        await next(false, 'local_safety')
       } else {
         // 停止播放但保留队列（对齐 Android stopPlaybackPreservingQueue）
-        await pause()
+        await pause('local_safety')
         positionMs.value = 0
       }
     }
@@ -1917,11 +2297,15 @@ export const usePlayerStore = defineStore('player', () => {
    * - Shuffle 模式使用三栈模型
    */
   async function next(force: boolean = false, commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     markCommandSource(commandSource)
     log.info('next:', { source: commandSource, force, shuffle: shuffleEnabled.value, repeat: repeatMode.value, index: queueIndex.value, queueLen: queue.value.length })
     if (queue.value.length === 0) return
     // 用户手动操作重置失败计数（自动 skip 不重置）
-    if (!_isAutoSkipping) consecutivePlayFailures = 0
+    if (!_isAutoSkipping) {
+      consecutivePlayFailures = 0
+      consecutiveLoginSkips = 0
+    }
 
     let nextIdx: number
     if (shuffleEnabled.value) {
@@ -1964,7 +2348,7 @@ export const usePlayerStore = defineStore('player', () => {
         }
       }
     }
-    await play(queue.value[nextIdx], commandSource)
+    await play(queue.value[nextIdx], commandSource, 0, false, false)
   }
 
   /**
@@ -1974,9 +2358,11 @@ export const usePlayerStore = defineStore('player', () => {
    * - 非 shuffle：只有 repeat_all 才回绕到末尾
    */
   async function previous(commandSource: PlaybackCommandSource = 'local') {
+    if (blockedByListenTogether(commandSource)) return
     markCommandSource(commandSource)
     log.info('previous:', { source: commandSource, shuffle: shuffleEnabled.value, positionMs: Math.round(positionMs.value) })
     consecutivePlayFailures = 0
+    consecutiveLoginSkips = 0
     if (queue.value.length === 0) return
 
     // 播放超过 3 秒则回到开头
@@ -1990,7 +2376,7 @@ export const usePlayerStore = defineStore('player', () => {
       if (shuffleHistory.length > 0) {
         shuffleFuture.push(queueIndex.value)
         const prevIdx = shuffleHistory.pop()!
-        await play(queue.value[prevIdx], commandSource)
+        await play(queue.value[prevIdx], commandSource, 0, false, false)
       } else {
         seekTo(0, commandSource) // 无历史，重新开始当前曲目
       }
@@ -1999,9 +2385,9 @@ export const usePlayerStore = defineStore('player', () => {
 
     // 非 shuffle 模式
     if (queueIndex.value > 0) {
-      await play(queue.value[queueIndex.value - 1], commandSource)
+      await play(queue.value[queueIndex.value - 1], commandSource, 0, false, false)
     } else if (repeatMode.value === 'all') {
-      await play(queue.value[queue.value.length - 1], commandSource)
+      await play(queue.value[queue.value.length - 1], commandSource, 0, false, false)
     }
     // else: 已在开头且非列表循环，不动
   }
@@ -2122,7 +2508,28 @@ export const usePlayerStore = defineStore('player', () => {
   // 播放速度
   const playbackSpeed = ref(settings.playbackSpeed)
   const currentStreamUrl = ref<string | null>(null)
+  let currentResolvedStreamUrls: string[] = []
+  // 自己解析出的直链对应的一起听频道和音质，分享给听众时据此加音质标记
+  let currentStreamChannel: string | null = null
+  let currentStreamQualities = new Map<string, string>()
   let listenTogetherSyncRateMultiplier: number | null = null
+
+  function rememberStreamQualities(resolved: ResolvedPlaybackSource | null) {
+    // 直链（包括房间给的）和试听片段的实际音质未知，不标
+    currentStreamChannel = resolved && !resolved.isPreview ? ltChannelForSource(resolved.source) : null
+    currentStreamQualities = new Map()
+    if (!resolved || !currentStreamChannel) return
+    currentStreamQualities.set(resolved.url, resolved.audioInfo?.qualityKey ?? resolved.qualityKey)
+    for (const detail of resolved.candidateDetails ?? []) {
+      currentStreamQualities.set(detail.url, detail.audioInfo?.qualityKey ?? detail.qualityKey)
+    }
+  }
+
+  /** 分享出去的链接带音质标记（对齐 Android decorateListenTogetherStreamUrl）；已带标记的保持原样 */
+  function shareableStreamUrl(url: string): string {
+    if (!currentStreamChannel || hasLtStreamQuality(url)) return url
+    return decorateLtStreamUrl(url, currentStreamChannel, currentStreamQualities.get(url))
+  }
 
   function effectivePlaybackSpeed(): number {
     const multiplier = listenTogetherSyncRateMultiplier ?? 1
@@ -2142,13 +2549,86 @@ export const usePlayerStore = defineStore('player', () => {
     if (_speedInvokeTimer) clearTimeout(_speedInvokeTimer)
     _speedInvokeTimer = setTimeout(() => {
       _speedInvokeTimer = null
-      invoke('set_speed', { speed: effectivePlaybackSpeed() }).catch(() => {})
+      invoke('set_speed', { speed: effectivePlaybackSpeed() })
+        .catch(error => log.warn('listen together sync rate not applied:', error))
     }, 80)
   }
 
   function getCurrentStreamUrl(trackId?: string): string | null {
     if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return null
-    return currentStreamUrl.value
+    return currentStreamUrl.value ? shareableStreamUrl(currentStreamUrl.value) : null
+  }
+
+  function getCurrentStreamUrls(trackId?: string): string[] {
+    if (!currentTrack.value || (trackId && currentTrack.value.id !== trackId)) return []
+    return currentResolvedStreamUrls.map(shareableStreamUrl)
+  }
+
+  /**
+   * 一起听房主给听众准备可分享的直链：只解析不播放，也不看本地缓存或下载
+   * （对齐 Android resolveShareableStreamUrls）。预览片段和 HLS 分享不了，返回空
+   */
+  async function resolveShareableStreamUrls(track: TrackInfo): Promise<string[]> {
+    try {
+      const settings = playbackSourceSettings()
+      if (getPlaybackSourceKind(track) === 'netease') return await resolveNeteaseShareableStreamUrls(track, settings)
+      const result = await resolvePlaybackResult(track, settings)
+      if (result.type !== 'success' || result.isPreview || result.streamType === 'hls') return []
+      const channelId = ltChannelForSource(result.source)
+      if (!channelId) return []
+      const candidates = [
+        { url: result.url, quality: result.audioInfo?.qualityKey ?? result.qualityKey, bitrate: result.bitrate ?? 0 },
+        ...(result.candidateDetails ?? []).filter(detail => detail.streamType !== 'hls').map(detail => ({
+          url: detail.url, quality: detail.audioInfo?.qualityKey ?? detail.qualityKey, bitrate: detail.bitrate ?? 0,
+        })),
+      ].filter((candidate, index, all) =>
+        isDirectStreamUrl(candidate.url) && all.findIndex(other => other.url === candidate.url) === index)
+      const chosen = result.source === 'bilibili'
+        ? pickBiliShareableStreams(candidates, settings.biliQuality)
+        : candidates.slice(0, LT_SHARE_LIMITS[channelId] ?? 1)
+      return chosen.map(candidate => decorateLtStreamUrl(candidate.url, channelId, candidate.quality))
+    } catch (error) {
+      log.warn('resolve shareable stream failed:', error)
+      return []
+    }
+  }
+
+  /**
+   * 网易云按音质组各取一条（对齐 Android resolveNeteaseListenTogetherShareableStreams）：
+   * 组内依次请求，实际音质已经分享过就试下一档，最多三条
+   */
+  async function resolveNeteaseShareableStreamUrls(track: TrackInfo, settings: PlaybackSourceSettings): Promise<string[]> {
+    const urls: string[] = []
+    const qualities = new Set<string>()
+    for (const group of neteaseShareQualityGroups(settings.neteaseQuality)) {
+      if (urls.length >= (LT_SHARE_LIMITS.netease ?? 3)) break
+      for (const quality of group) {
+        const result = await resolvePlaybackResult(track, settings, { qualityOverride: quality, allowFallback: false })
+          .catch(() => null)
+        if (!result || result.type !== 'success' || result.isPreview || result.source !== 'netease') continue
+        if (!isDirectStreamUrl(result.url)) continue
+        const actual = (result.audioInfo?.qualityKey ?? result.qualityKey ?? quality).toLowerCase()
+        if (qualities.has(actual)) continue
+        qualities.add(actual)
+        urls.push(decorateLtStreamUrl(result.url, 'netease', actual))
+        break
+      }
+    }
+    return urls
+  }
+
+  /** B 站按偏好、高→中→低、无损的顺序各取码率最高的一条，最多两条（对齐 Android selectBiliListenTogetherShareableStreams） */
+  function pickBiliShareableStreams<T extends { url: string; quality: string; bitrate: number }>(
+    candidates: T[],
+    preferredQuality: string,
+  ): T[] {
+    const byQuality = new Map<string, T>()
+    for (const candidate of [...candidates].sort((left, right) => right.bitrate - left.bitrate)) {
+      if (!byQuality.has(candidate.quality)) byQuality.set(candidate.quality, candidate)
+    }
+    return biliShareQualityOrder(preferredQuality, new Set(byQuality.keys()))
+      .map(quality => byQuality.get(quality))
+      .filter((candidate): candidate is T => !!candidate)
   }
 
   async function setSpeed(spd: number) {
@@ -2172,12 +2652,13 @@ export const usePlayerStore = defineStore('player', () => {
         requestGeneration: playbackRequestToken,
       }
     }
-    // 去抖后再下发：后端改速度要从当前位置重建解码会话，滑条 @input
-    // 每 tick 连发会触发连环重建。UI/插值已即时更新，音频落地晚 200ms 无感
+    // 去抖后再下发：滑条 @input 每 tick 都会触发，只需送出最后的值。
+    // 后端在输出端保持音调地实时变速，UI/插值已即时更新，音频落地晚 200ms 无感
     if (_speedInvokeTimer) clearTimeout(_speedInvokeTimer)
     _speedInvokeTimer = setTimeout(() => {
       _speedInvokeTimer = null
-      invoke('set_speed', { speed: effectivePlaybackSpeed() }).catch(() => {})
+      invoke('set_speed', { speed: effectivePlaybackSpeed() })
+        .catch(error => log.warn('playback speed not applied:', error))
     }, 200)
   }
 
@@ -2197,12 +2678,29 @@ export const usePlayerStore = defineStore('player', () => {
   async function setLoudnessGain(mb: number) {
     loudnessGainMb.value = Math.round(Math.max(0, Math.min(1500, mb)))
     settings.loudnessGainMb = loudnessGainMb.value
-    try { await invoke('set_loudness_gain', { gainMb: loudnessGainMb.value }) } catch {}
+    try {
+      await invoke('set_loudness_gain', { gainMb: loudnessGainMb.value })
+    } catch (error) {
+      log.warn('loudness gain not applied:', error)
+    }
   }
 
   // 音量均衡由设置页直接改 settings，这里跟随下发到音频链
   watch(() => settings.normalizeVolume, (enabled) => {
-    void invoke('set_normalize_volume', { enabled }).catch(() => {})
+    void invoke('set_normalize_volume', { enabled })
+      .catch(error => log.warn('volume normalization not applied:', error))
+  })
+
+  // 多声道音轨的动态范围压缩：对之后打开的音轨生效
+  watch(() => settings.multichannelDrc, (enabled) => {
+    void invoke('set_multichannel_drc', { enabled })
+      .catch(error => log.warn('multichannel dynamic range compression not applied:', error))
+  })
+
+  // 声道平衡同样在设置页里改，拖动时实时下发，音频链按 30 ms 平滑过渡
+  watch(() => settings.volumeBalance, (balance) => {
+    void invoke('set_volume_balance', { balance })
+      .catch(error => log.warn('channel balance not applied:', error))
   })
 
   async function setEqualizer(enabled: boolean, bands: number[]) {
@@ -2210,7 +2708,11 @@ export const usePlayerStore = defineStore('player', () => {
     equalizerBands.value = bands.map(v => Math.round(Math.max(-1500, Math.min(1500, v))))
     settings.equalizerEnabled = enabled
     settings.equalizerBands = [...equalizerBands.value]
-    try { await invoke('set_equalizer', { enabled, bandLevelsMb: equalizerBands.value }) } catch {}
+    try {
+      await invoke('set_equalizer', { enabled, bandLevelsMb: equalizerBands.value })
+    } catch (error) {
+      log.warn('equalizer not applied:', error)
+    }
   }
 
   async function setEqualizerPreset(presetId: string) {
@@ -2236,7 +2738,25 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       await invoke('reset_audio_effects')
       await invoke('set_speed', { speed: 1.0 })
-    } catch {}
+    } catch (error) {
+      log.warn('audio effects reset not applied:', error)
+    }
+  }
+
+  // 取流按后端实际能解的编码挑选；查询失败或 FFmpeg 没加载上时只认内置解码器，
+  // Opus、E-AC-3 这类流排到后面，选出来的流一定能播
+  const decoderCapabilities = ref<DecoderCapabilities | null>(null)
+  async function loadDecoderCapabilities() {
+    try {
+      const capabilities = await invoke<DecoderCapabilities>('get_decoder_capabilities')
+      setDecodableCodecs(capabilities.codecs)
+      decoderCapabilities.value = capabilities
+      if (capabilities.ffmpegError) {
+        log.warn('FFmpeg unavailable, streams that need it will be avoided:', capabilities.ffmpegError)
+      }
+    } catch (error) {
+      log.warn('decoder capabilities unavailable, using built-in decoders only:', error)
+    }
   }
 
   async function applyPersistedSettings() {
@@ -2248,20 +2768,51 @@ export const usePlayerStore = defineStore('player', () => {
     equalizerBands.value = settings.equalizerBands.map(value => Math.round(Math.max(-1500, Math.min(1500, value))))
     _interpSpeed = playbackSpeed.value
 
-    await Promise.allSettled([
-      invoke('set_volume', { level: volume.value }),
-      invoke('set_speed', { speed: effectivePlaybackSpeed() }),
-      invoke('set_loudness_gain', { gainMb: loudnessGainMb.value }),
-      invoke('set_normalize_volume', { enabled: settings.normalizeVolume }),
-      invoke('set_equalizer', { enabled: equalizerEnabled.value, bandLevelsMb: equalizerBands.value }),
-    ])
+    const restored: Array<[string, Promise<unknown>]> = [
+      ['volume', invoke('set_volume', { level: volume.value })],
+      ['output device', invoke('set_audio_output_device', { name: settings.audioOutputDevice || null })
+        .catch((error) => {
+          log.warn('preferred output device unavailable, using the system default:', error)
+          return invoke('set_audio_output_device', { name: null })
+        })],
+      ['speed', invoke('set_speed', { speed: effectivePlaybackSpeed() })],
+      ['loudness gain', invoke('set_loudness_gain', { gainMb: loudnessGainMb.value })],
+      ['volume normalization', invoke('set_normalize_volume', { enabled: settings.normalizeVolume })],
+      ['multichannel dynamic range compression', invoke('set_multichannel_drc', { enabled: settings.multichannelDrc })],
+      ['channel balance', invoke('set_volume_balance', { balance: settings.volumeBalance })],
+      ['equalizer', invoke('set_equalizer', { enabled: equalizerEnabled.value, bandLevelsMb: equalizerBands.value })],
+    ]
+    const results = await Promise.allSettled(restored.map(([, request]) => request))
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') log.warn(`persisted ${restored[index][0]} not applied:`, result.reason)
+    })
   }
 
   // 批量替换队列，并且只发起一次目标曲目的播放请求
+  // 队列从哪个本地歌单开始播：其中的歌计入一次播放时，歌单也计一次（对齐 Android localPlaylistPlaybackSource）
+  let localPlaylistSource: { id: string; members: Set<string> } | null = null
+
+  function localPlaylistMemberKey(track: TrackInfo): string {
+    return track.playlistKey || track.id
+  }
+
+  function setLocalPlaylistSource(tracks: TrackInfo[], localPlaylistId?: string) {
+    localPlaylistSource = localPlaylistId
+      ? { id: localPlaylistId, members: new Set(tracks.map(localPlaylistMemberKey)) }
+      : null
+  }
+
+  /** 这首歌属于当前队列的来源本地歌单时返回歌单 id；之后加进队列的别处歌曲不算 */
+  function localPlaylistIdFor(track: TrackInfo): string | null {
+    return localPlaylistSource?.members.has(localPlaylistMemberKey(track)) ? localPlaylistSource.id : null
+  }
+
+  /** @param localPlaylistId 从本地歌单开始播放时传入，用于歌单播放统计 */
   function playAll(
     tracks: TrackInfo[],
     requestedTrackId?: string,
     requestedPlaylistKey?: string,
+    localPlaylistId?: string,
   ) {
     const startIndex = resolvePlaybackQueueStartIndex(
       tracks,
@@ -2285,6 +2836,7 @@ export const usePlayerStore = defineStore('player', () => {
     queueIndex.value = startIndex
     shuffleHistory = []
     shuffleFuture = []
+    setLocalPlaylistSource(tracks, localPlaylistId)
     // 队列整体替换后 shuffleBag 必须按新队列重建（排除当前索引）；
     // 否则曲目自然结束/手动 next 走 bag 空 -> 提前 return，自动切歌永久卡死
     if (shuffleEnabled.value) {
@@ -2296,8 +2848,9 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   // 洗牌后替换队列并播放
-  function shufflePlay(tracks: TrackInfo[]) {
+  function shufflePlay(tracks: TrackInfo[], localPlaylistId?: string) {
     if (tracks.length === 0) return
+    setLocalPlaylistSource(tracks, localPlaylistId)
     const shuffled = [...tracks]
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -2354,7 +2907,7 @@ export const usePlayerStore = defineStore('player', () => {
       shuffleBag = []
       shuffleHistory = []
       shuffleFuture = []
-      pause()
+      void pause('local_safety')
       savePlayerState()
       return
     }
@@ -2415,7 +2968,83 @@ export const usePlayerStore = defineStore('player', () => {
     return originalTrackInfo !== null
   }
 
+  async function withReleasedAudioFile<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
+    const key = audioFilePathKey(filePath)
+    if (audioFileMutations.has(key)) throw new Error('An operation on this audio file is already in progress')
+    const track = currentTrack.value
+    const usesFile = !!track && (
+      (!isLoadingAudio.value && loadedPlaybackRequestToken === playbackRequestToken && audioFilePathKey(_currentLoadedFromDownloadPath) === key)
+      || audioFilePathKey(track.audioUrl) === key
+      || (isLoadingAudio.value && audioFilePathKey(useDownloadStore().getDownloadedTrack(track.id)?.filePath) === key)
+    )
+    let finishMutation!: () => void
+    const mutation = {
+      trackId: usesFile ? track?.id || null : null,
+      requestToken: null as number | null,
+      shouldResume: usesFile && (isPlaying.value || isLoadingAudio.value),
+      releasesCurrentPlayback: usesFile,
+      positionMs: positionMs.value,
+      finished: new Promise<void>(resolve => { finishMutation = resolve }),
+    }
+    audioFileMutations.set(key, mutation)
+    let requestToken: number | null = null
+    try {
+      if (usesFile && track) {
+        requestToken = ++playbackRequestToken
+        mutation.requestToken = requestToken
+        playbackStartupWatchdog.cancel()
+        replacePlaybackDemand(null)
+        _interpIsPlaying = false
+        freezeRenderedPosition()
+        mutation.positionMs = positionMs.value
+        isPlaying.value = false
+        isLoadingAudio.value = false
+        _needsReload = true
+        deferredPlaybackSeek = null
+        pendingSeek = null
+        seekGuardUntil = 0
+        await invoke('begin_playback_request', {
+          requestGeneration: requestToken, trackId: track.id,
+          source: getPlaybackSourceKind(track) || track.source || 'local',
+        })
+      }
+      await invoke<boolean>('release_audio_file', { path: filePath })
+      if (requestToken !== null && requestToken === playbackRequestToken) {
+        _currentLoadedFromDownloadPath = null
+        isPlayingFromDownload.value = false
+        isPlayingFromCache.value = false
+        audioInfo.value = null
+        loadedPlaybackRequestToken = 0
+      }
+      return await operation()
+    } finally {
+      audioFileMutations.delete(key)
+      finishMutation()
+      const resumeTrack = currentTrack.value
+      if (requestToken !== null && requestToken === playbackRequestToken && resumeTrack && track && resumeTrack.id === track.id) {
+        _needsReload = true
+        savePlayerState()
+        if (mutation.shouldResume && (isRemotePlaybackTrack(resumeTrack) || resumeTrack.audioUrl)) {
+          try {
+            await play(resumeTrack, 'local_safety', mutation.positionMs, true)
+          } catch (error) {
+            log.warn('Resume after audio file operation failed:', error)
+          }
+        } else {
+          isPlaying.value = false
+        }
+      }
+    }
+  }
+
   function handleDownloadedFileRemoved(trackId: string, filePath?: string) {
+    const key = audioFilePathKey(filePath)
+    if (key) {
+      queue.value = queue.value.map(track => audioFilePathKey(track.audioUrl) === key ? { ...track, audioUrl: '' } : track)
+      if (currentTrack.value && audioFilePathKey(currentTrack.value.audioUrl) === key) {
+        currentTrack.value = { ...currentTrack.value, audioUrl: '' }
+      }
+    }
     if (!currentTrack.value || currentTrack.value.id !== trackId) return
     if (filePath && _currentLoadedFromDownloadPath && _currentLoadedFromDownloadPath !== filePath) return
 
@@ -2438,7 +3067,8 @@ export const usePlayerStore = defineStore('player', () => {
     playbackUrlResolver.invalidate(track, sourceSettings)
     lastUrlResolveTime = 0
     playError.value = null
-    await play(track, 'local', pos, true)
+    // 换音质只影响本机，一起听里没有控制权时也允许
+    await play(track, 'local_safety', pos, true)
     if (playError.value) {
       throw new Error(playError.value)
     }
@@ -2450,6 +3080,7 @@ export const usePlayerStore = defineStore('player', () => {
   // 初始化：恢复持久化状态
   loadPlayerState()
   void applyPersistedSettings()
+  void loadDecoderCapabilities()
 
   return {
     isPlaying, currentTrack, positionMs, durationMs, queue, queueIndex,
@@ -2459,19 +3090,21 @@ export const usePlayerStore = defineStore('player', () => {
     lastCommandSource, lastSeekCommand, isRemoteSyncGuardActive,
     playbackSpeed, currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
-    progress, interpolatedPositionMs, interpolatedProgress,
+    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs,
     currentTimeFormatted, durationFormatted,
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode,
-    playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl,
+    playMode, setVolume, setSpeed, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl, getCurrentStreamUrls,
+    resolveShareableStreamUrls,
+    localPlaylistIdFor,
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
-    applyPersistedSettings,
+    applyPersistedSettings, decoderCapabilities,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
     prefetchPlaybackTracks,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
-    handleDownloadedFileRemoved, replayWithQuality,
+    handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
   }
 })
 
@@ -2511,6 +3144,8 @@ async function playRemoteUrl(
   startPositionMs = 0,
   cacheKey?: string,
   expectedContentLength?: number,
+  expectedContentMd5?: string,
+  streamType: 'direct' | 'hls' = 'direct',
 ): Promise<number> {
   const safeStartMs = Math.max(0, Math.round(startPositionMs))
   const cacheLimitBytes = playbackCacheLimitBytes()
@@ -2524,6 +3159,8 @@ async function playRemoteUrl(
         cacheKey,
         cacheLimitBytes,
         expectedContentLength,
+        expectedContentMd5,
+        streamType,
         requestGeneration,
       })
     } catch (streamError) {
@@ -2540,6 +3177,8 @@ async function playRemoteUrl(
         cacheKey,
         cacheLimitBytes,
         expectedContentLength,
+        expectedContentMd5,
+        streamType,
         requestGeneration,
       })
     }
@@ -2553,6 +3192,8 @@ async function playRemoteUrl(
       cacheKey,
       cacheLimitBytes,
       expectedContentLength,
+      expectedContentMd5,
+      streamType,
       requestGeneration,
     })
   } catch (streamError) {
@@ -2568,6 +3209,8 @@ async function playRemoteUrl(
       cacheKey,
       cacheLimitBytes,
       expectedContentLength,
+      expectedContentMd5,
+      streamType,
       requestGeneration,
     })
   }

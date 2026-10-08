@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+package-lock.json
 
 # Build output
 dist/
@@ -39,9 +40,8 @@ src-tauri/src/.omc/
 AGENTS.md
 CLAUDE.md
 docs-private/
-
-# Audit report (local only)
-.report/
+# 本地下载/构建校验用的临时工作区
+.download-verification/
 
 # TypeScript incremental build info
 *.tsbuildinfo

@@ -7,10 +7,11 @@
 //!
 //! 文件持久化受设置项控制：`log_to_file` 为真时追加 Folder target，
 //! 落到 `<data_dir>/NeriPlayer/logs/`。受插件能力限制，文件 target 只能
-//! 在启动时构建，运行时切换开关需重启生效；日志级别则可运行时调整。
+//! 在启动时构建，运行时切换开关需重启生效；日志级别经 `set_runtime_level` 即时生效。
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use log::LevelFilter;
@@ -353,14 +354,44 @@ fn format_record_colored(
     ));
 }
 
+/// 运行时日志级别（`LevelFilter as usize`）。
+///
+/// 插件的 dispatch 级别在构建时就固定了，而前端日志经 `log::logger().log()`
+/// 直接进入 dispatch、不看 `log::max_level`，所以只调 `set_max_level`
+/// 对前端日志无效。dispatch 按 Trace 构建，再用这个原子值逐条过滤。
+static RUNTIME_LEVEL: AtomicUsize = AtomicUsize::new(LevelFilter::Info as usize);
+
+fn level_from_usize(value: usize) -> LevelFilter {
+    match value {
+        0 => LevelFilter::Off,
+        1 => LevelFilter::Error,
+        2 => LevelFilter::Warn,
+        3 => LevelFilter::Info,
+        4 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    }
+}
+
+pub fn runtime_level() -> LevelFilter {
+    level_from_usize(RUNTIME_LEVEL.load(Ordering::Relaxed))
+}
+
+/// 立即切换日志级别：前后端日志都按新级别过滤
+pub fn set_runtime_level(level: LevelFilter) {
+    RUNTIME_LEVEL.store(level as usize, Ordering::Relaxed);
+    log::set_max_level(level);
+}
+
 /// 构建日志插件。
 ///
 /// - `log_to_file`：为真时追加文件 target，否则仅输出到 stdout
-/// - `level`：全局最低日志级别
+/// - `level`：启动时的日志级别，之后可由 `set_runtime_level` 调整；
+///   插件初始化会把 `log::max_level` 设为 Trace，宿主须在 setup 里再调用一次 `set_runtime_level`
 pub fn build_plugin<R: Runtime>(
     log_to_file: bool,
     level: LevelFilter,
 ) -> tauri::plugin::TauriPlugin<R> {
+    RUNTIME_LEVEL.store(level as usize, Ordering::Relaxed);
     let mut targets = vec![Target::new(TargetKind::Stdout)];
     if log_to_file {
         targets.push(Target::new(TargetKind::Folder {
@@ -370,7 +401,8 @@ pub fn build_plugin<R: Runtime>(
     }
 
     let builder = tauri_plugin_log::Builder::new()
-        .level(level)
+        .level(LevelFilter::Trace)
+        .filter(|metadata| metadata.level() <= runtime_level())
         // 降噪：第三方库的 target 前缀过滤到 Warn 以上，避免刷屏
         .level_for("hyper", LevelFilter::Warn)
         .level_for("reqwest", LevelFilter::Warn)
@@ -401,6 +433,23 @@ pub fn build_plugin<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::redact_sensitive;
+
+    #[test]
+    fn runtime_level_round_trips_every_filter() {
+        use log::LevelFilter;
+        for level in [
+            LevelFilter::Off,
+            LevelFilter::Error,
+            LevelFilter::Warn,
+            LevelFilter::Info,
+            LevelFilter::Debug,
+            LevelFilter::Trace,
+        ] {
+            assert_eq!(super::level_from_usize(level as usize), level);
+        }
+        assert!(log::Level::Warn <= LevelFilter::Info);
+        assert!(log::Level::Error > LevelFilter::Off, "Off drops every record");
+    }
 
     /// Set-Cookie 行必须整段打码，键名保留（cookie_store P0 泄漏路径）
     #[test]

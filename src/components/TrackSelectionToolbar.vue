@@ -10,12 +10,15 @@ withDefaults(defineProps<{
   showPlaylist?: boolean
   showDownload?: boolean
   showDelete?: boolean
+  /** 删除按钮的提示文字；歌单内是「移除」而不是删除文件 */
+  deleteLabel?: string
 }>(), {
   showPlay: true,
   showQueue: true,
   showPlaylist: true,
   showDownload: true,
   showDelete: false,
+  deleteLabel: '',
 })
 
 const emit = defineEmits<{
@@ -54,7 +57,7 @@ const { t } = useI18n()
       <button v-if="showDownload" class="selection-btn" type="button" :disabled="selectedCount === 0" :title="t('common.download_selected')" @click="emit('download')">
         <span class="material-symbols-rounded">download</span>
       </button>
-      <button v-if="showDelete" class="selection-btn danger" type="button" :disabled="selectedCount === 0" :title="t('common.delete_selected')" @click="emit('delete')">
+      <button v-if="showDelete" class="selection-btn danger" type="button" :disabled="selectedCount === 0" :title="deleteLabel || t('common.delete_selected')" @click="emit('delete')">
         <span class="material-symbols-rounded">delete</span>
       </button>
       <button class="selection-btn ghost" type="button" :title="t('common.exit_selection')" @click="emit('exit')">

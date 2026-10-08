@@ -1,14 +1,20 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import {
+  ref, computed, nextTick, onErrorCaptured, onMounted, onUnmounted, watch,
+  type ComponentInternalInstance, type ComponentPublicInstance,
+} from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
 import { installGlobalShortcuts } from '@/modules/shortcuts/globalShortcuts'
+import { installDesktopLyricsBridge } from '@/modules/desktopLyrics/bridge'
 import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
+import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
+import { useDownloadStore } from '@/stores/download'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -18,11 +24,13 @@ import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppToast from '@/components/AppToast.vue'
 import TitleBar from '@/components/TitleBar.vue'
-import { setLocale } from '@/i18n'
+import i18n, { setLocale } from '@/i18n'
+import { useToastStore } from '@/stores/toast'
 import { applyTheme } from '@/utils/theme'
 import { applyThemeColor } from '@/utils/themeColor'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { applyDynamicColorFromCover, applyDynamicColorFromSeed, clearDynamicColor, resolveSystemAccentSeed } from '@/utils/colorExtractor'
+import { createLogger } from '@/utils/logger'
 import { hasVisiblePlaybackSession } from '@/modules/playback/playbackRequest'
 
 type CoverSnapshot = {
@@ -38,6 +46,7 @@ const isMacPlatform = /Mac|iPhone|iPad/.test(
 )
 if (isMacPlatform) document.documentElement.classList.add('platform-mac')
 
+const appLog = createLogger('app')
 const player = usePlayerStore()
 const settingsStore = useSettingsStore()
 const likedSongs = useLikedSongsStore()
@@ -47,6 +56,7 @@ const isNowPlayingOpen = ref(false)
 // 静音前的音量，取消静音时还原
 let volumeBeforeMute = 0.5
 let uninstallShortcuts: (() => void) | null = null
+let uninstallDesktopLyrics: (() => void) | null = null
 const contentRef = ref<HTMLElement | null>(null)
 const miniPlayerRef = ref<InstanceType<typeof MiniPlayer> | null>(null)
 const nowPlayingRef = ref<InstanceType<typeof NowPlaying> | null>(null)
@@ -146,6 +156,29 @@ async function openNowPlaying() {
   isNowPlayingOpen.value = true
 }
 
+// 播放页里的组件挂载失败后，外层 <transition> 之后的每次更新都会因为它没有渲染结果而抛错，
+// 整个界面就此卡住：关掉播放页，并换 key 重建这层 transition
+const nowPlayingBoundaryKey = ref(0)
+
+function failedToMountInNowPlaying(instance: ComponentPublicInstance | null): boolean {
+  let current: ComponentInternalInstance | null = instance?.$ ?? null
+  if (!current || current.isMounted) return false
+  for (; current; current = current.parent) {
+    if (current.type === NowPlaying) return true
+  }
+  return false
+}
+
+onErrorCaptured((error, instance) => {
+  if (!failedToMountInNowPlaying(instance)) return
+  appLog.error('now playing failed to mount:', error)
+  isNowPlayingOpen.value = false
+  nowPlayingMotionState.value = null
+  nowPlayingBoundaryKey.value++
+  useToastStore().error((i18n.global as any).t('player.now_playing_failed'))
+  return false
+})
+
 async function closeNowPlaying() {
   if (!isNowPlayingOpen.value && nowPlayingMotionState.value !== 'opening') return
   const from = nowPlayingRef.value?.getCoverSnapshot?.() as CoverSnapshot | null
@@ -171,6 +204,18 @@ const miniCoverFallbackSrc = computed(() => {
 })
 
 // 背景图片
+// 旧版直接引用原图路径，资源作用域外的图片重启后会丢失：启动时复制进应用数据目录
+async function adoptManagedBackgroundImage() {
+  const uri = settingsStore.backgroundImageUri
+  if (!uri || /^https?:/i.test(uri)) return
+  try {
+    const managed = await invoke<string>('import_background_image', { source: uri })
+    if (managed !== uri && settingsStore.backgroundImageUri === uri) settingsStore.backgroundImageUri = managed
+  } catch (error) {
+    appLog.warn('Custom background could not be copied:', error)
+  }
+}
+
 const bgImageStyle = computed(() => {
   const uri = settingsStore.backgroundImageUri
   if (!uri) return null
@@ -184,17 +229,21 @@ const bgImageStyle = computed(() => {
 
 // 对齐 Android：数据变更后短暂延迟，给连续操作留出合并时间
 const DEBOUNCE_SYNC_MS = 5_000
+// 长音频进度播放时每 15 秒写一次：比写入间隔长，连续播放时不同步，暂停或停下后再同步
+const HISTORY_PROGRESS_SETTLE_MS = 30_000
 const PERIODIC_SYNC_MS = 60 * 60 * 1000
 let debounceSyncTimer: ReturnType<typeof setTimeout> | null = null
 let historyBatchedTimer: ReturnType<typeof setTimeout> | null = null
+let historyProgressTimer: ReturnType<typeof setTimeout> | null = null
 let periodicSyncTimer: ReturnType<typeof setInterval> | null = null
 let unlistenPlaylistChanged: UnlistenFn | null = null
+let unlistenPlaylistUsage: UnlistenFn | null = null
 let unlistenCloseRequested: UnlistenFn | null = null
 let unlistenTrayNowPlaying: UnlistenFn | null = null
 let unlistenTrayHome: UnlistenFn | null = null
 
 function handleBeforeUnload() {
-  player.flushPlayerState()
+  void player.flushPlayerState()
   // 结算最后一段收听，否则关窗前听的时长会丢
   void usePlaybackStatsStore().flushFinal()
 }
@@ -207,9 +256,8 @@ async function handleCloseRequested(event: { preventDefault: () => void }) {
   if (closeFlushDone) return
   closeFlushDone = true
   try {
-    // 同步保存播放器状态 + 等待统计落盘（隐藏后播放继续，下次关闭不再有卸载事件）
-    player.flushPlayerState()
-    await usePlaybackStatsStore().flushFinal()
+    // 等待播放器状态与统计都落库（关窗=隐藏到托盘，播放继续，不再有卸载事件）
+    await Promise.allSettled([player.flushPlayerState(), usePlaybackStatsStore().flushFinal()])
   } catch {
     // 落盘失败不阻塞
   }
@@ -218,8 +266,11 @@ async function handleCloseRequested(event: { preventDefault: () => void }) {
 
 function scheduleDebouncedSync() {
   const syncStore = useSyncStore()
-  // 同步进行中不调度
-  if (syncStore.isSyncing) return
+  // 这一轮同步的快照里没有这次修改，等它结束后补一轮
+  if (syncStore.isSyncing) {
+    syncStore.requestFollowUpSync()
+    return
+  }
 
   if (debounceSyncTimer) clearTimeout(debounceSyncTimer)
   debounceSyncTimer = setTimeout(() => {
@@ -230,13 +281,18 @@ function scheduleDebouncedSync() {
 
 function triggerSilentSync() {
   const syncStore = useSyncStore()
-  if (syncStore.isSyncing) return
+  if (syncStore.isSyncing) {
+    syncStore.requestFollowUpSync()
+    return
+  }
   void syncStore.syncAuto(true)
 }
 
-function scheduleHistorySync() {
+function scheduleHistorySync(event: Event) {
+  const type = (event as CustomEvent<{ type?: string }>).detail?.type
+  // 同步自己写回的历史不需要再同步一次
+  if (type === 'sync') return
   const syncStore = useSyncStore()
-  if (syncStore.isSyncing) return
 
   if (!(
     (syncStore.github.configured && syncStore.github.autoSync) ||
@@ -245,11 +301,24 @@ function scheduleHistorySync() {
 
   const delay = syncFrequencyDelayMs(syncStore.syncFrequency)
   if (delay === 0) {
+    if (type === 'progress') {
+      if (historyProgressTimer) clearTimeout(historyProgressTimer)
+      historyProgressTimer = setTimeout(() => {
+        historyProgressTimer = null
+        triggerSilentSync()
+      }, HISTORY_PROGRESS_SETTLE_MS)
+      return
+    }
+    if (historyProgressTimer) {
+      clearTimeout(historyProgressTimer)
+      historyProgressTimer = null
+    }
     triggerSilentSync()
     return
   }
 
-  if (historyBatchedTimer) clearTimeout(historyBatchedTimer)
+  // 批量窗口从第一条修改开始计时；每次播放都重新计时的话，连续听歌时永远等不到同步
+  if (historyBatchedTimer) return
   historyBatchedTimer = setTimeout(() => {
     historyBatchedTimer = null
     triggerSilentSync()
@@ -262,22 +331,22 @@ function scheduleHistorySync() {
 const KEEP_ALIVE_ROUTE_NAMES = ['home', 'explore', 'library']
 const _scrollPositions = new Map<string, number>()
 let _prevRouteName = route.name as string | undefined
-watch(() => route.fullPath, async () => {
+let pendingScrollTop = 0
+watch(() => route.fullPath, () => {
   // flush:'pre'——此刻 DOM 尚未切换，contentRef.scrollTop 仍是离开页的真实滚动量
   if (_prevRouteName && contentRef.value) {
     _scrollPositions.set(_prevRouteName, contentRef.value.scrollTop)
   }
   const entering = route.name as string | undefined
   _prevRouteName = entering
-  await nextTick()
-  requestAnimationFrame(() => {
-    if (!contentRef.value) return
-    const restore = entering && KEEP_ALIVE_ROUTE_NAMES.includes(entering)
-      ? _scrollPositions.get(entering) ?? 0
-      : 0
-    contentRef.value.scrollTo({ top: restore, left: 0 })
-  })
+  pendingScrollTop = entering && KEEP_ALIVE_ROUTE_NAMES.includes(entering)
+    ? _scrollPositions.get(entering) ?? 0
+    : 0
 }, { flush: 'pre' })
+// out-in 过渡要等离开页淡出后才插入新页；在 enter 钩子里滚动，才作用在新页上
+function restoreContentScroll() {
+  contentRef.value?.scrollTo({ top: pendingScrollTop, left: 0 })
+}
 
 // 动态取色：跟随封面主题色。解析当前深浅色，供令牌生成使用
 function resolveDynamicIsDark(): boolean {
@@ -322,6 +391,7 @@ watch(
 
 // 启动时初始化：加载同步配置 + 检查登录状态 + 自动同步
 onMounted(async () => {
+  uninstallDesktopLyrics = installDesktopLyricsBridge()
   const syncStore = useSyncStore()
   const authStore = useAuthStore()
   window.addEventListener('beforeunload', handleBeforeUnload)
@@ -365,20 +435,20 @@ onMounted(async () => {
       return true
     },
     focusSearch: () => {
-      void router.push({ name: 'explore' }).then(() => {
-        requestAnimationFrame(() => {
-          const input = document.querySelector<HTMLInputElement>('[data-shortcut-search]')
-          input?.focus()
-          input?.select()
-        })
+      const focusInput = () => requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement>('[data-shortcut-search]')
+        input?.focus()
+        input?.select()
       })
+      // 已在探索页时直接聚焦，不能重新 push 把 ?q= 冲掉
+      if (router.currentRoute.value.name === 'explore') focusInput()
+      else void router.push({ name: 'explore' }).then(focusInput)
     },
     toggleShuffle: () => player.toggleShuffle(),
     cycleRepeat: () => player.toggleRepeatMode(),
-    // 覆盖所有实际存在的弹层根类；旧选择器 .dialog-overlay/.m3-dialog-scrim 均不存在，
-    // 导致弹层打开时全局播放快捷键仍生效（UI-002）
+    // 覆盖所有实际存在的弹层根类，弹层打开时不响应全局播放快捷键（UI-002）
     isOverlayOpen: () => document.querySelector(
-      '.m3-dialog-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .notif-overlay, .debug-dialog-overlay',
+      '.m3-dialog-overlay, .dialog-overlay, .context-menu-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .notif-overlay, .debug-dialog-overlay',
     ) !== null,
   })
 
@@ -394,6 +464,7 @@ onMounted(async () => {
     if (seed) applyDynamicColorFromSeed(seed, resolveDynamicIsDark())
   }
   setLocale(settingsStore.locale, false)
+  void adoptManagedBackgroundImage()
   await player.applyPersistedSettings()
   if (route.name === 'home' && settingsStore.defaultScreen !== 'home') {
     await router.replace({ name: settingsStore.defaultScreen })
@@ -418,10 +489,27 @@ onMounted(async () => {
   // 自动同步（配置开启且已配置），静默模式
   void syncStore.syncAuto(true)
 
-  // 监听后端 playlists-changed 事件，防抖触发自动同步
-  unlistenPlaylistChanged = await listen('playlists-changed', () => {
+  // 账号状态就绪后再接着下上次没下完的任务（解析地址需要登录态）
+  void useDownloadStore().resumePendingDownloads().catch(error => appLog.warn('Resume pending downloads failed:', error))
+
+  // 云端歌单先用上次的缓存显示，这里在后台按已登录的账号各刷新一份，进音乐库时就是新的。
+  // 关了国际化就没有 YouTube 入口，不去请求它
+  const recommend = useRecommendStore()
+  const prefetched = settingsStore.internationalizationEnabled
+    ? ['netease', 'bilibili', 'youtube'] as const
+    : ['netease', 'bilibili'] as const
+  for (const platform of prefetched) {
+    if (authStore[platform].loggedIn) void recommend.ensureUserPlaylists(platform, { quiet: true })
+  }
+  if (authStore.netease.loggedIn) void recommend.ensureUserAlbums({ quiet: true })
+
+  // 监听后端 playlists-changed 事件，防抖触发自动同步；同步自己写回的歌单带 "sync" 标记，不再触发
+  unlistenPlaylistChanged = await listen<string | null>('playlists-changed', (event) => {
+    if (event.payload === 'sync') return
     scheduleDebouncedSync()
   })
+  // 打开歌单的记录写进了同步扩展段（对齐 Android recordOpen 之后 triggerSync）
+  unlistenPlaylistUsage = await listen('playlist-usage-changed', () => scheduleDebouncedSync())
 
   // 托盘菜单：正在播放 / 打开主页面（窗口可能处于隐藏状态，先由后端 show）
   unlistenTrayNowPlaying = await listen('tray:open-now-playing', () => {
@@ -432,11 +520,13 @@ onMounted(async () => {
   })
 
   // 监听前端播放历史变更事件，触发历史自动同步
-  window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
+  window.addEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)
 })
 
 onUnmounted(() => {
-  player.flushPlayerState()
+  uninstallDesktopLyrics?.()
+  uninstallDesktopLyrics = null
+  void player.flushPlayerState()
   uninstallShortcuts?.()
   uninstallShortcuts = null
   window.removeEventListener('beforeunload', handleBeforeUnload)
@@ -445,10 +535,12 @@ onUnmounted(() => {
   if (nowPlayingMotionTimer) clearTimeout(nowPlayingMotionTimer)
   if (debounceSyncTimer) clearTimeout(debounceSyncTimer)
   if (historyBatchedTimer) clearTimeout(historyBatchedTimer)
+  if (historyProgressTimer) clearTimeout(historyProgressTimer)
   if (periodicSyncTimer) clearInterval(periodicSyncTimer)
   likedSongs.stop()
-  window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync as EventListener)
+  window.removeEventListener(HISTORY_CHANGED_EVENT, scheduleHistorySync)
   if (unlistenPlaylistChanged) unlistenPlaylistChanged()
+  if (unlistenPlaylistUsage) unlistenPlaylistUsage()
   if (unlistenCloseRequested) unlistenCloseRequested()
   if (unlistenTrayNowPlaying) unlistenTrayNowPlaying()
   if (unlistenTrayHome) unlistenTrayHome()
@@ -476,7 +568,7 @@ onUnmounted(() => {
       }"
     >
       <router-view v-slot="{ Component, route }">
-        <transition name="fade" mode="out-in">
+        <transition name="fade" mode="out-in" @enter="restoreContentScroll">
           <keep-alive :include="['HomeView', 'ExploreView', 'LibraryView']">
             <component :is="Component" :key="route.path" />
           </keep-alive>
@@ -497,7 +589,7 @@ onUnmounted(() => {
     </transition>
 
     <!-- NowPlaying 全屏覆盖 -->
-    <transition name="slide-up">
+    <transition :key="nowPlayingBoundaryKey" name="slide-up">
       <NowPlaying
         v-if="isNowPlayingOpen"
         ref="nowPlayingRef"
@@ -545,7 +637,6 @@ onUnmounted(() => {
   height: 100%;
   overflow: hidden;
   position: relative;
-  border-radius: var(--radius-lg);
   padding-top: var(--titlebar-height, 36px); /* 让出顶栏高度（与 TitleBar / mac 红绿灯对齐） */
   isolation: isolate;
 }

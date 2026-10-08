@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { usePlayerStore, displayAlbum, type LyricLine, type TrackInfo } from '@/stores/player'
+import { usePlayerStore, displayAlbum, type AudioInfo, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useLikedSongsStore } from '@/stores/likedSongs'
-import { useSettingsStore } from '@/stores/settings'
+import {
+  COVER_BLUR_PX_PER_UNIT,
+  LYRIC_FONT_SCALE_MAX,
+  LYRIC_FONT_SCALE_MIN,
+  LYRIC_FONT_SCALE_STEP,
+  useSettingsStore,
+} from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { useDownloadStore } from '@/stores/download'
 import { useI18n } from 'vue-i18n'
@@ -17,7 +23,7 @@ import {
   resolveCoverImage,
 } from '@/utils/bilibiliCover'
 import { clearCachedLyrics, getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
-import { hasLyricsRequestInFlight, loadLyricsSingleFlight } from '@/modules/lyrics/lyricsRequest'
+import { hasLyricsRequestInFlight, hasWordTimedLyrics, loadLyricsSingleFlight } from '@/modules/lyrics/lyricsRequest'
 import {
   toEditableLyricsText,
   toEditableTranslationText,
@@ -26,10 +32,23 @@ import {
   withUpdatedLyricsPayload,
   mapBackendLyrics as mapBackendLyricsShared,
   mergeParsedLyricsWithTranslations,
+  mergeWordTimedLyricsWithBaseline,
 } from '@/modules/lyrics/lyricsFormat'
-import { offsetBucketForSource } from '@/modules/lyrics/lyricOffset'
+import {
+  formatLyricOffsetMs,
+  MAX_LYRIC_DEFAULT_OFFSET_MS,
+  MIN_LYRIC_DEFAULT_OFFSET_MS,
+  LYRIC_OFFSET_STEP_MS,
+  readSyncedLyricSource,
+} from '@/modules/lyrics/lyricOffset'
+import { fetchLyrics, fetchWordTimedLyrics } from '@/modules/lyrics/lyricsFetch'
+import { lyricSourceOf, rememberLyricSource } from '@/modules/lyrics/lyricSource'
 import { isEditableTarget, isMacPlatform } from '@/modules/shortcuts/platform'
-import { persistTrackSyncPayload, withUpdatedCustomInfoPayload } from '@/modules/lyrics/syncTrackPayload'
+import {
+  persistTrackSyncPayload,
+  recordLyricOverride,
+  withUpdatedCustomInfoPayload,
+} from '@/modules/lyrics/syncTrackPayload'
 import { useLyricOffsetStore } from '@/stores/lyricOffset'
 import HyperBackground from './HyperBackground.vue'
 import CoverBlurBackground from './CoverBlurBackground.vue'
@@ -39,14 +58,26 @@ import LyricsView from './LyricsView.vue'
 import QueuePanel from './QueuePanel.vue'
 import AddToPlaylistDialog from './AddToPlaylistDialog.vue'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
-import CustomSelect from './ui/CustomSelect.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
+import AudioEffectsPanel from './AudioEffectsPanel.vue'
 import ContextMenu from './ui/ContextMenu.vue'
 import type { ContextMenuActionItem } from '@/utils/contextMenu'
 import { playbackSessionTrackKey } from '@/modules/playback/playbackRequest'
 import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { summarizeLogError } from '@/utils/logSanitizer'
+import { neteaseSongArtists } from '@/modules/library/artistNavigation'
+import { splitArtistNames } from '@/modules/library/localArtists'
+import { openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
+import { usePlaybackAudioInfoDisplay } from '@/composables/usePlaybackAudioInfoDisplay'
+import {
+  actualAudioBitrateLabel,
+  actualAudioParameterLabels,
+  canSwitchAudioQuality,
+  isLocalAudioPlayback,
+  resolveAudioQualityLabel,
+} from '@/modules/playback/audioQualityDisplay'
 
 const log = createLogger('now-playing')
 
@@ -63,6 +94,15 @@ const downloadStore = useDownloadStore()
 const lyricOffsetStore = useLyricOffsetStore()
 const router = useRouter()
 const { t } = useI18n()
+async function showDesktopLyrics() {
+  try {
+    await openDesktopLyricsWindow()
+    hideMoreSheet()
+  } catch (error) {
+    log.warn('desktop lyrics window failed:', summarizeLogError(error))
+    toast.error(t('player.desktop_lyrics_failed'))
+  }
+}
 const playViewMode = ref<'cover' | 'lyrics'>('cover')
 const coverLoadError = ref(false)
 const coverUrl = ref('')
@@ -94,19 +134,6 @@ function coverSourceLabel(rawUrl: string): string {
 
 function hideMoreSheet() {
   showMoreSheet.value = false
-}
-
-// 均衡器辅助
-import { EQ_PRESETS } from '@/stores/player'
-const eqPresetIds = Object.keys(EQ_PRESETS)
-const eqFreqLabels = ['60', '230', '910', '3.6k', '14k']
-
-function onEqBandChange(index: number, value: number) {
-  const bands = [...player.equalizerBands]
-  bands[index] = Math.round(value)
-  player.setEqualizer(player.equalizerEnabled, bands)
-  player.equalizerPresetId = 'custom'
-  settings.equalizerPresetId = 'custom'
 }
 
 // 来源徽章（对齐 Android PlaybackSourceBadge）
@@ -160,6 +187,7 @@ async function materializeSyncedLyrics(track: TrackInfo): Promise<LyricLine[] | 
   if (lyricState.kind === 'cleared') return []
   try {
     const parsed = await invoke<any[]>('parse_lrc_content', { content: lyricState.text })
+    rememberLyricSource(track, readSyncedLyricSource(payload))
     const translationState = resolveStoredTranslatedLyricStateFromPayload(payload)
     let parsedTranslations: any[] = []
     if (translationState.kind === 'present' && translationState.text.trim()) {
@@ -183,12 +211,12 @@ async function materializeSyncedLyrics(track: TrackInfo): Promise<LyricLine[] | 
 
 function cacheLyricsForTrack(track: TrackInfo | null | undefined, lines: LyricLine[]) {
   if (!track || lines.length === 0) return
-  saveCachedLyrics(track, lines)
+  void saveCachedLyrics(track, lines)
 }
 
 function removeCachedLyricsForCurrentTrack() {
   if (!player.currentTrack) return
-  clearCachedLyrics(player.currentTrack)
+  void clearCachedLyrics(player.currentTrack)
 }
 
 /** 编辑后的歌词写回 syncPayload + 本地歌单, 供同步上传 (对齐 Android) */
@@ -212,6 +240,7 @@ async function commitLyricsToTrack(
   const updatedTrack = player.currentTrack
   if (updatedTrack) {
     await persistTrackSyncPayload(updatedTrack)
+    await recordLyricOverride(updatedTrack)
   }
 }
 
@@ -272,6 +301,7 @@ async function applyLyricsFromEditor() {
       mapBackendLyrics(parsedTranslations),
     )
     fetchedLyrics.value = nextLyrics
+    rememberLyricSource(player.currentTrack, 'LOCAL_EDIT')
     cacheLyricsForTrack(player.currentTrack, nextLyrics)
     // 原文保留编辑器文本(YRC/LRC), 与 Android toEditableLyricsText 往返一致
     await commitLyricsToTrack(text, translationText || null, 'LOCAL_EDIT')
@@ -358,6 +388,7 @@ async function applyLyricFill(result: any) {
     const direct = await parseLyricsFromSearchResult(result)
     if (direct && direct.lines.length > 0) {
       fetchedLyrics.value = direct.lines
+      rememberLyricSource(player.currentTrack, source)
       cacheLyricsForTrack(player.currentTrack, direct.lines)
       // 搜索填充也写回本地 syncPayload, 不直接覆写云端; 下次同步上传
       await commitLyricsToTrack(direct.rawLyric, direct.rawTranslated, source)
@@ -368,23 +399,26 @@ async function applyLyricFill(result: any) {
     const idText = String(result.id || '')
     const neteaseId = idText.startsWith('netease:') ? parseInt(idText.replace('netease:', '')) : null
     const qqSongMid = idText.startsWith('qq:') ? idText.replace('qq:', '') : null
-    const lyrics = await invoke<any[]>('fetch_lyrics', {
+    const fetched = await fetchLyrics({
       title: result.title || '',
       artist: result.artist || '',
       durationSecs: Math.floor((result.duration_ms || 0) / 1000),
       audioPath: null,
-      neteaseId: neteaseId,
+      neteaseId,
       qqSongMid,
-            youtubeVideoId: null,
-      })
-    const nextLyrics = mapBackendLyrics(lyrics)
+      youtubeVideoId: null,
+    })
+    const nextLyrics = fetched.lines
     fetchedLyrics.value = nextLyrics
+    // 兜底可能落到 LRCLIB / AMLL 等别的源，按实际来源记，重启后偏移量才对得上
+    const actualSource = fetched.source ? lyricSourceForPlatform(fetched.source) : source
+    rememberLyricSource(player.currentTrack, actualSource)
     cacheLyricsForTrack(player.currentTrack, nextLyrics)
     if (nextLyrics.length > 0) {
       await commitLyricsToTrack(
         toEditableLyricsText(nextLyrics),
         toEditableTranslationText(nextLyrics) || null,
-        source,
+        actualSource,
       )
     }
     toast.success(t('player.lyrics_fill_applied'))
@@ -693,11 +727,6 @@ const nowPlayingTrackKey = computed(() => (
 ))
 const transitionStateClass = computed(() => props.transitionState ? `np-shell--${props.transitionState}` : '')
 const nowPlayingTimeKey = computed(() => `time:${nowPlayingTrackKey.value}`)
-const nowPlayingAudioInfoKey = computed(() => [
-  nowPlayingTrackKey.value,
-  player.isPlayingFromDownload ? 'download' : 'stream',
-  audioInfoDisplay.value || 'none',
-].join(':'))
 const favoriteVisualKey = computed(() => `${nowPlayingTrackKey.value}:${isFavorite.value ? 'favorite' : 'normal'}`)
 const headerAlbumKey = computed(() => `${nowPlayingTrackKey.value}:${albumName.value || 'album'}`)
 const coverTransitionName = computed(() => {
@@ -830,6 +859,28 @@ watch(nowPlayingTrackKey, () => {
 })
 
 let lyricFetchRequestId = 0
+onUnmounted(() => { lyricFetchRequestId++ })
+
+function upgradeWordTimedLyrics(track: TrackInfo, requestId: number) {
+  const baseline = fetchedLyrics.value
+  if (!settings.advancedLyrics || !getPlaybackSourceKind(track) || hasWordTimedLyrics(baseline)) return
+  if (resolveStoredLyricStateFromPayload(track.syncPayload).kind !== 'absent') return
+  const identity = JSON.stringify([track.id, track.title, track.artist, track.durationMs])
+  void loadLyricsSingleFlight(track, () => fetchWordTimedLyrics({
+    title: track.title, artist: track.artist, durationMs: track.durationMs || 0,
+  }), 'word-timed').then(({ lines, source }) => {
+    const current = player.currentTrack
+    if (!current || requestId !== lyricFetchRequestId || !settings.advancedLyrics) return
+    if (identity !== JSON.stringify([current.id, current.title, current.artist, current.durationMs])) return
+    if (fetchedLyrics.value !== baseline || !hasWordTimedLyrics(lines)) return
+    if (resolveStoredLyricStateFromPayload(current.syncPayload).kind !== 'absent') return
+    const merged = mergeWordTimedLyricsWithBaseline(baseline, lines)
+    fetchedLyrics.value = merged
+    // 逐字时间轴来自 AMLL TTML / 酷狗，偏移按它们的默认算
+    rememberLyricSource(current, source)
+    cacheLyricsForTrack(current, merged)
+  }).catch(error => log.warn('word timed lyric upgrade unavailable:', summarizeLogError(error)))
+}
 
 // 当曲目切换时自动获取歌词
 watch(nowPlayingTrackKey, async (trackKey) => {
@@ -844,12 +895,13 @@ watch(nowPlayingTrackKey, async (trackKey) => {
 
   // 换曲瞬间立即撤下旧词：此刻播放位置已归零而旧词还挂着，
   // LyricsView 会判定大幅回跳、在旧词上硬跳回第一行——开播歌词
-  // 「有概率抽一下」就是这个窗口。缓存命中走同步路径，同一批次
-  // 更新内就把新词赋回，肉眼无感；在线获取则显示空态而不是旧词。
+  // 「有概率抽一下」就是这个窗口。缓存命中只需一次本地数据库读取，
+  // 随后赋回新词；在线获取则显示空态而不是旧词。
   fetchedLyrics.value = []
 
   const started = performance.now()
-  const cachedLyrics = readCachedLyrics(track)
+  const cachedLyrics = await readCachedLyrics(track)
+  if (requestId !== lyricFetchRequestId) return
   const reusedRequest = hasLyricsRequestInFlight(track)
   fetchedLyrics.value = cachedLyrics || []
   isFetchingLyrics.value = true
@@ -879,13 +931,14 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       return
     }
 
-    // 本地 cache 其次; 有缓存则不再触网/回写云端
+    // 先显示缓存，缺少逐字时间时再后台升级
     if (cachedLyrics?.length) {
       log.info('lyrics from local cache:', {
         requestId,
         trackId: track.id,
         lines: cachedLyrics.length,
       })
+      upgradeWordTimedLyrics(track, requestId)
       return
     }
 
@@ -899,10 +952,10 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       ? track.id.replace('youtube:', '')
       : undefined
 
-    const nextLyrics = await loadLyricsSingleFlight(track, async () => {
+    const { lines: nextLyrics } = await loadLyricsSingleFlight(track, async () => {
       const invokeStarted = performance.now()
       log.info('lyrics backend invoke:', { requestId, trackId: track.id })
-      const lyrics = await invoke<any[]>('fetch_lyrics', {
+      const fetched = await fetchLyrics({
         title: track.title,
         artist: track.artist,
         // 换歌瞬间 player.durationMs 仍是上一首的值, 会误触发后端时长硬门槛拒掉正确
@@ -913,17 +966,20 @@ watch(nowPlayingTrackKey, async (trackKey) => {
         qqSongMid: qqSongMid || null,
         youtubeVideoId: youtubeVideoId || null,
       })
-      const mapped = mapBackendLyrics(lyrics)
-      if (mapped.length > 0) cacheLyricsForTrack(track, mapped)
+      if (fetched.lines.length > 0) {
+        rememberLyricSource(track, fetched.source)
+        cacheLyricsForTrack(track, fetched.lines)
+      }
       // 后端目前把明确无词与任一歌词源临时失败都归为 []，不能据此写负缓存。
       // 否则一次网络/API 波动会让后续 24 小时都跳过在线歌词查询
       log.info('lyrics backend returned:', {
         requestId,
         trackId: track.id,
-        lines: mapped.length,
+        source: fetched.source,
+        lines: fetched.lines.length,
         elapsedMs: Math.round(performance.now() - invokeStarted),
       })
-      return mapped
+      return fetched
     })
 
     if (requestId !== lyricFetchRequestId) {
@@ -936,6 +992,7 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       return
     }
     fetchedLyrics.value = nextLyrics.length > 0 ? nextLyrics : []
+    upgradeWordTimedLyrics(track, requestId)
     log.info('lyrics load committed:', {
       requestId,
       trackId: track.id,
@@ -949,8 +1006,9 @@ watch(nowPlayingTrackKey, async (trackKey) => {
       elapsedMs: Math.round(performance.now() - started),
       error: summarizeLogError(e),
     })
+    const restored = await readCachedLyrics(track)
     if (requestId === lyricFetchRequestId) {
-      fetchedLyrics.value = readCachedLyrics(track) || cachedLyrics || []
+      fetchedLyrics.value = restored || cachedLyrics || []
       log.info('lyrics cache restored after failure:', {
         requestId,
         trackId: track.id,
@@ -1038,7 +1096,53 @@ defineExpose({
 })
 
 // 右键菜单（歌曲名/歌手复制 + 封面保存）
-const contextMenu = ref({ show: false, x: 0, y: 0, type: '' as 'title' | 'artist' | 'cover' })
+const contextMenu = ref({ show: false, x: 0, y: 0, type: '' as 'title' | 'artist' | 'cover' | 'artist-page' })
+const artistLinks = ref<Array<{ id: string; name: string; route: { name: string; params: Record<string, string> } }>>([])
+const artistLinkTrackId = ref('')
+const artistLinksLoading = ref(false)
+
+async function openArtistPage(event: MouseEvent) {
+  const track = player.currentTrack
+  if (!track?.artist.trim() || artistLinksLoading.value) return
+  const source = getPlaybackSourceKind(track)
+  if (source && source !== 'netease') {
+    await router.push({ name: 'explore', query: { q: track.artist, platform: source === 'qq' ? 'netease' : source } })
+    emit('collapse')
+    return
+  }
+  artistLinksLoading.value = true
+  try {
+    let links: typeof artistLinks.value
+    if (source === 'netease') {
+      const rawId = track.syncPayload?.audioId ?? track.syncPayload?.audio_id ?? track.id.replace(/^netease:/i, '')
+      const songId = Number(rawId)
+      if (!Number.isSafeInteger(songId) || songId <= 0) return
+      const detail = await invoke('get_netease_song_detail', { songId })
+      links = neteaseSongArtists(detail, songId).map(artist => ({
+        id: String(artist.id), name: artist.name,
+        route: { name: 'netease-artist', params: { id: String(artist.id) } },
+      }))
+    } else {
+      links = splitArtistNames(track.artist).map(name => ({
+        id: name, name, route: { name: 'local-artist', params: { name } },
+      }))
+    }
+    if (player.currentTrack?.id !== track.id) return
+    if (links.length === 1) {
+      await router.push(links[0]!.route)
+      emit('collapse')
+    } else if (links.length > 1) {
+      artistLinks.value = links
+      artistLinkTrackId.value = track.id
+      contextMenu.value = { show: true, x: event.clientX, y: event.clientY, type: 'artist-page' }
+    }
+  } catch (error) {
+    log.warn('failed to open artist page:', error)
+    toast.error(t('player.artist_load_failed'))
+  } finally {
+    artistLinksLoading.value = false
+  }
+}
 
 watch(() => player.hasPlaybackSession, (hasSession) => {
   if (hasSession) return
@@ -1050,6 +1154,9 @@ watch(() => player.hasPlaybackSession, (hasSession) => {
 })
 
 const contextMenuItems = computed(() => {
+  if (contextMenu.value.type === 'artist-page') {
+    return artistLinks.value.map(artist => ({ id: artist.id, label: artist.name, icon: 'person' }))
+  }
   if (contextMenu.value.type === 'title') {
     return [{ id: 'copy-title', label: t('player.copy_title'), icon: 'content_copy' }]
   }
@@ -1079,7 +1186,13 @@ async function copyText(text: string) {
 }
 
 function handleContextMenuClick(item: ContextMenuActionItem) {
-  if (item.id === 'copy-title') {
+  if (contextMenu.value.type === 'artist-page') {
+    const artist = artistLinks.value.find(link => link.id === item.id)
+    if (artist && player.currentTrack?.id === artistLinkTrackId.value) {
+      void router.push(artist.route).then(() => emit('collapse'))
+    }
+    closeContextMenu()
+  } else if (item.id === 'copy-title') {
     void copyText(player.currentTrack?.title || '')
   } else if (item.id === 'copy-artist') {
     void copyText(player.currentTrack?.artist || '')
@@ -1124,7 +1237,7 @@ const displayLyrics = computed(() => {
 
 // 更多选项面板子视图
 const moreSheetView = ref<
-  'main' | 'offset' | 'fontsize' | 'speed' | 'search' | 'editinfo' |
+  'main' | 'offset' | 'fontsize' | 'effects' | 'search' | 'editinfo' |
   'quality' | 'lyrics-editor' | 'lyrics-fill' | 'track-detail'
 >('main')
 const moreSheetTransition = ref('slide-left')
@@ -1136,7 +1249,7 @@ function goToSubView(view: typeof moreSheetView.value) {
 
 // 点击进度条旁的音质标签直接打开音质切换面板（ST-05：让该设置真实可切换而非纯展示）
 function openQualitySwitcher() {
-  if (currentSource.value === 'local') return
+  if (!canSwitchCurrentAudioQuality.value || player.isLoadingAudio) return
   showMoreSheet.value = true
   goToSubView('quality')
 }
@@ -1249,13 +1362,14 @@ async function confirmApplySearchResult() {
       const direct = await parseLyricsFromSearchResult(result)
       if (direct && direct.lines.length > 0) {
         fetchedLyrics.value = direct.lines
+        rememberLyricSource(player.currentTrack, source)
         cacheLyricsForTrack(player.currentTrack, direct.lines)
         await commitLyricsToTrack(direct.rawLyric, direct.rawTranslated, source)
       } else {
         const idText = String(result.id || '')
         const neteaseId = idText.startsWith('netease:') ? parseInt(idText.replace('netease:', '')) : null
         const qqSongMid = idText.startsWith('qq:') ? idText.replace('qq:', '') : null
-        const lyrics = await invoke<any[]>('fetch_lyrics', {
+        const fetched = await fetchLyrics({
           title: result.title || player.currentTrack?.title || '',
           artist: result.artist || player.currentTrack?.artist || '',
           durationSecs: Math.floor((result.duration_ms || player.currentTrack?.durationMs || 0) / 1000),
@@ -1264,15 +1378,17 @@ async function confirmApplySearchResult() {
           qqSongMid,
           youtubeVideoId: null,
         })
-        if (lyrics.length) {
-          const nextLyrics = mapBackendLyrics(lyrics)
+        if (fetched.lines.length) {
+          const nextLyrics = fetched.lines
           fetchedLyrics.value = nextLyrics
+          const actualSource = fetched.source ? lyricSourceForPlatform(fetched.source) : source
+          rememberLyricSource(player.currentTrack, actualSource)
           cacheLyricsForTrack(player.currentTrack, nextLyrics)
           // 兜底在线歌词同样写回 syncPayload, 否则不同步且重启即丢
           await commitLyricsToTrack(
             toEditableLyricsText(nextLyrics),
             toEditableTranslationText(nextLyrics) || null,
-            source,
+            actualSource,
           )
         }
       }
@@ -1333,6 +1449,40 @@ function restoreInfo() {
 }
 
 // 音质切换
+// 下面的计算属性在 setup 时就会被 watch 求值，选项表必须先于它们声明
+const neteaseQualities = [
+  { key: 'standard', label: 'settings.q_standard' },
+  { key: 'higher', label: 'settings.q_high' },
+  { key: 'exhigh', label: 'settings.q_exhigh' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+  { key: 'hires', label: 'settings.q_hires' },
+  { key: 'jyeffect', label: 'settings.q_surround' },
+  { key: 'sky', label: 'settings.q_sky' },
+  { key: 'jymaster', label: 'settings.q_master' },
+]
+
+const qqQualities = [
+  { key: 'standard', label: 'settings.q_standard' },
+  { key: 'high', label: 'settings.q_high_yt' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+]
+
+const youtubeQualities = [
+  { key: 'low', label: 'settings.q_low' },
+  { key: 'medium', label: 'settings.q_medium' },
+  { key: 'high', label: 'settings.q_high_yt' },
+  { key: 'very_high', label: 'settings.q_very_high' },
+]
+
+const biliQualities = [
+  { key: 'low', label: 'settings.q_smooth' },
+  { key: 'medium', label: 'settings.q_standard' },
+  { key: 'high', label: 'settings.q_good' },
+  { key: 'lossless', label: 'settings.q_lossless' },
+  { key: 'hires', label: 'settings.q_hires' },
+  { key: 'dolby', label: 'settings.q_dolby' },
+]
+
 const currentSource = computed(() => {
   const id = player.currentTrack?.id || ''
   if (id.startsWith('netease:')) return 'netease'
@@ -1341,37 +1491,85 @@ const currentSource = computed(() => {
   if (id.startsWith('youtube:')) return 'youtube'
   return 'local'
 })
-
-// 偏移分桶: netease→cloud, qq→qq, youtube/bili/local→none(默认 0)
-const currentOffsetBucket = computed(() => offsetBucketForSource(currentSource.value))
-
-// 逐曲用户偏移(delta, 默认 0) -- 偏移面板编辑的就是它, 不再混入系统默认
-const currentLyricUserOffsetMs = computed<number>({
-  get: () => lyricOffsetStore.getUserOffsetMs(player.currentTrack),
-  set: (value: number) => lyricOffsetStore.setUserOffsetMs(player.currentTrack, value),
+// 音质列表按播放层报告的可选项过滤（B 站只列这条视频实际提供的音质）；只有一档时不显示切换（对齐 Android）
+const switchableQualities = computed(() => {
+  const all = qualityOptionsForSource(currentSource.value)
+  const info = player.audioInfo
+  const offered = info?.source === currentSource.value ? info.qualityOptions?.map(option => option.key) : undefined
+  return offered?.length ? all.filter(option => offered.includes(option.key)) : all
+})
+const canSwitchCurrentAudioQuality = computed(() => canSwitchAudioQuality({
+  source: currentSource.value, fromDownload: player.isPlayingFromDownload, info: player.audioInfo,
+}) && switchableQualities.value.length > 1)
+watch(canSwitchCurrentAudioQuality, (canSwitch) => {
+  if (!canSwitch && moreSheetView.value === 'quality') goBackToMain()
 })
 
-// 系统全局默认(基线), 只读展示; youtube 等 none 桶恒为 0
+// 当前歌词用哪个来源的默认偏移：看正在显示的歌词来自哪里（AMLL TTML、酷狗、LRCLIB…），不知道时按播放来源
+const currentLyricOffsetSource = computed(() => lyricOffsetStore.offsetSourceFor(player.currentTrack))
 const currentLyricDefaultOffsetMs = computed(() =>
-  lyricOffsetStore.defaultOffsetMs(currentOffsetBucket.value),
+  lyricOffsetStore.defaultOffsetMs(currentLyricOffsetSource.value),
 )
+// 逐曲 delta：只用来判断这首歌是否单独调过
+const currentLyricUserOffsetMs = computed(() => lyricOffsetStore.getUserOffsetMs(player.currentTrack))
 
-// 有效偏移 = 基线 + delta, 喂给歌词渲染
-const currentLyricTotalOffsetMs = computed(
-  () => currentLyricDefaultOffsetMs.value + currentLyricUserOffsetMs.value,
-)
-
-// 偏移面板副标题: 标明当前生效的系统默认来源
-const currentLyricOffsetSourceLabel = computed(() => {
-  switch (currentOffsetBucket.value) {
-    case 'qq':
-      return t('player.source_qq')
-    case 'cloud':
-      return t('player.source_netease')
-    default:
-      return t(`player.source_${currentSource.value}` as 'player.source_youtube')
-  }
+// 有效偏移（绝对值）：歌词渲染用它，偏移面板显示和编辑的也是它
+const currentLyricTotalOffsetMs = computed<number>({
+  get: () => currentLyricDefaultOffsetMs.value + currentLyricUserOffsetMs.value,
+  set: value => lyricOffsetStore.setEffectiveOffsetMs(player.currentTrack, value),
 })
+
+// 滑条范围 ±5000ms，当前值越界时随之放宽（Android resolveLyricOffsetSliderRange）
+const lyricOffsetSliderMin = computed(() => Math.min(MIN_LYRIC_DEFAULT_OFFSET_MS, currentLyricTotalOffsetMs.value))
+const lyricOffsetSliderMax = computed(() => Math.max(MAX_LYRIC_DEFAULT_OFFSET_MS, currentLyricTotalOffsetMs.value))
+
+function nudgeLyricOffset(steps: number) {
+  currentLyricTotalOffsetMs.value += steps * LYRIC_OFFSET_STEP_MS
+}
+
+function resetLyricOffsetToDefault() {
+  lyricOffsetStore.setUserOffsetMs(player.currentTrack, 0)
+}
+
+// 当前歌词来源的名字，用于「网易云 · 默认 +1000ms」；没有可调默认的来源也标出来
+const currentLyricSourceLabel = computed(() => {
+  switch (currentLyricOffsetSource.value) {
+    case 'netease': return t('player.source_netease')
+    case 'qq': return t('player.source_qq')
+    case 'kugou': return t('player.lyric_source_kugou')
+    case 'lrclib': return 'LRCLIB'
+    case 'amll_ttml': return 'AMLL TTML'
+  }
+  const raw = (lyricSourceOf(player.currentTrack) ?? '').toLowerCase().replace(/[^a-z]/g, '')
+  if (raw === 'youtube') return t('player.source_youtube')
+  if (raw === 'local') return t('player.lyric_source_local')
+  if (raw === 'localedit') return t('player.lyric_source_edited')
+  return ''
+})
+
+const lyricOffsetSummary = computed(() => [formatLyricOffsetMs(currentLyricTotalOffsetMs.value), currentLyricSourceLabel.value]
+  .filter(Boolean).join(' · '))
+
+function nudgeLyricFontScale(steps: number) {
+  const next = Math.round((settings.lyricFontScale + steps * LYRIC_FONT_SCALE_STEP) / LYRIC_FONT_SCALE_STEP) * LYRIC_FONT_SCALE_STEP
+  settings.lyricFontScale = Math.min(LYRIC_FONT_SCALE_MAX, Math.max(LYRIC_FONT_SCALE_MIN, Number(next.toFixed(2))))
+}
+
+// 「更多」里音频效果一行直接写出当前生效的设置，都是默认时显示说明
+const audioEffectsSummary = computed(() => {
+  const parts: string[] = []
+  if (player.playbackSpeed !== 1) parts.push(`${player.playbackSpeed.toFixed(2)}x`)
+  if (player.loudnessGainMb !== 0) parts.push(`+${(player.loudnessGainMb / 100).toFixed(1)}dB`)
+  if (player.equalizerEnabled) parts.push(t(`player.eq_${player.equalizerPresetId}`))
+  return parts.length ? parts.join(' · ') : t('player.audio_effects_desc')
+})
+
+function openLyricsFill() {
+  lyricFillQuery.value = player.currentTrack?.title || ''
+  lyricFillResults.value = []
+  lyricFillPlatform.value = currentSource.value === 'netease' ? 'netease' : (currentSource.value === 'qq' ? 'qq' : 'lrclib')
+  goToSubView('lyrics-fill')
+}
 
 const currentTrackId = computed(() => player.currentTrack?.id || '')
 const currentNeteaseSongNumericId = computed(() => {
@@ -1413,21 +1611,23 @@ function formatFileSize(bytes?: number) {
 const trackDetailAudioParams = computed(() => {
   const info = player.audioInfo
   if (!info) return ''
+  const local = isLocalAudioPlayback({ source: currentSource.value, fromDownload: player.isPlayingFromDownload, info })
   const parts: string[] = []
   const quality = currentAudioQualityLabel()
   if (quality) parts.push(quality)
   if (info.codec) {
-    const codec = normalizeAudioDisplayToken(info.codec)
+    const codec = normalizeAudioDisplayToken(info.codec, local)
     if (codec && !parts.includes(codec)) parts.push(codec)
   }
   if (info.format) {
-    const format = normalizeAudioDisplayToken(info.format)
+    const format = normalizeAudioDisplayToken(info.format, local)
     if (format && !parts.includes(format) && format.toLowerCase() !== (info.codec || '').toLowerCase()) {
       parts.push(format)
     }
   }
-  if (info.bitrate && info.bitrate > 0) parts.push(`${Math.round(info.bitrate)} kbps`)
-  for (const token of paperSpecFromAudioInfo(info)) {
+  const bitrate = actualAudioBitrateLabel(info)
+  if (bitrate) parts.push(bitrate)
+  for (const token of paperSpecFromAudioInfo(info, !local)) {
     if (!parts.includes(token)) parts.push(token)
   }
   return parts.join(' · ')
@@ -1447,6 +1647,8 @@ function isRemotePlaybackSource(source: string) {
 
 function downloadTaskStatusText(status?: string) {
   switch (status) {
+    case 'queued': return t('download.queued')
+    case 'processing': return t('download.processing')
     case 'resolving': return t('download.resolving')
     case 'downloading': return t('download.downloading')
     case 'cancelling': return t('download.cancelling')
@@ -1458,7 +1660,6 @@ function downloadTaskStatusText(status?: string) {
 }
 
 const downloadActionIcon = computed(() => {
-  if (player.isPlayingFromDownload) return 'download_done'
   if (isCurrentDownloading.value) {
     const status = currentDownloadTask.value?.status
     if (status === 'error') return 'error'
@@ -1471,7 +1672,6 @@ const downloadActionIcon = computed(() => {
 })
 
 const downloadActionLabel = computed(() => {
-  if (player.isPlayingFromDownload) return t('player.playing_from_download')
   if (isCurrentDownloadCancellable.value) return t('download.cancel_task')
   if (isCurrentDownloading.value) return downloadTaskStatusText(currentDownloadTask.value?.status) || t('download.downloading')
   if (isCurrentDownloaded.value) return t('download.redownload')
@@ -1479,7 +1679,6 @@ const downloadActionLabel = computed(() => {
 })
 
 const downloadActionDesc = computed(() => {
-  if (player.isPlayingFromDownload) return t('download.using_local_file')
   if (isCurrentDownloading.value) {
     const task = currentDownloadTask.value
     if (!task) return ''
@@ -1493,47 +1692,13 @@ const downloadActionDesc = computed(() => {
 
 const downloadActionDisabled = computed(() =>
   !player.currentTrack
-  || player.isPlayingFromDownload
   || (isCurrentDownloading.value && !isCurrentDownloadCancellable.value && currentDownloadTask.value?.status !== 'error' && currentDownloadTask.value?.status !== 'cancelled')
 )
-
-const neteaseQualities = [
-  { key: 'standard', label: 'settings.q_standard' },
-  { key: 'higher', label: 'settings.q_high' },
-  { key: 'exhigh', label: 'settings.q_exhigh' },
-  { key: 'lossless', label: 'settings.q_lossless' },
-  { key: 'hires', label: 'settings.q_hires' },
-  { key: 'jyeffect', label: 'settings.q_surround' },
-  { key: 'sky', label: 'settings.q_sky' },
-  { key: 'jymaster', label: 'settings.q_master' },
-]
-
-const qqQualities = [
-  { key: 'standard', label: 'settings.q_standard' },
-  { key: 'high', label: 'settings.q_high_yt' },
-  { key: 'lossless', label: 'settings.q_lossless' },
-]
-
-const youtubeQualities = [
-  { key: 'low', label: 'settings.q_low' },
-  { key: 'medium', label: 'settings.q_medium' },
-  { key: 'high', label: 'settings.q_high_yt' },
-  { key: 'very_high', label: 'settings.q_very_high' },
-]
-
-const biliQualities = [
-  { key: 'low', label: 'settings.q_smooth' },
-  { key: 'medium', label: 'settings.q_standard' },
-  { key: 'high', label: 'settings.q_good' },
-  { key: 'lossless', label: 'settings.q_lossless' },
-  { key: 'hires', label: 'settings.q_hires' },
-  { key: 'dolby', label: 'settings.q_dolby' },
-]
 
 const isQualitySwitching = ref(false)
 
 async function switchQuality(key: string) {
-  if (isQualitySwitching.value) return
+  if (isQualitySwitching.value || !canSwitchCurrentAudioQuality.value || player.isLoadingAudio) return
   const source = currentSource.value
   const previousKey = currentQualityKey(source)
   if (!previousKey || previousKey === key) {
@@ -1592,8 +1757,7 @@ async function handleDownloadAction() {
     await downloadStore.cancelDownload(track.id)
     return
   }
-  if (isCurrentDownloaded.value && !player.isPlayingFromDownload) {
-    player.handleDownloadedFileRemoved(track.id, downloadStore.getDownloadedTrack(track.id)?.filePath)
+  if (isCurrentDownloaded.value) {
     await downloadStore.redownloadTrack(track)
   } else {
     await downloadStore.downloadTrack(track)
@@ -1699,41 +1863,71 @@ const canViewNeteaseArtist = computed(() =>
   currentSource.value === 'netease' && !!primaryArtistName.value && !!currentNeteaseSongNumericId.value)
 
 // 进度条下方音质信息（不展示 Local / download 占位）
-// 纸面规格: 最高/极高/杜比… + 可选编解码; 不展示 kbps 数字
+// 参数开关统一控制文件和在线流，平台音质标签单独显示
+const displayedAudioInfo = usePlaybackAudioInfoDisplay(() => ({
+  info: player.audioInfo,
+  fromDownload: player.isPlayingFromDownload,
+  loading: player.isLoadingAudio,
+  hasSession: player.hasPlaybackSession,
+}))
 const audioInfoParts = computed(() => {
-  const info = player.audioInfo
+  const info = displayedAudioInfo.value.info
   if (!info) return []
   const parts: Array<{ text: string; accent?: boolean }> = []
-  if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(), true)
-  if (settings.showAudioCodec) addAudioInfoPart(parts, normalizeAudioDisplayToken(info.codec))
-  // showAudioSpec: 只补 sampleRate/bitDepth 类纸面规格, 不写 kbps
-  if (settings.showAudioSpec) {
-    for (const token of paperSpecFromAudioInfo(info)) addAudioInfoPart(parts, token)
-  }
+  if (settings.showQualitySwitch) addAudioInfoPart(parts, currentAudioQualityLabel(info, displayedAudioInfo.value.fromDownload), true)
+  for (const token of actualAudioParameterLabels(info, settings)) addAudioInfoPart(parts, token)
   return parts.filter(part => !isHiddenAudioInfoToken(part.text))
 })
 
-const audioInfoDisplay = computed(() => {
-  return audioInfoParts.value.map(part => part.text).join(' · ')
-})
+// 音质行放不下时整项换行；正好落在换行处的分隔点隐藏，不让「·」挂在行首或行尾。
+// 只隐藏不移除，占位不变，避免隐藏后空出位置又把下一项拉回上一行来回跳
+const audioDetailEl = ref<HTMLElement | null>(null)
+const wrappedAudioSeparators = ref<ReadonlySet<number>>(new Set())
 
-function currentAudioQualityLabel() {
-  const info = player.audioInfo
-  const source = info?.source && info.source !== 'local' ? info.source : currentSource.value
-  // 优先已本地化的 qualityLabel; 否则用 qualityKey 映射到 标准/极高/最高…
-  const labeled = info?.qualityLabel?.trim()
-  if (labeled && !/kbps/i.test(labeled) && labeled !== info?.qualityKey) {
-    return labeled
+function updateWrappedAudioSeparators() {
+  const container = audioDetailEl.value
+  const wrapped = new Set<number>()
+  container?.querySelectorAll<HTMLElement>('.np-audio-separator').forEach((separator, index) => {
+    const before = separator.previousElementSibling as HTMLElement | null
+    const after = separator.nextElementSibling as HTMLElement | null
+    if (before && after && Math.abs(before.offsetTop - after.offsetTop) > 2) wrapped.add(index)
+  })
+  const current = wrappedAudioSeparators.value
+  if (wrapped.size !== current.size || [...wrapped].some(index => !current.has(index))) {
+    wrappedAudioSeparators.value = wrapped
   }
-  return qualityLabelFor(source, info?.qualityKey || currentQualityKey(source))
 }
 
-/** 从 audioInfo 抽出非码率的纸面规格 (如 48 kHz / 16 bit) */
+// 放到下一帧再量：在观察回调里直接改状态会触发浏览器的 ResizeObserver 循环告警
+let wrappedSeparatorsFrame = 0
+const audioDetailResize = typeof ResizeObserver === 'undefined'
+  ? null
+  : new ResizeObserver(() => {
+    cancelAnimationFrame(wrappedSeparatorsFrame)
+    wrappedSeparatorsFrame = requestAnimationFrame(updateWrappedAudioSeparators)
+  })
+watch(audioDetailEl, (element, previous) => {
+  if (previous) audioDetailResize?.unobserve(previous)
+  if (element) audioDetailResize?.observe(element)
+})
+watch(audioInfoParts, () => { void nextTick(updateWrappedAudioSeparators) }, { flush: 'post' })
+onUnmounted(() => {
+  audioDetailResize?.disconnect()
+  cancelAnimationFrame(wrappedSeparatorsFrame)
+})
+
+function currentAudioQualityLabel(info: AudioInfo | null = player.audioInfo, fromDownload = player.isPlayingFromDownload) {
+  return resolveAudioQualityLabel({ source: currentSource.value, fromDownload, info },
+    (source, key) => qualityLabelFor(source, key || currentQualityKey(source)))
+}
+
+// 文件播放只采用探测字段，避免把平台规格当成实际文件参数
 function paperSpecFromAudioInfo(info: {
   sampleRateHz?: number
   bitDepth?: number
+  channelCount?: number
   specLabel?: string
-}): string[] {
+}, includeSpecLabel = true): string[] {
   const tokens: string[] = []
   if (info.sampleRateHz && info.sampleRateHz > 0) {
     const khz = info.sampleRateHz / 1000
@@ -1742,8 +1936,9 @@ function paperSpecFromAudioInfo(info: {
       : `${khz.toFixed(1)} kHz`)
   }
   if (info.bitDepth && info.bitDepth > 0) tokens.push(`${info.bitDepth} bit`)
+  if (!includeSpecLabel && info.channelCount && info.channelCount > 0) tokens.push(`${info.channelCount} ch`)
   // specLabel 里可能混有 kbps, 过滤掉
-  if (info.specLabel) {
+  if (includeSpecLabel && info.specLabel) {
     for (const part of info.specLabel.split('|').map(s => s.trim())) {
       if (!part || /kbps/i.test(part)) continue
       if (!tokens.includes(part)) tokens.push(part)
@@ -1763,10 +1958,11 @@ function addAudioInfoPart(
   parts.push({ text: normalized, accent })
 }
 
-function normalizeAudioDisplayToken(value?: string) {
+function normalizeAudioDisplayToken(value?: string, local = false) {
   if (!value) return ''
   const raw = value.trim()
   const lower = raw.toLowerCase()
+  if (local && lower === 'mpeg') return 'MPEG'
   // 占位词直接丢掉
   if (isHiddenAudioInfoToken(raw)) return ''
   const tokenMap: Record<string, string> = {
@@ -1919,7 +2115,7 @@ const sliderActiveColor = computed(() => {
     <CoverBlurBackground
       v-if="player.hasPlaybackSession && settings.coverBlurBg"
       :cover-url="coverUrl"
-      :blur-amount="settings.coverBlurAmount * 30"
+      :blur-amount="settings.coverBlurAmount * COVER_BLUR_PX_PER_UNIT"
       :darken-alpha="Math.min(Math.max(settings.coverBlurDarken, 0), 0.8)"
     />
     <HyperBackground
@@ -2021,7 +2217,12 @@ const sliderActiveColor = computed(() => {
           </div>
           <!-- 来源徽章（对齐 Android PlaybackSourceBadge） -->
           <transition name="np-badge-swap" mode="out-in">
-            <div v-if="showSourceBadge && settings.coverStyle === 'card'" :key="sourceBadgeKey" class="source-badge">
+            <div
+              v-if="showSourceBadge"
+              :key="sourceBadgeKey"
+              class="source-badge"
+              :class="{ 'source-badge--disc': settings.coverStyle !== 'card' }"
+            >
               <span
                 v-if="playbackSourceIcon === 'netease'"
                 class="source-badge-icon source-badge-icon--netease"
@@ -2038,7 +2239,7 @@ const sliderActiveColor = computed(() => {
           <transition :name="metaTransitionName">
             <div :key="nowPlayingTrackKey" class="np-meta">
               <h2 class="np-title" @contextmenu="openContextMenu($event, 'title')">{{ player.currentTrack?.title || t('player.not_playing') }}</h2>
-              <p class="np-artist" @contextmenu="openContextMenu($event, 'artist')">{{ player.currentTrack?.artist || '' }}</p>
+              <button type="button" class="np-artist" :disabled="artistLinksLoading || !player.currentTrack?.artist.trim()" :aria-label="t('player.open_artist')" @click="openArtistPage" @contextmenu="openContextMenu($event, 'artist')">{{ player.currentTrack?.artist || '' }}</button>
             </div>
           </transition>
         </div>
@@ -2057,25 +2258,32 @@ const sliderActiveColor = computed(() => {
             <span>{{ player.durationFormatted }}</span>
           </div>
           <!-- 音质行始终占位，空内容也保留高度 -->
-          <div class="np-audio-info" :key="nowPlayingAudioInfoKey">
-            <span v-if="player.isPlayingFromDownload" class="np-download-chip">
-              <span class="material-symbols-rounded">download_done</span>
-              {{ t('player.playing_from_download') }}
+          <div class="np-audio-info" :aria-busy="player.isLoadingAudio">
+            <span v-if="displayedAudioInfo.fromDownload" class="np-download-chip"
+              role="img"
+              :title="t('player.playing_from_download')" :aria-label="t('player.playing_from_download')">
+              <span class="material-symbols-rounded" aria-hidden="true">download_done</span>
             </span>
-            <span v-if="audioInfoParts.length" class="np-audio-detail" :class="{ separated: player.isPlayingFromDownload }">
+            <span v-if="audioInfoParts.length" ref="audioDetailEl" class="np-audio-detail" :class="{ separated: displayedAudioInfo.fromDownload }">
               <template v-for="(part, index) in audioInfoParts" :key="`${part.text}:${index}`">
                 <span
                   class="np-audio-detail-part"
                   :class="{
                     'np-audio-detail-part--accent': part.accent,
-                    'np-audio-detail-part--clickable': part.accent && currentSource !== 'local',
+                    'np-audio-detail-part--clickable': part.accent && canSwitchCurrentAudioQuality && !player.isLoadingAudio,
                   }"
-                  :role="part.accent && currentSource !== 'local' ? 'button' : undefined"
-                  :tabindex="part.accent && currentSource !== 'local' ? 0 : undefined"
-                  @click="part.accent && openQualitySwitcher()"
-                  @keydown.enter="part.accent && openQualitySwitcher()"
+                  :role="part.accent && canSwitchCurrentAudioQuality && !player.isLoadingAudio ? 'button' : undefined"
+                  :tabindex="part.accent && canSwitchCurrentAudioQuality && !player.isLoadingAudio ? 0 : undefined"
+                  @click="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
+                  @keydown.enter="part.accent && !player.isLoadingAudio && openQualitySwitcher()"
                 >{{ part.text }}</span>
-                <span v-if="index < audioInfoParts.length - 1" class="np-audio-separator">·</span>
+                <template v-if="index < audioInfoParts.length - 1">
+                  <span
+                    class="np-audio-separator"
+                    :class="{ 'np-audio-separator--wrapped': wrappedAudioSeparators.has(index) }"
+                    aria-hidden="true"
+                  >·</span>{{ ' ' }}
+                </template>
               </template>
             </span>
           </div>
@@ -2223,123 +2431,7 @@ const sliderActiveColor = computed(() => {
               <span class="material-symbols-rounded">tune</span>
             </button>
             <div v-if="showAudioFxPanel" class="audiofx-popover np-floating-popover np-floating-popover--audiofx">
-              <!-- 播放速度 -->
-              <div class="audiofx-section">
-                <div class="audiofx-section-header">{{ t('player.speed') }}</div>
-                <div class="audiofx-speed-grid">
-                  <button
-                    v-for="spd in [0.5, 0.75, 0.85, 1.0, 1.25, 1.5, 2.0, 3.0]"
-                    :key="spd"
-                    class="speed-option"
-                    :class="{ active: player.playbackSpeed === spd }"
-                    @click="player.setSpeed(spd)"
-                  >
-                    {{ spd }}x
-                  </button>
-                </div>
-                <div class="audiofx-slider-row">
-                  <span class="audiofx-slider-label">0.25x</span>
-                  <input
-                    type="range" min="0.25" max="3" step="0.05"
-                    :value="player.playbackSpeed"
-                    class="audiofx-slider"
-                    @input="player.setSpeed(parseFloat(($event.target as HTMLInputElement).value))"
-                  />
-                  <span class="audiofx-slider-label">3x</span>
-                  <EditableRangeValue
-                    :model-value="player.playbackSpeed"
-                    class="audiofx-slider-value"
-                    :min="0.25"
-                    :max="3"
-                    :step="0.05"
-                    :display-value="`${player.playbackSpeed.toFixed(2)}x`"
-                    input-suffix="x"
-                    :aria-label="t('player.playback_speed')"
-                    @update:model-value="player.setSpeed($event)"
-                  />
-                </div>
-              </div>
-
-              <!-- 响度增益 -->
-              <div class="audiofx-section">
-                <div class="audiofx-section-header">{{ t('player.loudness_gain') }}</div>
-                <div class="audiofx-preset-row">
-                  <button v-for="db in [0, 300, 600, 900, 1200, 1500]" :key="db"
-                    class="speed-option" :class="{ active: player.loudnessGainMb === db }"
-                    @click="player.setLoudnessGain(db)"
-                  >
-                    {{ db === 0 ? '0' : '+' + (db / 100).toFixed(0) }}dB
-                  </button>
-                </div>
-                <div class="audiofx-slider-row">
-                  <span class="audiofx-slider-label">0</span>
-                  <input
-                    type="range" min="0" max="1500" step="50"
-                    :value="player.loudnessGainMb"
-                    class="audiofx-slider"
-                    @input="player.setLoudnessGain(parseFloat(($event.target as HTMLInputElement).value))"
-                  />
-                  <span class="audiofx-slider-label">+15dB</span>
-                  <EditableRangeValue
-                    :model-value="player.loudnessGainMb"
-                    class="audiofx-slider-value"
-                    :min="0"
-                    :max="1500"
-                    :step="50"
-                    :input-scale="0.01"
-                    :input-width="44"
-                    :display-value="`+${(player.loudnessGainMb / 100).toFixed(1)}dB`"
-                    input-suffix="dB"
-                    :aria-label="t('player.loudness_gain')"
-                    @update:model-value="player.setLoudnessGain($event)"
-                  />
-                </div>
-              </div>
-
-              <!-- 均衡器 -->
-              <div class="audiofx-section">
-                <div class="audiofx-section-header">
-                  {{ t('player.equalizer') }}
-                  <label class="audiofx-toggle">
-                    <input type="checkbox" :checked="player.equalizerEnabled"
-                      @change="player.setEqualizer(($event.target as HTMLInputElement).checked, player.equalizerBands)" />
-                    <span class="audiofx-toggle-slider"></span>
-                  </label>
-                </div>
-                <CustomSelect
-                  surface="dark"
-                  :model-value="player.equalizerPresetId"
-                  :options="eqPresetIds.map(pid => ({ value: pid, label: t('player.eq_' + pid) }))"
-                  @update:model-value="player.setEqualizerPreset($event)"
-                />
-                <div v-if="player.equalizerEnabled" class="audiofx-eq-bands">
-                  <div v-for="(freq, i) in eqFreqLabels" :key="i" class="audiofx-eq-band">
-                    <EditableRangeValue
-                      :model-value="player.equalizerBands[i]"
-                      class="audiofx-eq-val"
-                      :min="-1500"
-                      :max="1500"
-                      :step="50"
-                      :input-scale="0.01"
-                      :input-width="44"
-                      :display-value="(player.equalizerBands[i] / 100).toFixed(1)"
-                      input-suffix="dB"
-                      :aria-label="`${freq} Hz`"
-                      @update:model-value="onEqBandChange(i, $event)"
-                    />
-                    <input type="range" min="-1500" max="1500" step="50"
-                      class="audiofx-eq-slider" orient="vertical"
-                      :value="player.equalizerBands[i]"
-                      @input="onEqBandChange(i, parseFloat(($event.target as HTMLInputElement).value))" />
-                    <span class="audiofx-eq-freq">{{ freq }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 重置 -->
-              <button class="speed-option audiofx-reset" @click="player.resetAudioEffects()">
-                {{ t('player.reset_effects') }}
-              </button>
+              <AudioEffectsPanel />
             </div>
           </div>
           <button class="tool-btn tool-btn--feedback" @click="triggerControlFeedbackPulse(); toggleToolbarPanel('add')">
@@ -2388,147 +2480,167 @@ const sliderActiveColor = computed(() => {
           <Transition :name="moreSheetTransition" mode="out-in">
           <div :key="moreSheetView" class="np-more-sheet-content">
 
-          <!-- 主菜单（对齐 Android MoreOptionsSheet 顺序） -->
+          <!-- 主菜单：分组与顺序对齐 Android MoreOptionsMainContent；常用的偏移、字号直接在行内加减 -->
           <template v-if="moreSheetView === 'main'">
             <h4 class="np-more-title">{{ t('player.more_options') }}</h4>
 
-            <!-- 获取歌曲信息 -->
-            <button class="np-more-list-item" @click="openInfoSearch">
-              <span class="material-symbols-rounded">info</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.get_info') }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
+            <!-- 歌曲信息 -->
+            <div class="np-more-group">
+              <button class="np-more-list-item" @click="openInfoSearch">
+                <span class="material-symbols-rounded">info</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.get_info') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+              <button class="np-more-list-item" @click="openEditInfo">
+                <span class="material-symbols-rounded">edit</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.edit_info') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+            </div>
 
-            <!-- 编辑歌曲信息 -->
-            <button class="np-more-list-item" @click="openEditInfo">
-              <span class="material-symbols-rounded">edit</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.edit_info') }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
+            <!-- 播放：音质、音频效果、下载 -->
+            <div class="np-more-group">
+              <button v-if="canSwitchCurrentAudioQuality" class="np-more-list-item" :disabled="player.isLoadingAudio" @click="openQualitySwitcher()">
+                <span class="material-symbols-rounded">music_note</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.quality_switch') }}</span>
+                  <span class="np-more-list-desc">{{ currentAudioQualityLabel() || '—' }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+              <button class="np-more-list-item" @click="goToSubView('effects')">
+                <span class="material-symbols-rounded">tune</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.audio_effects') }}</span>
+                  <span class="np-more-list-desc">{{ audioEffectsSummary }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+              <button
+                v-if="currentSource !== 'local'"
+                class="np-more-list-item"
+                :disabled="downloadActionDisabled"
+                @click="handleDownloadAction"
+              >
+                <span class="material-symbols-rounded">{{ downloadActionIcon }}</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ downloadActionLabel }}</span>
+                  <span v-if="downloadActionDesc" class="np-more-list-desc">{{ downloadActionDesc }}</span>
+                </div>
+              </button>
+            </div>
 
-            <!-- 歌曲详情 -->
-            <button class="np-more-list-item" @click="goToSubView('track-detail')">
-              <span class="material-symbols-rounded">article</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">歌曲详情</span>
-                <span class="np-more-list-desc">来源、ID、音频与下载状态</span>
+            <!-- 歌词 -->
+            <div class="np-more-group">
+              <div class="np-more-list-item np-more-list-item--stepper">
+                <button class="np-more-stepper-main" @click="goToSubView('offset')">
+                  <span class="material-symbols-rounded">timer</span>
+                  <div class="np-more-list-info">
+                    <span class="np-more-list-headline">{{ t('player.lyric_offset') }}</span>
+                    <span class="np-more-list-desc" :class="{ 'np-more-list-desc--custom': currentLyricUserOffsetMs !== 0 }">{{ lyricOffsetSummary }}</span>
+                  </div>
+                </button>
+                <div class="np-more-stepper">
+                  <button :title="t('player.lyric_offset_later')" :aria-label="t('player.lyric_offset_later')" @click="nudgeLyricOffset(-1)">
+                    <span class="material-symbols-rounded">remove</span>
+                  </button>
+                  <button :title="t('player.lyric_offset_earlier')" :aria-label="t('player.lyric_offset_earlier')" @click="nudgeLyricOffset(1)">
+                    <span class="material-symbols-rounded">add</span>
+                  </button>
+                </div>
               </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
+              <div class="np-more-list-item np-more-list-item--stepper">
+                <button class="np-more-stepper-main" @click="goToSubView('fontsize')">
+                  <span class="material-symbols-rounded">format_size</span>
+                  <div class="np-more-list-info">
+                    <span class="np-more-list-headline">{{ t('player.font_scale') }}</span>
+                    <span class="np-more-list-desc">{{ Math.round(settings.lyricFontScale * 100) }}%</span>
+                  </div>
+                </button>
+                <div class="np-more-stepper">
+                  <button
+                    :disabled="settings.lyricFontScale <= LYRIC_FONT_SCALE_MIN"
+                    :title="t('player.font_scale_smaller')" :aria-label="t('player.font_scale_smaller')"
+                    @click="nudgeLyricFontScale(-1)"
+                  >
+                    <span class="material-symbols-rounded">text_decrease</span>
+                  </button>
+                  <button
+                    :disabled="settings.lyricFontScale >= LYRIC_FONT_SCALE_MAX"
+                    :title="t('player.font_scale_larger')" :aria-label="t('player.font_scale_larger')"
+                    @click="nudgeLyricFontScale(1)"
+                  >
+                    <span class="material-symbols-rounded">text_increase</span>
+                  </button>
+                </div>
+              </div>
+              <button class="np-more-list-item" @click="showDesktopLyrics">
+                <span class="material-symbols-rounded">picture_in_picture_alt</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.desktop_lyrics') }}</span>
+                </div>
+              </button>
+              <button class="np-more-list-item" @click="openLyricsFill">
+                <span class="material-symbols-rounded">lyrics</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.lyrics_fill') }}</span>
+                  <span class="np-more-list-desc">{{ t('player.lyrics_fill_desc') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+              <button class="np-more-list-item" @click="openLyricsEditor">
+                <span class="material-symbols-rounded">edit_note</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.lyrics_editor') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+            </div>
 
-            <!-- 查看专辑（对齐 Android：网易云来源显示） -->
-            <button v-if="canViewNeteaseAlbum" class="np-more-list-item" @click="openCurrentAlbum">
-              <span class="material-symbols-rounded">library_music</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.view_album', { name: albumName }) }}</span>
-              </div>
-            </button>
-
-            <!-- 查看歌手（对齐 Android：网易云来源显示） -->
-            <button v-if="canViewNeteaseArtist" class="np-more-list-item" @click="openCurrentArtist">
-              <span class="material-symbols-rounded">artist</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.view_artist', { name: primaryArtistName }) }}</span>
-              </div>
-            </button>
-
-            <!-- 音质切换（仅在线来源显示） -->
-            <button v-if="currentSource !== 'local'" class="np-more-list-item" @click="goToSubView('quality')">
-              <span class="material-symbols-rounded">music_note</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.quality_switch') }}</span>
-                <span class="np-more-list-desc">{{ currentAudioQualityLabel() || '—' }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 音频效果 -->
-            <button class="np-more-list-item" @click="goToSubView('speed')">
-              <span class="material-symbols-rounded">tune</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.audio_effects') }}</span>
-                <span class="np-more-list-desc">{{ t('player.audio_effects_desc') }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 歌词偏移 -->
-            <button class="np-more-list-item" @click="goToSubView('offset')">
-              <span class="material-symbols-rounded">timer</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.lyric_offset') }}</span>
-                <span class="np-more-list-desc">{{ currentLyricUserOffsetMs > 0 ? '+' : '' }}{{ currentLyricUserOffsetMs }}ms · {{ currentLyricOffsetSourceLabel }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 歌词字号 -->
-            <button class="np-more-list-item" @click="goToSubView('fontsize')">
-              <span class="material-symbols-rounded">format_size</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.font_scale') }}</span>
-                <span class="np-more-list-desc">{{ Math.round(settings.lyricFontScale * 100) }}%</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 歌词编辑器（对齐 Android LyricsEditorSheet） -->
-            <button class="np-more-list-item" @click="openLyricsEditor">
-              <span class="material-symbols-rounded">edit_note</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.lyrics_editor') }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 歌词填充（对齐 Android FillOptionsDialog） -->
-            <button class="np-more-list-item" @click="lyricFillQuery = player.currentTrack?.title || ''; lyricFillResults = []; lyricFillPlatform = currentSource === 'netease' ? 'netease' : (currentSource === 'qq' ? 'qq' : 'lrclib'); goToSubView('lyrics-fill')">
-              <span class="material-symbols-rounded">lyrics</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.lyrics_fill') }}</span>
-                <span class="np-more-list-desc">{{ t('player.lyrics_fill_desc') }}</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 分享 -->
-            <button class="np-more-list-item" @click="shareSong">
-              <span class="material-symbols-rounded">share</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('player.share') }}</span>
-              </div>
-            </button>
-
-            <!-- 一起听 -->
-            <button class="np-more-list-item" @click="openListenTogetherFromMore">
-              <span class="material-symbols-rounded">headphones</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ t('listen_together.title') }}</span>
-                <span class="np-more-list-desc">创建或加入同步播放房间</span>
-              </div>
-              <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
-            </button>
-
-            <!-- 下载（在线来源：下载 / 重新下载 / 本地播放状态） -->
-            <button
-              v-if="currentSource !== 'local'"
-              class="np-more-list-item"
-              :disabled="downloadActionDisabled"
-              @click="handleDownloadAction"
-            >
-              <span class="material-symbols-rounded">{{ downloadActionIcon }}</span>
-              <div class="np-more-list-info">
-                <span class="np-more-list-headline">{{ downloadActionLabel }}</span>
-                <span v-if="downloadActionDesc" class="np-more-list-desc">{{ downloadActionDesc }}</span>
-              </div>
-            </button>
+            <!-- 浏览与分享 -->
+            <div class="np-more-group">
+              <button v-if="canViewNeteaseAlbum" class="np-more-list-item" @click="openCurrentAlbum">
+                <span class="material-symbols-rounded">library_music</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.view_album', { name: albumName }) }}</span>
+                </div>
+              </button>
+              <button v-if="canViewNeteaseArtist" class="np-more-list-item" @click="openCurrentArtist">
+                <span class="material-symbols-rounded">artist</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.view_artist', { name: primaryArtistName }) }}</span>
+                </div>
+              </button>
+              <button class="np-more-list-item" @click="shareSong">
+                <span class="material-symbols-rounded">share</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.share') }}</span>
+                </div>
+              </button>
+              <button class="np-more-list-item" @click="openListenTogetherFromMore">
+                <span class="material-symbols-rounded">headphones</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('listen_together.title') }}</span>
+                  <span class="np-more-list-desc">{{ t('listen_together.entry_desc') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+              <button class="np-more-list-item" @click="goToSubView('track-detail')">
+                <span class="material-symbols-rounded">article</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('player.track_detail') }}</span>
+                  <span class="np-more-list-desc">{{ t('player.track_detail_desc') }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
+            </div>
           </template>
 
-          <!-- 子视图：歌词偏移 -->
+          <!-- 子视图：歌词偏移（显示与编辑的都是实际生效的偏移） -->
           <template v-else-if="moreSheetView === 'offset'">
             <div class="np-more-sub-header">
               <button class="np-more-back" @click="goBackToMain()">
@@ -2537,26 +2649,42 @@ const sliderActiveColor = computed(() => {
               <h4 class="np-more-title">{{ t('player.lyric_offset') }}</h4>
             </div>
             <div class="np-more-item">
-              <div class="np-more-label">{{ t('player.lyric_offset_song') }}</div>
-              <div class="np-more-hint">{{ t('player.lyric_offset_base', { value: `${currentLyricDefaultOffsetMs >= 0 ? '+' : ''}${currentLyricDefaultOffsetMs}ms` }) }} · {{ currentLyricOffsetSourceLabel }}</div>
+              <div class="np-more-hint">
+                {{ currentLyricSourceLabel
+                  ? t('player.lyric_offset_default_of', { source: currentLyricSourceLabel, value: formatLyricOffsetMs(currentLyricDefaultOffsetMs) })
+                  : t('player.lyric_offset_default', { value: formatLyricOffsetMs(currentLyricDefaultOffsetMs) }) }}
+              </div>
               <div class="np-more-row">
-                <input type="range" min="-2000" max="2000" step="50"
-                  :value="currentLyricUserOffsetMs"
+                <button class="np-more-step-btn" :title="t('player.lyric_offset_later')" :aria-label="t('player.lyric_offset_later')" @click="nudgeLyricOffset(-1)">
+                  <span class="material-symbols-rounded">remove</span>
+                </button>
+                <input type="range"
+                  :min="lyricOffsetSliderMin" :max="lyricOffsetSliderMax" :step="LYRIC_OFFSET_STEP_MS"
+                  :value="currentLyricTotalOffsetMs"
                   class="np-more-slider"
-                  @input="currentLyricUserOffsetMs = parseInt(($event.target as HTMLInputElement).value)"
+                  :aria-label="t('player.lyric_offset')"
+                  @input="currentLyricTotalOffsetMs = parseInt(($event.target as HTMLInputElement).value)"
                 />
+                <button class="np-more-step-btn" :title="t('player.lyric_offset_earlier')" :aria-label="t('player.lyric_offset_earlier')" @click="nudgeLyricOffset(1)">
+                  <span class="material-symbols-rounded">add</span>
+                </button>
                 <EditableRangeValue
-                  v-model="currentLyricUserOffsetMs"
+                  v-model="currentLyricTotalOffsetMs"
                   class="np-offset-value"
-                  :class="{ positive: currentLyricUserOffsetMs > 0, negative: currentLyricUserOffsetMs < 0 }"
-                  :min="-2000"
-                  :max="2000"
-                  :step="50"
-                  :display-value="`${currentLyricUserOffsetMs > 0 ? '+' : ''}${currentLyricUserOffsetMs}ms`"
+                  :class="{ positive: currentLyricTotalOffsetMs > 0, negative: currentLyricTotalOffsetMs < 0 }"
+                  :min="lyricOffsetSliderMin"
+                  :max="lyricOffsetSliderMax"
+                  :step="LYRIC_OFFSET_STEP_MS"
+                  :display-value="formatLyricOffsetMs(currentLyricTotalOffsetMs)"
                   input-suffix="ms"
                   :aria-label="t('player.lyric_offset')"
                 />
               </div>
+              <p class="np-more-hint np-more-hint--below">{{ t('player.lyric_offset_hint') }}</p>
+              <button v-if="currentLyricUserOffsetMs !== 0" class="np-more-text-btn" @click="resetLyricOffsetToDefault">
+                <span class="material-symbols-rounded">restart_alt</span>
+                {{ t('player.lyric_offset_reset', { value: formatLyricOffsetMs(currentLyricDefaultOffsetMs) }) }}
+              </button>
             </div>
           </template>
 
@@ -2570,17 +2698,18 @@ const sliderActiveColor = computed(() => {
             </div>
             <div class="np-more-item">
               <div class="np-more-row">
-                <input type="range" min="0.6" max="1.6" step="0.05"
+                <input type="range" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP"
                   :value="settings.lyricFontScale"
                   class="np-more-slider"
+                  :aria-label="t('player.font_scale')"
                   @input="settings.lyricFontScale = parseFloat(($event.target as HTMLInputElement).value)"
                 />
                 <EditableRangeValue
                   v-model="settings.lyricFontScale"
                   class="np-offset-value"
-                  :min="0.6"
-                  :max="1.6"
-                  :step="0.05"
+                  :min="LYRIC_FONT_SCALE_MIN"
+                  :max="LYRIC_FONT_SCALE_MAX"
+                  :step="LYRIC_FONT_SCALE_STEP"
                   :input-scale="100"
                   :display-value="`${Math.round(settings.lyricFontScale * 100)}%`"
                   input-suffix="%"
@@ -2593,51 +2722,15 @@ const sliderActiveColor = computed(() => {
             </div>
           </template>
 
-          <!-- 子视图：音频效果（对齐 Android PlaybackSoundSheet） -->
-          <template v-else-if="moreSheetView === 'speed'">
+          <!-- 子视图：音频效果，与工具栏的音效弹层是同一个面板 -->
+          <template v-else-if="moreSheetView === 'effects'">
             <div class="np-more-sub-header">
               <button class="np-more-back" @click="goBackToMain()">
                 <span class="material-symbols-rounded">arrow_back</span>
               </button>
               <h4 class="np-more-title">{{ t('player.audio_effects') }}</h4>
             </div>
-            <!-- 播放速度 -->
-            <div class="np-more-item">
-              <div class="np-more-label">
-                <span class="material-symbols-rounded" style="font-size: 18px">speed</span>
-                {{ t('player.playback_speed') }}
-              </div>
-              <div class="np-more-speed-grid">
-                <button
-                  v-for="spd in [0.5, 0.75, 0.85, 0.9, 1, 1.1, 1.25, 1.5, 2]"
-                  :key="spd"
-                  class="np-more-speed-btn"
-                  :class="{ active: player.playbackSpeed === spd }"
-                  @click="player.setSpeed(spd)"
-                >{{ spd }}x</button>
-              </div>
-            </div>
-            <!-- 速度微调滑块 -->
-            <div class="np-more-item">
-              <div class="np-more-row">
-                <input type="range" min="0.25" max="3" step="0.05"
-                  :value="player.playbackSpeed"
-                  class="np-more-slider"
-                  @input="player.setSpeed(parseFloat(($event.target as HTMLInputElement).value))"
-                />
-                <EditableRangeValue
-                  :model-value="player.playbackSpeed"
-                  class="np-offset-value"
-                  :min="0.25"
-                  :max="3"
-                  :step="0.05"
-                  :display-value="`${player.playbackSpeed.toFixed(2)}x`"
-                  input-suffix="x"
-                  :aria-label="t('player.playback_speed')"
-                  @update:model-value="player.setSpeed($event)"
-                />
-              </div>
-            </div>
+            <AudioEffectsPanel class="np-more-effects" />
           </template>
 
           <!-- 子视图：获取歌曲信息 -->
@@ -2664,13 +2757,13 @@ const sliderActiveColor = computed(() => {
                 :class="{ active: infoSearchPlatform === 'netease' }"
                 @click="infoSearchPlatform = 'netease'; searchResults = []; infoApplyCandidate = null"
               >
-                网易云
+                {{ t('player.source_netease') }}
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'qq' }"
                 @click="infoSearchPlatform = 'qq'; searchResults = []; infoApplyCandidate = null"
               >
-                QQ 音乐
+                {{ t('player.source_qq') }}
               </button>
               <button
                 :class="{ active: infoSearchPlatform === 'bilibili' }"
@@ -2695,7 +2788,7 @@ const sliderActiveColor = computed(() => {
                 :class="{ active: infoApplyCandidate === r }"
                 @click="applySearchResult(r)"
               >
-                <BilibiliCoverImage v-if="r.cover_url" :src="r.cover_url" class="np-more-search-cover" />
+                <BilibiliCoverImage :src="r.cover_url" class="np-more-search-cover"><span class="np-more-search-cover np-more-search-cover-fallback material-symbols-rounded filled">music_note</span></BilibiliCoverImage>
                 <div class="np-more-search-info">
                   <span class="np-more-search-title">{{ r.title }}</span>
                   <span class="np-more-search-artist">{{ r.artist }}</span>
@@ -2715,32 +2808,32 @@ const sliderActiveColor = computed(() => {
                   <span class="np-more-search-artist">{{ infoApplyCandidate.artist }}</span>
                 </div>
               </div>
-              <div class="np-more-field-title">选择要填充的字段</div>
+              <div class="np-more-field-title">{{ t('player.fill_fields_title') }}</div>
               <div class="np-more-field-options">
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.title" type="checkbox" />
-                  <span>歌曲名</span>
+                  <span>{{ t('player.song_title') }}</span>
                 </label>
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.artist" type="checkbox" />
-                  <span>歌手</span>
+                  <span>{{ t('player.artist_name') }}</span>
                 </label>
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.cover" type="checkbox" />
-                  <span>封面</span>
+                  <span>{{ t('player.fill_field_cover') }}</span>
                 </label>
                 <label class="np-more-chip">
                   <input v-model="applyInfoFields.lyrics" type="checkbox" />
-                  <span>歌词</span>
+                  <span>{{ t('player.fill_field_lyrics') }}</span>
                 </label>
               </div>
               <div class="np-more-form-actions compact">
                 <button class="np-more-form-btn primary" @click="confirmApplySearchResult">
                   <span class="material-symbols-rounded">check</span>
-                  应用选择
+                  {{ t('player.apply_selection') }}
                 </button>
                 <button class="np-more-form-btn" @click="infoApplyCandidate = null">
-                  取消
+                  {{ t('common.cancel') }}
                 </button>
               </div>
             </div>
@@ -2783,16 +2876,18 @@ const sliderActiveColor = computed(() => {
               <button class="np-more-back" @click="goBackToMain()">
                 <span class="material-symbols-rounded">arrow_back</span>
               </button>
-              <h4 class="np-more-title">歌曲详情</h4>
+              <h4 class="np-more-title">{{ t('player.track_detail') }}</h4>
             </div>
             <div class="np-track-detail-card">
               <div class="np-track-detail-hero">
                 <img
-                  v-if="coverUrl"
+                  v-if="coverUrl && !coverLoadError"
                   :src="coverUrl"
                   class="np-track-detail-cover"
                   referrerpolicy="no-referrer"
+                  @error="handleNowPlayingCoverError"
                 />
+                <span v-else class="np-track-detail-cover np-track-detail-cover-fallback material-symbols-rounded filled">music_note</span>
                 <div class="np-track-detail-heading">
                   <strong>{{ player.currentTrack?.title || '-' }}</strong>
                   <span>{{ player.currentTrack?.artist || '-' }}</span>
@@ -2800,24 +2895,24 @@ const sliderActiveColor = computed(() => {
               </div>
 
               <button class="np-track-detail-row copyable" @click="copyText(player.currentTrack?.id || '')">
-                <span>歌曲 ID</span>
+                <span>{{ t('player.track_detail_id') }}</span>
                 <strong>{{ player.currentTrack?.id || '-' }}</strong>
               </button>
               <button class="np-track-detail-row copyable" @click="copyText(player.currentTrack?.title || '')">
-                <span>标题</span>
+                <span>{{ t('player.track_detail_title') }}</span>
                 <strong>{{ player.currentTrack?.title || '-' }}</strong>
               </button>
               <button class="np-track-detail-row copyable" @click="copyText(player.currentTrack?.artist || '')">
-                <span>歌手</span>
+                <span>{{ t('player.track_detail_artist') }}</span>
                 <strong>{{ player.currentTrack?.artist || '-' }}</strong>
               </button>
               <div class="np-track-detail-row">
-                <span>专辑</span>
+                <span>{{ t('player.track_detail_album') }}</span>
                 <strong>{{ albumName || '-' }}</strong>
               </div>
               <div class="np-track-detail-row">
-                <span>来源</span>
-                <strong>{{ playbackSourceLabel || currentSource }}</strong>
+                <span>{{ t('player.track_detail_source') }}</span>
+                <strong>{{ playbackSourceLabel || platformLabel(currentSource) || '-' }}</strong>
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_duration') }}</span>
@@ -2825,14 +2920,12 @@ const sliderActiveColor = computed(() => {
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_audio_params') }}</span>
-                <strong>{{ trackDetailAudioParams || audioInfoDisplay || '-' }}</strong>
+                <strong>{{ trackDetailAudioParams || '-' }}</strong>
               </div>
               <div class="np-track-detail-row">
                 <span>{{ t('player.track_detail_bitrate') }}</span>
                 <strong>
-                  {{ player.audioInfo?.bitrate && player.audioInfo.bitrate > 0
-                    ? `${Math.round(player.audioInfo.bitrate)} kbps`
-                    : '-' }}
+                  {{ actualAudioBitrateLabel(player.audioInfo) || '-' }}
                 </strong>
               </div>
               <div class="np-track-detail-row">
@@ -2870,9 +2963,9 @@ const sliderActiveColor = computed(() => {
               </button>
               <h4 class="np-more-title">{{ t('player.quality_switch') }}</h4>
             </div>
-            <div v-if="qualityOptionsForSource(currentSource).length" class="np-more-quality-list">
+            <div v-if="canSwitchCurrentAudioQuality" class="np-more-quality-list">
               <button
-                v-for="q in qualityOptionsForSource(currentSource)"
+                v-for="q in switchableQualities"
                 :key="q.key"
                 class="np-more-quality-item"
                 :class="{ active: currentQualityKey() === q.key }"
@@ -2905,13 +2998,13 @@ const sliderActiveColor = computed(() => {
                   :class="{ active: lyricsEditorTab === 'original' }"
                   @click="lyricsEditorTab = 'original'"
                 >
-                  原文
+                  {{ t('player.lyrics_editor_original') }}
                 </button>
                 <button
                   :class="{ active: lyricsEditorTab === 'translation' }"
                   @click="lyricsEditorTab = 'translation'"
                 >
-                  翻译
+                  {{ t('player.lyrics_editor_translation') }}
                 </button>
               </div>
               <textarea
@@ -2925,7 +3018,7 @@ const sliderActiveColor = computed(() => {
                 v-else
                 v-model="lyricsTranslationEditorText"
                 class="np-lyrics-textarea"
-                placeholder="[00:12.34]翻译歌词，可留空"
+                :placeholder="t('player.lyrics_translation_placeholder')"
                 spellcheck="false"
               />
               <div class="np-more-form-actions">
@@ -2965,13 +3058,13 @@ const sliderActiveColor = computed(() => {
                 :class="{ active: lyricFillPlatform === 'netease' }"
                 @click="lyricFillPlatform = 'netease'; lyricFillResults = []"
               >
-                网易云
+                {{ t('player.source_netease') }}
               </button>
               <button
                 :class="{ active: lyricFillPlatform === 'qq' }"
                 @click="lyricFillPlatform = 'qq'; lyricFillResults = []"
               >
-                QQ 音乐
+                {{ t('player.source_qq') }}
               </button>
               <button
                 :class="{ active: lyricFillPlatform === 'lrclib' }"
@@ -2989,7 +3082,7 @@ const sliderActiveColor = computed(() => {
                 class="np-more-search-item"
                 @click="applyLyricFill(r)"
               >
-                <BilibiliCoverImage v-if="r.cover_url" :src="r.cover_url" class="np-more-search-cover" />
+                <BilibiliCoverImage :src="r.cover_url" class="np-more-search-cover"><span class="np-more-search-cover np-more-search-cover-fallback material-symbols-rounded filled">music_note</span></BilibiliCoverImage>
                 <div class="np-more-search-info">
                   <span class="np-more-search-title">{{ r.title }}</span>
                   <span class="np-more-search-artist">{{ r.artist }}</span>
@@ -3500,6 +3593,9 @@ const sliderActiveColor = computed(() => {
 }
 
 .np-artist {
+  display: block;
+  cursor: pointer;
+  text-align: left;
   font-size: 14px;
   color: rgba(255,255,255,0.78);
   margin-top: 2px;
@@ -3509,15 +3605,20 @@ const sliderActiveColor = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  &:hover { text-decoration: underline; }
+  &:disabled { cursor: default; }
+  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
 }
 
 /* 进度条区域：固定高度，音质行始终占位 */
 .np-slider-area {
   width: 100%;
   max-width: 100%;
-  /* 进度条 + 时间 + 音质/下载 chip，留足高度避免裁切 */
-  height: 80px;
+  /* 进度条 + 时间 + 音质/下载 chip，留足高度避免裁切；窄栏里音质行换成两行时随之长高，不压到控制栏 */
+  min-height: 80px;
+  padding-top: 10px;
   flex-shrink: 0;
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
@@ -3549,8 +3650,8 @@ const sliderActiveColor = computed(() => {
   font-weight: 600;
   color: rgba(255,255,255,0.68);
   letter-spacing: 0.2px;
-  margin-top: 6px;
-  /* 给下载 chip 完整高度，禁止裁切圆角 */
+  margin-top: 0;
+  /* 空参数行保持高度，切换播放来源时不推动控制栏 */
   min-height: 24px;
   height: auto;
   flex-shrink: 0;
@@ -3564,21 +3665,26 @@ const sliderActiveColor = computed(() => {
   transition: color 0.6s ease;
 }
 
+/* 行内排版：放不下时在分隔点后的空格处整项换行，并让两行长度接近，不在第二行孤零零剩一项 */
 .np-audio-detail {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  text-align: center;
+  text-wrap: balance;
+  line-height: 1.45;
   color: rgba(255,255,255,0.68);
 
   &.separated::before {
     content: '·';
-    margin-right: 0;
+    margin-right: 5px;
     color: rgba(255,255,255,0.42);
   }
 }
 
 .np-audio-detail-part {
+  /* 「1025 kbps」「多声道（E-AC-3）」这类整项不从中间断开，放不下就整项换到下一行 */
+  white-space: nowrap;
   color: rgba(255,255,255,0.70);
   transition: color 0.45s ease;
 }
@@ -3603,26 +3709,37 @@ const sliderActiveColor = computed(() => {
   outline: none;
 }
 
+/* 左边距加上后面的空格，两侧间隔相当 */
 .np-audio-separator {
+  margin: 0 2px 0 5px;
   color: rgba(255,255,255,0.34);
+}
+
+.np-audio-separator--wrapped {
+  visibility: hidden;
+}
+
+/* 左栏较窄时收紧字号，常见的六项参数尽量仍排在一行 */
+@container (max-width: 360px) {
+  .np-audio-info {
+    font-size: 10.5px;
+    letter-spacing: 0;
+  }
+
+  .np-audio-separator {
+    margin-left: 3px;
+  }
 }
 
 .np-download-chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  line-height: 1.2;
-  white-space: nowrap;
+  line-height: 1;
   color: var(--np-primary-container, var(--md-primary-container, #E8DEF8));
-  background: rgba(255,255,255,0.10);
-  border: 1px solid rgba(255,255,255,0.14);
-  box-sizing: border-box;
   flex-shrink: 0;
 
   .material-symbols-rounded {
-    font-size: 13px;
+    font-size: 16px;
     line-height: 1;
   }
 }
@@ -4202,6 +4319,15 @@ const sliderActiveColor = computed(() => {
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+/* 黑胶是圆形，右下角落在唱片外：改为底部居中（不用 transform，避免与切换动画冲突） */
+.source-badge--disc {
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  width: fit-content;
+  margin: 0 auto;
+}
+
 .source-badge-icon {
   font-size: 14px;
   color: rgba(255, 255, 255, 0.7);
@@ -4375,200 +4501,6 @@ const sliderActiveColor = computed(() => {
   overflow-y: auto;
 
   &::-webkit-scrollbar { width: 0; height: 0; display: none; }
-}
-
-.audiofx-section :deep(.custom-select) {
-  width: 100%;
-}
-
-.audiofx-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.audiofx-section-header {
-  font-size: 12px;
-  font-weight: 600;
-  color: rgba(255,255,255,0.5);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.audiofx-speed-grid, .audiofx-preset-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.audiofx-speed-grid .speed-option,
-.audiofx-preset-row .speed-option {
-  padding: 5px 10px;
-  font-size: 12px;
-  min-width: unset;
-  flex: 0 0 auto;
-}
-
-.audiofx-slider-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.audiofx-slider-label {
-  font-size: 10px;
-  color: rgba(255,255,255,0.35);
-  min-width: 28px;
-  text-align: center;
-}
-
-.audiofx-slider-value {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--md-primary, #D0BCFF);
-  min-width: 42px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.audiofx-slider {
-  flex: 1;
-  appearance: none;
-  height: 4px;
-  background: rgba(255,255,255,0.15);
-  border-radius: 2px;
-  outline: none;
-  cursor: pointer;
-
-  &::-webkit-slider-thumb {
-    appearance: none;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--np-primary, var(--md-primary, #D0BCFF));
-    cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  }
-
-  &::-moz-range-thumb {
-    width: 14px;
-    height: 14px;
-    border: none;
-    border-radius: 50%;
-    background: var(--np-primary, var(--md-primary, #D0BCFF));
-    cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  }
-}
-
-.audiofx-toggle {
-  position: relative;
-  display: inline-block;
-  width: 34px;
-  height: 18px;
-
-  input { opacity: 0; width: 0; height: 0; }
-
-  .audiofx-toggle-slider {
-    position: absolute;
-    cursor: pointer;
-    inset: 0;
-    background: rgba(255,255,255,0.15);
-    border-radius: 18px;
-    transition: 0.2s;
-
-    &::before {
-      content: '';
-      position: absolute;
-      height: 14px;
-      width: 14px;
-      left: 2px;
-      bottom: 2px;
-      background: white;
-      border-radius: 50%;
-      transition: 0.2s;
-    }
-  }
-
-  input:checked + .audiofx-toggle-slider {
-    background: var(--md-primary, #D0BCFF);
-  }
-
-  input:checked + .audiofx-toggle-slider::before {
-    transform: translateX(16px);
-  }
-}
-
-.audiofx-eq-bands {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 0;
-}
-
-.audiofx-eq-band {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-}
-
-.audiofx-eq-val {
-  font-size: 10px;
-  color: var(--np-primary, var(--md-primary, #D0BCFF));
-  font-variant-numeric: tabular-nums;
-  min-height: 14px;
-}
-
-.audiofx-eq-freq {
-  font-size: 9px;
-  color: rgba(255,255,255,0.35);
-}
-
-.audiofx-eq-slider {
-  writing-mode: vertical-lr;
-  direction: rtl;
-  appearance: none;
-  width: 4px;
-  height: 80px;
-  background: rgba(255,255,255,0.15);
-  border-radius: 2px;
-  cursor: pointer;
-  outline: none;
-
-  &::-webkit-slider-thumb {
-    appearance: none;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--np-primary, var(--md-primary, #D0BCFF));
-    cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  }
-
-  &::-moz-range-thumb {
-    width: 12px;
-    height: 12px;
-    border: none;
-    border-radius: 50%;
-    background: var(--np-primary, var(--md-primary, #D0BCFF));
-    cursor: pointer;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  }
-}
-
-.audiofx-reset {
-  width: 100%;
-  text-align: center;
-  color: #EF5350 !important;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  margin-top: 2px;
-  padding-top: 10px;
 }
 
 .speed-popover, .sleep-popover {
@@ -4852,30 +4784,111 @@ const sliderActiveColor = computed(() => {
   transition: color 0.18s, transform 0.18s cubic-bezier(0.2, 0, 0, 1);
 }
 
-// 速度选择网格
-.np-more-speed-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-  padding: 8px 0;
+// 分组：组与组之间用细线隔开，组内是 Android 式列表项
+.np-more-group + .np-more-group {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.06);
 }
 
-.np-more-speed-btn {
-  padding: 12px;
-  border: none;
-  border-radius: 12px;
-  background: rgba(255,255,255,0.06);
-  color: rgba(255,255,255,0.7);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
+// 带行内加减的列表项：左边整块点进详细页，右边直接调整，不用来回进出子页
+.np-more-list-item--stepper {
+  padding: 0 10px 0 0;
+  cursor: default;
 
-  &:hover { background: rgba(255,255,255,0.10); }
-  &.active {
-    background: var(--md-primary-container, #E8DEF8);
-    color: var(--md-on-primary-container, #1D192B);
+  &:active { transform: none; }
+}
+
+.np-more-stepper-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+  padding: 12px 0 12px 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+
+  > .material-symbols-rounded:first-child {
+    font-size: 21px;
+    color: rgba(255,255,255,0.72);
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 13px;
+    background: rgba(255,255,255,0.08);
+    transition: background 0.18s, color 0.18s;
   }
+
+  &:hover > .material-symbols-rounded:first-child {
+    background: color-mix(in srgb, var(--md-primary, #D0BCFF) 26%, transparent);
+    color: var(--md-primary, #D0BCFF);
+  }
+}
+
+.np-more-stepper {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.np-more-stepper button,
+.np-more-step-btn {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.78);
+  background: rgba(255,255,255,0.08);
+  transition: background 0.15s, color 0.15s;
+
+  .material-symbols-rounded { font-size: 20px; }
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--md-primary, #D0BCFF) 26%, transparent);
+    color: var(--md-primary, #D0BCFF);
+  }
+
+  &:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+}
+
+// 这首歌单独调过偏移时用主色标出
+.np-more-list-desc--custom {
+  color: var(--md-primary, #D0BCFF);
+}
+
+.np-more-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 14px;
+  border-radius: var(--radius-full, 999px);
+  color: var(--md-primary, #D0BCFF);
+  background: rgba(255,255,255,0.06);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.15s;
+
+  .material-symbols-rounded { font-size: 18px; }
+
+  &:hover { background: rgba(255,255,255,0.1); }
+}
+
+.np-more-effects {
+  padding: 0 2px 4px;
 }
 
 .np-more-item {
@@ -4897,6 +4910,8 @@ const sliderActiveColor = computed(() => {
   color: rgba(255,255,255,0.5);
   margin-top: -4px;
   margin-bottom: 12px;
+
+  &--below { margin-top: 12px; }
 }
 
 .np-more-row {
@@ -5035,6 +5050,14 @@ const sliderActiveColor = computed(() => {
   object-fit: cover;
   flex-shrink: 0;
   background: rgba(255,255,255,0.06);
+}
+
+.np-more-search-cover-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: rgba(255,255,255,0.5);
 }
 
 .np-more-search-info {
@@ -5236,6 +5259,15 @@ const sliderActiveColor = computed(() => {
   border-radius: 14px;
   object-fit: cover;
   background: rgba(255,255,255,0.08);
+}
+
+.np-track-detail-cover-fallback {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: rgba(255,255,255,0.6);
 }
 
 .np-track-detail-heading {

@@ -1,0 +1,30 @@
+.artist-tabs {
+  display: flex;
+  padding: 4px;
+  border-radius: 24px;
+  background: var(--md-surface-container);
+  margin-bottom: 12px;
+}
+
+.artist-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 42px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--md-on-surface-variant);
+  transition: background var(--duration-short, 150ms), color var(--duration-short, 150ms);
+
+  .material-symbols-rounded { font-size: 19px; }
+
+  &:hover { background: color-mix(in srgb, var(--md-on-surface) 6%, transparent); }
+
+  &.active {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+  }
+}

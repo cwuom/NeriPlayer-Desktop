@@ -4,6 +4,14 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+#[tauri::command]
+pub async fn get_netease_home_section(
+    source: String,
+    state: State<'_, AppState>,
+) -> AppResult<Value> {
+    state.netease().get_home_section(&source, state.bypasses_system_proxy()).await
+}
+
 /// 获取网易云个性化推荐歌单（需登录）
 #[tauri::command]
 pub async fn get_recommended_playlists(
@@ -372,7 +380,7 @@ pub async fn get_netease_artist_songs(
 }
 
 /// 单次歌单详情最多展开的 continuation 页数
-const YOUTUBE_PLAYLIST_MAX_PAGES: usize = 20;
+const YOUTUBE_PLAYLIST_MAX_PAGES: usize = 80;
 
 /// 获取 YouTube Music 歌单详情(自动展开 continuation 分页 + 会话刷新)
 #[tauri::command]

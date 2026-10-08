@@ -1,18 +1,18 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onDeactivated, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 
 defineOptions({ name: 'LibraryView' })
 import { useI18n } from 'vue-i18n'
-import { useLibraryStore } from '@/stores/library'
+import LocalFilesView from '@/views/LocalFilesView.vue'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
-import { useRecommendStore } from '@/stores/recommend'
+import { useRecommendStore, type CloudListStatus } from '@/stores/recommend'
 import { AUTH_CHANGED_EVENT, useAuthStore } from '@/stores/auth'
-import { useDownloadStore } from '@/stores/download'
+import CloudListState from '@/components/CloudListState.vue'
+import DownloadsView from '@/views/DownloadsView.vue'
 import { useToastStore } from '@/stores/toast'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import M3Input from '@/components/ui/M3Input.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
@@ -31,18 +31,37 @@ import {
   type LocalArtistSummary,
 } from '@/modules/library/localArtists'
 import { createLogger } from '@/utils/logger'
+import {
+  isEmptyLocalFilesPlaylist,
+  isFavoritesPlaylist,
+  isLocalFilesPlaylist,
+  isSystemPlaylist,
+  LEGACY_PLAYLIST_ORDER_KEY,
+  localPlaylistDisplayName,
+  playlistOrderIds,
+  readLegacyPlaylistOrder,
+  visibleSelection,
+} from '@/modules/library/localPlaylists'
 import { usePointerListReorder } from '@/composables/usePointerListReorder'
+import {
+  ARTIST_FAVORITE_SOURCES,
+  favoriteArtistRoute,
+  favoriteKey,
+  filterFavoriteArtists,
+  isArtistFavoriteSource,
+  parseFavoritePlaylists,
+  type ArtistFavoriteSource,
+  type FavoritePlaylist,
+} from '@/modules/library/favoriteArtists'
 
 const log = createLogger('library-view')
 
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
-const library = useLibraryStore()
 const player = usePlayerStore()
 const recommend = useRecommendStore()
 const auth = useAuthStore()
-const downloadStore = useDownloadStore()
 const toast = useToastStore()
 
 // 喜欢的歌曲计数
@@ -74,6 +93,8 @@ const activeTab = ref(initialTab)
 watch(() => route.query.tab, (tab) => {
   if (typeof tab === 'string' && tab in tabKeyToIndex) {
     activeTab.value = tabKeyToIndex[tab]
+    if (tab === 'netease_albums') neteaseCategory.value = 'albums'
+    else if (tab === 'netease_playlists') neteaseCategory.value = 'playlists'
   }
 })
 
@@ -95,6 +116,13 @@ function exitMultiSelect() {
   isMultiSelectMode.value = false
   selectedPlaylists.value.clear()
 }
+// 多选只属于本地歌单列表：切 tab 或离开资料库（KeepAlive 停用）都要退出
+watch(activeTab, () => {
+  if (isMultiSelectMode.value) exitMultiSelect()
+})
+onDeactivated(() => {
+  if (isMultiSelectMode.value) exitMultiSelect()
+})
 function togglePlaylistSelection(id: number) {
   // 受保护歌单（我喜欢的音乐/本地文件）不允许进入选择集，防止被批量删除
   const pl = playlists.value.find(p => p.id === id)
@@ -103,16 +131,15 @@ function togglePlaylistSelection(id: number) {
   if (set.has(id)) set.delete(id)
   else set.add(id)
 }
+// 全选 / 反选只作用于当前可见（搜索过滤后）的歌单，被筛掉的歌单不会被批量删除
 function selectAll() {
-  for (const pl of playlists.value) {
-    if (!LIKED_NAMES.includes(pl.name) && !LOCAL_NAMES.includes(pl.name)) {
-      selectedPlaylists.value.add(pl.id)
-    }
+  for (const pl of filteredPlaylists.value) {
+    if (!isProtectedPlaylist(pl)) selectedPlaylists.value.add(pl.id)
   }
 }
 function invertSelection() {
-  for (const pl of playlists.value) {
-    if (LIKED_NAMES.includes(pl.name) || LOCAL_NAMES.includes(pl.name)) continue
+  for (const pl of filteredPlaylists.value) {
+    if (isProtectedPlaylist(pl)) continue
     if (selectedPlaylists.value.has(pl.id)) selectedPlaylists.value.delete(pl.id)
     else selectedPlaylists.value.add(pl.id)
   }
@@ -161,21 +188,36 @@ const {
 
     if (arr.map(playlistDragKey).join('\n') === playlists.value.map(playlistDragKey).join('\n')) return
     playlists.value = arr
-    // 持久化链路保持不变：仅写 localStorage 的自定义顺序
-    savePlaylistOrder(arr)
+    void savePlaylistOrder(arr)
   },
 })
 
-function savePlaylistOrder(ordered: PlaylistInfo[]) {
-  const orderIds = ordered.map(p => p.id)
-  localStorage.setItem('neri:playlist-order', JSON.stringify(orderIds))
-  log.info('Playlist order saved:', orderIds)
-}
-function loadPlaylistOrder(): number[] | null {
+// 自定义顺序落库并随同步跨端保留（对齐 Android reorderPlaylists）
+async function savePlaylistOrder(ordered: PlaylistInfo[]) {
+  const orderedIds = playlistOrderIds(ordered, isProtectedPlaylist)
   try {
-    const raw = localStorage.getItem('neri:playlist-order')
-    return raw ? JSON.parse(raw) : null
-  } catch { return null }
+    await invoke('reorder_playlists', { orderedIds })
+    log.info('Playlist order saved:', orderedIds)
+  } catch (e) {
+    log.error('Save playlist order failed:', e)
+    toast.error(t('library.playlist_order_save_failed'))
+    void loadPlaylists()
+  }
+}
+
+let legacyPlaylistOrderMigrated = false
+async function migrateLegacyPlaylistOrder() {
+  if (legacyPlaylistOrderMigrated) return
+  legacyPlaylistOrderMigrated = true
+  const legacyOrder = readLegacyPlaylistOrder(localStorage)
+  if (legacyOrder === null) return
+  try {
+    if (legacyOrder.length > 0) await invoke('reorder_playlists', { orderedIds: legacyOrder })
+    localStorage.removeItem(LEGACY_PLAYLIST_ORDER_KEY)
+  } catch (e) {
+    legacyPlaylistOrderMigrated = false
+    log.warn('Migrate legacy playlist order failed:', e)
+  }
 }
 
 const failedLibraryCoverKeys = ref<Set<string>>(new Set())
@@ -207,62 +249,21 @@ function markLibraryCoverFailed(scope: string, id: string | number, url?: string
 
 async function loadPlaylists() {
   try {
+    await migrateLegacyPlaylistOrder()
     const raw = await invoke<PlaylistInfo[]>('list_playlists')
-    // 排序：「我喜欢的音乐」置顶，「本地音乐」置底，其余保持原序
+    // 排序：「我喜欢的音乐」置顶，「本地音乐」置底，其余沿用数据库中的自定义顺序
     const liked: PlaylistInfo[] = []
     const localFiles: PlaylistInfo[] = []
     const normal: PlaylistInfo[] = []
     for (const pl of raw) {
-      if (LIKED_NAMES.includes(pl.name)) liked.push(pl)
-      else if (LOCAL_NAMES.includes(pl.name)) localFiles.push(pl)
+      if (isEmptyLocalFilesPlaylist(pl)) continue
+      if (isFavoritesPlaylist(pl)) liked.push(pl)
+      else if (isLocalFilesPlaylist(pl)) localFiles.push(pl)
       else normal.push(pl)
-    }
-    // 应用用户自定义排序
-    const savedOrder = loadPlaylistOrder()
-    if (savedOrder && savedOrder.length > 0) {
-      const orderMap = new Map(savedOrder.map((id, idx) => [id, idx]))
-      normal.sort((a, b) => {
-        const ai = orderMap.get(a.id) ?? Number.MAX_SAFE_INTEGER
-        const bi = orderMap.get(b.id) ?? Number.MAX_SAFE_INTEGER
-        return ai - bi
-      })
     }
     playlists.value = [...liked, ...normal, ...localFiles]
   } catch (e) {
     log.error('Load playlists failed:', e)
-  }
-}
-
-function inferTrackSource(track: TrackInfo) {
-  if (track.id.startsWith('netease:')) return 'netease'
-  if (track.id.startsWith('qq:')) return 'qq'
-  if (track.id.startsWith('bilibili:')) return 'bilibili'
-  if (track.id.startsWith('youtube:')) return 'youtube'
-  return 'local'
-}
-
-// 扫描时封面路径经 convertFileSrc 转成 asset URL, 直接落盘会把 webview 专用 URL 写进
-// playlists.json, 协议格式变更/数据迁移后封面失效（SC-12）。持久化前反解回原始路径
-function assetUrlToLocalPath(value?: string | null): string {
-  if (!value) return ''
-  const m = value.match(/^(?:asset:\/\/localhost\/|https?:\/\/asset\.localhost\/)(.+)$/i)
-  if (!m) return value
-  try { return decodeURIComponent(m[1]) } catch { return value }
-}
-
-function toBackendTrack(track: TrackInfo) {
-  return {
-    id: track.id,
-    title: track.title,
-    artist: track.artist,
-    album: track.album || '',
-    duration_ms: track.durationMs || 0,
-    source: inferTrackSource(track),
-    url: track.audioUrl || '',
-    cover_url: assetUrlToLocalPath(track.coverUrl) || null,
-    added_at: Math.max(0, Math.round(track.addedAt || 0)),
-    sync_payload: track.syncPayload ?? null,
-    playlist_key: track.playlistKey ?? null,
   }
 }
 
@@ -309,6 +310,7 @@ async function confirmCreate() {
     await loadPlaylists()
   } catch (e) {
     log.error('Create playlist failed:', e)
+    toast.error(t('library.create_playlist_failed'))
   }
 }
 
@@ -316,11 +318,6 @@ async function confirmCreate() {
 const contextMenu = ref<{ show: boolean; x: number; y: number; playlist: PlaylistInfo | null }>({
   show: false, x: 0, y: 0, playlist: null,
 })
-
-// 特殊歌单：跨语言匹配（同步数据可能是任何语言的名称）
-const LIKED_NAMES = ['我喜欢的音乐', '我喜歡的音樂', 'お気に入りの曲', 'Liked Songs']
-const LOCAL_NAMES = ['本地音乐', '本機音樂', 'ローカル音楽', 'Local Music']
-const ALL_PROTECTED = [...LIKED_NAMES, ...LOCAL_NAMES]
 
 // 每个 tab 的搜索（对齐 Android 各库页顶部的搜索栏）
 //
@@ -350,6 +347,7 @@ const tabSearchModel = computed({
 })
 const tabSearchHint = computed(() =>
   isLocalArtistSearch.value ? t('library.local_artist_search_hint')
+  : activeTab.value === 0 && localCategory.value === 'files' ? t('library.local_scan_search')
   : activeTab.value === 2 ? t('library.download_search_hint')
   : t('library.tab_search_hint'),
 )
@@ -357,18 +355,53 @@ const tabSearchHint = computed(() =>
 const filteredPlaylists = computed(() =>
   playlists.value.filter((pl) => matchesQuery(tabQuery.value, displayName(pl))),
 )
+watch(filteredPlaylists, (visible) => {
+  if (selectedPlaylists.value.size > 0) selectedPlaylists.value = visibleSelection(selectedPlaylists.value, visible)
+})
 // 收藏分类: 歌单 / 歌手 (对齐 Android FavoritePlaylistList 的二级分类)
 const favoriteCategory = ref<'playlists' | 'artists'>('playlists')
+const favoriteArtistSource = ref<ArtistFavoriteSource>('neteaseArtist')
+const importingArtists = ref(false)
+const favoriteRenderCount = ref(100)
 const playlistFavorites = computed(() =>
-  favoritePlaylists.value.filter((fpl) => fpl.source !== 'neteaseArtist'),
+  favoritePlaylists.value.filter((fpl) => !isArtistFavoriteSource(fpl.source)),
 )
 const artistFavorites = computed(() =>
-  favoritePlaylists.value.filter((fpl) => fpl.source === 'neteaseArtist'),
+  filterFavoriteArtists(favoritePlaylists.value, favoriteArtistSource.value),
 )
 const filteredFavoritePlaylists = computed(() => {
-  const pool = favoriteCategory.value === 'artists' ? artistFavorites.value : playlistFavorites.value
-  return pool.filter((fpl) => matchesQuery(tabQuery.value, fpl.name, fpl.source))
+  if (favoriteCategory.value === 'artists') {
+    return filterFavoriteArtists(favoritePlaylists.value, favoriteArtistSource.value, tabQuery.value)
+  }
+  return playlistFavorites.value.filter((fpl) => matchesQuery(tabQuery.value, fpl.name, fpl.source))
 })
+const visibleFavoritePlaylists = computed(() => filteredFavoritePlaylists.value.slice(0, favoriteRenderCount.value))
+watch([favoriteCategory, favoriteArtistSource, tabQuery], () => { favoriteRenderCount.value = 100 })
+
+function favoriteArtistPlatformLabel(source: string): string {
+  return source === 'neteaseArtist' ? t('player.source_netease')
+    : source === 'biliArtist' ? t('player.source_bilibili') : 'YouTube'
+}
+
+async function importFollowedArtists() {
+  if (importingArtists.value) return
+  const source = favoriteArtistSource.value
+  const loggedIn = source === 'neteaseArtist' ? auth.netease.loggedIn : auth.youtube.loggedIn
+  if (!loggedIn) {
+    toast.show(t('library.artist_import_login'), 'info')
+    return
+  }
+  importingArtists.value = true
+  try {
+    const count = await invoke<number>('import_followed_artists', { source })
+    await loadFavorites()
+    toast.show(t('library.artist_import_success', { count }), 'success')
+  } catch (error) {
+    toast.show(String(error), 'error')
+  } finally {
+    importingArtists.value = false
+  }
+}
 const filteredNeteasePlaylists = computed(() =>
   neteasePlaylists.value.filter((npl: any) => matchesQuery(tabQuery.value, npl.name)),
 )
@@ -381,24 +414,16 @@ const filteredBiliPlaylists = computed(() =>
 const filteredYoutubePlaylists = computed(() =>
   youtubePlaylists.value.filter((ypl: any) => matchesQuery(tabQuery.value, ypl.name)),
 )
-// 下载页：同一关键词同时过滤进行中任务与已下载文件（标题/歌手不区分大小写）
-const filteredActiveDownloads = computed(() =>
-  downloadStore.activeDownloads.filter((task) => matchesQuery(tabQuery.value, task.title, task.artist)),
-)
-const filteredDownloads = computed(() =>
-  downloadStore.downloads.filter((dl) => matchesQuery(tabQuery.value, dl.title, dl.artist)),
-)
-
 // 本地库分类：歌单 / 歌手（对齐 Android LOCAL_CATEGORY_ARTIST）
-type LocalCategory = 'playlists' | 'artists'
+type LocalCategory = 'playlists' | 'artists' | 'files'
 const localCategory = ref<LocalCategory>('playlists')
-const localArtistSort = ref<LocalArtistSortMode>('name')
+const localArtistSort = ref<LocalArtistSortMode>('song_count')
 const localArtistQuery = ref('')
 const localArtistTracks = ref<TrackInfo[]>([])
 const localArtistsLoading = ref(false)
 const showLocalArtistSort = ref(false)
 
-const localArtistSortModes: LocalArtistSortMode[] = ['name', 'song_count', 'recent']
+const localArtistSortModes: LocalArtistSortMode[] = ['song_count', 'name', 'recent']
 
 const localArtists = computed(() =>
   sortLocalArtists(
@@ -427,6 +452,7 @@ async function loadLocalArtistTracks(force = false) {
 
 function switchLocalCategory(category: LocalCategory) {
   if (localCategory.value === category) return
+  if (isMultiSelectMode.value) exitMultiSelect()
   localCategory.value = category
   if (category === 'artists') void loadLocalArtistTracks()
 }
@@ -440,92 +466,12 @@ function playLocalArtist(artist: LocalArtistSummary) {
   player.playAll(artist.tracks)
 }
 
-async function ensureLocalPlaylistId(): Promise<number> {
-  const raw = await invoke<PlaylistInfo[]>('list_playlists')
-  const localPlaylist = raw.find((pl) => LOCAL_NAMES.includes(pl.name))
-  if (localPlaylist) return localPlaylist.id
-
-  const created = await invoke<PlaylistInfo>('create_playlist', { name: t('home.local_music') })
-  return created.id
-}
-
-async function syncScannedTracksToLocalPlaylist(
-  scannedTracks: TrackInfo[],
-  allowRemovals = true,
-) {
-  const localPlaylistId = await ensureLocalPlaylistId()
-
-  const existingTracks = await invoke<any[]>('get_playlist_tracks', { id: localPlaylistId })
-  const existingIds = new Set(
-    (existingTracks || [])
-      .map((track: any) => String(track?.id || ''))
-      .filter(Boolean),
-  )
-  const scannedIds = new Set(scannedTracks.map(t => t.id).filter(Boolean))
-
-  // 差量同步（SC-8）: 只移除本次扫描已消失的曲目, 只新增未入库的曲目; 仍存在的
-  // 曲目保持 added_at 与自定义顺序不变, 避免每次重扫排序归零、本地删除墓碑 token
-  // 无界累积（旧逻辑 remove-all/add-all 会重置 added_at 并给每首歌新增墓碑 token）
-  const removedIds = allowRemovals
-    ? [...existingIds].filter(id => !scannedIds.has(id))
-    : []
-  if (removedIds.length > 0) {
-    await invoke('remove_tracks_from_playlist', {
-      playlistId: localPlaylistId,
-      trackIds: removedIds,
-    })
-  }
-
-  const newTracks = scannedTracks.filter(t => t.id && !existingIds.has(t.id))
-  if (newTracks.length > 0) {
-    await invoke('add_tracks_to_playlist', {
-      playlistId: localPlaylistId,
-      tracks: newTracks.map(toBackendTrack),
-    })
-  }
-
-  await loadPlaylists()
-  if (localCategory.value === 'artists') await loadLocalArtistTracks(true)
-}
-
-async function selectAndScanLocalMusic() {
-  if (library.isScanning) return
-  try {
-    const result = await dialogOpen({ directory: true, multiple: false })
-    if (!result) return
-
-    const dir = typeof result === 'string' ? result : (result as any).path || String(result)
-    if (!dir || dir === '[object Object]') return
-
-    await library.scanDirectory(dir)
-    if (library.scanError) {
-      toast.error(t('library.scan_failed'))
-      return
-    }
-
-    // 部分扫描失败时无法区分“文件已删除”和“目录暂时不可读”，只新增成功项，
-    // 保留旧曲目直到下一次完整扫描（SC-1）
-    await syncScannedTracksToLocalPlaylist(library.tracks, library.scanSkipped.length === 0)
-    if (library.scanSkipped.length > 0) {
-      toast.show(t('library.scan_partial', { count: library.tracks.length, failed: library.scanSkipped.length }), 'info')
-    } else {
-      toast.success(t('library.scan_success', { count: library.tracks.length }))
-    }
-  } catch (e) {
-    log.error('Scan local music failed:', e)
-    toast.error(t('library.scan_failed'))
-  }
-}
-
 function isProtectedPlaylist(pl: PlaylistInfo) {
-  return ALL_PROTECTED.includes(pl.name)
+  return isSystemPlaylist(pl)
 }
 
-// 显示名：特殊歌单用当前语言翻译，其他原样
 function displayName(pl: PlaylistInfo): string {
-  if (LIKED_NAMES.includes(pl.name)) return t('library.liked_songs')
-  if (LOCAL_NAMES.includes(pl.name)) return t('library.local_files')
-  return pl.name
+  return localPlaylistDisplayName(pl, { favorites: t('library.liked_songs'), localFiles: t('library.local_files') })
 }
 
 function openContextMenu(e: MouseEvent, pl: PlaylistInfo) {
@@ -570,6 +516,7 @@ async function confirmDelete() {
     await loadPlaylists()
   } catch (e) {
     log.error('Delete playlist failed:', e)
+    toast.error(t('library.delete_playlist_failed'))
   }
 }
 
@@ -628,6 +575,7 @@ async function confirmRename() {
     await loadPlaylists()
   } catch (e) {
     log.error('Rename playlist failed:', e)
+    toast.error(t('library.rename_playlist_failed'))
   }
 }
 
@@ -640,8 +588,8 @@ function requestDeleteSelected() {
 }
 
 async function confirmDeleteSelected() {
-  // 兜底再过滤一次受保护歌单：即使选择集被其它路径污染也绝不删除系统歌单
-  const ids = [...selectedPlaylists.value].filter((id) => {
+  // 兜底再过滤一次：系统歌单与当前不可见的歌单都绝不删除
+  const ids = [...visibleSelection(selectedPlaylists.value, filteredPlaylists.value)].filter((id) => {
     const pl = playlists.value.find(p => p.id === id)
     return !pl || !isProtectedPlaylist(pl)
   })
@@ -654,6 +602,8 @@ async function confirmDeleteSelected() {
     await loadPlaylists()
   } catch (e) {
     log.error('Batch delete playlists failed:', e)
+    toast.error(t('library.delete_playlist_failed'))
+    await loadPlaylists()
   }
 }
 
@@ -665,29 +615,24 @@ const biliPlaylists = computed(() => recommend.userPlaylists['bilibili'] || [])
 const youtubePlaylists = computed(() => recommend.userPlaylists['youtube'] || [])
 
 // 收藏歌单（从同步数据中获取）
-interface FavoritePlaylist {
-  id: string; name: string; coverUrl: string; trackCount: number; source: string;
-  songs: any[]; addedTime: number; modifiedAt: number; isDeleted: boolean;
-  browseId: string; playlistId: string;
-}
 const favoritePlaylists = ref<FavoritePlaylist[]>([])
+let favoritesLoadVersion = 0
 
 /// 对齐 Android LibraryScreen: 按 source 跳平台详情页懒加载曲目,
 /// 无法定位平台页时才退回同步曲目快照的本地详情
 function openFavorite(fpl: FavoritePlaylist) {
+  if (isArtistFavoriteSource(fpl.source)) {
+    const target = favoriteArtistRoute(fpl)
+    if (target) router.push(target)
+    else toast.show(t('player.load_failed'), 'error')
+    return
+  }
   switch (fpl.source) {
     case 'netease':
       router.push({ name: 'netease-playlist', params: { id: fpl.id } })
       return
     case 'neteaseAlbum':
       router.push({ name: 'netease-album', params: { id: fpl.id } })
-      return
-    case 'neteaseArtist':
-      router.push({
-        name: 'netease-artist',
-        params: { id: fpl.id },
-        query: { name: fpl.name, ...(fpl.coverUrl ? { cover: fpl.coverUrl } : {}) },
-      })
       return
     case 'youtubeMusic': {
       const browseId = fpl.browseId || (fpl.playlistId ? `VL${fpl.playlistId}` : '')
@@ -705,22 +650,11 @@ function openFavorite(fpl: FavoritePlaylist) {
 }
 
 async function loadFavorites() {
+  const request = ++favoritesLoadVersion
   try {
-    const raw = await invoke<any[]>('list_favorite_playlists')
-    // 后端序列化为 camelCase; snake_case 仅为兼容旧字段保留
-    favoritePlaylists.value = (raw || []).map((f: any) => ({
-      id: String(f.id ?? ''),
-      name: f.name ?? '',
-      coverUrl: f.coverUrl ?? f.cover_url ?? '',
-      trackCount: f.trackCount ?? f.track_count ?? f.songs?.length ?? 0,
-      source: f.source ?? '',
-      songs: f.songs ?? [],
-      addedTime: f.addedTime ?? f.added_time ?? 0,
-      modifiedAt: f.modifiedAt ?? f.modified_at ?? 0,
-      isDeleted: f.isDeleted ?? f.is_deleted ?? false,
-      browseId: f.browseId ?? f.browse_id ?? '',
-      playlistId: f.playlistId ?? f.playlist_id ?? '',
-    }))
+    const raw = await invoke<unknown>('list_favorite_playlists')
+    if (request !== favoritesLoadVersion) return
+    favoritePlaylists.value = parseFavoritePlaylists(raw)
   } catch (e) {
     log.error('Load favorites failed:', e)
   }
@@ -728,178 +662,6 @@ async function loadFavorites() {
 
 onMounted(loadPlaylists)
 onMounted(loadFavorites)
-onMounted(() => downloadStore.loadDownloads())
-
-// 下载相关
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-}
-
-function playDownloadedTrack(dl: any) {
-  player.play({
-    id: dl.id,
-    title: dl.title,
-    artist: dl.artist,
-    album: dl.album,
-    durationMs: dl.durationMs,
-    coverUrl: dl.coverUrl || '',
-    audioUrl: dl.filePath,
-  })
-}
-
-// 下载列表右键菜单
-const dlContextMenu = ref<{ show: boolean; x: number; y: number; track: any | null }>({
-  show: false, x: 0, y: 0, track: null,
-})
-
-function openDlContextMenu(e: MouseEvent, track: any) {
-  const btn = e.currentTarget as HTMLElement
-  const rect = btn.getBoundingClientRect()
-  let x = rect.left - 204
-  if (x < 8) x = rect.right + 4
-  dlContextMenu.value = { show: true, x, y: rect.top, track }
-}
-
-// 行上右键：菜单在光标处弹出（复用 ContextMenu 的边缘翻转与重定位）
-function openDlRowContextMenu(e: MouseEvent, track: any) {
-  dlContextMenu.value = { show: true, x: e.clientX, y: e.clientY, track }
-}
-
-function closeDlContextMenu() {
-  dlContextMenu.value.show = false
-}
-
-// 删除下载确认
-const showDlDeleteDialog = ref(false)
-const dlDeleteTarget = ref<any>(null)
-
-async function cancelActiveDownload(trackId: string) {
-  await downloadStore.cancelDownload(trackId)
-}
-
-function activeDownloadStatusText(status: string) {
-  switch (status) {
-    case 'resolving': return t('download.resolving')
-    case 'cancelling': return t('download.cancelling')
-    case 'cancelled': return t('download.cancelled')
-    case 'error': return t('download.download_failed')
-    case 'already_exists': return t('download.already_exists')
-    default: return t('download.downloading')
-  }
-}
-
-function activeDownloadProgressText(task: {
-  status: string
-  progress?: number
-  downloadedBytes?: number
-  totalBytes?: number
-  message?: string
-}) {
-  if (task.status === 'resolving' || task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists') {
-    return activeDownloadStatusText(task.status)
-  }
-  if (task.status === 'error') {
-    return task.message
-      ? `${activeDownloadStatusText(task.status)} · ${task.message}`
-      : activeDownloadStatusText(task.status)
-  }
-
-  const downloaded = typeof task.downloadedBytes === 'number' ? formatFileSize(task.downloadedBytes) : null
-  const total = typeof task.totalBytes === 'number' && task.totalBytes > 0 ? formatFileSize(task.totalBytes) : null
-  const percent = typeof task.progress === 'number' ? `${task.progress}%` : null
-
-  if (downloaded && total && percent) return `${activeDownloadStatusText(task.status)} · ${downloaded} / ${total} · ${percent}`
-  if (downloaded && total) return `${activeDownloadStatusText(task.status)} · ${downloaded} / ${total}`
-  if (downloaded && percent) return `${activeDownloadStatusText(task.status)} · ${downloaded} · ${percent}`
-  return activeDownloadStatusText(task.status)
-}
-
-function requestDlDelete(track: any) {
-  if (isDownloadedTrackInUse(track)) return
-  closeDlContextMenu()
-  dlDeleteTarget.value = track
-  showDlDeleteDialog.value = true
-}
-
-async function revealDownloadFile(track: any) {
-  closeDlContextMenu()
-  try {
-    await invoke('reveal_file', { path: track.filePath })
-  } catch (e) {
-    log.error('Failed to reveal file:', e)
-  }
-}
-
-async function confirmDlDelete() {
-  if (!dlDeleteTarget.value) return
-  const deleted = dlDeleteTarget.value
-  await downloadStore.deleteDownload(deleted.id)
-  player.handleDownloadedFileRemoved(deleted.id, deleted.filePath)
-  showDlDeleteDialog.value = false
-  dlDeleteTarget.value = null
-}
-
-function isDownloadedTrackInUse(track: any) {
-  return player.isPlayingFromDownload && player.currentTrack?.id === track?.id
-}
-
-async function redownloadDownloadedTrack(track: any) {
-  if (isDownloadedTrackInUse(track)) return
-  closeDlContextMenu()
-  player.handleDownloadedFileRemoved(track.id, track.filePath)
-  await downloadStore.redownloadTrack({
-    id: track.id,
-    title: track.title,
-    artist: track.artist,
-    album: track.album || '',
-    durationMs: track.durationMs || 0,
-    coverUrl: track.coverUrl || '',
-    audioUrl: '',
-  })
-}
-
-const downloadMenuItems = computed<ContextMenuItem[]>(() => {
-  const track = dlContextMenu.value.track
-  const isInUse = track ? isDownloadedTrackInUse(track) : true
-  return [
-    createContextMenuItem(t('download.open_folder'), {
-      id: 'reveal',
-      icon: 'folder_open',
-      disabled: !track,
-    }),
-    createContextMenuItem(t('download.redownload'), {
-      id: 'redownload',
-      icon: 'refresh',
-      disabled: !track || isInUse,
-    }),
-    createContextMenuItem(t('common.delete'), {
-      id: 'delete',
-      icon: 'delete',
-      danger: true,
-      disabled: !track || isInUse,
-    }),
-  ]
-})
-
-function handleDownloadMenuClick(item: ContextMenuActionItem) {
-  const track = dlContextMenu.value.track
-  if (!track) return
-
-  switch (item.id) {
-    case 'reveal':
-      void revealDownloadFile(track)
-      break
-    case 'redownload':
-      void redownloadDownloadedTrack(track)
-      break
-    case 'delete':
-      requestDlDelete(track)
-      break
-  }
-}
-
 // 拉取云端歌单
 /// 平台数据按需拉取
 ///
@@ -907,47 +669,61 @@ function handleDownloadMenuClick(item: ContextMenuActionItem) {
 /// 挂载那一刻通常还是 false，判完就再没有东西重新触发，
 /// 表现就是「明明登录了，云端歌单一直空着」。
 /// 这里改成对（登录态 × 当前 tab）响应式求值，任一变化都会补拉。
-const inFlightPlatforms = new Set<string>()
-let albumsInFlight = false
+/// 有缓存时先显示缓存，本次启动第一次打开时在后台刷新；同一平台的请求由 store 合并。
+type CloudPlatform = 'netease' | 'bilibili' | 'youtube'
 
-function ensurePlatformData(platform: string, loaded: boolean, force = false) {
-  const loggedIn =
-    platform === 'netease' ? auth.netease.loggedIn
-    : platform === 'bilibili' ? auth.bilibili.loggedIn
-    : auth.youtube.loggedIn
-  if (!loggedIn) return
+function isCloudPlatform(platform: string): platform is CloudPlatform {
+  return platform === 'netease' || platform === 'bilibili' || platform === 'youtube'
+}
 
-  // 专辑拉取必须独立于歌单的 loaded 早退：歌单会从 localStorage 缓存
-  // 恢复（loaded 直接为 true），若专辑判断挂在早退之后，重启后永远走
-  // 不到，表现为「必须重新登录专辑才出现」
-  if (platform === 'netease' && (force || !recommend.userAlbums.length) && !albumsInFlight) {
-    albumsInFlight = true
-    void Promise.resolve(recommend.fetchUserAlbums())
-      .finally(() => { albumsInFlight = false })
-  }
-
-  if (!force && loaded) return
-  if (inFlightPlatforms.has(platform)) return
-
-  inFlightPlatforms.add(platform)
-  void Promise.resolve(recommend.fetchUserPlaylists(platform))
-    .finally(() => inFlightPlatforms.delete(platform))
+function ensurePlatformData(platform: string, force = false) {
+  if (!isCloudPlatform(platform) || !auth[platform].loggedIn) return
+  // 专辑和歌单分开判断：歌单从缓存恢复了，专辑也要照样补拉
+  if (platform === 'netease') void (force ? recommend.fetchUserAlbums() : recommend.ensureUserAlbums())
+  void (force ? recommend.fetchUserPlaylists(platform) : recommend.ensureUserPlaylists(platform))
 }
 
 function syncActiveTabData(force = false) {
   switch (activeTab.value) {
     case 3:
-      ensurePlatformData('netease', neteasePlaylists.value.length > 0, force)
+      ensurePlatformData('netease', force)
       break
     case 4:
-      ensurePlatformData('bilibili', biliPlaylists.value.length > 0, force)
+      ensurePlatformData('bilibili', force)
       break
     case 5:
-      ensurePlatformData('youtube', youtubePlaylists.value.length > 0, force)
+      ensurePlatformData('youtube', force)
       break
     default:
       break
   }
+}
+
+/// 登录态还没查回来时按「已登录」对待：有缓存就先显示，免得启动瞬间闪一下登录提示
+function cloudSignedIn(platform: CloudPlatform): boolean {
+  return !auth.statusChecked || auth[platform].loggedIn
+}
+
+/// 登录态检查返回之前还不知道要不要拉，按加载中显示，不先闪一下「暂无」
+const PENDING_AUTH: CloudListStatus = { loading: true, error: null }
+
+function cloudPlaylistStatus(platform: CloudPlatform): CloudListStatus | undefined {
+  return auth.statusChecked ? recommend.userPlaylistsStatus[platform] : PENDING_AUTH
+}
+
+const neteaseAlbumsStatus = computed(() => auth.statusChecked ? recommend.userAlbumsStatus : PENDING_AUTH)
+
+/// 网易云分类栏右侧的刷新状态：只在已有列表时显示，没有列表时由占位区显示
+const neteaseRefreshStatus = computed(() => {
+  if (neteaseCategory.value === 'albums') {
+    return recommend.userAlbums.length > 0 ? recommend.userAlbumsStatus : undefined
+  }
+  return neteasePlaylists.value.length > 0 ? recommend.userPlaylistsStatus.netease : undefined
+})
+
+function retryNeteaseRefresh() {
+  if (neteaseCategory.value === 'albums') void recommend.fetchUserAlbums()
+  else void recommend.fetchUserPlaylists('netease')
 }
 
 watch(
@@ -965,7 +741,7 @@ watch(
 function handleAuthChanged(event: Event) {
   const platform = (event as CustomEvent<{ platform?: string }>).detail?.platform
   if (!platform) return
-  ensurePlatformData(platform, false, true)
+  ensurePlatformData(platform, true)
   void loadFavorites()
 }
 
@@ -974,12 +750,21 @@ onUnmounted(() => window.removeEventListener(AUTH_CHANGED_EVENT, handleAuthChang
 
 // 监听同步完成后的歌单变更事件
 let unlistenPlaylistsChanged: UnlistenFn | null = null
+let libraryUnmounted = false
 onMounted(async () => {
-  unlistenPlaylistsChanged = await listen('playlists-changed', () => {
-    loadPlaylists()
+  const stop = await listen('playlists-changed', () => {
+    void loadPlaylists()
+    void loadFavorites()
+    // 本地歌手由歌单曲目聚合而来；不在歌手视图时清空，下次进入重新加载
+    if (localCategory.value === 'artists') void loadLocalArtistTracks(true)
+    else localArtistTracks.value = []
   })
+  if (libraryUnmounted) stop()
+  else unlistenPlaylistsChanged = stop
 })
 onUnmounted(() => {
+  libraryUnmounted = true
+  favoritesLoadVersion++
   unlistenPlaylistsChanged?.()
 })
 </script>
@@ -998,7 +783,7 @@ onUnmounted(() => {
         >
           <span class="material-symbols-rounded">bar_chart</span>
         </button>
-        <button v-if="activeTab === 0 && !isMultiSelectMode" class="header-action" @click="enterMultiSelect()" :title="t('common.multi_select')">
+        <button v-if="activeTab === 0 && localCategory === 'playlists' && !isMultiSelectMode" class="header-action" @click="enterMultiSelect()" :title="t('common.multi_select')">
           <span class="material-symbols-rounded">checklist</span>
         </button>
         <button v-if="isMultiSelectMode" class="header-action" @click="selectAll" :title="t('common.select_all')">
@@ -1060,16 +845,16 @@ onUnmounted(() => {
            排序按钮常驻在同一行右侧，只在歌手视图内以缩放过渡出现 -->
       <div class="local-category-bar">
         <button
-          v-for="category in (['playlists', 'artists'] as const)"
+          v-for="category in (['playlists', 'artists', 'files'] as const)"
           :key="category"
           class="local-category-chip"
           :class="{ active: localCategory === category }"
           @click="switchLocalCategory(category)"
         >
           <span class="material-symbols-rounded" style="font-size: 17px">
-            {{ category === 'playlists' ? 'queue_music' : 'account_circle' }}
+            {{ category === 'playlists' ? 'queue_music' : category === 'artists' ? 'account_circle' : 'folder_open' }}
           </span>
-          <span>{{ category === 'playlists' ? t('library.local_category_playlists') : t('library.local_category_artists') }}</span>
+          <span>{{ category === 'playlists' ? t('library.local_category_playlists') : category === 'artists' ? t('library.local_category_artists') : t('library.local_files') }}</span>
         </button>
         <Transition name="lib-zoom">
           <button
@@ -1116,8 +901,8 @@ onUnmounted(() => {
         </div>
         <div v-else-if="localArtists.length === 0" key="empty" class="empty-tab">
           <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">account_circle</span></div>
-          <p class="empty-title">{{ t('library.local_artist_empty') }}</p>
-          <p class="empty-desc">{{ t('library.local_artist_hint') }}</p>
+          <p class="empty-title">{{ t(localArtistQuery.trim() ? 'library.artist_search_empty' : 'library.local_artist_empty') }}</p>
+          <p v-if="!localArtistQuery.trim()" class="empty-desc">{{ t('library.local_artist_hint') }}</p>
         </div>
         <div v-else :key="`grid-${localArtistSort}`" class="artist-grid">
           <div
@@ -1131,7 +916,9 @@ onUnmounted(() => {
             @keydown.space.prevent="openLocalArtist(artist)"
           >
             <div class="artist-cover">
-              <BilibiliCoverImage v-if="artist.coverUrl" :src="artist.coverUrl" loading="lazy" />
+              <BilibiliCoverImage v-if="artist.coverUrl" :src="artist.coverUrl" loading="lazy">
+                <span class="material-symbols-rounded filled" style="font-size: 34px">account_circle</span>
+              </BilibiliCoverImage>
               <span v-else class="material-symbols-rounded filled" style="font-size: 34px">account_circle</span>
               <button
                 class="artist-play"
@@ -1149,24 +936,16 @@ onUnmounted(() => {
         </Transition>
       </div>
 
+      <LocalFilesView v-else-if="localCategory === 'files'" key="local-files" embedded :search-query="tabQuery" />
+
       <!-- 歌单视图 -->
       <div v-else key="local-playlists" class="local-subview">
-      <div class="new-playlist-row" :class="{ disabled: library.isScanning }" @click="selectAndScanLocalMusic">
-        <span class="material-symbols-rounded" :class="{ spinning: library.isScanning }" style="font-size: 20px">
-          {{ library.isScanning ? 'progress_activity' : 'folder_open' }}
-        </span>
-        <div class="new-playlist-copy">
-          <span>{{ library.isScanning ? t('library.scanning') : t('library.scan_local_music') }}</span>
-          <small v-if="library.lastScanDir" class="new-playlist-sub">{{ library.lastScanDir }}</small>
-        </div>
-      </div>
       <!-- 新建歌单（对齐 Android：+ 新建歌单 行） -->
       <div class="new-playlist-row" @click="openCreateDialog">
         <span class="material-symbols-rounded" style="font-size: 20px">add</span>
         <span>{{ t('library.create_playlist') }}</span>
       </div>
       <div class="list-divider" />
-      <p v-if="library.scanError" class="scan-error">{{ t('library.scan_failed') }}</p>
 
       <!-- 歌单列表：进入 / 移除走 TransitionGroup；拖拽重排与歌单详情页
            歌曲拖拽同一套指针交互（让路位移 + 单实例落点指示线 + 拖影） -->
@@ -1265,6 +1044,10 @@ onUnmounted(() => {
         <p class="empty-title">{{ t('library.playlist_empty_title') }}</p>
         <p class="empty-desc">{{ t('library.playlist_empty_desc') }}</p>
       </div>
+      <div v-else-if="filteredPlaylists.length === 0" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+        <p class="empty-title">{{ t('player.no_results') }}</p>
+      </div>
       </div>
       </Transition>
     </div>
@@ -1287,29 +1070,61 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <section v-if="favoriteCategory === 'artists'" class="favorite-artist-header">
+        <div class="favorite-artist-summary">
+          <h2>{{ t('library.artist_following') }}</h2>
+          <span>{{ t('library.artist_count', { count: artistFavorites.length }) }}</span>
+        </div>
+        <div class="favorite-artist-platforms" role="group" :aria-label="t('library.artist_following')">
+          <button
+            v-for="source in ARTIST_FAVORITE_SOURCES"
+            :key="source"
+            :class="{ active: favoriteArtistSource === source }"
+            :aria-pressed="favoriteArtistSource === source"
+            @click="favoriteArtistSource = source"
+          >
+            <span v-if="favoriteArtistSource === source" class="material-symbols-rounded">check</span>
+            {{ favoriteArtistPlatformLabel(source) }}
+          </button>
+        </div>
+        <button
+          v-if="favoriteArtistSource !== 'biliArtist'"
+          class="favorite-artist-import"
+          :disabled="importingArtists"
+          @click="importFollowedArtists"
+        >
+          <span class="material-symbols-rounded" :class="{ spinning: importingArtists }">
+            {{ importingArtists ? 'progress_activity' : 'cloud_download' }}
+          </span>
+          {{ t(importingArtists ? 'library.artist_import_loading' : 'library.artist_import') }}
+        </button>
+      </section>
+
       <Transition name="fade" mode="out-in">
       <TransitionGroup
         v-if="filteredFavoritePlaylists.length > 0"
-        :key="'fav-' + favoriteCategory"
+        :key="'fav-' + favoriteCategory + (favoriteCategory === 'artists' ? favoriteArtistSource : '')"
         tag="div"
         name="lib-list"
         class="lib-list"
       >
         <div
-          v-for="fpl in filteredFavoritePlaylists"
-          :key="'fav-' + fpl.id"
+          v-for="fpl in visibleFavoritePlaylists"
+          :key="favoriteKey(fpl)"
           class="playlist-item"
+          :class="{ 'favorite-artist-item': favoriteCategory === 'artists' }"
           role="button"
           tabindex="0"
           @click="openFavorite(fpl)"
           @keydown.enter="openFavorite(fpl)"
+          @keydown.space.prevent="openFavorite(fpl)"
         >
-          <div class="pl-icon has-cover" v-if="fpl.coverUrl && !isLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)">
-            <img
+          <div class="pl-icon has-cover" v-if="fpl.coverUrl && !isLibraryCoverFailed('favorite', favoriteKey(fpl), fpl.coverUrl)">
+            <BilibiliCoverImage
               :src="toDisplayableLibraryCoverUrl(fpl.coverUrl)"
-              referrerpolicy="no-referrer"
               class="pl-cover-img"
-              @error="markLibraryCoverFailed('favorite', fpl.id, fpl.coverUrl)"
+              loading="lazy"
+              @error="markLibraryCoverFailed('favorite', favoriteKey(fpl), fpl.coverUrl)"
             />
           </div>
           <div class="pl-icon" v-else>
@@ -1319,7 +1134,8 @@ onUnmounted(() => {
           </div>
           <div class="pl-info">
             <div class="pl-name">{{ fpl.name }}</div>
-            <div class="pl-count">{{ t('player.track_count', { count: fpl.trackCount }) }} · {{ favoriteSourceLabel(fpl.source) }}</div>
+            <div class="pl-count" v-if="favoriteCategory === 'artists'">{{ fpl.subtitle || favoriteArtistPlatformLabel(fpl.source) }}</div>
+            <div class="pl-count" v-else>{{ t('player.track_count', { count: fpl.trackCount }) }} · {{ favoriteSourceLabel(fpl.source) }}</div>
           </div>
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
@@ -1330,103 +1146,21 @@ onUnmounted(() => {
             {{ favoriteCategory === 'artists' ? 'account_circle' : 'bookmark' }}
           </span>
         </div>
-        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
-        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
+        <p class="empty-title">{{ t(favoriteCategory === 'artists'
+          ? (tabQuery.trim() ? 'library.artist_search_empty' : 'library.artist_empty')
+          : (tabQuery.trim() ? 'player.no_results' : 'explore.no_playlists')) }}</p>
+        <p v-if="!tabQuery.trim()" class="empty-desc">{{ t(favoriteCategory === 'artists' ? 'library.artist_empty_hint' : 'explore.login_for_playlists') }}</p>
       </div>
       </Transition>
+      <button
+        v-if="visibleFavoritePlaylists.length < filteredFavoritePlaylists.length"
+        class="favorite-artist-import"
+        @click="favoriteRenderCount += 100"
+      >{{ t('player.artist_load_more') }}</button>
     </div>
 
     <!-- Tab: 下载 -->
-    <div v-else-if="activeTab === 2" key="tab-downloads" class="playlist-list">
-      <!-- 进行中分组：过滤后为空时整组折叠隐藏，避免下方列表位置跳变 -->
-      <Transition name="lib-collapse">
-      <div v-if="filteredActiveDownloads.length > 0" class="collapse-row">
-      <div class="collapse-clip">
-        <div class="subsection-label">
-          <span class="material-symbols-rounded" style="font-size: 18px">downloading</span>
-          <span>{{ t('download.active_tasks', { count: filteredActiveDownloads.length }) }}</span>
-        </div>
-        <TransitionGroup tag="div" name="lib-list" class="lib-list">
-        <div
-          v-for="task in filteredActiveDownloads"
-          :key="'active-' + task.trackId"
-          class="playlist-item active-download-item"
-        >
-          <div class="pl-icon">
-            <span class="material-symbols-rounded filled" style="font-size: 22px">
-              {{ task.status === 'resolving' ? 'network_node' : task.status === 'error' ? 'error' : task.status === 'cancelled' ? 'cancel' : 'downloading' }}
-            </span>
-          </div>
-          <div class="pl-info">
-            <div class="pl-name">{{ task.title }}</div>
-            <div class="pl-count">{{ task.artist }} · {{ activeDownloadProgressText(task) }}</div>
-            <div
-              class="download-progress-bar"
-              :class="{
-                indeterminate: task.status === 'downloading' && !task.totalBytes,
-                error: task.status === 'error',
-                muted: task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'already_exists',
-              }"
-            >
-              <div
-                class="download-progress-fill"
-                :style="{ width: `${Math.max(4, task.status === 'cancelled' || task.status === 'already_exists' ? 100 : task.progress ?? 0)}%` }"
-              />
-            </div>
-          </div>
-          <button
-            class="pl-more danger"
-            :disabled="task.status === 'cancelling' || task.status === 'cancelled' || task.status === 'error' || task.status === 'already_exists'"
-            @click.stop="cancelActiveDownload(task.trackId)"
-          >
-            <span class="material-symbols-rounded" style="font-size: 20px">close</span>
-          </button>
-        </div>
-        </TransitionGroup>
-        <div v-if="downloadStore.downloads.length > 0" class="subsection-label" style="margin-top: 10px;">
-          <span class="material-symbols-rounded" style="font-size: 18px">download_done</span>
-          <span>{{ t('download.downloaded_items') }}</span>
-        </div>
-      </div>
-      </div>
-      </Transition>
-
-      <template v-if="downloadStore.downloads.length > 0">
-        <TransitionGroup tag="div" name="lib-list" class="lib-list">
-        <div
-          v-for="dl in filteredDownloads"
-          :key="'dl-' + dl.id"
-          class="playlist-item"
-          @click="playDownloadedTrack(dl)"
-          @contextmenu.prevent.stop="openDlRowContextMenu($event, dl)"
-        >
-          <div class="pl-icon has-cover" v-if="dl.coverUrl && !isLibraryCoverFailed('download', dl.id, dl.coverUrl)">
-            <img
-              :src="toDisplayableLibraryCoverUrl(dl.coverUrl)"
-              referrerpolicy="no-referrer"
-              class="pl-cover-img"
-              @error="markLibraryCoverFailed('download', dl.id, dl.coverUrl)"
-            />
-          </div>
-          <div class="pl-icon" v-else>
-            <span class="material-symbols-rounded filled" style="font-size: 22px">music_note</span>
-          </div>
-          <div class="pl-info">
-            <div class="pl-name">{{ dl.title }}</div>
-            <div class="pl-count">{{ dl.artist }} · {{ formatFileSize(dl.fileSize) }} · {{ platformLabel(dl.source) }}</div>
-          </div>
-          <button class="pl-more" @click.stop="openDlContextMenu($event, dl)">
-            <span class="material-symbols-rounded" style="font-size: 20px">more_vert</span>
-          </button>
-        </div>
-        </TransitionGroup>
-      </template>
-      <div v-else-if="downloadStore.activeDownloads.length === 0" class="empty-tab">
-        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">download</span></div>
-        <p class="empty-title">{{ t('library.downloads_empty_title') }}</p>
-        <p class="empty-desc">{{ t('library.downloads_empty_desc') }}</p>
-      </div>
-    </div>
+    <DownloadsView v-else-if="activeTab === 2" key="tab-downloads" embedded :search-query="tabQuery" />
 
     <!-- Tab: 网易云-歌单 -->
     <div v-else-if="activeTab === 3" key="tab-netease" class="playlist-list">
@@ -1444,12 +1178,13 @@ onUnmounted(() => {
           </span>
           <span>{{ category === 'playlists' ? t('library.tab_netease_playlists_short') : t('library.tab_netease_albums_short') }}</span>
         </button>
+        <CloudListState class="platform-sync" variant="banner" :status="neteaseRefreshStatus" @retry="retryNeteaseRefresh" />
       </div>
 
       <!-- 歌单 / 专辑分类切换同样走交叉淡入，与本地页保持一致 -->
       <Transition name="fade" mode="out-in">
       <div v-if="neteaseCategory === 'albums'" key="ne-albums" class="local-subview">
-        <TransitionGroup v-if="recommend.userAlbums.length > 0" tag="div" name="lib-list" class="lib-list">
+        <TransitionGroup v-if="filteredNeteaseAlbums.length > 0 && cloudSignedIn('netease')" tag="div" name="lib-list" class="lib-list">
           <div
             v-for="album in filteredNeteaseAlbums"
             :key="album.id"
@@ -1474,15 +1209,33 @@ onUnmounted(() => {
             <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
           </div>
         </TransitionGroup>
+        <div v-else-if="recommend.userAlbums.length > 0 && cloudSignedIn('netease')" class="empty-tab">
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+          <p class="empty-title">{{ t('player.no_results') }}</p>
+        </div>
+        <CloudListState
+          v-else-if="cloudSignedIn('netease')"
+          variant="placeholder"
+          :status="neteaseAlbumsStatus"
+          :loading-text="t('library.cloud_albums_loading')"
+          :failed-text="t('library.cloud_albums_load_failed')"
+          @retry="recommend.fetchUserAlbums()"
+        >
+          <template #icon>
+            <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">album</span></div>
+          </template>
+          <p class="empty-title">{{ t('library.empty_title', { type: t('library.albums') }) }}</p>
+          <p class="empty-desc">{{ t('library.empty_desc') }}</p>
+        </CloudListState>
         <div v-else class="empty-tab">
           <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">album</span></div>
           <p class="empty-title">{{ t('library.empty_title', { type: t('library.albums') }) }}</p>
-          <p class="empty-desc">{{ t('library.empty_desc') }}</p>
+          <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
         </div>
       </div>
 
       <div v-else key="ne-playlists" class="local-subview">
-      <TransitionGroup v-if="neteasePlaylists.length > 0" tag="div" name="lib-list" class="lib-list">
+      <TransitionGroup v-if="filteredNeteasePlaylists.length > 0 && cloudSignedIn('netease')" tag="div" name="lib-list" class="lib-list">
         <div
           v-for="npl in filteredNeteasePlaylists"
           :key="'ne-' + npl.id"
@@ -1506,6 +1259,21 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
       </TransitionGroup>
+      <div v-else-if="neteasePlaylists.length > 0 && cloudSignedIn('netease')" class="empty-tab">
+        <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+        <p class="empty-title">{{ t('player.no_results') }}</p>
+      </div>
+      <CloudListState
+        v-else-if="cloudSignedIn('netease')"
+        variant="placeholder"
+        :status="cloudPlaylistStatus('netease')"
+        @retry="recommend.fetchUserPlaylists('netease')"
+      >
+        <template #icon>
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">cloud_queue</span></div>
+        </template>
+        <p class="empty-title">{{ t('explore.no_playlists') }}</p>
+      </CloudListState>
       <div v-else class="empty-tab">
         <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">cloud_queue</span></div>
         <p class="empty-title">{{ t('explore.no_playlists') }}</p>
@@ -1517,13 +1285,19 @@ onUnmounted(() => {
 
     <!-- Tab: Bili 收藏夹 -->
     <div v-else-if="activeTab === 4" key="tab-bilibili" class="playlist-list">
-      <template v-if="biliPlaylists.length > 0">
+      <template v-if="biliPlaylists.length > 0 && cloudSignedIn('bilibili')">
         <div class="platform-summary bilibili">
           <span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span>
           <div>
             <div class="platform-title">{{ t('library.bilibili_favorites') }}</div>
             <div class="platform-desc">{{ t('player.video_count', { count: biliPlaylists.reduce((sum, p) => sum + (p.trackCount || 0), 0) }) }}</div>
           </div>
+          <CloudListState
+            class="platform-sync"
+            variant="banner"
+            :status="recommend.userPlaylistsStatus.bilibili"
+            @retry="recommend.fetchUserPlaylists('bilibili')"
+          />
         </div>
         <TransitionGroup tag="div" name="lib-list" class="lib-list">
         <div
@@ -1545,23 +1319,45 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
         </TransitionGroup>
+        <div v-if="filteredBiliPlaylists.length === 0" class="empty-tab">
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+          <p class="empty-title">{{ t('player.no_results') }}</p>
+        </div>
       </template>
+      <CloudListState
+        v-else-if="cloudSignedIn('bilibili')"
+        variant="placeholder"
+        :status="cloudPlaylistStatus('bilibili')"
+        @retry="recommend.fetchUserPlaylists('bilibili')"
+      >
+        <template #icon>
+          <div class="empty-circle platform-empty bilibili"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span></div>
+        </template>
+        <p class="empty-title">{{ t('library.bilibili_favorites') }}</p>
+        <p class="empty-desc">{{ t('explore.no_playlists') }}</p>
+      </CloudListState>
       <div v-else class="empty-tab">
         <div class="empty-circle platform-empty bilibili"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_bilibili.svg')"></span></div>
         <p class="empty-title">{{ t('library.bilibili_favorites') }}</p>
-        <p class="empty-desc">{{ auth.bilibili.loggedIn ? t('explore.no_playlists') : t('explore.login_for_playlists') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
       </div>
     </div>
 
     <!-- Tab: YouTube Music 歌单 -->
     <div v-else-if="activeTab === 5" key="tab-youtube" class="playlist-list">
-      <template v-if="youtubePlaylists.length > 0">
+      <template v-if="youtubePlaylists.length > 0 && cloudSignedIn('youtube')">
         <div class="platform-summary youtube">
           <span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span>
           <div>
             <div class="platform-title">YouTube Music</div>
-            <div class="platform-desc">{{ t('player.track_count', { count: youtubePlaylists.length }) }}</div>
+            <div class="platform-desc">{{ t('library.playlist_count', { count: youtubePlaylists.length }) }}</div>
           </div>
+          <CloudListState
+            class="platform-sync"
+            variant="banner"
+            :status="recommend.userPlaylistsStatus.youtube"
+            @retry="recommend.fetchUserPlaylists('youtube')"
+          />
         </div>
         <TransitionGroup tag="div" name="lib-list" class="lib-list">
         <div
@@ -1587,35 +1383,30 @@ onUnmounted(() => {
           <span class="material-symbols-rounded" style="font-size: 18px; opacity: 0.3">chevron_right</span>
         </div>
         </TransitionGroup>
+        <div v-if="filteredYoutubePlaylists.length === 0" class="empty-tab">
+          <div class="empty-circle"><span class="material-symbols-rounded" style="font-size: 40px">search_off</span></div>
+          <p class="empty-title">{{ t('player.no_results') }}</p>
+        </div>
       </template>
+      <CloudListState
+        v-else-if="cloudSignedIn('youtube')"
+        variant="placeholder"
+        :status="cloudPlaylistStatus('youtube')"
+        @retry="recommend.fetchUserPlaylists('youtube')"
+      >
+        <template #icon>
+          <div class="empty-circle platform-empty youtube"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span></div>
+        </template>
+        <p class="empty-title">YouTube Music</p>
+        <p class="empty-desc">{{ t('explore.no_playlists') }}</p>
+      </CloudListState>
       <div v-else class="empty-tab">
         <div class="empty-circle platform-empty youtube"><span class="platform-icon-mask" style="mask-image: url('/icons/ic_youtube.svg')"></span></div>
         <p class="empty-title">YouTube Music</p>
-        <p class="empty-desc">{{ auth.youtube.loggedIn ? t('explore.no_playlists') : t('explore.login_for_playlists') }}</p>
+        <p class="empty-desc">{{ t('explore.login_for_playlists') }}</p>
       </div>
     </div>
     </Transition>
-
-    <ContextMenu
-      :open="dlContextMenu.show"
-      :x="dlContextMenu.x"
-      :y="dlContextMenu.y"
-      :items="downloadMenuItems"
-      @update:open="dlContextMenu.show = $event"
-      @click="handleDownloadMenuClick"
-    />
-
-    <!-- 删除下载确认对话框 -->
-    <M3Dialog
-      v-model:open="showDlDeleteDialog"
-      :title="t('download.delete_confirm')"
-      icon="delete"
-      :confirm-text="t('common.delete')"
-      confirm-danger
-      @confirm="confirmDlDelete"
-    >
-      <p class="dialog-msg">{{ t('library.delete_confirm_msg', { name: dlDeleteTarget?.title || '' }) }}</p>
-    </M3Dialog>
 
     <!-- 创建播放列表对话框 -->
     <M3Dialog
@@ -2211,6 +2002,13 @@ onUnmounted(() => {
   color: var(--md-on-surface-variant);
 }
 
+/* 云端列表的刷新状态贴在标题行右侧，出现和消失都不挤动下面的列表 */
+.platform-sync {
+  margin-left: auto;
+  flex-shrink: 0;
+  align-self: center;
+}
+
 .empty-circle.platform-empty {
   opacity: 0.85;
 
@@ -2496,6 +2294,73 @@ onUnmounted(() => {
   text-align: center;
   color: var(--md-on-surface-variant);
   opacity: 0.7;
+}
+
+.favorite-artist-header {
+  padding: 18px;
+  margin-bottom: 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 24px;
+  background: var(--md-surface-container);
+}
+
+.favorite-artist-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+
+  h2 { font-size: 16px; font-weight: 600; margin: 0; }
+  span { color: var(--md-primary); font-size: 13px; font-weight: 600; }
+}
+
+.favorite-artist-platforms {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--md-outline);
+  border-radius: var(--radius-full);
+
+  button {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 40px;
+    font-size: 13px;
+    color: var(--md-on-surface-variant);
+
+    + button { border-left: 1px solid var(--md-outline); }
+    &:hover { background: var(--md-surface-container-high); }
+    &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+    .material-symbols-rounded { font-size: 18px; }
+  }
+}
+
+.favorite-artist-import {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 12px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  color: var(--md-primary);
+  font-size: 13px;
+  font-weight: 500;
+
+  &:hover:not(:disabled) { background: var(--md-surface-container-high); }
+  &:disabled { opacity: 0.5; cursor: progress; }
+  .material-symbols-rounded { font-size: 19px; }
+}
+
+.favorite-artist-item {
+  .pl-icon { width: 56px; height: 56px; border-radius: 50%; }
+  .pl-name { font-size: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

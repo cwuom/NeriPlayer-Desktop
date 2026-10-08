@@ -8,6 +8,7 @@ import {
   type ContextMenuItem,
   type ContextMenuPosition,
 } from '@/utils/contextMenu'
+import { useEscapeClose } from '@/composables/useEscapeClose'
 
 const props = defineProps<{
   open: boolean
@@ -149,12 +150,7 @@ function close() {
   emit('close')
 }
 
-function handleDocumentKeydown(event: KeyboardEvent) {
-  if (!props.open || event.key !== 'Escape') return
-  event.preventDefault()
-  event.stopPropagation()
-  close()
-}
+useEscapeClose(() => props.open, close)
 
 function handleOverlayClick(event: MouseEvent) {
   if (event.target === event.currentTarget) close()
@@ -218,13 +214,11 @@ watch(
 )
 
 onMounted(() => {
-  document.addEventListener('keydown', handleDocumentKeydown, true)
   window.addEventListener('resize', handleViewportChange)
   window.addEventListener('scroll', handleViewportChange, true)
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', handleDocumentKeydown, true)
   window.removeEventListener('resize', handleViewportChange)
   window.removeEventListener('scroll', handleViewportChange, true)
   disconnectResizeObserver()

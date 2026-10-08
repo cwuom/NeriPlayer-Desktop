@@ -40,6 +40,15 @@ pub fn extract_continuation_token(root: &Value) -> Option<String> {
                     return Some(token.to_string());
                 }
             }
+            if let Some(token) = obj
+                .get("continuationCommand")
+                .and_then(|value| value.get("token"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(token.to_string());
+            }
             for value in obj.values() {
                 stack.push(value);
             }
@@ -64,16 +73,23 @@ pub async fn fetch_playlist_detail_pages(
         .await?;
 
     let mut page = 1usize;
+    let mut token = extract_continuation_token(&root);
+    let mut seen_tokens = std::collections::HashSet::new();
     while page < max_pages {
-        let Some(token) = extract_continuation_token(&root) else {
+        let Some(next_token) = token.take() else {
             break;
         };
+        if !seen_tokens.insert(next_token.clone()) {
+            break;
+        }
         let (next, next_auth) = client
-            .continue_playlist_with_session(&token, auth_opt.as_ref().unwrap_or(auth))
+            .continue_playlist_with_session(&next_token, auth_opt.as_ref().unwrap_or(auth))
             .await?;
         if let Some(updated) = next_auth {
             auth_opt = Some(updated);
         }
+        // 下一页 token 只从刚收到的页面获取，旧 root 中可能仍有其它 shelf 的 token
+        token = extract_continuation_token(&next);
         merge_continuation_items(&mut root, &next);
         page += 1;
     }
@@ -86,7 +102,9 @@ fn merge_continuation_items(root: &mut Value, next: &Value) {
         .pointer("/continuationContents/musicPlaylistShelfContinuation/contents")
         .or_else(|| next.pointer("/continuationContents/musicShelfContinuation/contents"))
         .or_else(|| {
-            next.pointer("/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems")
+            next.pointer(
+                "/onResponseReceivedActions/0/appendContinuationItemsAction/continuationItems",
+            )
         })
         .and_then(|v| v.as_array())
         .cloned()
@@ -111,6 +129,7 @@ fn merge_continuation_items(root: &mut Value, next: &Value) {
                         .pointer_mut(&format!("/{shelf_key}/contents"))
                         .and_then(|v| v.as_array_mut())
                     {
+                        items.retain(|item| item.get("continuationItemRenderer").is_none());
                         items.extend(next_items.clone());
                         // 更新 continuation token
                         if let Some(conts) = next
@@ -121,10 +140,12 @@ fn merge_continuation_items(root: &mut Value, next: &Value) {
                                 )
                             })
                         {
-                            if let Some(slot) =
-                                section.pointer_mut(&format!("/{shelf_key}/continuations"))
+                            if let Some(shelf) = section
+                                .as_object_mut()
+                                .and_then(|obj| obj.get_mut(shelf_key))
+                                .and_then(Value::as_object_mut)
                             {
-                                *slot = conts.clone();
+                                shelf.insert("continuations".into(), conts.clone());
                             }
                         } else if let Some(shelf) = section
                             .as_object_mut()
@@ -147,10 +168,7 @@ fn merge_continuation_items(root: &mut Value, next: &Value) {
                 existing.extend(next_items);
             }
             _ => {
-                obj.insert(
-                    "_neriMergedContinuationItems".into(),
-                    json!(next_items),
-                );
+                obj.insert("_neriMergedContinuationItems".into(), json!(next_items));
             }
         }
     }
@@ -180,7 +198,9 @@ pub fn normalize_playlist_browse_id(browse_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_continuation_token, normalize_playlist_browse_id};
+    use super::{
+        extract_continuation_token, merge_continuation_items, normalize_playlist_browse_id,
+    };
     use serde_json::json;
 
     #[test]
@@ -208,5 +228,48 @@ mod tests {
         assert_eq!(normalize_playlist_browse_id("VLPLabc"), "VLPLabc");
         assert_eq!(normalize_playlist_browse_id("MPREb_x"), "MPREb_x");
         assert_eq!(normalize_playlist_browse_id("FEmusic_home"), "FEmusic_home");
+    }
+
+    #[test]
+    fn recognizes_android_append_action_continuation_command() {
+        let root = json!({"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [{"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "NEXT"}}}}]}}]});
+        assert_eq!(extract_continuation_token(&root).as_deref(), Some("NEXT"));
+        assert!(
+            extract_continuation_token(&json!({"continuationCommand": {"token": ""}})).is_none()
+        );
+    }
+
+    #[test]
+    fn merges_pages_without_retaining_previous_continuation_items() {
+        let path = "/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents/0/musicPlaylistShelfRenderer";
+        let mut root = json!({"contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {"sectionListRenderer": {"contents": [{"musicPlaylistShelfRenderer": {"contents": [{"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "first"}}}]}}]}}}}});
+        let next = json!({"continuationContents": {"musicPlaylistShelfContinuation": {"contents": [{"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "second"}}}], "continuations": [{"nextContinuationData": {"continuation": "THIRD"}}]}}});
+        merge_continuation_items(&mut root, &next);
+        assert_eq!(
+            root.pointer(&format!("{path}/contents"))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            root.pointer(&format!(
+                "{path}/continuations/0/nextContinuationData/continuation"
+            ))
+            .unwrap(),
+            "THIRD"
+        );
+        let final_page = json!({"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [{"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "third"}}}]}}]});
+        merge_continuation_items(&mut root, &final_page);
+        assert_eq!(
+            root.pointer(&format!("{path}/contents"))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(root.pointer(&format!("{path}/continuations")).is_none());
     }
 }

@@ -9,6 +9,7 @@ import { usePlayerStore } from '@/stores/player'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore, type PlaylistInfo } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
+import { useSearchHistoryStore } from '@/stores/searchHistory'
 import { invoke } from '@tauri-apps/api/core'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
@@ -21,6 +22,7 @@ const player = usePlayerStore()
 const auth = useAuthStore()
 const recommend = useRecommendStore()
 const settings = useSettingsStore()
+const searchHistory = useSearchHistoryStore()
 
 // 搜索
 const searchQuery = ref('')
@@ -92,8 +94,8 @@ interface SearchResult {
 
 interface DiscoveryShelf {
   key: string
-  title: string
-  subtitle: string
+  /** i18n key 前缀，渲染时取 `${labelKey}_title` / `${labelKey}_subtitle`，跟随语言切换 */
+  labelKey: string
   platform: PlatformTab
   items: SearchResult[]
 }
@@ -103,16 +105,17 @@ const youtubeDiscoveryShelves = ref<DiscoveryShelf[]>([])
 const isLoadingBiliDiscovery = ref(false)
 const isLoadingYoutubeDiscovery = ref(false)
 
+// query 是平台侧的搜索词，不随界面语言变化
 const biliDiscoveryQueries = [
-  { key: 'bili-hot', title: 'B站音乐现场', subtitle: 'Live / 翻唱 / 演奏', query: '音乐现场' },
-  { key: 'bili-vocal', title: '热门翻唱', subtitle: 'UP 主精选音乐内容', query: '翻唱 音乐' },
-  { key: 'bili-acg', title: 'ACG 音乐', subtitle: '动画 / 游戏 / 虚拟歌手', query: 'ACG 音乐' },
+  { key: 'bili-hot', labelKey: 'explore.bili_shelf_live', query: '音乐现场' },
+  { key: 'bili-vocal', labelKey: 'explore.bili_shelf_cover', query: '翻唱 音乐' },
+  { key: 'bili-acg', labelKey: 'explore.bili_shelf_acg', query: 'ACG 音乐' },
 ]
 
 const youtubeDiscoveryQueries = [
-  { key: 'yt-new', title: 'YouTube Music 新鲜听', subtitle: 'New music and mixes', query: 'new music mix' },
-  { key: 'yt-live', title: 'Live Sessions', subtitle: '现场 / Session / Acoustic', query: 'live session music' },
-  { key: 'yt-focus', title: 'Focus & Chill', subtitle: '学习 / 工作 / 放松', query: 'focus chill music' },
+  { key: 'yt-new', labelKey: 'explore.yt_shelf_new', query: 'new music mix' },
+  { key: 'yt-live', labelKey: 'explore.yt_shelf_live', query: 'live session music' },
+  { key: 'yt-focus', labelKey: 'explore.yt_shelf_focus', query: 'focus chill music' },
 ]
 
 async function loadDiscoveryShelves(platform: 'bilibili' | 'youtube') {
@@ -126,9 +129,9 @@ async function loadDiscoveryShelves(platform: 'bilibili' | 'youtube') {
     const results = await Promise.all(queries.map(async q => {
       try {
         const items = await invoke<SearchResult[]>('search', { query: q.query, platform })
-        return { key: q.key, title: q.title, subtitle: q.subtitle, platform, items: items.slice(0, 10) }
+        return { key: q.key, labelKey: q.labelKey, platform, items: items.slice(0, 10) }
       } catch {
-        return { key: q.key, title: q.title, subtitle: q.subtitle, platform, items: [] }
+        return { key: q.key, labelKey: q.labelKey, platform, items: [] }
       }
     }))
     target.value = results.filter(shelf => shelf.items.length > 0)
@@ -153,14 +156,18 @@ watch(
   },
 )
 
+// 连续点标签时只采纳最后一次请求，避免慢响应把旧标签的歌单盖回来
+let tagRequestSeq = 0
 async function loadQualityByTag(tagKey: string) {
+  const requestId = ++tagRequestSeq
   selectedTag.value = tagKey
   isLoadingPlaylists.value = true
   try {
     const cat = TAG_TO_CAT[tagKey] || '全部'
-    qualityPlaylists.value = await recommend.fetchHighQualityPlaylists(cat, 30)
+    const playlists = await recommend.fetchHighQualityPlaylists(cat, 30)
+    if (requestId === tagRequestSeq) qualityPlaylists.value = playlists
   } finally {
-    isLoadingPlaylists.value = false
+    if (requestId === tagRequestSeq) isLoadingPlaylists.value = false
   }
 }
 
@@ -176,8 +183,30 @@ watch(searchQuery, (q) => {
   }, 300)
 })
 
+// 页面被 KeepAlive 缓存：离开探索页时 route.query 属于别的页面，不能据此清空搜索
+watch(() => route.query.q, (q) => {
+  if (route.name !== 'explore') return
+  const value = typeof q === 'string' ? q.trim() : ''
+  if (searchQuery.value !== value) searchQuery.value = value
+}, { immediate: true })
+
+function retrySearch() {
+  if (searchQuery.value.trim()) void searchStore.search(searchQuery.value, activeTab.value)
+}
+
+// 边输入边搜，只在确认时（回车、播放结果、点历史）记历史，免得记下半截关键词
+function rememberSearch() {
+  searchHistory.record(searchQuery.value)
+}
+
+function searchFromHistory(keyword: string) {
+  searchQuery.value = keyword
+  searchHistory.record(keyword)
+}
+
 
 watch(() => route.query.platform, (platform) => {
+  if (route.name !== 'explore') return
   if (typeof platform === 'string' && PLATFORM_KEYS.includes(platform as PlatformTab)) {
     activeTab.value = platform as PlatformTab
   }
@@ -198,6 +227,7 @@ watch(activeTab, (tab) => {
 
 // 工具函数
 function playResult(r: any) {
+  rememberSearch()
   player.play({
     id: r.id,
     title: r.title,
@@ -274,6 +304,7 @@ onMounted(() => {
         data-shortcut-search
         @focus="isFocused = true"
         @blur="isFocused = false"
+        @keydown.enter="rememberSearch"
       />
       <button v-if="searchQuery" class="clear-btn" @click="searchQuery = ''; searchStore.clear()">
         <span class="material-symbols-rounded" style="font-size: 20px">close</span>
@@ -295,6 +326,18 @@ onMounted(() => {
         ></span>
         <span class="tab-label">{{ tab.label }}</span>
       </button>
+    </div>
+
+    <div v-if="!isSearching && searchHistory.visible.length > 0" class="search-history">
+      <div class="search-history-header">
+        <span class="search-history-title">{{ t('explore.search_history') }}</span>
+        <button class="search-history-clear" @click="searchHistory.clear()">{{ t('explore.clear_search_history') }}</button>
+      </div>
+      <div class="tag-flow">
+        <button v-for="keyword in searchHistory.visible" :key="keyword" class="tag-chip" @click="searchFromHistory(keyword)">
+          {{ keyword }}
+        </button>
+      </div>
     </div>
 
     <!-- 加载状态 -->
@@ -325,10 +368,17 @@ onMounted(() => {
       </div>
     </div>
 
+    <!-- 搜索失败：与无结果区分开，并允许重试 -->
+    <div v-else-if="isSearching && searchStore.error" class="empty-state" style="padding: 40px 0">
+      <span class="material-symbols-rounded" style="font-size: 32px; opacity: 0.4">wifi_off</span>
+      <p class="empty-desc" style="margin-top: 8px">{{ t('explore.search_failed') }}</p>
+      <button class="retry-btn" @click="retrySearch">{{ t('player.retry') }}</button>
+    </div>
+
     <!-- 搜索无结果 -->
     <div v-else-if="isSearching && searchStore.results.length === 0" class="empty-state" style="padding: 40px 0">
       <span class="material-symbols-rounded" style="font-size: 32px; opacity: 0.4">search_off</span>
-      <p class="empty-desc" style="margin-top: 8px">{{ t('explore.empty_desc') }}</p>
+      <p class="empty-desc" style="margin-top: 8px">{{ t('player.no_results') }}</p>
     </div>
 
     <!-- 默认内容（按平台） -->
@@ -362,7 +412,9 @@ onMounted(() => {
             @click="goToPlaylist(pl)"
           >
             <div class="playlist-cover">
-              <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy" />
+              <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy">
+                <span class="material-symbols-rounded filled">queue_music</span>
+              </BilibiliCoverImage>
               <span v-else class="material-symbols-rounded filled">queue_music</span>
             </div>
             <div class="playlist-name">{{ pl.name }}</div>
@@ -377,7 +429,7 @@ onMounted(() => {
           <span class="tab-icon large" :style="{ maskImage: 'url(/icons/ic_bilibili.svg)' }"></span>
           <div>
             <h2>{{ t('settings.bilibili_account') }}</h2>
-            <p>{{ t('explore.bili_hint') }} · 为你预置音乐现场、翻唱和 ACG 音乐入口</p>
+            <p>{{ t('explore.bili_hint') }} · {{ t('explore.bili_discovery_hint') }}</p>
           </div>
         </div>
         <div v-if="isLoadingBiliDiscovery" class="loading-state">
@@ -387,8 +439,8 @@ onMounted(() => {
           <section v-for="shelf in biliDiscoveryShelves" :key="shelf.key" class="discovery-shelf">
             <div class="discovery-header">
               <div>
-                <h2 class="section-title">{{ shelf.title }}</h2>
-                <p>{{ shelf.subtitle }}</p>
+                <h2 class="section-title">{{ t(`${shelf.labelKey}_title`) }}</h2>
+                <p>{{ t(`${shelf.labelKey}_subtitle`) }}</p>
               </div>
             </div>
             <div class="discovery-row">
@@ -413,7 +465,7 @@ onMounted(() => {
           <span class="tab-icon large" :style="{ maskImage: 'url(/icons/ic_youtube.svg)' }"></span>
           <div>
             <h2>{{ t('settings.youtube_account') }}</h2>
-            <p>{{ auth.youtube.loggedIn ? '优先展示 YouTube Music 首页 Feed，并补充默认搜索发现' : t('explore.yt_hint') }}</p>
+            <p>{{ auth.youtube.loggedIn ? t('explore.yt_feed_hint') : t('explore.yt_hint') }}</p>
           </div>
         </div>
 
@@ -425,7 +477,9 @@ onMounted(() => {
             <div class="discovery-row">
               <div v-for="item in shelf.items.slice(0, 10)" :key="item.browseId || item.videoId || item.title" class="discovery-card" @click="goToYoutubeShelfItem(item)">
                 <div class="discovery-cover">
-                  <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy" />
+                  <BilibiliCoverImage v-if="item.coverUrl" :src="item.coverUrl" loading="lazy">
+                    <span class="material-symbols-rounded filled">music_note</span>
+                  </BilibiliCoverImage>
                   <span v-else class="material-symbols-rounded filled">music_note</span>
                 </div>
                 <div class="discovery-title">{{ item.title }}</div>
@@ -442,14 +496,16 @@ onMounted(() => {
           <section v-for="shelf in youtubeDiscoveryShelves" :key="shelf.key" class="discovery-shelf">
             <div class="discovery-header">
               <div>
-                <h2 class="section-title">{{ shelf.title }}</h2>
-                <p>{{ shelf.subtitle }}</p>
+                <h2 class="section-title">{{ t(`${shelf.labelKey}_title`) }}</h2>
+                <p>{{ t(`${shelf.labelKey}_subtitle`) }}</p>
               </div>
             </div>
             <div class="discovery-row">
               <div v-for="item in shelf.items" :key="item.id" class="discovery-card" @click="playDiscoveryItem(item)">
                 <div class="discovery-cover">
-                  <BilibiliCoverImage v-if="item.cover_url" :src="item.cover_url" loading="lazy" />
+                  <BilibiliCoverImage v-if="item.cover_url" :src="item.cover_url" loading="lazy">
+                    <span class="material-symbols-rounded filled">music_note</span>
+                  </BilibiliCoverImage>
                   <span v-else class="material-symbols-rounded filled">music_note</span>
                 </div>
                 <div class="discovery-title">{{ item.title }}</div>
@@ -591,6 +647,37 @@ onMounted(() => {
 /* Tag 选择区 */
 .tag-section {
   margin-bottom: 20px;
+}
+
+.search-history {
+  margin-bottom: 20px;
+}
+
+.search-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.search-history-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--md-on-surface-variant);
+}
+
+.search-history-clear {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--md-primary);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--md-surface-container-high);
+  }
 }
 
 .tag-flow {
@@ -829,6 +916,20 @@ onMounted(() => {
   font-size: 13px;
   color: var(--md-on-surface-variant);
   opacity: 0.6;
+}
+
+.retry-btn {
+  margin-top: 12px;
+  padding: 6px 18px;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--md-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--duration-short) var(--ease-standard);
+
+  &:hover { background: color-mix(in srgb, var(--md-primary) 8%, transparent); }
 }
 
 /* 加载 & 搜索结果 */

@@ -28,6 +28,8 @@
   --md-outline-variant: rgb(73, 69, 79);
   --md-error: rgb(242, 184, 181);
   --md-on-error: rgb(96, 20, 16);
+  --md-error-container: rgb(140, 29, 24);
+  --md-on-error-container: rgb(249, 222, 220);
   --md-background: rgb(20, 18, 24);
   --md-inverse-surface: rgb(230, 225, 229);
   --md-inverse-on-surface: rgb(49, 47, 51);
@@ -210,6 +212,8 @@ a { color: inherit; text-decoration: none; }
   --md-outline-variant: rgb(202, 196, 207);
   --md-error: rgb(179, 38, 30);
   --md-on-error: rgb(255, 255, 255);
+  --md-error-container: rgb(249, 222, 220);
+  --md-on-error-container: rgb(65, 14, 11);
   --md-background: rgb(252, 248, 253);
   --md-inverse-surface: rgb(49, 48, 51);
   --md-inverse-on-surface: rgb(244, 239, 244);
@@ -303,6 +307,86 @@ html.theme-ripple-active::view-transition-new(root) {
 
 .np-locate-pulse {
   animation: np-locate-pulse 600ms var(--ease-standard) 1;
+}
+
+/* ===== M3 Switch：设置页与弹窗共用，结构为 .m3-switch > input + .track > .thumb ===== */
+.m3-switch {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  cursor: pointer;
+
+  // 视觉隐藏但保留键盘焦点与读屏语义
+  input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+
+  .track {
+    display: flex;
+    align-items: center;
+    width: 52px;
+    height: 32px;
+    border-radius: 16px;
+    background: var(--md-surface-container-highest);
+    border: 2px solid var(--md-outline);
+    position: relative;
+    pointer-events: none;
+    transition: background var(--duration-medium) var(--ease-standard),
+                border-color var(--duration-medium) var(--ease-standard);
+  }
+
+  .thumb {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--md-outline);
+    top: 50%;
+    left: 6px;
+    transform: translateY(-50%);
+    transition: left var(--duration-medium) var(--ease-standard),
+                width var(--duration-medium) var(--ease-standard),
+                height var(--duration-medium) var(--ease-standard),
+                background var(--duration-medium) var(--ease-standard);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--md-on-primary);
+    font-size: 0;
+
+    .material-symbols-rounded { font-size: 14px; }
+  }
+
+  input:checked + .track {
+    background: var(--md-primary);
+    border-color: var(--md-primary);
+
+    // 选中态滑块为 on-primary，图标需用 on-primary-container 才可见
+    .thumb {
+      left: 22px;
+      width: 24px;
+      height: 24px;
+      background: var(--md-on-primary);
+      color: var(--md-on-primary-container);
+      font-size: 14px;
+    }
+  }
+
+  input:focus-visible + .track {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+  }
+
+  &:has(input:disabled) {
+    cursor: default;
+    opacity: 0.38;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

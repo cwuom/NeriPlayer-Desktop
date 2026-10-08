@@ -308,6 +308,8 @@ pub struct SyncData {
     pub playback_stat_buckets: Vec<SyncPlaybackStatBucket>,
     #[serde(default)]
     pub playlist_song_deletions: Vec<SyncPlaylistSongDeletion>,
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, Value>,
 }
 
 fn default_version() -> String { "2.0".into() }
@@ -545,6 +547,14 @@ pub struct SyncSong {
     pub sync_metadata_version: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_added_at: Option<i64>,
+    #[serde(default)]
+    pub lyric_sync_revision: i64,
+    #[serde(default)]
+    pub lyric_sync_edited: Option<bool>,
+    #[serde(default)]
+    pub matched_romanized_lyric: Option<String>,
+    #[serde(default)]
+    pub original_romanized_lyric: Option<String>,
 }
 
 impl SyncSong {
@@ -612,10 +622,7 @@ impl SyncSong {
     pub fn normalized_for_sync(&self) -> Self {
         let mut normalized = self.clone();
         normalized.sync_membership_tokens = normalize_sync_causal_tokens(&self.sync_membership_tokens);
-        // 空字符串歌词/元数据视为缺失, 避免上传 Some("") 洗掉云端或制造伪 diff
-        normalized.matched_lyric = normalize_optional_text(self.matched_lyric.as_deref());
-        normalized.matched_translated_lyric =
-            normalize_optional_text(self.matched_translated_lyric.as_deref());
+        // 歌词空值与空文本是不同的可恢复状态，不能裁剪原文或尾部换行
         normalized.matched_lyric_source =
             normalize_optional_text(self.matched_lyric_source.as_deref());
         normalized.matched_song_id = normalize_optional_text(self.matched_song_id.as_deref());
@@ -625,15 +632,59 @@ impl SyncSong {
         normalized.original_name = normalize_optional_text(self.original_name.as_deref());
         normalized.original_artist = normalize_optional_text(self.original_artist.as_deref());
         normalized.original_cover_url = normalize_optional_text(self.original_cover_url.as_deref());
-        normalized.original_lyric = normalize_optional_text(self.original_lyric.as_deref());
-        normalized.original_translated_lyric =
-            normalize_optional_text(self.original_translated_lyric.as_deref());
         normalized.channel_id = normalize_optional_text(self.channel_id.as_deref());
         normalized.audio_id = normalize_optional_text(self.audio_id.as_deref());
         normalized.sub_audio_id = normalize_optional_text(self.sub_audio_id.as_deref());
         normalized.playlist_context_id =
             normalize_optional_text(self.playlist_context_id.as_deref());
         normalized
+    }
+}
+
+/// 其它设备也能打开的封面地址（对齐 Android SyncCoverUrlPolicy）：本机路径、file/content 等 URI，
+/// 以及指向本机的 http 地址（含 Tauri 的 asset.localhost）都不算
+pub fn is_shareable_cover_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            host != "localhost" && !host.ends_with(".localhost") && host != "127.0.0.1" && host != "[::1]"
+        })
+}
+
+impl SyncSong {
+    /// 上传用的副本：去掉只在本机有效的封面
+    pub fn with_shareable_covers(&self) -> Self {
+        let keep = |value: &Option<String>| value.clone().filter(|url| is_shareable_cover_url(url));
+        Self {
+            cover_url: if is_shareable_cover_url(&self.cover_url) {
+                self.cover_url.clone()
+            } else {
+                String::new()
+            },
+            custom_cover_url: keep(&self.custom_cover_url),
+            original_cover_url: keep(&self.original_cover_url),
+            ..self.clone()
+        }
+    }
+}
+
+impl SyncData {
+    /// 上传用的副本：歌单、收藏歌单和最近播放里的歌曲都去掉只在本机有效的封面
+    pub fn with_shareable_covers(&self) -> Self {
+        let mut data = self.clone();
+        for song in data
+            .playlists
+            .iter_mut()
+            .flat_map(|playlist| playlist.songs.iter_mut())
+            .chain(data.favorite_playlists.iter_mut().flat_map(|playlist| playlist.songs.iter_mut()))
+            .chain(data.recent_plays.iter_mut().map(|play| &mut play.song))
+        {
+            *song = song.with_shareable_covers();
+        }
+        data
     }
 }
 
@@ -674,6 +725,8 @@ pub struct SyncRecentPlay {
     pub played_at: i64,
     #[serde(default)]
     pub device_id: String,
+    #[serde(default)]
+    pub resume_position_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1018,6 +1071,12 @@ pub struct SyncResult {
     pub songs_removed: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<Value>,
+    /// 合并结果校正了本地逐曲歌词偏移时，给出新的完整映射
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyric_offsets: Option<std::collections::BTreeMap<String, i64>>,
+    /// 同步期间本地数据有变化，这一轮没有写回任何东西，前端应稍后再同步一次
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 
 /// 同步配置
@@ -1084,6 +1143,36 @@ pub struct WebDavSyncConfig {
 mod legacy_json_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_covers_other_devices_can_open_are_uploaded() {
+        for local in [
+            "C:\\Music\\cover.jpg",
+            "\\\\nas\\share\\cover.jpg",
+            "/storage/emulated/0/cover.jpg",
+            "file:///C:/cover.jpg",
+            "content://media/external/images/1",
+            "http://asset.localhost/C%3A%5Ccover.jpg",
+            "http://127.0.0.1:8080/cover.jpg",
+            "",
+        ] {
+            assert!(!is_shareable_cover_url(local), "{local} must stay on this device");
+        }
+        assert!(is_shareable_cover_url("https://p1.music.126.net/cover.jpg"));
+        assert!(is_shareable_cover_url(" http://i0.hdslb.com/cover.jpg "));
+
+        let song = SyncSong {
+            id: "1".into(),
+            cover_url: "C:\\Music\\cover.jpg".into(),
+            custom_cover_url: Some("D:\\custom.png".into()),
+            original_cover_url: Some("https://p1.music.126.net/original.jpg".into()),
+            ..Default::default()
+        };
+        let shared = song.with_shareable_covers();
+        assert_eq!(shared.cover_url, "");
+        assert_eq!(shared.custom_cover_url, None);
+        assert_eq!(shared.original_cover_url.as_deref(), Some("https://p1.music.126.net/original.jpg"));
+    }
 
     #[test]
     fn sync_song_json_uses_android_field_contract() {
@@ -1232,7 +1321,7 @@ mod legacy_json_tests {
     }
 
     #[test]
-    fn normalized_for_sync_clears_blank_lyric_fields() {
+    fn normalized_for_sync_preserves_lyric_text_and_clears_blank_metadata() {
         let song = SyncSong {
             id: "1".into(),
             matched_lyric: Some("   ".into()),
@@ -1245,9 +1334,9 @@ mod legacy_json_tests {
         };
 
         let normalized = song.normalized_for_sync();
-        assert!(normalized.matched_lyric.is_none());
-        assert!(normalized.matched_translated_lyric.is_none());
-        assert_eq!(normalized.original_lyric.as_deref(), Some("keep"));
+        assert_eq!(normalized.matched_lyric.as_deref(),Some("   "));
+        assert_eq!(normalized.matched_translated_lyric.as_deref(),Some(""));
+        assert_eq!(normalized.original_lyric.as_deref(), Some(" keep "));
         assert!(normalized.matched_lyric_source.is_none());
         assert!(normalized.custom_name.is_none());
         assert_eq!(normalized.channel_id.as_deref(), Some("netease"));
