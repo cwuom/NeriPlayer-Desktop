@@ -49,11 +49,9 @@ watch(() => props.coverUrl, (newUrl) => {
   if (newUrl === frontUrl.value) return
 
   // 预加载新图片，加载完成后交叉淡入
+  // 预加载必须和下面的 <img> 同为非 CORS 请求：CORS 模式不同的请求不共用缓存，封面会被下载两次
   const img = new Image()
   pendingImg = img
-  if (!newUrl.startsWith('data:') && !newUrl.startsWith('blob:')) {
-    img.crossOrigin = 'anonymous'
-  }
   img.referrerPolicy = 'no-referrer'
   img.onload = () => {
     // 若期间又切歌，当前回调已过期，丢弃

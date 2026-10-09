@@ -53,6 +53,7 @@ import {
   type ArtistFavoriteSource,
   type FavoritePlaylist,
 } from '@/modules/library/favoriteArtists'
+import { biliPlaylistRoute, parseBiliPlaylistReference } from '@/modules/library/biliPlaylistReference'
 
 const log = createLogger('library-view')
 
@@ -642,9 +643,19 @@ function openFavorite(fpl: FavoritePlaylist) {
       }
       break
     }
-    case 'bili':
-      router.push({ name: 'bili-playlist', params: { mediaId: fpl.id } })
-      return
+    case 'bili': {
+      // 合集、视频列表不是收藏夹，按收藏夹 id 去查只会拿到空的默认收藏夹
+      const reference = parseBiliPlaylistReference(fpl.browseId)
+      const target = biliPlaylistRoute({
+        id: fpl.id, kind: reference?.kind, mid: reference?.mid,
+        name: fpl.name, coverUrl: fpl.coverUrl, trackCount: fpl.trackCount, uploader: fpl.subtitle,
+      })
+      if (target) {
+        router.push(target)
+        return
+      }
+      break
+    }
   }
   router.push({ name: 'favorite-playlist', params: { id: fpl.id } })
 }

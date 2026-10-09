@@ -48,6 +48,7 @@
     "test:playback-failure": "node scripts/test-playback-failure.mjs",
     "test:youtube-seek-policy": "node scripts/test-youtube-seek-policy.mjs",
     "test:lyrics-cache": "node scripts/test-lyrics-cache.mjs",
+    "test:lyrics-prefetch": "node scripts/test-lyrics-prefetch.mjs",
     "test:local-artists": "node scripts/test-local-artists.mjs",
     "test:local-scan-preview": "node scripts/test-local-scan-preview.mjs",
     "test:local-scan-store": "node scripts/test-local-scan-store.mjs",
@@ -66,6 +67,9 @@
     "test:search-history": "node scripts/test-search-history.mjs",
     "test:user-data-persistence": "node scripts/test-user-data-persistence.mjs",
     "test:home-continue": "node scripts/test-home-continue.mjs",
+    "test:bili-playlist-reference": "node scripts/test-bili-playlist-reference.mjs",
+    "test:lyric-match": "node scripts/test-lyric-match.mjs",
+    "test:desktop-lyrics-style": "node scripts/test-desktop-lyrics-style.mjs",
     "test:home-feed": "node scripts/test-home-feed.mjs",
     "test:youtube-home-layout": "node scripts/test-youtube-home-layout.mjs",
     "test:youtube-home-feed": "node scripts/test-youtube-home-feed.mjs",
@@ -75,7 +79,7 @@
     "tauri": "node scripts/run-tauri.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/api": "~2.12.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-log": "^2.9.0",
@@ -90,7 +94,7 @@
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.5.0",
+    "@tauri-apps/cli": "~2.12.1",
     "@types/animejs": "^3.1.12",
     "@types/node": "^26.1.1",
     "@vitejs/plugin-vue": "^5.2.4",

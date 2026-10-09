@@ -259,19 +259,25 @@ pub async fn begin_playback_request(
     has_cover: Option<bool>,
     has_audio_url: Option<bool>,
     has_sync_payload: Option<bool>,
+    silence_previous: Option<bool>,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     log::info!(
         target: "playback-request",
-        "begin generation={}, id={}, source={}, cover={}, direct_url={}, sync_payload={}",
+        "begin generation={}, id={}, source={}, cover={}, direct_url={}, sync_payload={}, silence_previous={}",
         request_generation,
         track_id.as_deref().unwrap_or("unknown"),
         source.as_deref().unwrap_or("unknown"),
         has_cover.unwrap_or(false),
         has_audio_url.unwrap_or(false),
-        has_sync_payload.unwrap_or(false)
+        has_sync_payload.unwrap_or(false),
+        silence_previous.unwrap_or(false)
     );
-    claim_playback_request(&state, request_generation)
+    claim_playback_request(&state, request_generation)?;
+    if silence_previous.unwrap_or(false) {
+        state.player.lock().silence_stale_sessions(request_generation);
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1616,6 +1622,39 @@ fn playback_user_agent(url: &str) -> &'static str {
     } else {
         DEFAULT_PLAYBACK_USER_AGENT
     }
+}
+
+/// 预开下一首的直链（总长 + 首包），切过去时省掉冷连接上的首包等待；失败不影响播放
+#[tauri::command]
+pub async fn prewarm_remote_audio(
+    url: String,
+    duration_hint_ms: Option<u64>,
+    state: State<'_, AppState>,
+) -> AppResult<bool> {
+    let parsed = url::Url::parse(&url).map_err(|_| AppError::Audio("Invalid stream URL".into()))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(AppError::Audio("Invalid stream URL".into()));
+    }
+    let started = std::time::Instant::now();
+    let warmed = crate::audio::remote::prewarm(
+        &state.http(),
+        &url,
+        playback_referer(&url),
+        duration_hint_ms.unwrap_or(0),
+    )
+    .await
+    .inspect_err(|error| {
+        log::info!(target: "remote-audio", "prewarm skipped host={}: {error}", parsed.host_str().unwrap_or("unknown"));
+    })?;
+    if warmed {
+        log::info!(
+            target: "remote-audio",
+            "prewarm ready host={}, elapsed_ms={}",
+            parsed.host_str().unwrap_or("unknown"),
+            started.elapsed().as_millis(),
+        );
+    }
+    Ok(warmed)
 }
 
 async fn open_remote_audio_source(

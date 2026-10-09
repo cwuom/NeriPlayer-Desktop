@@ -1250,6 +1250,9 @@ function uniqueUrls(urls: string[] = []): string[] {
     .filter((url, index, values) => values.indexOf(url) === index)
 }
 
+/** -404 啥都木有、62002 稿件不可见、62004 审核中、62012 仅 UP 主自己可见 */
+const BILI_DEFINITIVE_UNAVAILABLE_CODE = /\bcode=(?:-404|62002|62004|62012)\b/
+
 function classifyPlaybackError(error: unknown): PlaybackResolution {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof PlaybackFailure) {
@@ -1260,7 +1263,9 @@ function classifyPlaybackError(error: unknown): PlaybackResolution {
   // 只有网易云明确的「需要登录」才提示登录；YouTube 的 LOGIN_REQUIRED 是可重试的取流失败（对齐 Android）
   if (/\bPlayback requires login\b/i.test(message)) return { type: 'requires_login', message }
   if (message.includes(BILI_VIDEO_INFO_UNAVAILABLE)) {
-    return { type: 'failure', reason: 'video_info_unavailable', message, retryable: true }
+    // 稿件不存在、已删、审核中、仅 UP 主可见是平台的明确答复，重试 5 次只会让自动跳过多等 4 秒
+    const definitive = BILI_DEFINITIVE_UNAVAILABLE_CODE.test(message)
+    return { type: 'failure', reason: 'video_info_unavailable', message, retryable: !definitive }
   }
   return { type: 'failure', reason: 'url_error', message, retryable: true }
 }

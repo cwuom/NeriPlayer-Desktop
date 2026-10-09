@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 「定位到当前播放曲目」悬浮按钮：对齐 Android 端 HapticFloatingActionButton + PlaylistPlay 图标
-// .detail-view 带 transform 会劫持 fixed 定位，因此 Teleport 到 body
+// .detail-view 带 transform 会劫持 fixed 定位，因此 Teleport 出去；目标是 .app-layout 而不是 body：
+// .app-layout 是独立层叠上下文（isolation），放到 body 上 z-index 会压过整个应用，播放页也挡不住
 defineProps<{
   visible: boolean
   label: string
@@ -10,7 +11,7 @@ const emit = defineEmits<{ (e: 'click'): void }>()
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport to=".app-layout">
     <Transition name="locate-fab">
       <button
         v-if="visible"

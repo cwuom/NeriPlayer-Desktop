@@ -48,10 +48,12 @@ let layoutSyncToken = 0
 let lastFrameAt = 0
 let lastSyncedTime = Number.NaN
 let lastFeedAt = 0
-let settleTimer: ReturnType<typeof setTimeout> | null = null
 let resizeObserver: ResizeObserver | null = null
 let lastHostWidth = 0
 let lastHostHeight = 0
+let idleDeadline = 0
+let wakeTarget: HTMLElement | null = null
+let loadedTimelineKey: string | null = null
 
 const SPLIT_WHITESPACE_RE = /(\s+)/
 const WHITESPACE_RE = /\s/g
@@ -59,12 +61,12 @@ const AMLL_WORD_FADE_WIDTH = 0.5
 const LAYOUT_SETTLE_PASSES = 4
 const LAYOUT_SETTLE_MAX_PASSES = 8
 const SIZE_EPSILON = 0.5
-// 时间喂入节流：后端插值时钟在 60/120Hz 显示上每帧变化，逐帧 setCurrentTime
-// 会让 AMLL 每帧重算整棵歌词状态树；30ms 粒度下行切换/逐字误差不可感知，
-// 弹簧与 WAAPI 词遮罩动画各自独立走时钟，不受喂入频率影响
+// 覆盖 AMLL 弹簧（posY/scale）从任意位移收敛所需的时长
+const IDLE_FRAME_GRACE_MS = 2500
+const WAKE_EVENTS = ['wheel', 'pointerdown', 'touchstart', 'keydown'] as const
+// 播放中后端插值时钟每帧都变，逐帧 setCurrentTime 会让 AMLL 每帧重算整棵歌词状态树；
+// 30ms 粒度下行切换/逐字误差不可感知，弹簧与词遮罩动画各自走时钟，不受喂入频率影响
 const TIME_FEED_INTERVAL_MS = 30
-// 暂停态下 seek/布局后弹簧需要短暂逐帧驱动收敛，收敛后停表省掉每帧样式写入
-const PAUSE_SETTLE_MS = 500
 
 interface PlayerRubyWord {
   startMs: number
@@ -223,7 +225,7 @@ function toAmllWord(word: PlayerLyricWord): AmllLyricWord {
     startTime,
     endTime,
   }
-  if (richWord.romanWord) amllWord.romanWord = richWord.romanWord
+  if (richWord.romanWord && settings.showRomanization) amllWord.romanWord = richWord.romanWord
   if (richWord.obscene != null) amllWord.obscene = richWord.obscene
   if (richWord.ruby?.length) {
     amllWord.ruby = richWord.ruby.map(ruby => {
@@ -270,7 +272,7 @@ function toAmllLine(line: PlayerLyricLine): AmllLyricLine {
   return {
     words,
     translatedLyric: settings.showTranslation ? (line.translation || '') : '',
-    romanLyric: settings.showTranslation ? (line.roman || '') : '',
+    romanLyric: settings.showRomanization ? (line.roman || '') : '',
     startTime,
     endTime,
     isBG: false,
@@ -286,30 +288,27 @@ function syncCurrentTime(forceSeek = false): void {
   if (!lyricPlayer) return
   const time = Math.max(0, Math.round(amllTimeMs.value))
   const drift = Math.abs(time - lastSyncedTime)
+  if (!forceSeek && drift < 1) return
   // 只有真正的跳转（>500ms）才强制 seek。插值时钟被后端位置事件小幅
   // 回拉是常态（缓冲、事件节流都会造成 100ms 级摆动），80ms 就强跳的话
   // 每次回拉歌词都猛抖一下——「一抖一抖」就是它。500ms 以内直接喂时间，
   // AMLL 按连续播放自行平滑，行切换粒度是秒级，不会因此卡错行。
   if (!forceSeek && drift >= 500) forceSeek = true
 
-  if (forceSeek) {
-    lastFeedAt = performance.now()
-  } else {
-    const now = performance.now()
-    if (now - lastFeedAt < TIME_FEED_INTERVAL_MS) return
-    if (drift < 1) return
-    lastFeedAt = now
-  }
+  const now = performance.now()
+  if (!forceSeek && props.isPlaying && now - lastFeedAt < TIME_FEED_INTERVAL_MS) return
+  lastFeedAt = now
 
   lyricPlayer.setCurrentTime(time, forceSeek)
   lastSyncedTime = time
-  if (forceSeek) requestSettleLoop()
+  if (!props.isPlaying) wakeFrameLoop()
 }
 
 function syncPlayState(): void {
   if (!lyricPlayer) return
   if (props.isPlaying) lyricPlayer.resume()
   else lyricPlayer.pause()
+  wakeFrameLoop()
 }
 
 function syncLyricOptions(): void {
@@ -317,11 +316,20 @@ function syncLyricOptions(): void {
   lyricPlayer.setEnableBlur(settings.lyricBlur)
   lyricPlayer.setBlurAmount(settings.lyricBlurAmount)
   lyricPlayer.setWordFadeWidth(settings.advancedLyrics ? AMLL_WORD_FADE_WIDTH : 0)
+  wakeFrameLoop()
+}
+
+function lyricTimelineKey(lines: PlayerLyricLine[]): string {
+  return lines.map(line => line.startMs).join(',')
 }
 
 function reloadLyrics(): void {
   if (!lyricPlayer) return
-  isLayoutReady.value = false
+  // 换了一首（时间轴不同）才先隐藏等排版落定；同一份时间轴补上音译、翻译、逐字，
+  // 或切换显示选项时原地重排，不让整屏歌词闪一下
+  const timelineKey = lyricTimelineKey(props.lyrics)
+  const isNewTimeline = timelineKey !== loadedTimelineKey
+  loadedTimelineKey = timelineKey
   const time = Math.max(0, Math.round(amllTimeMs.value))
   lyricPlayer.setLyricLines(buildAmllLines(), time)
   lyricPlayer.setCurrentTime(time, true)
@@ -329,7 +337,9 @@ function reloadLyrics(): void {
   lastSyncedTime = time
   syncLyricOptions()
   syncPlayState()
-  scheduleLayoutSync()
+  // 新建的行起始在屏幕外，原地重排要在这一帧就摆好位置
+  if (!isNewTimeline && isLayoutReady.value) forceLayoutAtCurrentTime()
+  scheduleLayoutSync(isNewTimeline || !isLayoutReady.value)
 }
 
 /// 右键菜单：主路径走 AMLL 的 line-contextmenu 事件直接拿 lineIndex；
@@ -418,6 +428,13 @@ function onLineClick(event: Event): void {
   emit('seek', Math.max(0, Math.round(line.startTime - offsetMs.value)))
 }
 
+/// 暂停时没有逐字/间奏动画需要推进，只剩弹簧收尾；收尾后停表，
+/// 避免暂停挂机时每帧重写所有可见行的样式。布局、滚动、交互会再唤醒
+function wakeFrameLoop(): void {
+  idleDeadline = performance.now() + IDLE_FRAME_GRACE_MS
+  startFrameLoop()
+}
+
 function startFrameLoop(): void {
   if (rafId) return
   lastFrameAt = performance.now()
@@ -425,6 +442,10 @@ function startFrameLoop(): void {
     const delta = Math.min(64, now - lastFrameAt)
     lastFrameAt = now
     lyricPlayer?.update(delta)
+    if (!props.isPlaying && now >= idleDeadline) {
+      rafId = 0
+      return
+    }
     rafId = requestAnimationFrame(tick)
   })
 }
@@ -433,50 +454,6 @@ function stopFrameLoop(): void {
   if (!rafId) return
   cancelAnimationFrame(rafId)
   rafId = 0
-}
-
-/// 帧循环按需启停：AMLL 的 update() 每帧会给所有已挂载歌词行写
-/// transform/opacity/filter 等样式，暂停时歌词动画已冻结，继续逐帧驱动
-/// 只会徒增样式重算与重绘（WebKitGTK 尤甚）。暂停态下 seek/布局等
-/// 需要弹簧收敛的场景由 requestSettleLoop 短暂续跑。
-function syncFrameLoop(): void {
-  const shouldRun = props.isPlaying || props.previewTimeMs != null
-  if (shouldRun) startFrameLoop()
-  else stopFrameLoop()
-}
-
-function requestSettleLoop(): void {
-  if (props.isPlaying || props.previewTimeMs != null) return
-  startFrameLoop()
-  if (settleTimer) clearTimeout(settleTimer)
-  settleTimer = setTimeout(() => {
-    settleTimer = null
-    if (!props.isPlaying && props.previewTimeMs == null) stopFrameLoop()
-  }, PAUSE_SETTLE_MS)
-}
-
-function clearSettleTimer(): void {
-  if (settleTimer) {
-    clearTimeout(settleTimer)
-    settleTimer = null
-  }
-}
-
-let stopManualScrollWatcher: (() => void) | null = null
-
-/// 暂停态下手动滚动歌词：AMLL 的滚动由弹簧驱动，弹簧只在 update() 里推进，
-/// 帧循环停表时滚轮/触摸拖动不会产生视觉位移。滚动事件持续刷新续跑窗口，
-/// 停止滚动 500ms 后自动停表
-function startManualScrollWatcher(): void {
-  if (!hostRef.value || stopManualScrollWatcher) return
-  const onScroll = () => requestSettleLoop()
-  hostRef.value.addEventListener('wheel', onScroll, { passive: true })
-  hostRef.value.addEventListener('touchmove', onScroll, { passive: true })
-  stopManualScrollWatcher = () => {
-    hostRef.value?.removeEventListener('wheel', onScroll)
-    hostRef.value?.removeEventListener('touchmove', onScroll)
-    stopManualScrollWatcher = null
-  }
 }
 
 function cancelLayoutSync(): void {
@@ -542,7 +519,6 @@ function forceLayoutAtCurrentTime(): boolean {
   }
 
   lastSyncedTime = time
-  requestSettleLoop()
   return hasPlayerSize
 }
 
@@ -569,13 +545,15 @@ function scheduleFontReadyLayout(token: number): void {
   })
 }
 
-function scheduleLayoutSync(): void {
+/// hide：新歌词首次排版时先隐藏，避免行从屏幕外飞入；缩放、字号等重排保持可见
+function scheduleLayoutSync(hide = false): void {
   if (!lyricPlayer) return
   if (layoutFrameId) cancelAnimationFrame(layoutFrameId)
 
   const token = layoutSyncToken + 1
   layoutSyncToken = token
-  isLayoutReady.value = false
+  if (hide) isLayoutReady.value = false
+  wakeFrameLoop()
   let pass = 0
 
   const runPass = () => {
@@ -634,23 +612,30 @@ onMounted(() => {
     if (!hostRef.value || lyricPlayer) return
 
     lyricPlayer = new DomLyricPlayer()
+    // AMLL 默认把每行开始时间最多提前 600ms，行会在唱到之前就高亮滚动；
+    // Android 按原始时间轴切行，偏移量也是按原始时间轴标定的
+    lyricPlayer.setOptimizeOptions({ tryAdvanceStartTime: false })
     lyricPlayer.addEventListener('line-click', onLineClick as EventListener)
     lyricPlayer.addEventListener('line-contextmenu', onLineContextMenu as EventListener)
     hostRef.value.appendChild(lyricPlayer.getElement())
+    wakeTarget = hostRef.value
+    for (const type of WAKE_EVENTS) {
+      wakeTarget.addEventListener(type, wakeFrameLoop, { passive: true })
+    }
 
     startResizeObserver()
     reloadLyrics()
-    startManualScrollWatcher()
-    syncFrameLoop()
   })
 })
 
 onUnmounted(() => {
-  clearSettleTimer()
-  stopManualScrollWatcher?.()
   stopFrameLoop()
   cancelLayoutSync()
   stopResizeObserver()
+  for (const type of WAKE_EVENTS) {
+    wakeTarget?.removeEventListener(type, wakeFrameLoop)
+  }
+  wakeTarget = null
   if (!lyricPlayer) return
 
   lyricPlayer.removeEventListener('line-click', onLineClick as EventListener)
@@ -667,7 +652,7 @@ watch(() => settings.advancedLyrics, () => {
   reloadLyrics()
 })
 
-watch(() => settings.showTranslation, () => {
+watch([() => settings.showTranslation, () => settings.showRomanization], () => {
   reloadLyrics()
 })
 
@@ -681,13 +666,6 @@ watch(() => settings.lyricFontScale, () => {
 
 watch(() => props.isPlaying, () => {
   syncPlayState()
-  clearSettleTimer()
-  syncFrameLoop()
-})
-
-watch(() => props.previewTimeMs, () => {
-  if (props.isPlaying) syncFrameLoop()
-  else requestSettleLoop()
 })
 
 watch(amllTimeMs, (time, oldTime) => {

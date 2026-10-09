@@ -90,48 +90,18 @@ impl ExternalLyricsClient {
     }
 
     async fn fetch_amll(&self, title: &str, artist: &str, duration: u64) -> Option<Vec<LyricLine>> {
-        let endpoint = format!("{}/api/search-lyrics", self.amll_base.trim_end_matches('/'));
-        let query = serde_json::json!({"query":title.trim(),"type":"title"});
-        let body = self
-            .read(|client| client.post(&endpoint).json(&query))
-            .await?;
-        let response: Value = serde_json::from_str(&body).ok()?;
-        let mut candidates = response
-            .as_array()?
-            .iter()
-            .take(200)
+        let mut candidates = self
+            .amll_search(title)
+            .await?
+            .into_iter()
             .filter_map(|item| {
-                let file = item.get("file")?.as_str()?.trim();
-                if !safe_ttml_file(file) {
-                    return None;
-                }
-                let score = identity_score(
-                    title,
-                    artist,
-                    &aliases(item, "titles", "title"),
-                    &aliases(item, "artists", "artist"),
-                );
-                (score >= 70).then(|| {
-                    (
-                        score,
-                        number(item.get("score")).unwrap_or(0),
-                        file.to_owned(),
-                    )
-                })
+                let score = identity_score(title, artist, &item.titles, &item.artists);
+                (score >= 70).then_some((score, item.score, item.file))
             })
             .collect::<Vec<_>>();
         candidates.sort_by_key(|candidate| std::cmp::Reverse((candidate.0, candidate.1)));
         for (_, _, file) in candidates.into_iter().take(5) {
-            let mut url = reqwest::Url::parse(&self.amll_base).ok()?;
-            url.path_segments_mut()
-                .ok()?
-                .pop_if_empty()
-                .push("raw-lyrics")
-                .push(&file);
-            let Some(body) = self.read(|client| client.get(url.clone())).await else {
-                continue;
-            };
-            let Ok(lines) = super::ttml::parse(&body) else {
+            let Some(lines) = self.amll_lyrics(&file).await else {
                 continue;
             };
             if has_word_timing(&lines) && amll_duration_compatible(duration, lyric_end(&lines)) {
@@ -139,6 +109,100 @@ impl ExternalLyricsClient {
             }
         }
         None
+    }
+
+    /// AMLL TTML 库按标题搜；只留文件名安全的条目
+    pub(super) async fn amll_search(&self, query: &str) -> Option<Vec<AmllEntry>> {
+        let endpoint = format!("{}/api/search-lyrics", self.amll_base.trim_end_matches('/'));
+        let query = serde_json::json!({"query":query.trim(),"type":"title"});
+        let body = self
+            .read(|client| client.post(&endpoint).json(&query))
+            .await?;
+        let response: Value = serde_json::from_str(&body).ok()?;
+        Some(
+            response
+                .as_array()?
+                .iter()
+                .take(200)
+                .filter_map(|item| {
+                    let file = item.get("file")?.as_str()?.trim();
+                    safe_ttml_file(file).then(|| AmllEntry {
+                        file: file.to_owned(),
+                        titles: aliases(item, "titles", "title"),
+                        artists: aliases(item, "artists", "artist"),
+                        albums: aliases(item, "albums", "album"),
+                        score: number(item.get("score")).unwrap_or(0),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    pub(super) async fn amll_lyrics(&self, file: &str) -> Option<Vec<LyricLine>> {
+        if !safe_ttml_file(file) {
+            return None;
+        }
+        let mut url = reqwest::Url::parse(&self.amll_base).ok()?;
+        url.path_segments_mut()
+            .ok()?
+            .pop_if_empty()
+            .push("raw-lyrics")
+            .push(file);
+        let body = self.read(|client| client.get(url.clone())).await?;
+        super::ttml::parse(&body).ok().filter(|lines| !lines.is_empty())
+    }
+
+    /// 酷狗按关键字搜歌，不做身份过滤，由调用方排序
+    pub(super) async fn kugou_songs(&self, keyword: &str) -> Option<Vec<KugouSong>> {
+        let body = self
+            .read(|client| {
+                client.get(&self.kugou_song_endpoint).query(&[
+                    ("format", "json"),
+                    ("keyword", keyword.trim()),
+                    ("page", "1"),
+                    ("pagesize", "8"),
+                    ("showtype", "1"),
+                ])
+            })
+            .await?;
+        let response: Value = serde_json::from_str(&body).ok()?;
+        Some(
+            response
+                .get("data")?
+                .get("info")?
+                .as_array()?
+                .iter()
+                .take(8)
+                .filter_map(|item| {
+                    let hash = item.get("hash")?.as_str()?.trim();
+                    if hash.is_empty() {
+                        return None;
+                    }
+                    Some(KugouSong {
+                        title: item.get("songname")?.as_str()?.trim().to_owned(),
+                        artist: item.get("singername")?.as_str()?.trim().to_owned(),
+                        album: item
+                            .get("album_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_owned(),
+                        hash: hash.to_owned(),
+                        duration: number(item.get("duration"))
+                            .and_then(|seconds| seconds.checked_mul(1000))
+                            .unwrap_or(0),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// 一首酷狗歌的最佳歌词：先逐字 KRC，再 LRC
+    pub(super) async fn kugou_lyrics(&self, song: &KugouSong) -> Option<Vec<LyricLine>> {
+        if song.duration == 0 {
+            return None;
+        }
+        self.fetch_kugou_song(song, song.duration, false).await
     }
 
     async fn fetch_kugou(
@@ -187,9 +251,10 @@ impl ExternalLyricsClient {
                 Some((
                     score,
                     song_duration.abs_diff(duration),
-                    Song {
+                    KugouSong {
                         title: song_title.to_owned(),
                         artist: song_artist.to_owned(),
+                        album: String::new(),
                         hash: hash.to_owned(),
                         duration: song_duration,
                     },
@@ -207,7 +272,7 @@ impl ExternalLyricsClient {
 
     async fn fetch_kugou_song(
         &self,
-        song: &Song,
+        song: &KugouSong,
         duration: u64,
         word_only: bool,
     ) -> Option<Vec<LyricLine>> {
@@ -291,11 +356,20 @@ impl ExternalLyricsClient {
     }
 }
 
-struct Song {
-    title: String,
-    artist: String,
-    hash: String,
-    duration: u64,
+pub(super) struct KugouSong {
+    pub(super) title: String,
+    pub(super) artist: String,
+    pub(super) album: String,
+    pub(super) hash: String,
+    pub(super) duration: u64,
+}
+
+pub(super) struct AmllEntry {
+    pub(super) file: String,
+    pub(super) titles: Vec<String>,
+    pub(super) artists: Vec<String>,
+    pub(super) albums: Vec<String>,
+    pub(super) score: u64,
 }
 
 fn number(value: Option<&Value>) -> Option<u64> {
@@ -382,7 +456,7 @@ fn version_tags(value: &str) -> Vec<&'static str> {
     .collect()
 }
 
-fn identity_score(title: &str, artist: &str, titles: &[String], artists: &[String]) -> i32 {
+pub(super) fn identity_score(title: &str, artist: &str, titles: &[String], artists: &[String]) -> i32 {
     static ARTISTS: OnceLock<Regex> = OnceLock::new();
     static FEATURED: OnceLock<Regex> = OnceLock::new();
     let requested = normalized(title);
@@ -492,7 +566,7 @@ pub(super) fn has_word_timing(lines: &[LyricLine]) -> bool {
             .any(|word| word.duration_ms > 0 && !word.text.trim().is_empty())
     })
 }
-fn lyric_end(lines: &[LyricLine]) -> u64 {
+pub(super) fn lyric_end(lines: &[LyricLine]) -> u64 {
     lines
         .iter()
         .flat_map(|line| {

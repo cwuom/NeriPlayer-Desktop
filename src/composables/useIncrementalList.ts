@@ -19,16 +19,17 @@ export function useIncrementalList<T>(getSource: () => readonly T[]) {
   const visibleItems = computed(() => source.value.slice(0, renderCount.value))
   const hasMore = computed(() => renderCount.value < source.value.length)
 
-  // 内容整体变化（搜索过滤/替换）时重置窗口
-  watch(source, (list) => {
-    renderCount.value = Math.min(RENDER_CHUNK, list.length)
+  // 窗口至少一批：短列表之后原地追加（队列 push）时，新行不用等滚动就能显示。
+  // 换成另一份列表（搜索过滤、切歌单）时重置；同一份列表重算出新数组（收藏、刷新）时保留已展开的部分
+  watch(source, (list, previous) => {
+    if (list[0] !== previous?.[0]) renderCount.value = RENDER_CHUNK
   })
-  // 行数收缩（删除/清空）时把窗口拉回来，避免窗口悬空
+  // 行数收缩（删除/清空）时窗口跟着收到新长度，已展开的部分保留，滚动位置不跳
   watch(
     () => source.value.length,
     (len) => {
       if (len < renderCount.value) {
-        renderCount.value = Math.min(RENDER_CHUNK, len)
+        renderCount.value = Math.max(RENDER_CHUNK, len)
       }
     },
   )

@@ -417,6 +417,8 @@ onMounted(() => {
             :class="{ active: player.currentTrack?.id === track.id, selected: selectionMode && selectedIds.has(track.id), 'selection-mode': selectionMode }"
             :data-track-key="track.id"
             @click="playTrack(track)"
+            @pointerenter="player.prefetchIntent(track)"
+            @focusin="player.prefetchIntent(track)"
             @contextmenu.prevent.stop="openTrackContextMenu($event, track)"
           >
             <button v-if="selectionMode" class="track-select" @click.stop="toggleSelected(track.id)">

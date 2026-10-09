@@ -62,14 +62,16 @@ for (const [raw, expected] of [
 assert.equal(resolveLyricOffsetSource('amll_ttml', 'netease'), 'amll_ttml')
 assert.equal(resolveLyricOffsetSource('lrclib', 'youtube'), 'lrclib')
 assert.equal(resolveLyricOffsetSource('kugou', 'bilibili'), 'kugou')
-// 没有可调默认的来源恒为 0，即使是网易云曲目
-assert.equal(resolveLyricOffsetSource('LOCAL_EDIT', 'netease'), null)
-assert.equal(resolveLyricOffsetSource('youtube', 'youtube'), null)
-// 来源未知（旧缓存）时按播放来源推断，与改版前一致
+// 手动编辑、YouTube、本地歌词与来源未知时对齐 Android：QQ 曲目用 QQ 默认，其它回落网易云默认
+assert.equal(resolveLyricOffsetSource('LOCAL_EDIT', 'netease'), 'netease')
+assert.equal(resolveLyricOffsetSource('LOCAL_EDIT', 'qq'), 'qq')
+assert.equal(resolveLyricOffsetSource('youtube', 'youtube'), 'netease')
+assert.equal(resolveLyricOffsetSource('local', 'local'), 'netease')
 assert.equal(resolveLyricOffsetSource(null, 'netease'), 'netease')
 assert.equal(resolveLyricOffsetSource(null, 'qq'), 'qq')
-assert.equal(resolveLyricOffsetSource(null, 'youtube'), null)
-assert.equal(resolveLyricOffsetSource(null, null), null)
+assert.equal(resolveLyricOffsetSource(null, 'youtube'), 'netease')
+assert.equal(resolveLyricOffsetSource(null, 'bilibili'), 'netease')
+assert.equal(resolveLyricOffsetSource(null, null), 'netease')
 
 const defaults = { netease: 1000, qq: 500, kugou: -200, lrclib: 150, amll_ttml: 300 }
 assert.equal(resolveLyricDefaultOffsetMs('netease', defaults), 1000)

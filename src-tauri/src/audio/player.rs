@@ -53,6 +53,8 @@ const SEEK_ADOPT_GRACE: Duration = Duration::from_millis(200);
 const OUTPUT_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// 回调一次最多经变速器处理的帧数；更大的设备缓冲按这个大小分块
 const RENDER_CHUNK_FRAMES: usize = 4096;
+/// 字节跳转后最多丢掉这么长的分片开头；超过说明落点不对，宁可不丢
+const MAX_VIRTUAL_BODY_LEAD_MS: u64 = 20_000;
 
 #[derive(Clone)]
 struct GenerationToken {
@@ -193,6 +195,9 @@ enum AudioCmd {
     Pause,
     Resume,
     Stop,
+    /// 切歌时立刻静音上一首：只暂停代际早于 `before_generation` 的会话，不推进任何代际，
+    /// 晚于新会话到达也不会误伤它，也不会作废排在后面的 Play
+    SilenceStale { before_generation: u64 },
     ReleaseFile {
         path: String,
         reply: mpsc::Sender<Option<u64>>,
@@ -576,6 +581,12 @@ fn finish_decode_worker(
         let _ = worker.join();
     } else {
         reap_worker_handle(worker);
+    }
+}
+
+fn silence_stale_session(current: Option<&PlaybackSession>, before_generation: u64) {
+    if let Some(session) = current.filter(|session| session.playback_generation < before_generation) {
+        session.pause();
     }
 }
 
@@ -1161,6 +1172,11 @@ impl PlayerEngine {
         self.transition_generation.fetch_add(1, Ordering::AcqRel);
         let _ = self.cmd_tx.send(AudioCmd::Stop);
         self.clear_playback_state();
+    }
+
+    /// 新播放请求一开始就静音上一首（交叉淡化除外），不必等新音源解析、缓冲完
+    pub fn silence_stale_sessions(&self, before_generation: u64) {
+        let _ = self.cmd_tx.send(AudioCmd::SilenceStale { before_generation });
     }
 
     fn clear_playback_state(&mut self) {
@@ -1899,6 +1915,9 @@ fn audio_control_loop(
                 }
                 SharedAudioLevel::reset(&shared_level);
             }
+            AudioCmd::SilenceStale { before_generation } => {
+                silence_stale_session(current.as_ref(), before_generation);
+            }
             AudioCmd::ReleaseFile { path, reply } => {
                 let released = current.as_ref()
                     .filter(|session| matches_local_file(&session.source, Path::new(&path)))
@@ -2587,9 +2606,9 @@ fn prepare_session(
             decoder_source.prefers_remote_virtual_body_seek(),
         );
     }
-    let mut decoder = match make_decoder_for_position(&decoder_source, start_position_ms, use_byte_seek)
+    let (mut decoder, segment_start_ms) = match make_decoder_with_start(&decoder_source, start_position_ms, use_byte_seek)
     {
-        Ok(decoder) => decoder,
+        Ok(opened) => opened,
         Err(error) => {
             session_cancelled.store(true, Ordering::Release);
             return Err(error);
@@ -2614,11 +2633,15 @@ fn prepare_session(
             .try_seek(Duration::from_millis(start_position_ms))
             .map_err(|error| format!("Could not seek decoder: {error}"))?;
     } else if start_position_ms > 0 && use_byte_seek {
+        let discarded_ms = segment_start_ms
+            .map_or(0, |segment_start| discard_until_target(decoder.as_mut(), segment_start, start_position_ms));
         log::info!(
             target: "cpal-output",
-            "virtual-body open ready generation={}, start_ms={}, skip_format_seek=true virtual_body=true",
+            "virtual-body open ready generation={}, start_ms={}, segment_start_ms={:?}, discarded_ms={} skip_format_seek=true virtual_body=true",
             expected_generation,
             start_position_ms,
+            segment_start_ms,
+            discarded_ms,
         );
     }
 
@@ -2758,7 +2781,26 @@ fn make_decoder_for_position(
     start_position_ms: u64,
     use_byte_seek: bool,
 ) -> Result<Box<dyn AudioDecoder>, String> {
-    match source {
+    make_decoder_with_start(source, start_position_ms, use_byte_seek).map(|(decoder, _)| decoder)
+}
+
+/// 同 make_decoder_for_position，另带解码实际出声的起点：字节跳转从目标所在分片开头解码，
+/// 不是目标本身；为 None 时解码已经停在目标上，或者分片起点不可靠
+fn make_decoder_with_start(
+    source: &AudioSource,
+    start_position_ms: u64,
+    use_byte_seek: bool,
+) -> Result<(Box<dyn AudioDecoder>, Option<u64>), String> {
+    if let AudioSource::Remote(reader, _) = source {
+        if use_byte_seek && start_position_ms > 0 {
+            let segment_start_ms = reader
+                .configure_virtual_body_for_time(start_position_ms)
+                .map_err(|error| format!("Could not prepare remote virtual body: {error}"))?;
+            let decoder = SymphoniaAudioDecoder::new_remote_virtual(reader.clone(), true)?;
+            return Ok((Box::new(decoder), segment_start_ms));
+        }
+    }
+    let decoder = match source {
         AudioSource::Bytes(data, _) => decoder::open_decoder(
             decoder::sniff(&data[..data.len().min(decoder::SNIFF_BYTES)]),
             || SymphoniaAudioDecoder::new(Box::new(Cursor::new(Arc::clone(data))), None),
@@ -2780,28 +2822,39 @@ fn make_decoder_for_position(
             )
         }
         AudioSource::Remote(reader, _) => {
-            if use_byte_seek && start_position_ms > 0 {
-                reader
-                    .configure_virtual_body_for_time(start_position_ms)
-                    .map_err(|error| format!("Could not prepare remote virtual body: {error}"))?;
-                let decoder = SymphoniaAudioDecoder::new_remote_virtual(reader.clone(), true)?;
-                Ok(Box::new(decoder))
-            } else {
-                // 普通远程：demuxer open 可隐藏 seekable；无虚拟 body
-                reader.clear_virtual_body();
-                decoder::open_decoder(
-                    reader.header_bytes().and_then(|header| decoder::sniff(&header)),
-                    || SymphoniaAudioDecoder::new_remote(reader.clone()),
-                    || {
-                        // 分片 MP4 打开期间暂停了预取（防 symphonia 顺着 moof 链读完整个文件），
-                        // FFmpeg 按 sidx 定位不需要这个限制，交出去之前恢复
-                        reader.finish_demuxer_open();
-                        Ok(Box::new(reader.clone()) as Box<dyn ByteInput>)
-                    },
-                )
-            }
+            // 普通远程：demuxer open 可隐藏 seekable；无虚拟 body
+            reader.clear_virtual_body();
+            decoder::open_decoder(
+                reader.header_bytes().and_then(|header| decoder::sniff(&header)),
+                || SymphoniaAudioDecoder::new_remote(reader.clone()),
+                || {
+                    // 分片 MP4 打开期间暂停了预取（防 symphonia 顺着 moof 链读完整个文件），
+                    // FFmpeg 按 sidx 定位不需要这个限制，交出去之前恢复
+                    reader.finish_demuxer_open();
+                    Ok(Box::new(reader.clone()) as Box<dyn ByteInput>)
+                },
+            )
         }
+    }?;
+    Ok((decoder, None))
+}
+
+/// 字节跳转落在分片开头：解码并丢掉分片起点到目标之间的音频，让第一个出声的样本就是目标位置，
+/// 和设成目标的播放时钟对上。分片约 5 秒，不丢的话时钟（以及歌词）会领先声音最多一个分片
+fn discard_until_target(decoder: &mut dyn AudioDecoder, segment_start_ms: u64, target_ms: u64) -> u64 {
+    let lead_ms = target_ms.saturating_sub(segment_start_ms);
+    if lead_ms == 0 || lead_ms > MAX_VIRTUAL_BODY_LEAD_MS {
+        return 0;
     }
+    let samples = lead_ms
+        .saturating_mul(u64::from(decoder.sample_rate()))
+        / 1_000
+        * u64::from(decoder.channels().max(1));
+    let mut discarded = 0u64;
+    while discarded < samples && decoder.next().is_some() {
+        discarded += 1;
+    }
+    lead_ms
 }
 
 fn spawn_decode_worker(
@@ -4711,6 +4764,32 @@ mod tests {
         assert!(track.is_complete());
         assert!(!track.estimate_pending(), "跳过估计时也要放行等待中的起播");
         assert_eq!(track.analyzed_samples(), stats.samples());
+    }
+
+    /// 字节跳转从分片开头解码：丢掉分片起点到目标之间的音频后，下一个样本正好是目标位置
+    #[test]
+    fn virtual_body_start_discards_audio_before_the_target() {
+        let (wav, expected) = sine_sections_wav(8_000, &[(0.5, 3)]);
+        let source = AudioSource::Bytes(Arc::from(wav), 0);
+        let mut decoder = super::make_decoder_for_position(&source, 0, false).unwrap();
+
+        // 分片从 1s 开始，目标 2.25s：丢 1.25s
+        assert_eq!(super::discard_until_target(decoder.as_mut(), 1_000, 2_250), 1_250);
+
+        let target_sample = 8_000 * 1_250 / 1_000 * 2;
+        let next: Vec<f32> = decoder.by_ref().take(4).collect();
+        assert_eq!(next, expected[target_sample..target_sample + 4]);
+    }
+
+    #[test]
+    fn virtual_body_start_keeps_audio_when_the_segment_start_is_implausible() {
+        let (wav, expected) = sine_sections_wav(8_000, &[(0.5, 1)]);
+        let source = AudioSource::Bytes(Arc::from(wav), 0);
+        let mut decoder = super::make_decoder_for_position(&source, 0, false).unwrap();
+
+        assert_eq!(super::discard_until_target(decoder.as_mut(), 0, 60_000), 0, "领先超过 20s 说明落点不对");
+        assert_eq!(super::discard_until_target(decoder.as_mut(), 5_000, 4_000), 0, "分片晚于目标时没有可丢的");
+        assert_eq!(decoder.next(), Some(expected[0]));
     }
 
     #[test]

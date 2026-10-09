@@ -95,6 +95,11 @@ assert.match(
 )
 assert.match(
   playerStoreSource,
+  /void invoke<void>\('begin_playback_request', \{[\s\S]*?silencePrevious: !keepsPreviousAudible,/,
+  'switching tracks must silence the previous track before the new source resolves',
+)
+assert.match(
+  playerStoreSource,
   /commitTrack\(\)\s+isLoadingAudio\.value = true\s+hasPlaybackSession\.value = true/,
   'a user-initiated load must keep MiniPlayer visible while audio is preparing',
 )

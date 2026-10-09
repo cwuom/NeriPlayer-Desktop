@@ -558,16 +558,15 @@ fn is_android_config(root: &Value) -> bool {
         .is_some()
 }
 
-fn android_cookie_entries(cookies: &HashMap<String, String>, domain: &str) -> Vec<CookieEntry> {
-    cookies
+/// Android 只导出 name→value，域名按桌面手动粘贴 Cookie 的规则补齐（YouTube 还要补 google.com 的会话 Cookie）
+fn android_cookie_entries(cookies: &HashMap<String, String>, platform: &str) -> Vec<CookieEntry> {
+    let raw = cookies
         .iter()
         .filter(|(name, value)| !name.is_empty() && !value.is_empty())
-        .map(|(name, value)| CookieEntry {
-            name: name.clone(),
-            value: value.clone(),
-            domain: domain.into(),
-        })
-        .collect()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    crate::auth::cookies::parse_raw_cookie_text(&raw, platform)
 }
 
 /// Android 三平台 Cookie 快照 → 桌面 AuthState（不包含用户资料字段）
@@ -577,7 +576,7 @@ fn map_android_auth(config: &AndroidConfigFile) -> Option<AuthState> {
         .as_ref()
         .filter(|auth| !auth.cookies.is_empty())
         .map(|auth| NeteaseAuth {
-            cookies: android_cookie_entries(&auth.cookies, "music.163.com"),
+            cookies: android_cookie_entries(&auth.cookies, "netease"),
             user_id: None,
             nickname: None,
             avatar_url: None,
@@ -587,7 +586,7 @@ fn map_android_auth(config: &AndroidConfigFile) -> Option<AuthState> {
         .as_ref()
         .filter(|auth| !auth.cookies.is_empty())
         .map(|auth| BiliAuth {
-            cookies: android_cookie_entries(&auth.cookies, ".bilibili.com"),
+            cookies: android_cookie_entries(&auth.cookies, "bilibili"),
             mid: None,
             nickname: None,
             avatar_url: None,
@@ -597,7 +596,7 @@ fn map_android_auth(config: &AndroidConfigFile) -> Option<AuthState> {
         .as_ref()
         .filter(|auth| !auth.cookies.is_empty())
         .map(|auth| YouTubeAuth {
-            cookies: android_cookie_entries(&auth.cookies, "music.youtube.com"),
+            cookies: android_cookie_entries(&auth.cookies, "youtube"),
             nickname: None,
             avatar_url: None,
         });
@@ -688,9 +687,19 @@ struct ImportedConfig {
     listen_together: Option<ConfigListenTogether>,
     language: Option<ConfigLanguage>,
     auth: Option<AuthState>,
+    /// Android 备份只带有 Cookie 的平台，按平台合并；桌面配置是完整快照，整体替换
+    merge_auth: bool,
     github_sync: Option<ConfigGitHubSync>,
     webdav_sync: Option<ConfigWebDavSync>,
     sync_preferences: Option<ConfigSyncPreferences>,
+}
+
+fn merge_imported_auth(previous: &AuthState, imported: AuthState) -> AuthState {
+    AuthState {
+        netease: imported.netease.or_else(|| previous.netease.clone()),
+        bilibili: imported.bilibili.or_else(|| previous.bilibili.clone()),
+        youtube: imported.youtube.or_else(|| previous.youtube.clone()),
+    }
 }
 
 /// 解析桌面端导出的配置文件
@@ -708,6 +717,7 @@ fn parse_pc_config(root: Value) -> AppResult<ImportedConfig> {
         listen_together: payload.listen_together,
         language: payload.language,
         auth: payload.auth,
+        merge_auth: false,
         github_sync: payload.github_sync,
         webdav_sync: payload.webdav_sync,
         sync_preferences: payload.sync_preferences,
@@ -733,6 +743,7 @@ fn parse_android_config(app: &AppHandle, root: Value) -> AppResult<ImportedConfi
         listen_together: map_android_listen_together(payload.listen_together),
         language: map_android_language(payload.language),
         auth,
+        merge_auth: true,
         github_sync: map_android_github(payload.git_hub_sync),
         webdav_sync: map_android_webdav(payload.web_dav_sync),
         sync_preferences: map_android_sync_preferences(payload.sync_preferences),
@@ -1967,7 +1978,11 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
                 platform,
             );
         }
-        *auth = imported_auth;
+        *auth = if imported.merge_auth {
+            merge_imported_auth(&previous_auth, imported_auth)
+        } else {
+            imported_auth
+        };
         crate::auth::cookies::inject_all(&state.cookie_jar, &auth);
         crate::auth::cookies::save_auth(&app, &auth);
     }
@@ -2831,7 +2846,41 @@ mod tests {
         // 空值 Cookie 被过滤
         assert_eq!(auth.netease.as_ref().unwrap().cookies.len(), 1);
         assert_eq!(auth.netease.as_ref().unwrap().cookies[0].domain, "music.163.com");
-        assert_eq!(auth.youtube.as_ref().unwrap().cookies[0].domain, "music.youtube.com");
+        // YouTube 会话 Cookie 要同时落在 youtube.com 与 google.com 上，播放和账号接口才都认
+        let youtube = &auth.youtube.as_ref().unwrap().cookies;
+        assert!(youtube.iter().any(|c| c.name == "SAPISID" && c.domain == ".youtube.com"));
+        assert!(youtube.iter().any(|c| c.name == "SAPISID" && c.domain == ".google.com"));
+    }
+
+    #[test]
+    fn android_auth_merges_per_platform() {
+        use super::merge_imported_auth;
+        use crate::auth::state::{AuthState, BiliAuth, CookieEntry, NeteaseAuth};
+        let cookie = |value: &str| CookieEntry {
+            name: "SESSDATA".into(),
+            value: value.into(),
+            domain: ".bilibili.com".into(),
+        };
+        let previous = AuthState {
+            netease: Some(NeteaseAuth {
+                cookies: vec![],
+                user_id: Some(1),
+                nickname: None,
+                avatar_url: None,
+            }),
+            bilibili: Some(BiliAuth { cookies: vec![cookie("old")], mid: None, nickname: None, avatar_url: None }),
+            youtube: None,
+        };
+        let imported = AuthState {
+            netease: None,
+            bilibili: Some(BiliAuth { cookies: vec![cookie("new")], mid: None, nickname: None, avatar_url: None }),
+            youtube: None,
+        };
+        let merged = merge_imported_auth(&previous, imported);
+        // 备份里没有的平台保留原登录，有的平台用备份覆盖
+        assert_eq!(merged.netease.unwrap().user_id, Some(1));
+        assert_eq!(merged.bilibili.unwrap().cookies[0].value, "new");
+        assert!(merged.youtube.is_none());
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "identifier": "tray-popup",
+  "description": "Tray popup window: reads its state and forwards menu actions; playback goes through the main window",
+  "windows": ["tray-popup"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

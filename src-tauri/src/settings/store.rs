@@ -31,6 +31,8 @@ pub struct AppSettings {
     pub theme_color: String,
     pub locale: String,
     pub default_screen: String,
+    /// 关闭主窗口时收进托盘继续播放；关掉后关闭即退出
+    pub close_to_tray: bool,
     pub show_cover_badge: bool,
     pub show_now_playing_title: bool,
     pub show_toolbar_dock: bool,
@@ -65,6 +67,8 @@ pub struct AppSettings {
     pub remember_long_form_progress: bool,
     pub keep_playback_mode: bool,
     pub show_translation: bool,
+    /// 罗马音等音译；与 Android 一样默认不显示
+    pub show_romanization: bool,
     pub lyric_blur: bool,
     pub lyric_blur_amount: f32,
     #[serde(deserialize_with = "lenient_i32")]
@@ -80,6 +84,10 @@ pub struct AppSettings {
     pub amll_ttml_offset: i32,
     pub cover_style: String,
     pub advanced_lyrics: bool,
+    /// 有逐字结果时优先用；关闭后不再用 AMLL/酷狗补逐字（对齐 Android prefer_word_timed_lyrics）
+    pub prefer_word_timed_lyrics: bool,
+    /// 播放时优先尝试的歌词源，找不到时回退自动（对齐 Android default_lyric_source）
+    pub default_lyric_source: String,
     /// 取色方式：system=跟随系统取色 / default=默认主题色 / cover=跟随封面动态取色
     pub color_mode: String,
     /// 旧版字段（封面取色开关），仅用于迁移，导出配置时不序列化
@@ -104,6 +112,10 @@ pub struct AppSettings {
     pub background_image_uri: String,
     pub background_image_blur: f32,
     pub background_image_alpha: f32,
+    /// 背景图模式下卡片、搜索框等控件的实时玻璃模糊（对齐 Android enhanced_advanced_blur_enabled，PC 默认开）
+    pub enhanced_advanced_blur: bool,
+    /// 玻璃模糊半径（px），12–64 按 4 对齐（Android enhanced_advanced_blur_radius_dp）
+    pub enhanced_advanced_blur_radius: f32,
     pub dev_mode_enabled: bool,
     pub log_to_file: bool,
     pub log_level: String,
@@ -134,7 +146,12 @@ pub struct AppSettings {
     pub equalizer_preset_id: String,
     #[serde(deserialize_with = "lenient_i32_vec")]
     pub equalizer_bands: Vec<i32>,
+    /// 桌面歌词外观（字体、颜色、布局、锁定、窗口位置……），逐项规整在前端
+    /// normalizeDesktopLyricsStyle；这里只保证是对象且不过大
+    pub desktop_lyrics: serde_json::Value,
 }
+
+const MAX_DESKTOP_LYRICS_STYLE_BYTES: usize = 16 * 1024;
 
 /// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
 fn lenient_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
@@ -171,6 +188,7 @@ impl Default for AppSettings {
             theme_color: "purple".into(),
             locale: "zh-CN".into(),
             default_screen: "home".into(),
+            close_to_tray: true,
             show_cover_badge: true,
             show_now_playing_title: true,
             show_toolbar_dock: true,
@@ -197,6 +215,7 @@ impl Default for AppSettings {
             remember_long_form_progress: true,
             keep_playback_mode: true,
             show_translation: true,
+            show_romanization: false,
             lyric_blur: true,
             lyric_blur_amount: 1.5,
             cloud_music_offset: 1000,
@@ -206,6 +225,8 @@ impl Default for AppSettings {
             amll_ttml_offset: 0,
             cover_style: "card".into(),
             advanced_lyrics: true,
+            prefer_word_timed_lyrics: true,
+            default_lyric_source: "automatic".into(),
             color_mode: "default".into(),
             dynamic_color: false,
             dynamic_background: true,
@@ -226,6 +247,8 @@ impl Default for AppSettings {
             background_image_uri: String::new(),
             background_image_blur: 20.0,
             background_image_alpha: 0.3,
+            enhanced_advanced_blur: true,
+            enhanced_advanced_blur_radius: 36.0,
             dev_mode_enabled: false,
             log_to_file: false,
             log_level: "info".into(),
@@ -252,6 +275,7 @@ impl Default for AppSettings {
             equalizer_enabled: false,
             equalizer_preset_id: "flat".into(),
             equalizer_bands: vec![0; EQUALIZER_BAND_COUNT],
+            desktop_lyrics: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -276,6 +300,11 @@ impl AppSettings {
             "home",
         );
         self.cover_style = normalize_choice(&self.cover_style, &["disc", "card"], "card");
+        self.default_lyric_source = normalize_choice(
+            &self.default_lyric_source,
+            &["automatic", "cloud_music", "kugou", "qq_music", "lrclib", "amll_ttml"],
+            "automatic",
+        );
 
         if self.crossfade {
             if !self.crossfade_next {
@@ -305,6 +334,8 @@ impl AppSettings {
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
         self.background_image_alpha = clamp_f32(self.background_image_alpha, 0.0, 1.0, 0.3);
+        self.enhanced_advanced_blur_radius =
+            (clamp_f32(self.enhanced_advanced_blur_radius, 12.0, 64.0, 36.0) / 4.0).round() * 4.0;
         self.max_cache_size = self
             .max_cache_size
             .clamp(MIN_MEDIA_CACHE_SIZE_MB, MAX_MEDIA_CACHE_SIZE_MB);
@@ -315,6 +346,10 @@ impl AppSettings {
         self.playback_speed = clamp_f32(self.playback_speed, 0.25, 3.0, 1.0);
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, 1_500);
         self.volume_balance = (clamp_f32(self.volume_balance, -1.0, 1.0, 0.0) * 100.0).round() / 100.0;
+        let style_bytes = serde_json::to_vec(&self.desktop_lyrics).map_or(usize::MAX, |bytes| bytes.len());
+        if !self.desktop_lyrics.is_object() || style_bytes > MAX_DESKTOP_LYRICS_STYLE_BYTES {
+            self.desktop_lyrics = serde_json::Value::Object(serde_json::Map::new());
+        }
 
         if self.netease_quality.trim() == "high" {
             self.netease_quality = "higher".into();
@@ -853,6 +888,33 @@ mod tests {
         }
         let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(missing.volume_balance, 0.0, "旧配置没有这个字段时居中");
+    }
+
+    #[test]
+    fn desktop_lyrics_style_is_kept_as_an_object_and_bounded() {
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(missing.desktop_lyrics, serde_json::json!({}), "旧配置没有这个字段时为空对象，前端补默认值");
+        let mut kept: AppSettings = serde_json::from_value(serde_json::json!({
+            "desktopLyrics": { "layout": "double", "fontSize": 40, "bounds": { "x": 10, "y": 20, "width": 900, "height": 180 } }
+        }))
+        .unwrap();
+        kept.normalize();
+        assert_eq!(kept.desktop_lyrics["layout"], "double");
+        assert_eq!(kept.desktop_lyrics["bounds"]["width"], 900);
+        for bad in [serde_json::json!("double"), serde_json::json!({ "fontFamily": "x".repeat(20_000) })] {
+            let mut settings = AppSettings { desktop_lyrics: bad, ..AppSettings::default() };
+            settings.normalize();
+            assert_eq!(settings.desktop_lyrics, serde_json::json!({}));
+        }
+    }
+
+    #[test]
+    fn romanization_is_its_own_switch_and_off_by_default_like_android() {
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({ "showTranslation": true })).unwrap();
+        assert!(missing.show_translation);
+        assert!(!missing.show_romanization, "旧配置没有这个字段时不显示音译");
+        let saved = serde_json::to_value(AppSettings { show_romanization: true, ..AppSettings::default() }).unwrap();
+        assert_eq!(saved["showRomanization"], true);
     }
 
     #[test]

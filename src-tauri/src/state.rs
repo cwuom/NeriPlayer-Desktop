@@ -22,6 +22,21 @@ const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// （半开 TCP、服务器停止发数据）才会在 30s 后报错，让上层可重试。
 /// 刻意不设总超时（`.timeout()`），否则会杀掉正常的长流式请求
 const HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 经代理时一次 TLS 握手就要 2 秒左右：连接留在池里供下一首、下一次 Range 复用，并用心跳保活
+const HTTP_POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const HTTP_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn api_client_builder(jar: Arc<reqwest::cookie::Jar>) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .cookie_provider(jar)
+        .user_agent(USER_AGENT)
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .read_timeout(HTTP_READ_TIMEOUT)
+        .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(HTTP_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_interval(HTTP_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_while_idle(true)
+}
 
 pub struct DownloadTaskControl {
     pub cancel_flag: Arc<AtomicBool>,
@@ -81,21 +96,13 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         let jar = Arc::new(reqwest::cookie::Jar::default());
-        let http = reqwest::Client::builder()
-            .cookie_provider(jar.clone())
-            .user_agent(USER_AGENT)
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .read_timeout(HTTP_READ_TIMEOUT)
+        let http = api_client_builder(jar.clone())
             .no_proxy()
             .build()
             .expect("Failed to create HTTP client");
 
         // 初始客户端直连，备用客户端走系统代理
-        let alt = reqwest::Client::builder()
-            .cookie_provider(jar.clone())
-            .user_agent(USER_AGENT)
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .read_timeout(HTTP_READ_TIMEOUT)
+        let alt = api_client_builder(jar.clone())
             .build()
             .expect("Failed to create fallback HTTP client");
 
@@ -131,11 +138,7 @@ impl AppState {
     /// 重建 HTTP Client，切换代理模式
     pub fn rebuild_http(&self, bypass_proxy: bool) {
         let build = |no_proxy: bool| {
-            let mut builder = reqwest::Client::builder()
-                .cookie_provider(self.cookie_jar.clone())
-                .user_agent(USER_AGENT)
-                .connect_timeout(HTTP_CONNECT_TIMEOUT)
-                .read_timeout(HTTP_READ_TIMEOUT);
+            let mut builder = api_client_builder(self.cookie_jar.clone());
             if no_proxy {
                 builder = builder.no_proxy();
             }

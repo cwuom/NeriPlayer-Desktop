@@ -548,6 +548,20 @@ await run('Bilibili video info failures map to the video-info reason', async () 
   const resolution = await resolvePlaybackResult({ ...track(111), id: 'bilibili:BV1xx411c7mD', source: 'bilibili' }, settings)
   assert.equal(resolution.type, 'failure')
   assert.equal(resolution.reason, 'video_info_unavailable')
+  assert.equal(resolution.retryable, true, '网络超时可能是瞬时的，照常重试')
+})
+
+await run('a removed or hidden Bilibili video fails without retries', async () => {
+  let calls = 0
+  globalThis.__playbackInvoke = async () => {
+    calls++
+    throw new Error('API error: Bilibili video info unavailable: API error: Bili API error: code=62002, message="稿件不可见"')
+  }
+  const resolution = await resolvePlaybackResult({ ...track(112), id: 'bilibili:116933185832925', source: 'bilibili' }, settings)
+  assert.equal(resolution.type, 'failure')
+  assert.equal(resolution.reason, 'video_info_unavailable')
+  assert.equal(resolution.retryable, false)
+  assert.equal(calls, 1, '稿件不可见是明确答复，不再重试 5 次')
 })
 
 await run('retains only trusted room stream candidates associated with the primary URL', async () => {

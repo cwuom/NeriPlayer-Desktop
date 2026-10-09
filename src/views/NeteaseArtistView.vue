@@ -326,6 +326,8 @@ onUnmounted(() => { generation++ })
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
           @click="playTrack(track)"
+          @pointerenter="player.prefetchIntent(track)"
+          @focusin="player.prefetchIntent(track)"
         >
           <div class="track-index">
             <div

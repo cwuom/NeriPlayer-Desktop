@@ -166,6 +166,20 @@ display.displayedAudioInfo.value = { info: { bitrate: NaN, format: 'unknown', co
 assert.deepEqual(labels(), [], 'unknown and invalid audio measurements must stay absent')
 display.displayedAudioInfo.value = { info: { codec: 'opus', sampleRateHz: 44100 }, fromDownload: true }
 assert.deepEqual(labels(), ['Opus', '44.1 kHz'], 'known codec is a fallback when format is absent')
+for (const [format, codec, expected] of [
+  ['audio/mp4', 'AAC', 'AAC'],
+  ['audio/mp4', undefined, 'MP4'],
+  ['audio/mp4; codecs="mp4a.40.2"', undefined, 'AAC'],
+  ['audio/webm; codecs="opus"', undefined, 'Opus'],
+  ['audio/mp4', 'E-AC-3', 'E-AC-3'],
+  ['audio/x-flac', undefined, 'FLAC'],
+  ['flac', 'FLAC', 'FLAC'],
+]) {
+  display.displayedAudioInfo.value = { info: { format, codec }, fromDownload: false }
+  assert.deepEqual(labels(), [expected], `stream MIME ${format} must not leak into the quality row`)
+}
+assert.equal(normalizeAudioDisplayToken('audio/mp4'), 'MP4')
+assert.equal(normalizeAudioDisplayToken('audio/webm; codecs="opus"'), 'Opus')
 
 const downloadDeclarations = ['isCurrentDownloading', 'isCurrentDownloadCancellable', 'downloadTaskStatusText',
   'downloadActionIcon', 'downloadActionLabel', 'downloadActionDesc', 'downloadActionDisabled', 'handleDownloadAction'].map(name => {

@@ -33,7 +33,24 @@ fn main() {
     println!("cargo:warning=NeriPlayer build metadata: uuid={uuid} version={build_version}");
 
     build_ffmpeg_shim();
-    tauri_build::build()
+    tauri_build::try_build(tauri_attributes()).expect("tauri-build failed");
+}
+
+/// 托盘与菜单引入了只有 Common Controls v6 才导出的函数。tauri-build 只给应用本体嵌清单，
+/// 测试程序没有清单会在加载时就失败（STATUS_ENTRYPOINT_NOT_FOUND），所以改为给所有链接目标统一嵌入
+fn tauri_attributes() -> tauri_build::Attributes {
+    let windows_msvc = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows")
+        && env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|target_env| target_env == "msvc");
+    if !windows_msvc {
+        return tauri_build::Attributes::new();
+    }
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let manifest = std::path::Path::new(&manifest_dir).join("windows-app-manifest.xml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
 }
 
 /// 编译 FFmpeg 运行时加载垫片：只依赖仓库里固定版本的头文件，不需要构建机上装 FFmpeg

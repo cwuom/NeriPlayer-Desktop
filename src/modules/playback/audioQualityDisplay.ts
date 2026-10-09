@@ -68,8 +68,11 @@ export function actualAudioParameterLabels(
     if (bitrate) labels.push(bitrate)
   }
   if (visibility.showAudioFormat) {
-    const format = actualAudioFormatLabel(info.format) || actualAudioFormatLabel(info.codec)
-    if (format) labels.push(format)
+    const format = actualAudioFormatLabel(info.format)
+    const codec = actualAudioFormatLabel(info.codec)
+    // MP4/WebM/OGG 只是封装，同一个 audio/mp4 里可能是 AAC 也可能是 E-AC-3，认得出编码就展示编码
+    const label = format && codec && CONTAINER_FORMATS.has(format) ? codec : format || codec
+    if (label) labels.push(label)
   }
   if (visibility.showAudioChannels && isPositiveInteger(info.channelCount)) labels.push(`${info.channelCount} ch`)
   if (visibility.showAudioSampleRate && typeof info.sampleRateHz === 'number'
@@ -85,15 +88,23 @@ function isPositiveInteger(value?: number): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
+const CONTAINER_FORMATS = new Set(['MP4', 'M4A', 'WebM', 'OGG', 'MKA'])
+
+const AUDIO_FORMAT_LABELS: Record<string, string> = {
+  flac: 'FLAC', mp3: 'MP3', mpeg: 'MPEG', aac: 'AAC', mp4a: 'AAC',
+  mp4: 'MP4', m4a: 'M4A', opus: 'Opus', ogg: 'OGG', vorbis: 'Vorbis',
+  wav: 'WAV', wave: 'WAV', aiff: 'AIFF', 'ec-3': 'E-AC-3', eac3: 'E-AC-3', 'e-ac-3': 'E-AC-3',
+  ac3: 'AC-3', 'ac-3': 'AC-3', alac: 'ALAC', webm: 'WebM', matroska: 'MKA',
+}
+
 function actualAudioFormatLabel(value?: string): string {
   const raw = value?.trim() || ''
   const lower = raw.toLowerCase()
   if (!raw || ['unknown', 'local', 'download', 'file', 'offline', 'downloaded'].includes(lower)) return ''
-  const formats: Record<string, string> = {
-    flac: 'FLAC', mp3: 'MP3', mpeg: 'MPEG', aac: 'AAC', mp4a: 'AAC',
-    mp4: 'MP4', m4a: 'M4A', opus: 'Opus', ogg: 'OGG', vorbis: 'Vorbis',
-    wav: 'WAV', aiff: 'AIFF', 'ec-3': 'E-AC-3', eac3: 'E-AC-3', 'e-ac-3': 'E-AC-3',
-    ac3: 'AC-3', 'ac-3': 'AC-3', alac: 'ALAC',
-  }
-  return formats[lower] ?? formats[lower.split('.')[0]] ?? raw
+  // 在线流常给 MIME（audio/mp4; codecs="mp4a.40.2"），按编码参数或子类型识别，不把 MIME 原样露给用户
+  const [essence, params = ''] = lower.split(';')
+  const codecs = /codecs\s*=\s*"?([^",]+)/.exec(params)?.[1]?.trim()
+  const isMime = /^(audio|video)\//.test(essence)
+  const token = codecs || (isMime ? essence.trim().replace(/^(audio|video)\/(x-)?/, '') : lower)
+  return AUDIO_FORMAT_LABELS[token] ?? AUDIO_FORMAT_LABELS[token.split('.')[0]] ?? (isMime ? token.toUpperCase() : raw)
 }

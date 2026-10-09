@@ -1015,6 +1015,39 @@ async fn resolve_format_streams(
     ))
 }
 
+/// 启动预热，对齐 Android warmYouTubePlaybackIfEnabled：首页配置和 player.js 是首选客户端取流的前置，
+/// 等第一次点播才去拿，首选客户端全部顺延、退到备用客户端，再叠上 API 域名的冷握手（经代理一次 2 秒左右）。
+/// 提前拿好并把连接留在池里，第一首就能直接走首选客户端
+pub async fn warm_playback(auth: Option<YouTubeAuth>, bypass_proxy: bool) {
+    let Ok(http) = playback_http_client(bypass_proxy) else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let auth = auth.filter(YouTubeAuth::has_login);
+    let preconnect = |url: &'static str| {
+        let http = http.clone();
+        async move { http.send(|client| client.head(url)).await.is_ok() }
+    };
+    let (music, anonymous, www_ready, music_ready) = tokio::join!(
+        super::bootstrap::fetch(&http, auth.as_ref(), true, false),
+        super::bootstrap::fetch(&http, None, false, false),
+        preconnect(PLAYER_URL_WWW),
+        preconnect(PLAYER_URL_MUSIC),
+    );
+    if let Ok(bootstrap) = &music {
+        if !bootstrap.player_js_url.is_empty() && !super::challenge::player_ready(&bootstrap.player_js_url) {
+            super::challenge::warm(http.clone(), bootstrap.player_js_url.clone());
+        }
+    }
+    log::info!(
+        target: "youtube-playback",
+        "startup warm-up music_bootstrap={} anonymous_bootstrap={} www_connected={www_ready} music_connected={music_ready} elapsed_ms={}",
+        music.is_ok(),
+        anonymous.is_ok(),
+        started.elapsed().as_millis(),
+    );
+}
+
 pub async fn resolve_audio_streams(
     video_id: &str,
     auth: Option<&YouTubeAuth>,

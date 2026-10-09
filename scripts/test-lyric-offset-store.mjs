@@ -39,9 +39,10 @@ globalThis.localStorage = {
 const offsetModule = await loadModule('../src/modules/lyrics/lyricOffset.ts', {})
 const sourceModule = await loadModule('../src/modules/lyrics/lyricSource.ts', { vue })
 
-async function runtime({ hydrated = true, savedOffsets = null } = {}) {
+async function runtime({ hydrated = true, savedOffsets = null, savedMeta = null } = {}) {
   storage.clear()
   if (savedOffsets) storage.set('neri:lyric-offsets', JSON.stringify(savedOffsets))
+  if (savedMeta) storage.set('neri:lyric-offset-meta', JSON.stringify(savedMeta))
   const settings = vue.reactive({
     isHydrated: hydrated,
     cloudMusicOffset: 1000, qqMusicOffset: 500, kugouOffset: 0, lrclibOffset: 0, amllTtmlOffset: 300,
@@ -85,10 +86,22 @@ await regression('the default follows the source of the lyrics on screen', async
   assert.equal(store.offsetSourceFor(song), 'amll_ttml')
   assert.equal(store.effectiveOffsetMs(song), 300, '显示的是 AMLL TTML 逐字歌词时用 TTML 的默认')
   sourceModule.rememberLyricSource(song, 'LOCAL_EDIT')
-  assert.equal(store.effectiveOffsetMs(song), 0, '手动编辑的歌词没有可调默认')
+  assert.equal(store.effectiveOffsetMs(song), 1000, '手动编辑的歌词与 Android 一样按网易云默认')
   const youtube = track('youtube:abc')
+  assert.equal(store.effectiveOffsetMs(youtube), 1000, 'YouTube 曲目来源未知时也回落网易云默认')
   sourceModule.rememberLyricSource(youtube, 'lrclib')
   assert.equal(store.offsetSourceFor(youtube), 'lrclib')
+})
+
+await regression('a NetEase default borrowed for unknown lyrics is reported as a guess', async () => {
+  const { store } = await runtime()
+  const bili = track('bilibili:1')
+  assert.equal(store.offsetSourceFor(bili), 'netease')
+  assert.equal(store.offsetSourceIsGuessed(bili), true, 'B 站歌词没记来源，网易云默认只是兜底')
+  sourceModule.rememberLyricSource(bili, 'KUGOU')
+  assert.equal(store.offsetSourceIsGuessed(bili), false)
+  const netease = track('netease:9')
+  assert.equal(store.offsetSourceIsGuessed(netease), false, '网易云曲目来源未知时就是网易云的歌词')
 })
 
 await regression('editing the absolute offset stores the Android delta', async () => {
@@ -130,7 +143,19 @@ await regression('offsets saved before sources were recorded rebase by their tra
   assert.equal(store.getUserOffsetMs(track('qq:9')), 250, 'qq: 前缀的旧偏移按 QQ 默认 rebase')
   settings.cloudMusicOffset = 800
   await vue.nextTick()
-  assert.equal(store.getUserOffsetMs(track('youtube:x')), 80, 'YouTube 曲目没有网易云默认，不受影响')
+  assert.equal(store.getUserOffsetMs(track('youtube:x')), 280, 'YouTube 曲目按网易云默认 rebase（1000+80 = 800+280）')
+})
+
+await regression('songs recorded under the old zero default follow the Android default', async () => {
+  const { store, settings } = await runtime({
+    savedOffsets: { 'bilibili:7': 300 },
+    savedMeta: { 'bilibili:7': { source: 'none' } },
+  })
+  const song = track('bilibili:7', { syncPayload: { userLyricOffsetMs: 300 } })
+  assert.equal(store.effectiveOffsetMs(song), 1300, '同步出去的 delta 在 Android 上叠网易云默认，两端总偏移一致')
+  settings.cloudMusicOffset = 800
+  await vue.nextTick()
+  assert.equal(store.effectiveOffsetMs(song), 1300, '改网易云默认时同样 rebase，绝对时序不变')
 })
 
 await regression('loading settings at startup only sets the baseline', async () => {

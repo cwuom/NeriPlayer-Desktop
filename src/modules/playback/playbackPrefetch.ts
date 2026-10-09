@@ -44,6 +44,9 @@ export class PlaybackPrefetchManager {
   private readonly ttlMs: number | undefined
   private readonly maxEntries: number
   private currentDemandKey: string | null = null
+  private intentJob: { cacheKey: string; token: symbol } | null = null
+  /** 预取解析成功、结果已入缓存后调用；播放层据此预开下一首的直链 */
+  onPrefetched: ((track: TrackInfo, result: ResolvedPlaybackSource) => void) | null = null
   // YouTube 预取串行执行（对齐 Android 单许可的预取闸门），避免抢在用户要听的曲目前面排队取 PoToken；
   // 被取代或清除的任务立即让出名额
   private readonly youtubeQueue: QueuedPrefetch[] = []
@@ -82,6 +85,7 @@ export class PlaybackPrefetchManager {
       // clearForTrack/clear 可能在解析完成前删除了令牌，此时丢弃旧结果
       if (this.jobs.get(cacheKey)?.token !== token) return
       this.put(cacheKey, resolution, ttlMs)
+      this.onPrefetched?.(track, resolution)
     }).catch(() => {
       // 预热失败不影响当前播放
     }).finally(() => {
@@ -97,6 +101,39 @@ export class PlaybackPrefetchManager {
     }
     this.youtubeQueue.push({ cacheKey, token, run })
     this.pumpYoutubeQueue()
+  }
+
+  /**
+   * 悬停、聚焦等「可能马上要点」的预取：只留最新的一个。鼠标扫过一长串行时，
+   * 还在排队的旧意图直接撤掉，不在 YouTube 单许可队列里堵住真正要点的那首。
+   * 已经预取过的立即回报 onPrefetched，让播放层照样预开直链
+   */
+  prefetchIntent(
+    track: TrackInfo,
+    settings: PlaybackSourceSettings,
+    resolver: PlaybackUrlResolver,
+  ): void {
+    if (!isRemotePlaybackTrack(track)) return
+    const cacheKey = playbackPrefetchCacheId(track, settings)
+    const previous = this.intentJob
+    this.intentJob = null
+    // 只撤意图自己发起、还在排队的那个任务；同一首若已被下一首预取排上，那是别人的任务
+    if (previous && previous.cacheKey !== cacheKey && this.jobs.get(previous.cacheKey)?.token === previous.token) {
+      const queued = this.youtubeQueue.findIndex(entry => entry.token === previous.token)
+      if (queued >= 0) {
+        this.youtubeQueue.splice(queued, 1)
+        this.jobs.delete(previous.cacheKey)
+      }
+    }
+    const fresh = this.hasFresh(cacheKey) ? this.entries.get(cacheKey) : undefined
+    if (fresh) {
+      this.onPrefetched?.(track, fresh.result)
+      return
+    }
+    const existing = this.jobs.get(cacheKey)?.token
+    this.prefetch(track, settings, resolver)
+    const created = this.jobs.get(cacheKey)?.token
+    if (created && created !== existing) this.intentJob = { cacheKey, token: created }
   }
 
   prefetchWindow(

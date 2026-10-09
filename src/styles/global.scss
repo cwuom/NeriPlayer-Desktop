@@ -183,6 +183,41 @@ a { color: inherit; text-decoration: none; }
   outline: none;
 }
 
+/* 自定义背景图：#app 内的 surface 系变量换成半透明，背景图从页面、侧栏和卡片下透出来。
+   实色先在 html 上取下（主题色以行内样式写在 html 上），teleport 到 body 的弹窗、菜单不受影响 */
+html.has-custom-bg {
+  --bg-solid-container-lowest: var(--md-surface-container-lowest);
+  --bg-solid-container-low: var(--md-surface-container-low);
+  --bg-solid-container: var(--md-surface-container);
+  --bg-solid-container-high: var(--md-surface-container-high);
+  --bg-solid-container-highest: var(--md-surface-container-highest);
+}
+
+html.has-custom-bg #app {
+  --md-background: transparent;
+  --md-surface: transparent;
+  --md-surface-dim: transparent;
+  --md-surface-container-lowest: color-mix(in srgb, var(--bg-solid-container-lowest) 36%, transparent);
+  --md-surface-container-low: color-mix(in srgb, var(--bg-solid-container-low) 46%, transparent);
+  --md-surface-container: color-mix(in srgb, var(--bg-solid-container) 54%, transparent);
+  --md-surface-container-high: color-mix(in srgb, var(--bg-solid-container-high) 62%, transparent);
+  --md-surface-container-highest: color-mix(in srgb, var(--bg-solid-container-highest) 70%, transparent);
+}
+
+/* 标题栏是透明的，侧栏不再自带底色，两者和页面落在同一张背景上 */
+html.has-custom-bg .app-side-nav {
+  background: transparent;
+  border-right-color: transparent;
+}
+
+/* 进阶高级模糊（Android enhanced_advanced_blur）：透出背景的卡片和输入框加实时玻璃模糊，文字压在图上也清楚 */
+html.has-custom-bg.enhanced-blur #app :is(
+  .setting-card, .settings-nav-group, .home-search, .search-bar, .search-box, .mini-player
+) {
+  -webkit-backdrop-filter: blur(var(--glass-blur, 36px)) saturate(1.4);
+  backdrop-filter: blur(var(--glass-blur, 36px)) saturate(1.4);
+}
+
 /* 浅色主题变量（中性灰白底，色彩由 themeColor.ts 动态注入） */
 .light-theme {
   --md-primary: rgb(101, 78, 163);

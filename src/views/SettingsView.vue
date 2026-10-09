@@ -2,8 +2,33 @@
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { SUPPORTED_LOCALES, setLocaleWithTransition } from '@/i18n'
+import DesktopLyricsStage from '@/components/desktopLyrics/DesktopLyricsStage.vue'
+import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import type { DesktopLyricsFrameLine } from '@/modules/desktopLyrics/frame'
+import {
+  DEFAULT_DESKTOP_LYRICS_STYLE,
+  DESKTOP_LYRICS_ALIGNS,
+  DESKTOP_LYRICS_BACKGROUND_OPACITY,
+  DESKTOP_LYRICS_BACKGROUNDS,
+  DESKTOP_LYRICS_FONT_PRESETS,
+  DESKTOP_LYRICS_FONT_SIZE,
+  DESKTOP_LYRICS_KARAOKE,
+  DESKTOP_LYRICS_LAYOUTS,
+  DESKTOP_LYRICS_LETTER_SPACING,
+  DESKTOP_LYRICS_OPACITY,
+  DESKTOP_LYRICS_SECONDARY,
+  DESKTOP_LYRICS_SECONDARY_SCALE,
+  DESKTOP_LYRICS_SHADOW_BLUR,
+  DESKTOP_LYRICS_STROKE_WIDTH,
+  DESKTOP_LYRICS_THEMES,
+  DESKTOP_LYRICS_WEIGHTS,
+  applyDesktopLyricsTheme,
+  normalizeDesktopLyricsStyle,
+  parseCssColor,
+  type DesktopLyricsStyle,
+} from '@/modules/desktopLyrics/style'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
@@ -22,6 +47,10 @@ import {
   MAX_DOWNLOAD_PARALLELISM,
   MIN_DOWNLOAD_PARALLELISM,
   YOUTUBE_PLAYBACK_SOURCES,
+  DEFAULT_LYRIC_SOURCES,
+  ENHANCED_BLUR_RADIUS_MAX,
+  ENHANCED_BLUR_RADIUS_MIN,
+  ENHANCED_BLUR_RADIUS_STEP,
   useSettingsStore,
   type ColorMode,
 } from '@/stores/settings'
@@ -63,20 +92,20 @@ const lt = useListenTogetherStore()
 const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle,
-  defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
+  defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
   normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
-  showTranslation, lyricBlur, lyricBlurAmount,
-  cloudMusicOffset, qqMusicOffset,
-  advancedLyrics, dynamicBackground, colorMode, audioReactive,
+  showTranslation, showRomanization, lyricBlur, lyricBlurAmount,
+  advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
   coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
   backgroundImageUri, backgroundImageBlur, backgroundImageAlpha,
+  enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
   devModeEnabled, logToFile, logLevel,
   maxCacheSize, downloadNameTemplate, downloadDir,
   downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
@@ -115,6 +144,17 @@ const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map
   label: t(`settings.youtube_source_${value}`),
 })))
 const youtubePlaybackSourceDescription = computed(() => t(`settings.youtube_source_${youtubePlaybackSource.value}_desc`))
+
+const defaultLyricSourceOptions = computed(() => DEFAULT_LYRIC_SOURCES.map(value => ({
+  value,
+  label: t(`settings.lyric_source_${value}`),
+})))
+const defaultLyricSourceDescription = computed(() => t(`settings.lyric_source_${defaultLyricSource.value}_desc`))
+
+function changeDefaultLyricSource(value: string) {
+  const source = DEFAULT_LYRIC_SOURCES.find(source => source === value)
+  if (source) defaultLyricSource.value = source
+}
 
 function changeYouTubePlaybackSource(value: string) {
   const source = YOUTUBE_PLAYBACK_SOURCES.find(source => source === value)
@@ -282,12 +322,11 @@ const darkModeThumbStyle = computed(() => ({
   transform: `translateX(${darkModeThumbIndex.value * 38}px)`,
 }))
 
-// 取色方式三选项
-const colorModeOptions = computed(() => [
-  { value: 'system', label: t('settings.color_mode_system'), icon: 'brightness_auto' },
-  { value: 'default', label: t('settings.color_mode_default'), icon: 'format_paint' },
-  { value: 'cover', label: t('settings.color_mode_cover'), icon: 'colorize' },
-] as const)
+const colorModeOptions = computed<{ value: ColorMode; label: string; desc: string }[]>(() => [
+  { value: 'default', label: t('settings.color_mode_default'), desc: t('settings.color_mode_default_desc') },
+  { value: 'cover', label: t('settings.color_mode_cover'), desc: t('settings.color_mode_cover_desc') },
+  { value: 'system', label: t('settings.color_mode_system'), desc: t('settings.color_mode_system_desc') },
+])
 
 function handleDarkModeSwitch(mode: ThemeMode, event: MouseEvent) {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
@@ -605,6 +644,22 @@ function selectSettingsSection(id: SettingsSectionId) {
   // 滚动位置恢复改由面板过渡的 onPanelEnter 钩子触发（等新面板插入布局后再恢复）
 }
 
+// 其它地方（桌面歌词工具栏的「设置」）用 ?section=lyrics&focus=desktop-lyrics 直接打开某个分区
+const route = useRoute()
+function applyRouteSection() {
+  const section = String(route.query.section || '')
+  if (!SETTINGS_SECTION_IDS.includes(section as SettingsSectionId)) return
+  selectSettingsSection(section as SettingsSectionId)
+  const focus = String(route.query.focus || '')
+  if (focus === 'desktop-lyrics') {
+    expandedSections.value = new Set([...expandedSections.value, 'desktop_lyrics'])
+    void nextTick(() => {
+      setTimeout(() => document.getElementById('settings-desktop-lyrics')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 260)
+    })
+  }
+}
+watch(() => [route.query.section, route.query.focus], applyRouteSection)
+
 // 启动时检查登录状态
 onMounted(() => {
   auth.checkStatus()
@@ -617,6 +672,8 @@ onMounted(() => {
   loadDefaultDownloadDir()
   void loadAudioOutputDevices()
   void restoreSettingsScrollPosition(activeSettingsSection.value)
+  refreshDesktopLyricsAccent()
+  applyRouteSection()
 })
 
 onBeforeUnmount(() => {
@@ -985,17 +1042,105 @@ const githubIsSettingRepo = ref(false)
 const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo&description=NeriPlayer%20Backup'
 // 各歌词来源的默认偏移，顺序与默认值对齐 Android 设置页
 const lyricOffsetSettings = [
-  { key: 'cloudMusicOffset', label: 'settings.netease_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.netease },
-  { key: 'qqMusicOffset', label: 'settings.qq_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.qq },
-  { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou },
-  { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib },
-  { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml },
+  { key: 'cloudMusicOffset', label: 'settings.netease_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.netease, iconSvg: '/icons/ic_netease.svg' },
+  { key: 'qqMusicOffset', label: 'settings.qq_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.qq, iconSvg: '/icons/ic_qq_music.svg' },
+  { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou, iconSvg: '/icons/ic_kugou.svg' },
+  { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib, iconSvg: '/icons/ic_lrclib.svg' },
+  { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml, iconSvg: '/icons/ic_amll.svg' },
 ] as const
 
 const lyricOffsetsChanged = computed(() => lyricOffsetSettings.some(item => settings[item.key] !== item.defaultMs))
 
 function resetLyricOffsets() {
   for (const item of lyricOffsetSettings) settings[item.key] = item.defaultMs
+}
+
+// ---- 桌面歌词 ----
+const desktopLyricsStyle = computed(() => settings.desktopLyrics)
+
+function updateDesktopLyrics(patch: Partial<DesktopLyricsStyle>) {
+  settings.desktopLyrics = normalizeDesktopLyricsStyle({ ...settings.desktopLyrics, ...patch })
+}
+
+/** 改任一颜色就变成自定义配色 */
+function setDesktopLyricsGradient(key: 'playedColors' | 'unplayedColors', index: 0 | 1, value: string) {
+  const colors = [...desktopLyricsStyle.value[key]] as [string, string]
+  colors[index] = value
+  updateDesktopLyrics({ [key]: colors, theme: 'custom' })
+}
+
+function chooseDesktopLyricsTheme(id: string) {
+  settings.desktopLyrics = applyDesktopLyricsTheme(desktopLyricsStyle.value, id)
+}
+
+function resetDesktopLyrics() {
+  const { bounds, locked } = desktopLyricsStyle.value
+  settings.desktopLyrics = normalizeDesktopLyricsStyle({ ...DEFAULT_DESKTOP_LYRICS_STYLE, bounds, locked })
+}
+
+const desktopLyricsBusy = ref(false)
+async function toggleDesktopLyrics(open: boolean) {
+  if (desktopLyricsBusy.value) return
+  desktopLyricsBusy.value = true
+  try {
+    if (open) await openDesktopLyricsWindow()
+    else await closeDesktopLyricsWindow()
+  } catch (error) {
+    log.error('Desktop lyrics toggle failed:', error)
+    toast.error(t('desktop_lyrics.open_failed'))
+  } finally {
+    desktopLyricsBusy.value = false
+  }
+}
+
+const CUSTOM_FONT = '__custom__'
+const desktopLyricsCustomFont = ref(false)
+const desktopLyricsFontOptions = computed(() => [
+  { value: '', label: t('desktop_lyrics.font_default') },
+  ...DESKTOP_LYRICS_FONT_PRESETS.map(font => ({ value: font, label: font })),
+  { value: CUSTOM_FONT, label: t('desktop_lyrics.font_custom') },
+])
+const desktopLyricsFontChoice = computed(() => {
+  const family = desktopLyricsStyle.value.fontFamily
+  if (desktopLyricsCustomFont.value) return CUSTOM_FONT
+  return !family || (DESKTOP_LYRICS_FONT_PRESETS as readonly string[]).includes(family) ? family : CUSTOM_FONT
+})
+function chooseDesktopLyricsFont(value: string) {
+  desktopLyricsCustomFont.value = value === CUSTOM_FONT
+  if (value !== CUSTOM_FONT) updateDesktopLyrics({ fontFamily: value })
+}
+const desktopLyricsWeightOptions = computed(() => DESKTOP_LYRICS_WEIGHTS.map(weight => ({ value: String(weight), label: String(weight) })))
+const desktopLyricsSecondaryOptions = computed(() => DESKTOP_LYRICS_SECONDARY.map(value => ({
+  value, label: t(`desktop_lyrics.secondary_${value}`),
+})))
+
+function themeSwatch(id: string): string {
+  if (id === 'accent') {
+    const accent = desktopLyricsAccent.value || '#d0bcff'
+    return `linear-gradient(135deg, #ffffff, ${accent})`
+  }
+  const theme = DESKTOP_LYRICS_THEMES.find(candidate => candidate.id === id)
+  return theme ? `linear-gradient(135deg, ${theme.played[0]}, ${theme.played[1]})` : 'transparent'
+}
+
+// 预览：两句示例歌词循环播放，第一句逐字
+const PREVIEW_LOOP_MS = 7_600
+const desktopLyricsAccent = ref<string | null>(null)
+const desktopLyricsPreviewLines = computed<DesktopLyricsFrameLine[]>(() => {
+  const characters = Array.from(t('desktop_lyrics.preview_line'))
+  const step = Math.max(120, Math.floor(3_000 / Math.max(1, characters.length)))
+  const words = characters.map((text, index) => ({ startMs: 400 + index * step, durationMs: step, text }))
+  const firstEnd = 400 + characters.length * step
+  return [
+    { startMs: 400, durationMs: firstEnd - 400, text: characters.join(''), translation: t('desktop_lyrics.preview_translation'), roman: 'desktop lyrics preview', words },
+    { startMs: firstEnd + 300, durationMs: 3_000, text: t('desktop_lyrics.preview_next'), translation: '', roman: '', words: [] },
+  ]
+})
+function desktopLyricsPreviewClock(): number {
+  return performance.now() % PREVIEW_LOOP_MS
+}
+function refreshDesktopLyricsAccent() {
+  desktopLyricsAccent.value = parseCssColor(getComputedStyle(document.documentElement).getPropertyValue('--md-primary'))
 }
 
 const volumeBalanceLabel = computed(() => {
@@ -1341,19 +1486,18 @@ useEscapeClose(
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">colorize</span></div>
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.color_mode') }}</div>
-        <div class="setting-desc">{{ t('settings.color_mode_desc') }}</div>
-        <div class="radio-group">
-          <label
-            v-for="opt in colorModeOptions"
-            :key="opt.value"
-            class="radio-option"
-            :class="{ active: colorMode === opt.value }"
-            @click="colorMode = opt.value as ColorMode"
-          >
-            <span class="radio-dot" :class="{ checked: colorMode === opt.value }"></span>
-            {{ opt.label }}
-          </label>
-        </div>
+        <div class="setting-desc">{{ colorModeOptions.find(o => o.value === colorMode)?.desc }}</div>
+      </div>
+      <div class="chip-row" role="radiogroup" :aria-label="t('settings.color_mode')">
+        <button
+          v-for="o in colorModeOptions"
+          :key="o.value"
+          class="m3-chip"
+          :class="{ active: colorMode === o.value }"
+          role="radio"
+          :aria-checked="colorMode === o.value"
+          @click="colorMode = o.value"
+        >{{ o.label }}</button>
       </div>
     </div>
 
@@ -1374,6 +1518,14 @@ useEscapeClose(
         <div class="chip-row">
           <button v-for="o in defaultScreenOptions" :key="o.value" class="m3-chip" :class="{ active: defaultScreen === o.value }" @click="defaultScreen = o.value as any">{{ o.label }}</button>
         </div>
+      </div>
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">tab_inactive</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.close_to_tray') }}</div>
+          <div class="setting-desc">{{ t('settings.close_to_tray_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="closeToTray" /><span class="track"><span class="thumb"><span v-if="closeToTray" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
       <div class="setting-card">
@@ -1513,6 +1665,32 @@ useEscapeClose(
           />
         </div>
           <input type="range" class="m3-slider" v-model.number="backgroundImageAlpha" min="0" max="1" step="0.05" />
+        </div>
+
+        <div class="setting-card sub-card">
+          <div class="setting-info">
+            <div class="setting-title">{{ t('settings.enhanced_advanced_blur') }}</div>
+            <div class="setting-desc">{{ t('settings.enhanced_advanced_blur_desc') }}</div>
+          </div>
+          <label class="m3-switch"><input type="checkbox" v-model="enhancedAdvancedBlur" /><span class="track"><span class="thumb"><span v-if="enhancedAdvancedBlur" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+        </div>
+
+        <div v-if="enhancedAdvancedBlur" class="setting-card sub-card">
+          <div class="setting-info">
+            <div class="setting-title">{{ t('settings.enhanced_advanced_blur_radius') }}</div>
+            <EditableRangeValue
+              v-model="enhancedAdvancedBlurRadius"
+              class="setting-desc"
+              :min="ENHANCED_BLUR_RADIUS_MIN"
+              :max="ENHANCED_BLUR_RADIUS_MAX"
+              :step="ENHANCED_BLUR_RADIUS_STEP"
+              :display-value="`${enhancedAdvancedBlurRadius}px`"
+              input-suffix="px"
+              :aria-label="t('settings.enhanced_advanced_blur_radius')"
+            />
+          </div>
+          <input type="range" class="m3-slider" v-model.number="enhancedAdvancedBlurRadius"
+            :min="ENHANCED_BLUR_RADIUS_MIN" :max="ENHANCED_BLUR_RADIUS_MAX" :step="ENHANCED_BLUR_RADIUS_STEP" />
         </div>
       </template>
     </div></Transition>
@@ -1890,6 +2068,36 @@ useEscapeClose(
     </div>
 
     <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">abc</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.show_romanization') }}</div>
+        <div class="setting-desc">{{ t('settings.show_romanization_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="showRomanization" /><span class="track"><span class="thumb"><span v-if="showRomanization" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <!-- 来源偏好（对齐 Android SettingsLyricSourceSection） -->
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">timer</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.prefer_word_timed_lyrics') }}</div>
+        <div class="setting-desc">{{ t('settings.prefer_word_timed_lyrics_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="preferWordTimedLyrics" /><span class="track"><span class="thumb"><span v-if="preferWordTimedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <div class="setting-card setting-card--select">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">source</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.default_lyric_source') }}</div>
+        <div class="setting-desc">{{ t('settings.default_lyric_source_desc') }}</div>
+        <div class="setting-desc">{{ defaultLyricSourceDescription }}</div>
+      </div>
+      <CustomSelect class="settings-select" :model-value="defaultLyricSource" :options="defaultLyricSourceOptions"
+        :label="t('settings.default_lyric_source')" @update:model-value="changeDefaultLyricSource" />
+    </div>
+
+    <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">blur_on</span></div>
       <div class="setting-info">
         <div class="setting-title">{{ t('settings.lyric_blur') }}</div>
@@ -1918,7 +2126,7 @@ useEscapeClose(
 
       <!-- 各歌词来源的默认偏移（对齐 Android）：显示的就是这类歌词实际生效的偏移 -->
       <div v-for="item in lyricOffsetSettings" :key="item.key" class="setting-card">
-        <div class="setting-icon-wrap"><span class="material-symbols-rounded">music_note</span></div>
+        <div class="setting-icon-wrap"><span class="platform-icon" :style="{ maskImage: `url(${item.iconSvg})` }"></span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t(item.label) }}</div>
           <EditableRangeValue
@@ -1952,6 +2160,240 @@ useEscapeClose(
           <div class="setting-desc">{{ t('settings.lyric_offset_reset_all_desc') }}</div>
         </div>
         <button class="m3-chip sm" @click="resetLyricOffsets">{{ t('settings.lyric_offset_reset_all') }}</button>
+      </div>
+    </div></Transition>
+
+    <!-- 桌面歌词 -->
+    <div id="settings-desktop-lyrics" class="section-label clickable" @click="toggleSection('desktop_lyrics')">
+      <span class="material-symbols-rounded" style="font-size: 18px">subtitles</span>
+      <span>{{ t('desktop_lyrics.title') }}</span>
+      <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('desktop_lyrics') }">expand_more</span>
+    </div>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">desktop_windows</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('desktop_lyrics.open') }}</div>
+        <div class="setting-desc">{{ t('desktop_lyrics.open_desc') }}</div>
+      </div>
+      <button
+        v-if="desktopLyricsOpen"
+        class="m3-chip sm"
+        :class="{ active: desktopLyricsStyle.locked }"
+        @click="updateDesktopLyrics({ locked: !desktopLyricsStyle.locked })"
+      >
+        {{ t(desktopLyricsStyle.locked ? 'desktop_lyrics.unlock' : 'desktop_lyrics.lock') }}
+      </button>
+      <label class="m3-switch"><input type="checkbox" :checked="desktopLyricsOpen" :disabled="desktopLyricsBusy" @change="toggleDesktopLyrics(($event.target as HTMLInputElement).checked)" /><span class="track"><span class="thumb"><span v-if="desktopLyricsOpen" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('desktop_lyrics')">
+      <div class="setting-card dl-preview-card">
+        <div class="dl-preview" :aria-label="t('desktop_lyrics.preview')">
+          <DesktopLyricsStage
+            :lines="desktopLyricsPreviewLines"
+            :first-index="0"
+            :clock="desktopLyricsPreviewClock"
+            :style="desktopLyricsStyle"
+            :accent="desktopLyricsAccent"
+            :placeholder="t('desktop_lyrics.preview')"
+          />
+        </div>
+      </div>
+
+      <div class="setting-card dl-stack-card">
+        <div class="setting-title">{{ t('desktop_lyrics.theme') }}</div>
+        <div class="dl-swatches">
+          <button
+            v-for="theme in [...DESKTOP_LYRICS_THEMES.map(item => item.id), 'accent']"
+            :key="theme"
+            class="dl-swatch"
+            :class="{ active: desktopLyricsStyle.theme === theme }"
+            :title="t(`desktop_lyrics.theme_${theme}`)"
+            @click="chooseDesktopLyricsTheme(theme)"
+          >
+            <span class="dl-swatch-dot" :style="{ background: themeSwatch(theme) }"></span>
+            <span>{{ t(`desktop_lyrics.theme_${theme}`) }}</span>
+          </button>
+          <span v-if="desktopLyricsStyle.theme === 'custom'" class="m3-chip sm active">{{ t('desktop_lyrics.theme_custom') }}</span>
+        </div>
+      </div>
+
+      <div class="setting-card dl-stack-card">
+        <div class="setting-title">{{ t('desktop_lyrics.layout') }}</div>
+        <div class="dl-chips">
+          <button v-for="layout in DESKTOP_LYRICS_LAYOUTS" :key="layout" class="m3-chip sm" :class="{ active: desktopLyricsStyle.layout === layout }" @click="updateDesktopLyrics({ layout })">
+            {{ t(`desktop_lyrics.layout_${layout}`) }}
+          </button>
+        </div>
+        <div v-if="desktopLyricsStyle.layout === 'double'" class="setting-desc">{{ t('desktop_lyrics.layout_double_desc') }}</div>
+      </div>
+
+      <div class="setting-card dl-stack-card">
+        <div class="setting-title">{{ t('desktop_lyrics.align') }}</div>
+        <div class="dl-chips">
+          <button v-for="align in DESKTOP_LYRICS_ALIGNS" :key="align" class="m3-chip sm" :class="{ active: desktopLyricsStyle.align === align }" @click="updateDesktopLyrics({ align })">
+            {{ t(`desktop_lyrics.align_${align}`) }}
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-card dl-stack-card">
+        <div class="setting-title">{{ t('desktop_lyrics.karaoke') }}</div>
+        <div class="dl-chips">
+          <button v-for="mode in DESKTOP_LYRICS_KARAOKE" :key="mode" class="m3-chip sm" :class="{ active: desktopLyricsStyle.karaoke === mode }" @click="updateDesktopLyrics({ karaoke: mode })">
+            {{ t(`desktop_lyrics.karaoke_${mode}`) }}
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-card setting-card--select">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.secondary') }}</div></div>
+        <CustomSelect class="settings-select" :model-value="desktopLyricsStyle.secondary" :options="desktopLyricsSecondaryOptions"
+          :label="t('desktop_lyrics.secondary')" :disabled="desktopLyricsStyle.layout === 'double'"
+          @update:model-value="updateDesktopLyrics({ secondary: $event as DesktopLyricsStyle['secondary'] })" />
+      </div>
+
+      <div class="setting-card setting-card--select">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.font') }}</div></div>
+        <CustomSelect class="settings-select" :model-value="desktopLyricsFontChoice" :options="desktopLyricsFontOptions"
+          :label="t('desktop_lyrics.font')" @update:model-value="chooseDesktopLyricsFont" />
+      </div>
+      <div v-if="desktopLyricsFontChoice === CUSTOM_FONT" class="setting-card sub-card">
+        <input
+          class="lt-url-input lt-input-left dl-font-input"
+          :value="desktopLyricsStyle.fontFamily"
+          :placeholder="t('desktop_lyrics.font_custom_placeholder')"
+          maxlength="64"
+          @change="updateDesktopLyrics({ fontFamily: ($event.target as HTMLInputElement).value })"
+        />
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.font_size') }}</div>
+          <div class="setting-desc">{{ desktopLyricsStyle.fontSize }}px</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.fontSize" :min="DESKTOP_LYRICS_FONT_SIZE.min" :max="DESKTOP_LYRICS_FONT_SIZE.max" :step="DESKTOP_LYRICS_FONT_SIZE.step"
+          :aria-label="t('desktop_lyrics.font_size')" @input="updateDesktopLyrics({ fontSize: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card setting-card--select sub-card">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.font_weight') }}</div></div>
+        <CustomSelect class="settings-select" :model-value="String(desktopLyricsStyle.fontWeight)" :options="desktopLyricsWeightOptions"
+          :label="t('desktop_lyrics.font_weight')" @update:model-value="updateDesktopLyrics({ fontWeight: Number($event) })" />
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.letter_spacing') }}</div>
+          <div class="setting-desc">{{ desktopLyricsStyle.letterSpacing }}px</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.letterSpacing" :min="DESKTOP_LYRICS_LETTER_SPACING.min" :max="DESKTOP_LYRICS_LETTER_SPACING.max" :step="DESKTOP_LYRICS_LETTER_SPACING.step"
+          :aria-label="t('desktop_lyrics.letter_spacing')" @input="updateDesktopLyrics({ letterSpacing: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.secondary_size') }}</div>
+          <div class="setting-desc">{{ Math.round(desktopLyricsStyle.secondaryScale * 100) }}%</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.secondaryScale" :min="DESKTOP_LYRICS_SECONDARY_SCALE.min" :max="DESKTOP_LYRICS_SECONDARY_SCALE.max" :step="DESKTOP_LYRICS_SECONDARY_SCALE.step"
+          :aria-label="t('desktop_lyrics.secondary_size')" @input="updateDesktopLyrics({ secondaryScale: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card dl-stack-card">
+        <div class="setting-desc">{{ t('desktop_lyrics.gradient_hint') }}</div>
+        <div class="dl-color-rows">
+          <label class="dl-color-row">
+            <span>{{ t('desktop_lyrics.played') }}</span>
+            <input type="color" :value="desktopLyricsStyle.playedColors[0]" @input="setDesktopLyricsGradient('playedColors', 0, ($event.target as HTMLInputElement).value)" />
+            <input type="color" :value="desktopLyricsStyle.playedColors[1]" @input="setDesktopLyricsGradient('playedColors', 1, ($event.target as HTMLInputElement).value)" />
+          </label>
+          <label class="dl-color-row">
+            <span>{{ t('desktop_lyrics.unplayed') }}</span>
+            <input type="color" :value="desktopLyricsStyle.unplayedColors[0]" @input="setDesktopLyricsGradient('unplayedColors', 0, ($event.target as HTMLInputElement).value)" />
+            <input type="color" :value="desktopLyricsStyle.unplayedColors[1]" @input="setDesktopLyricsGradient('unplayedColors', 1, ($event.target as HTMLInputElement).value)" />
+          </label>
+          <label class="dl-color-row">
+            <span>{{ t('desktop_lyrics.secondary_color') }}</span>
+            <input type="color" :value="desktopLyricsStyle.secondaryColor" @input="updateDesktopLyrics({ secondaryColor: ($event.target as HTMLInputElement).value, theme: 'custom' })" />
+          </label>
+        </div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.stroke') }}</div></div>
+        <input v-if="desktopLyricsStyle.strokeEnabled" type="color" class="dl-color-inline" :value="desktopLyricsStyle.strokeColor" :aria-label="t('desktop_lyrics.stroke')"
+          @input="updateDesktopLyrics({ strokeColor: ($event.target as HTMLInputElement).value })" />
+        <label class="m3-switch"><input type="checkbox" :checked="desktopLyricsStyle.strokeEnabled" @change="updateDesktopLyrics({ strokeEnabled: ($event.target as HTMLInputElement).checked })" /><span class="track"><span class="thumb"><span v-if="desktopLyricsStyle.strokeEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+      <div v-if="desktopLyricsStyle.strokeEnabled" class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.stroke_width') }}</div>
+          <div class="setting-desc">{{ desktopLyricsStyle.strokeWidth }}px</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.strokeWidth" :min="DESKTOP_LYRICS_STROKE_WIDTH.min" :max="DESKTOP_LYRICS_STROKE_WIDTH.max" :step="DESKTOP_LYRICS_STROKE_WIDTH.step"
+          :aria-label="t('desktop_lyrics.stroke_width')" @input="updateDesktopLyrics({ strokeWidth: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.shadow') }}</div></div>
+        <input v-if="desktopLyricsStyle.shadowEnabled" type="color" class="dl-color-inline" :value="desktopLyricsStyle.shadowColor" :aria-label="t('desktop_lyrics.shadow')"
+          @input="updateDesktopLyrics({ shadowColor: ($event.target as HTMLInputElement).value })" />
+        <label class="m3-switch"><input type="checkbox" :checked="desktopLyricsStyle.shadowEnabled" @change="updateDesktopLyrics({ shadowEnabled: ($event.target as HTMLInputElement).checked })" /><span class="track"><span class="thumb"><span v-if="desktopLyricsStyle.shadowEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+      <div v-if="desktopLyricsStyle.shadowEnabled" class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.shadow_blur') }}</div>
+          <div class="setting-desc">{{ desktopLyricsStyle.shadowBlur }}px</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.shadowBlur" :min="DESKTOP_LYRICS_SHADOW_BLUR.min" :max="DESKTOP_LYRICS_SHADOW_BLUR.max" :step="DESKTOP_LYRICS_SHADOW_BLUR.step"
+          :aria-label="t('desktop_lyrics.shadow_blur')" @input="updateDesktopLyrics({ shadowBlur: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.glow') }}</div></div>
+        <label class="m3-switch"><input type="checkbox" :checked="desktopLyricsStyle.glowEnabled" @change="updateDesktopLyrics({ glowEnabled: ($event.target as HTMLInputElement).checked })" /><span class="track"><span class="thumb"><span v-if="desktopLyricsStyle.glowEnabled" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.opacity') }}</div>
+          <div class="setting-desc">{{ Math.round(desktopLyricsStyle.opacity * 100) }}%</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.opacity" :min="DESKTOP_LYRICS_OPACITY.min" :max="DESKTOP_LYRICS_OPACITY.max" :step="DESKTOP_LYRICS_OPACITY.step"
+          :aria-label="t('desktop_lyrics.opacity')" @input="updateDesktopLyrics({ opacity: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card dl-stack-card">
+        <div class="setting-title">{{ t('desktop_lyrics.background') }}</div>
+        <div class="dl-chips">
+          <button v-for="mode in DESKTOP_LYRICS_BACKGROUNDS" :key="mode" class="m3-chip sm" :class="{ active: desktopLyricsStyle.background === mode }" @click="updateDesktopLyrics({ background: mode })">
+            {{ t(`desktop_lyrics.background_${mode}`) }}
+          </button>
+        </div>
+      </div>
+      <div v-if="desktopLyricsStyle.background !== 'never'" class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.background_opacity') }}</div>
+          <div class="setting-desc">{{ Math.round(desktopLyricsStyle.backgroundOpacity * 100) }}%</div>
+        </div>
+        <input type="range" class="m3-slider" :value="desktopLyricsStyle.backgroundOpacity" :min="DESKTOP_LYRICS_BACKGROUND_OPACITY.min" :max="DESKTOP_LYRICS_BACKGROUND_OPACITY.max" :step="DESKTOP_LYRICS_BACKGROUND_OPACITY.step"
+          :aria-label="t('desktop_lyrics.background_opacity')" @input="updateDesktopLyrics({ backgroundOpacity: Number(($event.target as HTMLInputElement).value) })" />
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.show_track_info') }}</div></div>
+        <label class="m3-switch"><input type="checkbox" :checked="desktopLyricsStyle.showTrackInfo" @change="updateDesktopLyrics({ showTrackInfo: ($event.target as HTMLInputElement).checked })" /><span class="track"><span class="thumb"><span v-if="desktopLyricsStyle.showTrackInfo" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
+
+      <div class="setting-card sub-card">
+        <div class="setting-info">
+          <div class="setting-title">{{ t('desktop_lyrics.reset') }}</div>
+          <div class="setting-desc">{{ t('desktop_lyrics.reset_desc') }}</div>
+        </div>
+        <button class="m3-chip sm" @click="resetDesktopLyrics">{{ t('desktop_lyrics.reset') }}</button>
       </div>
     </div></Transition>
         </div>
@@ -3022,6 +3464,103 @@ useEscapeClose(
    任意分组激活时内容顶部基线一致，不再出现有的分组多 24px 空白 */
 .settings-section-panel > .section-label:first-child {
   margin-top: 0;
+}
+
+/* 桌面歌词设置 */
+.dl-preview {
+  width: 100%;
+  height: 156px;
+  padding: 12px 20px;
+  box-sizing: border-box;
+  border-radius: inherit;
+  /* 模拟桌面：歌词实际叠在各种壁纸上，深浅交错更容易看出描边和阴影 */
+  background:
+    radial-gradient(circle at 20% 30%, rgb(122 160 255 / 55%), transparent 55%),
+    radial-gradient(circle at 80% 70%, rgb(255 180 120 / 45%), transparent 55%),
+    linear-gradient(135deg, #2a3350, #4b3a4f 60%, #a7b4c8);
+  color: #fff;
+}
+
+/* 比 .setting-card 多一个类：基础规则写在后面，同等优先级会把这里的对齐盖掉 */
+.setting-card.dl-stack-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  text-align: left;
+}
+
+.setting-card.dl-preview-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.dl-chips,
+.dl-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.dl-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 3px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-highest);
+  color: var(--md-on-surface-variant);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color var(--duration-short), color var(--duration-short);
+
+  &:hover { color: var(--md-on-surface); }
+  &.active {
+    border-color: var(--md-primary);
+    color: var(--md-on-surface);
+    box-shadow: inset 0 0 0 1px var(--md-primary);
+  }
+}
+
+.dl-swatch-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 14%);
+}
+
+.dl-color-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dl-color-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--md-on-surface);
+
+  span { flex: 1; }
+}
+
+.dl-color-row input[type='color'],
+.dl-color-inline {
+  width: 38px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--md-outline-variant);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dl-font-input {
+  width: 100%;
 }
 
 .page-title {

@@ -23,36 +23,65 @@ async function loadModule(path, dependencies) {
   }
 }
 
-const { buildDesktopLyricsFrame } = await loadModule('../src/modules/desktopLyrics/frame.ts')
+const styleModule = await loadModule('../src/modules/desktopLyrics/style.ts')
+const timelineModule = await loadModule('../src/modules/desktopLyrics/timeline.ts')
+const frameModule = await loadModule('../src/modules/desktopLyrics/frame.ts', { './style': styleModule, './timeline': timelineModule })
+const { buildDesktopLyricsFrame } = frameModule
 const { createDesktopLyricsLoader } = await loadModule('../src/modules/desktopLyrics/loader.ts')
 const { mergeWordTimedLyricsWithBaseline } = await loadModule('../src/modules/lyrics/lyricsFormat.ts')
 const track = { id: 'netease:123', title: '互通', artist: '歌手', durationMs: 5000 }
 const lines = [
   { startMs: 1000, durationMs: 1000, text: '第一行', translation: 'first', words: [] },
   { startMs: 2000, durationMs: 1000, text: '', words: [{ startMs: 2000, durationMs: 500, text: '逐字' }] },
-  { startMs: 3000, durationMs: 1000, text: '第三行', words: [] },
+  { startMs: 3000, durationMs: 1000, text: '第三行', roman: 'dai san', words: [] },
 ]
-const frame = (positionMs, lyricOffsetMs = 0) => buildDesktopLyricsFrame({ track, lines, positionMs, lyricOffsetMs, isPlaying: false })
-assert.equal(frame(0).current, '')
-assert.equal(frame(0).next, '第一行')
-assert.equal(frame(1000).current, '第一行')
-assert.equal(frame(1000).translation, 'first')
-assert.equal(frame(2000).current, '逐字')
-assert.equal(frame(2000).previous, '第一行')
-assert.equal(frame(2000).next, '第三行')
-assert.equal(frame(1500, 500).current, '逐字')
-assert.equal(frame(3500, -1500).current, '逐字', 'seeking and negative offset must select from the current position')
-assert.equal(frame(Number.NaN).current, '')
-assert.equal(frame(2000).isPlaying, false)
-assert.deepEqual(buildDesktopLyricsFrame({ track: null, lines, positionMs: 5000, lyricOffsetMs: 0, isPlaying: true }), {
-  trackId: '', title: '', artist: '', previous: '', current: '', next: '', translation: '', isPlaying: false,
+const style = styleModule.normalizeDesktopLyricsStyle(null)
+const frame = (positionMs, lyricOffsetMs = 0, extra = {}) => buildDesktopLyricsFrame({
+  track, lines, positionMs, lyricOffsetMs, isPlaying: true, rate: 1.25, now: 50_000, accent: null, style, ...extra,
 })
-const bounded = buildDesktopLyricsFrame({ track: { ...track, title: 'x'.repeat(5000) }, lines: [{ ...lines[0], text: '😀'.repeat(5000) }], positionMs: 2000, isPlaying: true, lyricOffsetMs: 0 })
-assert.ok(bounded.title.length <= 1024)
-assert.ok(Buffer.byteLength(bounded.current) <= 4096)
-assert.ok(!/[\uD800-\uDBFF]$/.test(bounded.current), 'truncation must not split a surrogate pair')
-const escaped = buildDesktopLyricsFrame({ track, lines: [0, 1, 2].map(startMs => ({ ...lines[0], startMs, text: '\u0001'.repeat(4096), translation: '\\'.repeat(4096) })), positionMs: 1, isPlaying: true, lyricOffsetMs: 0 })
-assert.ok(Buffer.byteLength(JSON.stringify(escaped)) < 24 * 1024, 'escaped text must still fit the backend frame budget')
+// 帧带当前行附近的几行（上一行 + 当前 + 后三行），歌词窗口自己按锚点插值
+assert.deepEqual(frame(0).lines.map(line => line.text), ['第一行', '逐字', '第三行'], '前奏时带上开头几行')
+assert.equal(frame(0).firstIndex, 0)
+assert.equal(frame(2000).firstIndex, 0, '当前第二行时从上一行开始带')
+assert.equal(frame(2000).lines[1].words[0].text, '逐字', '逐字时间轴随帧带过去')
+assert.equal(frame(2000).lines[1].text, '逐字', '只有逐字的行用字拼出文本')
+assert.equal(frame(1000).lines[0].translation, 'first')
+assert.equal(frame(3000).lines.at(-1).roman, 'dai san')
+assert.equal(frameModule.desktopLyricsLineIndex(lines, 1500, 500), 1, '主窗口按加了偏移的位置判断换行')
+assert.equal(frameModule.desktopLyricsLineIndex(lines, 3500, -1500), 1, '负偏移从当前位置往前算')
+assert.equal(frameModule.desktopLyricsLineIndex(lines, Number.NaN, 0), -1)
+assert.deepEqual(
+  [frame(2000).positionMs, frame(2000).anchorAt, frame(2000).rate, frame(2000).offsetMs, frame(2000).isPlaying],
+  [2000, 50_000, 1.25, 0, true],
+  '锚点：位置、墙钟、倍速、偏移',
+)
+assert.equal(frame(2000, 300).offsetMs, 300)
+assert.equal(frame(0, 0, { rate: 0 }).rate, 1, '无效倍速按 1')
+assert.equal(frame(0, 0, { accent: '#ABCDEF' }).accent, '#abcdef')
+assert.equal(frame(0, 0, { accent: 'red; x: y' }).accent, '', '主题色只收 #rrggbb')
+assert.equal(frame(0, 0, { style: { layout: 'double', fontSize: 999 } }).style.fontSize, 96, '外观在发帧前规整')
+const many = Array.from({ length: 20 }, (_, index) => ({ startMs: index * 1000, durationMs: 1000, text: `L${index}`, words: [] }))
+const windowed = buildDesktopLyricsFrame({ track, lines: many, positionMs: 10_500, lyricOffsetMs: 0, isPlaying: true, rate: 1, now: 0, accent: null, style })
+assert.equal(windowed.firstIndex, 9)
+assert.deepEqual(windowed.lines.map(line => line.text), ['L9', 'L10', 'L11', 'L12', 'L13'], '最多 5 行')
+const empty = buildDesktopLyricsFrame({ track: null, lines, positionMs: 5000, lyricOffsetMs: 0, isPlaying: true, rate: 1, now: 1, accent: null, style })
+assert.deepEqual([empty.trackId, empty.lines.length, empty.isPlaying], ['', 0, false])
+const longWords = Array.from({ length: 400 }, (_, index) => ({ startMs: index, durationMs: 1, text: '字'.repeat(100) }))
+const bounded = buildDesktopLyricsFrame({
+  track: { ...track, title: 'x'.repeat(5000) },
+  lines: [{ startMs: 0, durationMs: 1, text: '😀'.repeat(5000), translation: '\\'.repeat(5000), words: longWords }],
+  positionMs: 0, lyricOffsetMs: 0, isPlaying: true, rate: 1, now: 0, accent: null, style,
+})
+assert.ok(Buffer.byteLength(bounded.title) <= 1024)
+assert.ok(Buffer.byteLength(bounded.lines[0].text) <= 1024)
+assert.ok(!/[\uD800-\uDBFF]$/.test(bounded.lines[0].text), 'truncation must not split a surrogate pair')
+assert.equal(bounded.lines[0].words.length, 128, '每行最多 128 个字')
+assert.ok(bounded.lines[0].words.every(word => Buffer.byteLength(word.text) <= 64))
+const worst = buildDesktopLyricsFrame({
+  track, positionMs: 1, lyricOffsetMs: 0, isPlaying: true, rate: 1, now: 0, accent: null, style,
+  lines: [0, 1, 2, 3, 4].map(startMs => ({ startMs, durationMs: 1, text: '\u0001'.repeat(4096), translation: '\\'.repeat(4096), roman: '"'.repeat(4096), words: longWords })),
+})
+assert.ok(Buffer.byteLength(JSON.stringify(worst)) < 128 * 1024, 'escaped text must still fit the backend frame budget')
 
 let changes = []
 let fetchCalls = 0
@@ -173,13 +202,23 @@ assert.equal(mergedDisplay[0].roman, 'dai ichi')
 assert.deepEqual(mergedCache, mergedDisplay, 'the cache must retain the same translation and roman as the display')
 preserveText.dispose()
 
-const player = { currentTrack: track, lyrics: [lines[0]], livePositionMs: () => 1000, isPlaying: true }
-const settings = { advancedLyrics: false }
+const playerCalls = []
+const player = {
+  currentTrack: track, lyrics: [lines[0]], livePositionMs: () => 1000, isPlaying: true,
+  effectivePlaybackSpeed: () => 1,
+  pause: async () => { playerCalls.push('pause') },
+  resume: async () => { playerCalls.push('resume') },
+  next: async () => { playerCalls.push('next') },
+  previous: async () => { playerCalls.push('previous') },
+}
+const settings = { preferWordTimedLyrics: false, defaultLyricSource: 'automatic', desktopLyrics: undefined }
 const watchers = []
 const intervals = new Map()
 const invocations = []
-let listener
+const listeners = {}
+const listener = event => listeners['desktop-lyrics:closed'](event)
 let releasedListeners = 0
+let openedSettings = 0
 let rejectOpen = false
 let deferredOpens = false
 const openRequests = []
@@ -199,7 +238,7 @@ try {
       watch: (_, callback, options) => {
         const watcher = { callback, stopped: false }
         watchers.push(watcher)
-        if (options.immediate) callback()
+        if (options?.immediate) callback()
         return () => { watcher.stopped = true }
       },
     },
@@ -214,8 +253,8 @@ try {
       if (command === 'close_desktop_lyrics' && args.sessionId === nativeSession) childExists = false
       if (command === 'fetch_lyrics') return new Promise(resolve => { fetchRelease = resolve })
     } },
-    '@tauri-apps/api/event': { listen: async (_, handler) => {
-      listener = handler
+    '@tauri-apps/api/event': { listen: async (name, handler) => {
+      listeners[name] = handler
       return () => { releasedListeners++ }
     } },
     '@/stores/player': { usePlayerStore: () => player },
@@ -223,35 +262,66 @@ try {
     '@/stores/lyricOffset': { useLyricOffsetStore: () => ({ effectiveOffsetMs: () => 0 }) },
     '@/modules/lyrics/lyricOffset': { readSyncedLyricSource: () => null },
     '@/modules/lyrics/lyricsFetch': {
-      fetchLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
+      fetchAutomaticLyrics: () => new Promise(resolve => { fetchRelease = fetched => resolve({ source: 'netease', lines: fetched }) }),
       fetchWordTimedLyrics: async () => ({ source: null, lines: [] }),
+      preferredLyricMatchSource: () => null,
+      fetchPreferredSourceLyrics: async () => null,
     },
     '@/modules/lyrics/lyricSource': { rememberLyricSource() {} },
     '@/modules/lyrics/lyricsCache': { getCachedLyrics: () => null, saveCachedLyrics: () => { cachedAfterClose++ } },
     '@/modules/lyrics/lyricsRequest': { loadLyricsSingleFlight: (_, fetch) => fetch(), hasWordTimedLyrics: () => false },
     '@/modules/lyrics/lyricsFormat': {
       resolveStoredLyricStateFromPayload: () => ({ kind: 'absent' }),
-      resolveStoredTranslatedLyricStateFromPayload: () => ({ kind: 'absent' }),
+      materializeStoredLyrics: async () => null,
       mapBackendLyrics: value => value,
-      mergeParsedLyricsWithTranslations: value => value,
       mergeWordTimedLyricsWithBaseline: (_, value) => value,
     },
-    './frame': { buildDesktopLyricsFrame },
+    './frame': frameModule,
     './loader': { createDesktopLyricsLoader },
+    './style': styleModule,
+    './timeline': timelineModule,
     '@/utils/logger': { createLogger: () => ({ warn() {} }) },
     '@/utils/logSanitizer': { summarizeLogError: String },
   })
-  const dispose = installDesktopLyricsBridge()
+  const dispose = installDesktopLyricsBridge({ openSettings: () => { openedSettings++ } })
   assert.equal(intervals.size, 0, 'inactive bridge must not start a timer')
   assert.equal(watchers.length, 0, 'inactive bridge must not fetch lyrics')
   await openDesktopLyricsWindow()
   await Promise.resolve()
   assert.equal(intervals.size, 1)
-  assert.equal(watchers.length, 1)
+  assert.equal(watchers.length, 2, '歌词和锁定状态各一个')
+  const opened = invocations.find(([command]) => command === 'open_desktop_lyrics')[1]
+  assert.equal(opened.bounds, null, '第一次打开没有保存的位置，由后端放到屏幕底部居中')
+  assert.deepEqual(invocations.find(([command]) => command === 'set_desktop_lyrics_lock')[1].locked, false, '打开后同步锁定状态')
   const frameCount = invocations.filter(([command]) => command === 'publish_desktop_lyrics').length
   for (const tick of intervals.values()) tick()
   await Promise.resolve()
-  assert.equal(invocations.filter(([command]) => command === 'publish_desktop_lyrics').length, frameCount, 'identical frames must not flood IPC')
+  assert.equal(invocations.filter(([command]) => command === 'publish_desktop_lyrics').length, frameCount, '没变化时不发帧：歌词窗口自己插值')
+  player.livePositionMs = () => 60_000
+  for (const tick of intervals.values()) tick()
+  await Promise.resolve()
+  assert.equal(invocations.filter(([command]) => command === 'publish_desktop_lyrics').length, frameCount + 1, 'seek 后位置对不上锚点，马上发新帧')
+  player.livePositionMs = () => 1000
+
+  // 工具栏操作在主窗口执行
+  listeners['desktop-lyrics:action']({ payload: { action: 'font-larger' } })
+  assert.equal(settings.desktopLyrics.fontSize, 38)
+  listeners['desktop-lyrics:action']({ payload: { action: 'cycle-layout' } })
+  assert.equal(settings.desktopLyrics.layout, 'double')
+  listeners['desktop-lyrics:action']({ payload: { action: 'toggle-play' } })
+  listeners['desktop-lyrics:action']({ payload: { action: 'next' } })
+  assert.deepEqual(playerCalls, ['pause', 'next'])
+  listeners['desktop-lyrics:action']({ payload: { action: 'open-settings' } })
+  assert.equal(openedSettings, 1)
+  listeners['desktop-lyrics:action']({ payload: { action: 'lock' } })
+  assert.equal(settings.desktopLyrics.locked, true)
+  watchers[1].callback()
+  assert.equal(invocations.filter(([command]) => command === 'set_desktop_lyrics_lock').at(-1)[1].locked, true, '锁定交给后端设置点击穿透')
+  listeners['desktop-lyrics:bounds']({ payload: { x: 100.4, y: 900, width: 50, height: 200 } })
+  assert.deepEqual(settings.desktopLyrics.bounds, { x: 100, y: 900, width: 360, height: 200 }, '记住位置，尺寸按下限规整')
+  listeners['desktop-lyrics:bounds']({ payload: { x: 'nope' } })
+  assert.deepEqual(settings.desktopLyrics.bounds, { x: 100, y: 900, width: 360, height: 200 }, '坏数据不覆盖已记住的位置')
+  settings.desktopLyrics = undefined
 
   player.currentTrack = { ...track, id: 'youtube:late' }
   player.lyrics = []
@@ -270,9 +340,10 @@ try {
   rejectOpen = true
   await assert.rejects(openDesktopLyricsWindow(), /window creation failed/)
   assert.equal(intervals.size, 0, 'failed window creation must clean up the timer')
-  assert.equal(watchers[1].stopped, true)
+  assert.equal(watchers[2].stopped, true)
+  assert.equal(watchers[3].stopped, true)
   dispose()
-  assert.equal(releasedListeners, 1)
+  assert.equal(releasedListeners, 3, '关闭、工具栏操作、位置三个监听都要释放')
   assert.equal(intervals.size, 0)
 
   rejectOpen = false

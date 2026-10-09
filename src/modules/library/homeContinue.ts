@@ -1,3 +1,5 @@
+import { biliPlaylistRoute } from './biliPlaylistReference'
+
 export interface ContinuePlaylist {
   id: string
   key: string
@@ -32,16 +34,10 @@ export function continuePlaylistRoute(playlist: PlaylistLocation) {
     case 'netease': return { name: 'netease-playlist', params: { id } }
     case 'neteasealbum': return { name: 'netease-album', params: { id } }
     case 'bili':
-      if (['COLLECTION', 'SERIES'].includes(playlist.subtype || '')) {
-        const mid = playlist.mid || ''
-        if (!/^[1-9]\d*$/.test(mid) || !Number.isSafeInteger(Number(mid))) return null
-        return {
-          name: 'bili-artist', params: { mid },
-          query: { contentId: id, kind: playlist.subtype === 'COLLECTION' ? 'collection' : 'series', name: playlist.name, cover: playlist.coverUrl || '', count: String(playlist.trackCount || 0) },
-        }
-      }
-      if (playlist.subtype && !['CREATED_FAVORITE', 'COLLECTED_FAVORITE'].includes(playlist.subtype)) return null
-      return { name: 'bili-playlist', params: { mediaId: id } }
+      return biliPlaylistRoute({
+        id, kind: playlist.subtype || null, mid: playlist.mid,
+        name: playlist.name, coverUrl: playlist.coverUrl, trackCount: playlist.trackCount,
+      })
   }
   return null
 }

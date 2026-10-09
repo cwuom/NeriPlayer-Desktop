@@ -138,6 +138,54 @@ try {
     now += 271_000
     assert.equal(manager.take(netease, settings), null)
   })
+  await run('a finished prefetch is reported so the player can pre-open the stream', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const reported = []
+    manager.onPrefetched = (track, result) => reported.push([track.id, result.url])
+    const netease = { ...youtube, id: 'netease:778', source: 'netease' }
+    globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/prewarm', format: 'mp3', bitrate: 320_000, level: 'exhigh', song_id: 778 })
+    manager.prefetch(netease, settings, new source.PlaybackUrlResolver())
+    await new Promise(setImmediate)
+    assert.deepEqual(reported, [['netease:778', 'https://m.music.126.net/prewarm']])
+    assert.ok(manager.take(netease, settings), '回调不影响预取结果入缓存')
+  })
+  await run('sweeping the pointer over rows keeps only the latest intent queued', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const gates = []
+    const requested = []
+    globalThis.__cacheInvoke = async (_, args) => {
+      requested.push(args.videoId)
+      const gate = deferred()
+      gates.push(gate)
+      await gate.promise
+      return stream(`https://rr.googlevideo.com/${args.videoId}`)
+    }
+    const next = { ...youtube, id: 'youtube:intent-next' }
+    manager.prefetch(next, settings, new source.PlaybackUrlResolver())
+    const rows = ['a', 'b', 'c'].map(id => ({ ...youtube, id: `youtube:intent-${id}` }))
+    for (const row of rows) manager.prefetchIntent(row, settings, new source.PlaybackUrlResolver())
+    await new Promise(setImmediate)
+    assert.deepEqual(requested, ['intent-next'], '下一首先跑，悬停的排队')
+    gates[0].resolve()
+    await new Promise(setImmediate)
+    await new Promise(setImmediate)
+    assert.deepEqual(requested, ['intent-next', 'intent-c'], '扫过的 a、b 已撤掉，只解析最后停住的 c')
+    gates[1].resolve()
+    await new Promise(setImmediate)
+    assert.ok(manager.take(next, settings), '下一首的预取不受意图影响')
+    assert.ok(manager.take(rows[2], settings))
+  })
+  await run('an intent on an already prefetched track is reported for pre-opening', async () => {
+    const manager = new PlaybackPrefetchManager()
+    const reported = []
+    manager.onPrefetched = track => reported.push(track.id)
+    const netease = { ...youtube, id: 'netease:779', source: 'netease' }
+    globalThis.__cacheInvoke = async () => ({ url: 'https://m.music.126.net/intent', format: 'mp3', bitrate: 320_000, level: 'exhigh', song_id: 779 })
+    manager.prefetch(netease, settings, new source.PlaybackUrlResolver())
+    await new Promise(setImmediate)
+    manager.prefetchIntent(netease, settings, new source.PlaybackUrlResolver())
+    assert.deepEqual(reported, ['netease:779', 'netease:779'])
+  })
   await run('YouTube prefetches run one at a time', async () => {
     const manager = new PlaybackPrefetchManager()
     const gates = []

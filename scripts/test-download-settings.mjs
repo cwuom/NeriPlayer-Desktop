@@ -31,12 +31,17 @@ const source = await readFile(new URL('../src/stores/settings.ts', import.meta.u
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
+const desktopLyricsStyle = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/desktopLyrics/style.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(desktopLyricsStyle)
 const exports = {}
 new Function('require', 'exports', compiled)(name => {
   if (name === 'pinia') return pinia
   if (name === 'vue') return vue
   if (name === '@tauri-apps/api/core') return bridge
   if (name === '@/utils/logger') return { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
+  if (name === '@/modules/desktopLyrics/style') return desktopLyricsStyle
   throw new Error(`Unexpected settings dependency: ${name}`)
 }, exports)
 

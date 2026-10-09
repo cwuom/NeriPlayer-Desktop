@@ -2,10 +2,13 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-const source = await readFile(new URL('../src/modules/library/homeContinue.ts', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(source, {
+const transpile = async (path) => ts.transpileModule(await readFile(new URL(path, import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
+const toDataUrl = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
+const referenceUrl = toDataUrl(await transpile('../src/modules/library/biliPlaylistReference.ts'))
+const compiled = (await transpile('../src/modules/library/homeContinue.ts'))
+  .replace(`from './biliPlaylistReference'`, `from '${referenceUrl}'`)
 const { normalizeContinuePlaylists, continuePlaylistRoute } =
   await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 
@@ -52,11 +55,15 @@ assert.deepEqual(continuePlaylistRoute(entry({ source: 'bili', id: '12', fid: '9
 assert.equal(continuePlaylistRoute(entry({ source: 'youtubeMusic' })), null)
 assert.equal(continuePlaylistRoute(entry({ source: 'bili', subtype: 'COLLECTION' })), null)
 assert.deepEqual(continuePlaylistRoute(entry({ source: 'bili', id: '12', subtype: 'COLLECTION', mid: '42' })), {
-  name: 'bili-artist', params: { mid: '42' }, query: { contentId: '12', kind: 'collection', name: '歌单', cover: '', count: '3' },
+  name: 'bili-playlist', params: { mediaId: '12' }, query: { kind: 'collection', mid: '42', name: '歌单', cover: '', count: '3' },
 })
 assert.deepEqual(continuePlaylistRoute(entry({ source: 'bili', id: '13', subtype: 'SERIES', mid: '42' })), {
-  name: 'bili-artist', params: { mid: '42' }, query: { contentId: '13', kind: 'series', name: '歌单', cover: '', count: '3' },
+  name: 'bili-playlist', params: { mediaId: '13' }, query: { kind: 'series', mid: '42', name: '歌单', cover: '', count: '3' },
 })
+assert.deepEqual(continuePlaylistRoute(entry({ source: 'bili', id: '14', subtype: 'COLLECTED_FAVORITE' })), {
+  name: 'bili-playlist', params: { mediaId: '14' },
+})
+assert.equal(continuePlaylistRoute(entry({ source: 'bili', id: '15', subtype: 'UNKNOWN' })), null)
 assert.equal(normalizeContinuePlaylists([entry({ id: '9007199254740993', source: 'local' })], [
   { id: '9007199254740993', name: '大 ID 歌单', track_count: 5 },
 ])[0].id, '9007199254740993')

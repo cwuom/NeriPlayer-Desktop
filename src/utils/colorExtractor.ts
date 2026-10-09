@@ -161,37 +161,30 @@ export function reapplyDynamicColorForTheme(isDark: boolean): boolean {
   return true
 }
 
+const RGB_RE = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/
+
 /**
  * 探测系统强调色作为取色种子。
- * 1) 优先 CSS accent-color: accent 关键字（WebKitGTK 等映射 GTK 主题）；
- * 2) 失败则走 Rust 命令（Windows 读注册表 SystemAccentColor）。
+ * 1) 先问后端（Windows 读注册表 SystemAccentColor，最准确）；
+ * 2) 其余平台用 CSS 系统色 AccentColor（WebKit 在 macOS/GTK 上映射系统强调色）。
+ *    Chromium 内核（WebView2）出于隐私只返回固定蓝色，所以排在注册表之后。
  * 都不支持时返回 null，调用方回退到默认取色。
  */
 export async function resolveSystemAccentSeed(): Promise<RGB | null> {
   try {
-    const probe = document.createElement('input')
-    probe.type = 'checkbox'
-    probe.style.position = 'fixed'
-    probe.style.opacity = '0'
-    probe.style.pointerEvents = 'none'
-    probe.style.accentColor = 'accent'
-    document.body.appendChild(probe)
-    const computed = getComputedStyle(probe).accentColor
-    probe.remove()
-    const match = computed?.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
-    if (match) return [Number(match[1]), Number(match[2]), Number(match[3])]
-  } catch {
-    // 探测失败走平台命令兜底
-  }
-  try {
     const { invoke } = await import('@tauri-apps/api/core')
-    const color = await invoke<string | null>('get_system_accent_color')
-    const match = color?.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+    const match = (await invoke<string | null>('get_system_accent_color'))?.match(RGB_RE)
     if (match) return [Number(match[1]), Number(match[2]), Number(match[3])]
   } catch {
-    // 非 Tauri 环境或命令不可用时忽略
+    // 非 Tauri 环境或命令不可用时走 CSS 探测
   }
-  return null
+  if (typeof CSS === 'undefined' || !CSS.supports('color', 'AccentColor')) return null
+  const probe = document.createElement('span')
+  probe.style.cssText = 'position:fixed;opacity:0;pointer-events:none;color:AccentColor'
+  document.body.appendChild(probe)
+  const match = getComputedStyle(probe).color.match(RGB_RE)
+  probe.remove()
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null
 }
 
 /**

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createLogger } from '@/utils/logger'
+import { normalizeDesktopLyricsStyle, type DesktopLyricsStyle } from '@/modules/desktopLyrics/style'
 
 const log = createLogger('settings')
 
@@ -13,6 +14,11 @@ export const YOUTUBE_PLAYBACK_SOURCES = [
   'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
 ] as const
 export type YouTubePlaybackSource = typeof YOUTUBE_PLAYBACK_SOURCES[number]
+/** 与 Android LyricSourcePreference.storageValue 一致 */
+export const DEFAULT_LYRIC_SOURCES = [
+  'automatic', 'cloud_music', 'kugou', 'qq_music', 'lrclib', 'amll_ttml',
+] as const
+export type DefaultLyricSource = typeof DEFAULT_LYRIC_SOURCES[number]
 
 export interface AppSettings {
   formatVersion: number
@@ -20,6 +26,8 @@ export interface AppSettings {
   themeColor: string
   locale: string
   defaultScreen: string
+  /** 关闭主窗口时收进托盘继续播放；关掉后关闭即退出 */
+  closeToTray: boolean
   showCoverBadge: boolean
   showNowPlayingTitle: boolean
   showToolbarDock: boolean
@@ -47,6 +55,7 @@ export interface AppSettings {
   rememberLongFormProgress: boolean
   keepPlaybackMode: boolean
   showTranslation: boolean
+  showRomanization: boolean
   lyricBlur: boolean
   lyricBlurAmount: number
   cloudMusicOffset: number
@@ -56,6 +65,10 @@ export interface AppSettings {
   amllTtmlOffset: number
   coverStyle: CoverStyle
   advancedLyrics: boolean
+  /** 有逐字结果时优先用；关闭后不再用 AMLL/酷狗补逐字（Android prefer_word_timed_lyrics） */
+  preferWordTimedLyrics: boolean
+  /** 播放时优先尝试的歌词源，找不到时回退自动（Android default_lyric_source） */
+  defaultLyricSource: DefaultLyricSource
   dynamicBackground: boolean
   colorMode: ColorMode
   audioReactive: boolean
@@ -75,6 +88,10 @@ export interface AppSettings {
   backgroundImageUri: string
   backgroundImageBlur: number
   backgroundImageAlpha: number
+  /** 背景图模式下卡片、搜索框等控件的实时玻璃模糊（Android enhanced_advanced_blur_enabled） */
+  enhancedAdvancedBlur: boolean
+  /** 玻璃模糊半径（px），12–64 按 4 对齐（Android enhanced_advanced_blur_radius_dp） */
+  enhancedAdvancedBlurRadius: number
   devModeEnabled: boolean
   logToFile: boolean
   logLevel: string
@@ -101,6 +118,7 @@ export interface AppSettings {
   equalizerEnabled: boolean
   equalizerPresetId: string
   equalizerBands: number[]
+  desktopLyrics: DesktopLyricsStyle
 }
 
 interface SettingsLoadResult {
@@ -126,6 +144,10 @@ export const LYRIC_FONT_SCALE_STEP = 0.05
 // 封面模糊强度 × 30 = CSS 模糊半径（px），8 档上限即 240px
 export const COVER_BLUR_PX_PER_UNIT = 30
 export const MAX_COVER_BLUR_AMOUNT = 8
+// 对齐 Android EnhancedAdvancedBlurPreference 12–64dp，按 4 对齐
+export const ENHANCED_BLUR_RADIUS_MIN = 12
+export const ENHANCED_BLUR_RADIUS_MAX = 64
+export const ENHANCED_BLUR_RADIUS_STEP = 4
 // 对齐 Android LyricDefaultOffset ±5000ms，按 50ms 对齐
 export const LYRIC_DEFAULT_OFFSET_RANGE_MS = 5000
 export const LYRIC_DEFAULT_OFFSET_STEP_MS = 50
@@ -140,6 +162,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   themeColor: 'purple',
   locale: detectLocale(),
   defaultScreen: 'home',
+  closeToTray: true,
   showCoverBadge: true,
   showNowPlayingTitle: true,
   showToolbarDock: true,
@@ -166,6 +189,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   rememberLongFormProgress: true,
   keepPlaybackMode: true,
   showTranslation: true,
+  showRomanization: false,
   lyricBlur: true,
   lyricBlurAmount: 1.5,
   cloudMusicOffset: 1000,
@@ -175,6 +199,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   amllTtmlOffset: 0,
   coverStyle: 'card',
   advancedLyrics: true,
+  preferWordTimedLyrics: true,
+  defaultLyricSource: 'automatic',
   dynamicBackground: true,
   colorMode: 'default',
   audioReactive: true,
@@ -194,6 +220,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   backgroundImageUri: '',
   backgroundImageBlur: 20,
   backgroundImageAlpha: 0.3,
+  enhancedAdvancedBlur: true,
+  enhancedAdvancedBlurRadius: 36,
   devModeEnabled: false,
   logToFile: false,
   logLevel: 'info',
@@ -220,6 +248,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   equalizerEnabled: false,
   equalizerPresetId: 'flat',
   equalizerBands: [0, 0, 0, 0, 0],
+  desktopLyrics: normalizeDesktopLyricsStyle(null),
 }
 
 const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
@@ -379,6 +408,10 @@ function normalizeSnapshot(input: unknown): AppSettings {
 
   if (!['system', 'dark', 'light'].includes(result.darkMode)) result.darkMode = DEFAULT_SETTINGS.darkMode
   if (!['disc', 'card'].includes(result.coverStyle)) result.coverStyle = DEFAULT_SETTINGS.coverStyle
+  // 旧版只有「封面动态取色」开关
+  const legacyDynamicColor = (source as { dynamicColor?: unknown }).dynamicColor
+  if (!('colorMode' in source) && legacyDynamicColor === true) result.colorMode = 'cover'
+  if (!['system', 'default', 'cover'].includes(result.colorMode)) result.colorMode = DEFAULT_SETTINGS.colorMode
   if (!['home', 'explore', 'library'].includes(result.defaultScreen)) result.defaultScreen = DEFAULT_SETTINGS.defaultScreen
   if (!['zh-CN', 'zh-TW', 'en', 'ja'].includes(result.locale)) result.locale = DEFAULT_SETTINGS.locale
   if (!['off', 'error', 'warn', 'info', 'debug', 'trace'].includes(result.logLevel)) result.logLevel = DEFAULT_SETTINGS.logLevel
@@ -398,6 +431,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.downloadQqMusicQuality = normalizeChoice(result.downloadQqMusicQuality, QQ_QUALITIES, 'high')
   result.downloadYoutubeQuality = normalizeChoice(result.downloadYoutubeQuality, YOUTUBE_QUALITIES, 'high')
   result.downloadBiliQuality = normalizeChoice(result.downloadBiliQuality, BILI_QUALITIES, 'high')
+  result.defaultLyricSource = normalizeChoice(result.defaultLyricSource, [...DEFAULT_LYRIC_SOURCES], 'automatic') as DefaultLyricSource
 
   // 旧版「无缝切换」与「切歌交叉淡入淡出」是同一效果的两个开关，合并到后者并沿用当时的淡入淡出时长
   if (result.crossfade) {
@@ -425,6 +459,9 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.coverBlurDarken = clamp(result.coverBlurDarken, 0, 1)
   result.backgroundImageBlur = clamp(result.backgroundImageBlur, 0, 100)
   result.backgroundImageAlpha = clamp(result.backgroundImageAlpha, 0, 1)
+  result.enhancedAdvancedBlurRadius = Math.round(
+    clamp(result.enhancedAdvancedBlurRadius, ENHANCED_BLUR_RADIUS_MIN, ENHANCED_BLUR_RADIUS_MAX) / ENHANCED_BLUR_RADIUS_STEP,
+  ) * ENHANCED_BLUR_RADIUS_STEP
   result.maxCacheSize = clampInteger(
     result.maxCacheSize,
     MIN_MEDIA_CACHE_SIZE_MB,
@@ -437,6 +474,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.volumeBalance = normalizeVolumeBalance(result.volumeBalance)
   result.equalizerBands = result.equalizerBands.slice(0, 5).map(value => clamp(Math.round(value), -1500, 1500))
   while (result.equalizerBands.length < 5) result.equalizerBands.push(0)
+  result.desktopLyrics = normalizeDesktopLyricsStyle(result.desktopLyrics)
   return result
 }
 
@@ -503,6 +541,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const themeColor = ref(initial.themeColor)
   const locale = ref(initial.locale)
   const defaultScreen = ref(initial.defaultScreen)
+  const closeToTray = ref(initial.closeToTray)
   const showCoverBadge = ref(initial.showCoverBadge)
   const showNowPlayingTitle = ref(initial.showNowPlayingTitle)
   const showToolbarDock = ref(initial.showToolbarDock)
@@ -529,6 +568,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const rememberLongFormProgress = ref(initial.rememberLongFormProgress)
   const keepPlaybackMode = ref(initial.keepPlaybackMode)
   const showTranslation = ref(initial.showTranslation)
+  const showRomanization = ref(initial.showRomanization)
   const lyricBlur = ref(initial.lyricBlur)
   const lyricBlurAmount = ref(initial.lyricBlurAmount)
   const cloudMusicOffset = ref(initial.cloudMusicOffset)
@@ -538,6 +578,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const amllTtmlOffset = ref(initial.amllTtmlOffset)
   const coverStyle = ref<CoverStyle>(initial.coverStyle)
   const advancedLyrics = ref(initial.advancedLyrics)
+  const preferWordTimedLyrics = ref(initial.preferWordTimedLyrics)
+  const defaultLyricSource = ref<DefaultLyricSource>(initial.defaultLyricSource)
   const dynamicBackground = ref(initial.dynamicBackground)
   const colorMode = ref<ColorMode>(initial.colorMode)
   const audioReactive = ref(initial.audioReactive)
@@ -557,6 +599,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const backgroundImageUri = ref(initial.backgroundImageUri)
   const backgroundImageBlur = ref(initial.backgroundImageBlur)
   const backgroundImageAlpha = ref(initial.backgroundImageAlpha)
+  const enhancedAdvancedBlur = ref(initial.enhancedAdvancedBlur)
+  const enhancedAdvancedBlurRadius = ref(initial.enhancedAdvancedBlurRadius)
   const devModeEnabled = ref(initial.devModeEnabled)
   const logToFile = ref(initial.logToFile)
   const logLevel = ref(initial.logLevel)
@@ -583,21 +627,23 @@ export const useSettingsStore = defineStore('settings', () => {
   const equalizerEnabled = ref(initial.equalizerEnabled)
   const equalizerPresetId = ref(initial.equalizerPresetId)
   const equalizerBands = ref([...initial.equalizerBands])
+  const desktopLyrics = ref<DesktopLyricsStyle>(initial.desktopLyrics)
 
   const settingRefs: SettingRefs = {
-    darkMode, themeColor, locale, defaultScreen, showCoverBadge,
+    darkMode, themeColor, locale, defaultScreen, closeToTray, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
     showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
-    lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
+    showRomanization, lyricBlur, lyricBlurAmount, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, coverStyle,
-    advancedLyrics, dynamicBackground, colorMode, audioReactive, coverBlurBg,
+    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
     youtubeQuality, biliQuality, bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
-    backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, devModeEnabled,
+    backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, enhancedAdvancedBlur,
+    enhancedAdvancedBlurRadius, devModeEnabled,
     logToFile, logLevel,
     maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
@@ -605,7 +651,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadYoutubeQuality, downloadBiliQuality,
     ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
     playbackSpeed, loudnessGainMb, equalizerEnabled, equalizerPresetId,
-    equalizerBands,
+    equalizerBands, desktopLyrics,
   }
 
   const isHydrated = ref(false)
@@ -682,24 +728,26 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     isHydrated, hydrate, snapshot, applySnapshot,
     darkMode, themeColor, locale, coverStyle,
-    defaultScreen, showCoverBadge, showNowPlayingTitle, showToolbarDock,
+    defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-    keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, lyricBlur, lyricBlurAmount,
+    keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, showRomanization,
+    lyricBlur, lyricBlurAmount,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
-    advancedLyrics, dynamicBackground,
+    advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground,
     colorMode, audioReactive, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,
     youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
     internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,
-    backgroundImageAlpha, devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
+    backgroundImageAlpha, enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
+    devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
     downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
     downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
     downloadYoutubeQuality, downloadBiliQuality,
     ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed,
-    loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands,
+    loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, desktopLyrics,
   }
 })

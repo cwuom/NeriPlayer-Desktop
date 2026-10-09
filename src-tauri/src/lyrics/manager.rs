@@ -766,7 +766,7 @@ pub(crate) fn lyrics_duration_acceptable(lines: &[LyricLine], target_duration_ms
     true
 }
 
-fn plain_text_to_lines(text: &str, target_duration_ms: u64) -> Vec<LyricLine> {
+pub(super) fn plain_text_to_lines(text: &str, target_duration_ms: u64) -> Vec<LyricLine> {
     let rows: Vec<&str> = text
         .lines()
         .map(str::trim)

@@ -11,6 +11,7 @@ import {
   clampLyricOffsetMs,
   LYRIC_OFFSET_SOURCES,
   lyricUserOffsetStorageKey,
+  normalizeLyricSource,
   readSyncedUserOffsetMs,
   rebaseLyricUserOffsetMs,
   resolveLyricDefaultOffsetMs,
@@ -184,9 +185,22 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     const key = lyricUserOffsetStorageKey(track)
     if (key && getUserOffsetMs(track) !== 0) {
       const source = songMeta.value[key]?.source ?? inferredSongSource(key)
-      return source === 'none' ? null : source
+      // 旧版按「无默认（0）」记下的歌：同步出去的 delta 在 Android 上叠的是网易云/QQ 默认，这里跟着算
+      if (source !== 'none') return source
     }
     return lyricOffsetSourceFor(track)
+  }
+
+  /// offsetSourceFor 的结果只是兜底猜的：B 站、YouTube、本地曲目的歌词没记下来源时，
+  /// 和 Android 一样按网易云默认算，但歌词并不一定来自网易云
+  function offsetSourceIsGuessed(track: OffsetTrack): boolean {
+    const key = lyricUserOffsetStorageKey(track)
+    const recorded = key && getUserOffsetMs(track) !== 0 ? songMeta.value[key]?.source : undefined
+    if (recorded && recorded !== 'none') return false
+    const shown = normalizeLyricSource(lyricSourceOf(track))
+    if (shown && shown !== 'none') return false
+    const playback = playbackSourceOf(track)
+    return playback !== 'netease' && playback !== 'qq'
   }
 
   function defaultOffsetMs(source: LyricOffsetSource | null): number {
@@ -263,7 +277,8 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     const zeroed: Array<[string, number]> = []
     let changed = false
     for (const key of Object.keys(next)) {
-      const songSource = songMeta.value[key]?.source ?? inferredSongSource(key)
+      const recorded = songMeta.value[key]?.source ?? inferredSongSource(key)
+      const songSource = recorded === 'none' ? inferredSongSource(key) : recorded
       const delta = next[key]
       if (!shouldRebaseLyricOffset(songSource === 'none' ? null : songSource, source, delta)) continue
       const rebased = clampLyricOffsetMs(rebaseLyricUserOffsetMs(delta, prevDefault, newDefault))
@@ -310,6 +325,7 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     setUserOffsetMs,
     replaceFromSync,
     offsetSourceFor,
+    offsetSourceIsGuessed,
     defaultOffsetMs,
     effectiveOffsetMs,
     setEffectiveOffsetMs,

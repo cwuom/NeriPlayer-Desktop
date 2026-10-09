@@ -483,6 +483,12 @@ export const usePlayerStore = defineStore('player', () => {
   // 音频分析数据
   const audioLevel = ref(0)
   const beatImpulse = ref(0)
+  // 后端只在播放中推电平；不清零的话暂停后背景律动会定格在最后一拍
+  watch(isPlaying, (playing) => {
+    if (playing) return
+    audioLevel.value = 0
+    beatImpulse.value = 0
+  })
 
   // 插值后的播放位置（rAF 驱动，60fps 平滑）
   const interpolatedPositionMs = ref(0)
@@ -847,6 +853,31 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  // 鼠标停在哪一行、多久以前：解析回来时它还是最新的意图，才值得预开
+  let intentTrackId: string | null = null
+  let intentAt = 0
+  const INTENT_PREWARM_WINDOW_MS = 10_000
+
+  // 只预开紧接着的下一首和鼠标正停着的那首：首包和到 CDN 的连接提前就位，
+  // 播放时不再等冷连接（经代理要 3 秒左右）
+  playbackPrefetchManager.onPrefetched = (track, result) => {
+    if (result.source === 'local' || result.streamType === 'hls' || !result.url) return
+    const isIntent = track.id === intentTrackId && Date.now() - intentAt < INTENT_PREWARM_WINDOW_MS
+    if (!isIntent && nextPrefetchTracks()[0]?.id !== track.id) return
+    void invoke('prewarm_remote_audio', {
+      url: result.url,
+      durationHintMs: result.durationMs || track.durationMs || 0,
+    }).catch(() => {})
+  }
+
+  /** 列表行悬停或聚焦：多半马上要点它，提前解析并预开 */
+  function prefetchIntent(track: TrackInfo) {
+    if (!isRemotePlaybackTrack(track) || track.id === currentTrack.value?.id) return
+    intentTrackId = track.id
+    intentAt = Date.now()
+    playbackPrefetchManager.prefetchIntent(track, playbackSourceSettings(), playbackUrlResolver)
+  }
+
   function prefetchPlaybackTracks(tracks: readonly TrackInfo[]) {
     const candidates = initialPlaybackPrefetchWindow(tracks)
       .filter(track => isRemotePlaybackTrack(track))
@@ -942,7 +973,11 @@ export const usePlayerStore = defineStore('player', () => {
     // 倍速播放时后端时钟与插值都应按速度前进；仍拒绝明显回跳
     if (_interpIsPlaying && !forceRendered && !isClockJump
       && safePositionMs < renderedMs - POSITION_BACKWARD_TOLERANCE_MS) {
-      // 仅忽略回跳，不把锚点锁死在旧渲染值（否则倍速歌词会落后）
+      // 后端在缓冲（时钟停了）而插值还在走：渲染值不往回拉，但锚点要跟上后端，
+      // 插值随之停住、等声音追上再走；只丢弃事件的话锚点不动，歌词会按累计卡顿时长永久领先
+      positionMs.value = safePositionMs
+      _interpAnchorMs = safePositionMs
+      _interpAnchorTime = performance.now()
       return
     }
 
@@ -1300,6 +1335,14 @@ export const usePlayerStore = defineStore('player', () => {
       `command=${commandSource}, startMs=${Math.max(0, Math.round(startPositionMs))}, force=${forceResolve}`,
       token,
     )
+    const settings = useSettingsStore()
+    // 换歌时一发起请求就静音上一首，新音源解析、缓冲再慢也不会卡着旧声音；切歌交叉淡化要让它继续出声。
+    // 同一首歌重新请求（断流恢复、换地址、音质切换）时旧会话在新会话就绪前继续出声，避免一断一断
+    const isTrackChange = !!currentTrack.value && currentTrack.value.id !== track.id
+    const keepsPreviousAudible = !isTrackChange || (isPlaying.value
+      && settings.crossfadeNext
+      && Math.round(settings.crossfadeInDuration) > 0
+      && Math.round(settings.crossfadeOutDuration) > 0)
     const claimStarted = performance.now()
     void invoke<void>('begin_playback_request', {
       requestGeneration: token,
@@ -1308,6 +1351,7 @@ export const usePlayerStore = defineStore('player', () => {
       hasCover: !!getTrackCoverUrl(track),
       hasAudioUrl: !!track.audioUrl,
       hasSyncPayload: !!track.syncPayload,
+      silencePrevious: !keepsPreviousAudible,
     }).then(() => {
       if (token !== playbackRequestToken) return
       tracePlaybackUi(
@@ -1336,7 +1380,6 @@ export const usePlayerStore = defineStore('player', () => {
     const wasPlayingBeforeSwitch = isPlaying.value
     const hadPlaybackSessionBeforeRequest = hasPlaybackSession.value
     const isSwitchingTrack = !!previousTrack && previousTrack.id !== track.id
-    const settings = useSettingsStore()
     const fadeInDurationMs = Math.max(0, Math.round(settings.fadeInDuration))
     const fadeOutDurationMs = Math.max(0, Math.round(settings.fadeOutDuration))
     const overlapFadeInDurationMs = settings.crossfadeNext
@@ -3090,7 +3133,7 @@ export const usePlayerStore = defineStore('player', () => {
     lastCommandSource, lastSeekCommand, isRemoteSyncGuardActive,
     playbackSpeed, currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
-    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs,
+    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs, effectivePlaybackSpeed,
     currentTimeFormatted, durationFormatted,
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,
@@ -3102,7 +3145,7 @@ export const usePlayerStore = defineStore('player', () => {
     applyPersistedSettings, decoderCapabilities,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
     playAll, shufflePlay, addToQueueNext, addToQueueEnd, removeFromQueue, clearQueue,
-    prefetchPlaybackTracks,
+    prefetchPlaybackTracks, prefetchIntent, upcomingTrack: () => nextPrefetchTracks()[0] ?? null,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
     handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
   }

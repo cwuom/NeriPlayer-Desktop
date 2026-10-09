@@ -43,9 +43,14 @@ assert.equal(lyricSource.lyricSourceOf(online), 'amll_ttml')
 // 改版前写下的缓存是纯数组：照常读出，来源记为未知
 const legacy = { id: 'qq:legacy', source: 'qq', title: 't', artist: 'a', album: '', durationMs: 1 }
 lyricSource.rememberLyricSource(legacy, 'lrclib')
-store.set(`v3:${legacy.id}`, lines)
+store.set(`v4:${legacy.id}`, lines)
 assert.deepEqual((await exports.getCachedLyrics(legacy)).map(line => line.text), ['hello'])
 assert.equal(lyricSource.lyricSourceOf(legacy), null)
+
+// v3 缓存缺音译、没去制作信息行，升级后不再读
+const stale = { id: 'netease:stale', source: 'netease', title: 't', artist: 'a', album: '', durationMs: 1 }
+store.set(`v3:${stale.id}`, { source: 'netease', lines })
+assert.equal(await exports.getCachedLyrics(stale), null)
 
 // 本地歌曲每次都重新读取歌词文件，不读也不写持久缓存
 calls.length = 0

@@ -194,6 +194,8 @@ onMounted(load)
           :class="{ active: player.currentTrack?.id === track.id }"
           :data-track-key="track.id"
           @click="playTrack(index)"
+          @pointerenter="player.prefetchIntent(track)"
+          @focusin="player.prefetchIntent(track)"
           @contextmenu.prevent.stop="openTrackContextMenu($event, track)"
         >
           <div class="track-index">

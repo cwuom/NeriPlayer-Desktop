@@ -1,15 +1,27 @@
 use crate::error::AppResult;
 use crate::lyrics::manager::LyricsManager;
+use crate::lyrics::matcher::{LyricMatcher, MatchRequest, RankedMatch};
 use crate::lyrics::parser::{self, LyricLine};
-use crate::lyrics::FetchedLyrics;
+use crate::lyrics::sanitize;
+use crate::lyrics::{FetchedLyrics, LyricSource};
 use crate::state::AppState;
 use std::time::Instant;
 use tauri::State;
 
+/// 自动识别 LRC / YRC(逐字), 支持逐字歌词编辑往返
+///
+/// 传了歌名时按匹配歌词处理：同步来的歌词多是 Android 从平台匹配的，同样去掉制作信息和标题行
 #[tauri::command]
-pub async fn parse_lrc_content(content: String) -> AppResult<Vec<LyricLine>> {
-    // 自动识别 LRC / YRC(逐字), 支持逐字歌词编辑往返
-    Ok(parser::parse_auto(&content))
+pub async fn parse_lrc_content(
+    content: String,
+    title: Option<String>,
+    artist: Option<String>,
+) -> AppResult<Vec<LyricLine>> {
+    let lines = parser::parse_auto(&content);
+    Ok(match title {
+        Some(title) => sanitize::sanitize_matched_lines(lines, &title, artist.as_deref().unwrap_or(""), ""),
+        None => lines,
+    })
 }
 
 #[tauri::command]
@@ -23,7 +35,43 @@ pub async fn fetch_word_timed_lyrics(
         state.transport("lyrics"),
         crate::auth::cookies::read_netease_csrf(&state.cookie_jar),
     );
-    manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await
+    let fetched = manager.fetch_word_timed_lyrics(&title, &artist, duration_ms).await?;
+    Ok(sanitize_fetched(fetched, &title, &artist))
+}
+
+/// 在线取到的歌词去掉制作信息、歌名歌手标题行；用户自己的本地歌词文件原样保留
+fn sanitize_fetched(fetched: FetchedLyrics, title: &str, artist: &str) -> FetchedLyrics {
+    if fetched.source == Some(LyricSource::Local) {
+        return fetched;
+    }
+    FetchedLyrics {
+        source: fetched.source,
+        lines: sanitize::sanitize_matched_lines(fetched.lines, title, artist, ""),
+    }
+}
+
+/// 网易云音译轨原文（romalrc）；同步来的歌词缺音译时补上，对齐 Android loadNeteaseRomanizedFallback
+#[tauri::command]
+pub async fn fetch_netease_romanized_lyric(song_id: u64, state: State<'_, AppState>) -> AppResult<Option<String>> {
+    let lyrics = state.netease().get_lyrics(song_id).await?;
+    Ok(lyrics.romalrc.filter(|text| !text.trim().is_empty()))
+}
+
+/// 歌词编辑器「匹配」：按所选平台搜索并排序候选，每个候选带完整歌词行
+#[tauri::command]
+pub async fn match_lyrics(request: MatchRequest, state: State<'_, AppState>) -> AppResult<Vec<RankedMatch>> {
+    let started = Instant::now();
+    let sources = request.sources.clone();
+    let matcher = LyricMatcher::new(state.transport("lyrics"), state.netease());
+    let results = matcher.find(request).await;
+    log::info!(
+        target: "lyrics-command",
+        "match sources={sources:?} results={} top={:?} elapsed_ms={}",
+        results.len(),
+        results.first().map(|result| (result.source, result.confidence, result.score)),
+        started.elapsed().as_millis(),
+    );
+    Ok(results)
 }
 
 #[tauri::command]
@@ -82,5 +130,5 @@ pub async fn fetch_lyrics(
         result.as_ref().map_or(0, |fetched| fetched.lines.len()),
         started.elapsed().as_millis(),
     );
-    result
+    result.map(|fetched| sanitize_fetched(fetched, &title, &artist))
 }

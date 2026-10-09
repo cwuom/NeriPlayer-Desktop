@@ -7,8 +7,8 @@
 // 存储与同步的仍是 delta，双端数据一致。
 //
 // 默认偏移按「当前显示的歌词实际来自哪里」选：网易云曲目显示的是 AMLL TTML 逐字歌词时用
-// TTML 的默认。歌词来源未知（旧缓存）时按播放来源推断：网易云、QQ 用各自默认，其余为 0。
-// YouTube 原生歌词、本地歌词文件和手动编辑的歌词没有可调的默认，按 0 计。
+// TTML 的默认。其余情况（来源未知、YouTube 原生歌词、本地歌词文件、手动编辑）与 Android
+// resolveLyricDefaultOffsetMs 一样：QQ 曲目用 QQ 默认，其它一律用网易云默认。
 
 export const LYRIC_OFFSET_SOURCES = ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml'] as const
 export type LyricOffsetSource = typeof LYRIC_OFFSET_SOURCES[number]
@@ -67,17 +67,15 @@ export function normalizeLyricSource(value: unknown): LyricOffsetSource | 'none'
   }
 }
 
-/** 有效偏移该用哪个来源的默认；null 表示没有默认（按 0 计） */
+/** 有效偏移该用哪个来源的默认 */
 export function resolveLyricOffsetSource(
   lyricSource: unknown,
   playbackSource?: string | null,
-): LyricOffsetSource | null {
+): LyricOffsetSource {
   const normalized = normalizeLyricSource(lyricSource)
-  if (normalized === 'none') return null
-  if (normalized) return normalized
-  if (playbackSource === 'netease') return 'netease'
+  if (normalized && normalized !== 'none') return normalized
   if (playbackSource === 'qq') return 'qq'
-  return null
+  return 'netease'
 }
 
 /** 某来源的默认偏移；没有默认的来源恒为 0 */

@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{self, Decoder, DecoderOptions, CODEC_TYPE_NULL};
@@ -295,6 +295,8 @@ struct RemoteAudioInner {
 struct RemoteSeekIndex {
     duration_ms: u64,
     entries: Vec<SeekIndexEntry>,
+    /// 条目时间是 sidx 给的分片真实起点；线性估算只是大致落点
+    exact_times: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -310,10 +312,10 @@ impl RemoteSeekIndex {
         self.estimate_segment(target_ms).0
     }
 
-    /// (start, end_exclusive_hint)：用下一条 sidx 推段长，便于一次预满 moof+mdat
-    fn estimate_segment(&self, target_ms: u64) -> (u64, Option<u64>) {
+    /// (分片起点字节, 分片起点时间)
+    fn estimate_segment(&self, target_ms: u64) -> (u64, u64) {
         if self.entries.is_empty() {
-            return (0, None);
+            return (0, 0);
         }
         let mut best_idx = 0usize;
         for (idx, entry) in self.entries.iter().enumerate() {
@@ -323,9 +325,8 @@ impl RemoteSeekIndex {
                 break;
             }
         }
-        let start = self.entries[best_idx].byte_offset;
-        let end = self.entries.get(best_idx + 1).map(|e| e.byte_offset);
-        (start, end)
+        let entry = self.entries[best_idx];
+        (entry.byte_offset, entry.time_ms)
     }
 
     #[allow(dead_code)]
@@ -518,17 +519,30 @@ impl RemoteAudioSource {
         if playback_generation.load(Ordering::Acquire) != expected_generation {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
-        let initial_block = if duration_hint_ms >= REMOTE_LONG_FORM_DURATION_MS {
-            REMOTE_LONG_INITIAL_BLOCK_BYTES
-        } else {
-            REMOTE_INITIAL_BLOCK_BYTES
-        };
+        let initial_block = initial_block_bytes(duration_hint_ms);
         let probe_started = Instant::now();
-        let range_result = {
+        tokio::select! {
+            () = join_warming_probe(&url) => {}
+            () = wait_for_generation_change(&playback_generation, expected_generation) => {
+                return Err(AppError::Audio("Playback request superseded".into()));
+            }
+        }
+        let warm = take_warm_probe(&url);
+        let probe_elapsed_ms = warm.as_ref().map(|probe| probe.elapsed_ms);
+        let range_result = if let Some(probe) = warm {
+            log::info!(
+                target: "remote-audio",
+                "range probe warm hit host={}, age_ms={}, bytes={}",
+                host,
+                probe.fetched_at.elapsed().as_millis(),
+                probe.data.len(),
+            );
+            Ok(ProbeHead { total_len: probe.total_len, data: probe.data, rest: None })
+        } else {
             // 连接层失败（重置、超时）只说明这条链路一时不通，换条连接再试一次；
             // 状态码或 Range 不受支持则直接交给调用方走兜底
             let range_probe = async {
-                match probe_range_len(&client, &url, &referer, initial_block).await {
+                match probe_range_head(&client, &url, &referer, initial_block, true).await {
                     Err(AppError::Network(error)) if error.is_connect() || error.is_timeout() => {
                         log::warn!(
                             target: "remote-audio",
@@ -537,7 +551,7 @@ impl RemoteAudioSource {
                             probe_started.elapsed().as_millis(),
                             error.without_url(),
                         );
-                        probe_range_len(&client, &url, &referer, initial_block).await
+                        probe_range_head(&client, &url, &referer, initial_block, true).await
                     }
                     result => result,
                 }
@@ -561,16 +575,17 @@ impl RemoteAudioSource {
             probe_started.elapsed().as_millis(),
             open_started.elapsed().as_millis(),
         );
-        let (total_len, initial_segment) = match range_result {
-            Ok((len, data)) => {
+        let (total_len, initial_segment, probe_rest) = match range_result {
+            Ok(ProbeHead { total_len: len, data, rest }) => {
                 log::info!(
                     target: "remote-audio",
-                    "range probe data host={}, total_len={}, initial_bytes={}",
+                    "range probe data host={}, total_len={}, initial_bytes={}, streaming_rest={}",
                     host,
                     len,
                     data.len(),
+                    rest.as_ref().map_or(0, |(end, _)| end.saturating_add(1).saturating_sub(data.len() as u64)),
                 );
-                (len, Some(CachedSegment { start: 0, data }))
+                (len, Some(CachedSegment { start: 0, data }), rest)
             }
             Err(range_error) => {
                 if playback_generation.load(Ordering::Acquire) != expected_generation {
@@ -596,7 +611,7 @@ impl RemoteAudioSource {
                 .as_ref()
                 .map(|segment| segment.data.len() as u64)
                 .unwrap_or(0),
-            (probe_started.elapsed().as_millis().max(1)) as u64,
+            probe_elapsed_ms.unwrap_or(probe_started.elapsed().as_millis() as u64).max(1),
         );
 
         if let Some(cache) = disk_cache.as_ref().cloned() {
@@ -622,6 +637,7 @@ impl RemoteAudioSource {
             );
         }
 
+        let head_len = initial_segment.as_ref().map_or(0, |segment| segment.data.len() as u64);
         let initial_disk_segment = initial_segment
             .as_ref()
             .map(|segment| (segment.start, segment.data.clone()));
@@ -792,6 +808,9 @@ impl RemoteAudioSource {
                 matches!(access_mode, RemoteAccessMode::LongFormProgressive);
             build_seek_index_for_long_form(&inner, duration_hint_ms, allow_linear_fallback);
         }
+        if let Some((rest_end, response)) = probe_rest {
+            continue_probe_in_background(&inner, head_len, rest_end, response, probe_started);
+        }
         replenish_prefetch_window(&inner, 0);
 
         log::info!(
@@ -916,7 +935,10 @@ impl RemoteAudioSource {
     }
 
     /// 配置虚拟 body：逻辑 [0, header_end) = 文件头；逻辑 header_end.. = 目标 moof 起
-    pub fn configure_virtual_body_for_time(&self, position_ms: u64) -> io::Result<u64> {
+    ///
+    /// 解码会从目标所在分片的开头出声。返回该分片的起点时间（只有落点确实是 sidx
+    /// 记录的那个分片时才有），调用方据此丢掉分片开头到目标之间的音频
+    pub fn configure_virtual_body_for_time(&self, position_ms: u64) -> io::Result<Option<u64>> {
         self.ensure_read_current()?;
         let header_end = self.inner.header_end.load(Ordering::Acquire);
         if header_end == 0 {
@@ -938,8 +960,9 @@ impl RemoteAudioSource {
             ));
         };
         // 只算 sidx 落点；真正 body 拉取交给 splice 分块（避免这里一次拉过大超时）
-        let (seg_start, _seg_end_hint) = index.estimate_segment(position_ms);
+        let (seg_start, seg_start_ms) = index.estimate_segment(position_ms);
         let mut target = seg_start.max(header_end).min(self.inner.total_len.saturating_sub(1));
+        let mut exact_start = index.exact_times && target == seg_start;
 
         // 轻量探测：最多拉 256KB 校验 moof 并对齐；失败也不致命，splice 会再 snap
         let probe_end = target
@@ -993,6 +1016,7 @@ impl RemoteAudioSource {
                     target = target
                         .saturating_add(rel)
                         .min(self.inner.total_len.saturating_sub(1));
+                    exact_start = false;
                 }
                 let store = data[rel as usize..].to_vec();
                 if !store.is_empty() {
@@ -1029,14 +1053,15 @@ impl RemoteAudioSource {
         let logical_len = header_end.saturating_add(self.inner.total_len.saturating_sub(target));
         log::info!(
             target: "remote-audio",
-            "virtual-body configured target_ms={}, header_end={}, body_origin={}, total_len={}, logical_len={}",
+            "virtual-body configured target_ms={}, segment_start_ms={:?}, header_end={}, body_origin={}, total_len={}, logical_len={}",
             position_ms,
+            exact_start.then_some(seg_start_ms),
             header_end,
             target,
             self.inner.total_len,
             logical_len,
         );
-        Ok(target)
+        Ok(exact_start.then_some(seg_start_ms))
     }
 
     pub fn clear_virtual_body(&self) {
@@ -1393,6 +1418,11 @@ impl Read for RemoteAudioSource {
             let mut read = self.read_cached_at(physical, &mut out[total_read..window]);
             if read == 0 {
                 read = self.read_disk_cached_at(physical, &mut out[total_read..window]);
+            }
+            // 已经读到数据、下一段还在路上时先交出去：FFmpeg 一次要 64KB，凑满要等慢链路上的下一块，
+            // 起播就被这一块卡住。短读是 Read 的正常语义，调用方会接着读
+            if read == 0 && total_read > 0 {
+                break;
             }
             if read == 0 {
                 match self.fetch_physical_range(physical, limit) {
@@ -3024,14 +3054,162 @@ impl PcmSource for SymphoniaAudioDecoder {
     }
 }
 
+fn initial_block_bytes(duration_hint_ms: u64) -> u64 {
+    if duration_hint_ms >= REMOTE_LONG_FORM_DURATION_MS {
+        REMOTE_LONG_INITIAL_BLOCK_BYTES
+    } else {
+        REMOTE_INITIAL_BLOCK_BYTES
+    }
+}
+
+/// 预先拿到的首包：总长与开头一块。经代理时冷连接拿首包要 3 秒左右，热连接不到 1 秒
+struct WarmProbe {
+    url: String,
+    total_len: u64,
+    data: Vec<u8>,
+    /// 当时拉首包的耗时，正式打开时据此估初始吞吐
+    elapsed_ms: u64,
+    fetched_at: Instant,
+}
+
+/// 直链签名本身也会过期，留太久的首包没用
+const WARM_PROBE_TTL: Duration = Duration::from_secs(10 * 60);
+/// 预开只拉 64KB：够解码起步（Opus 约 3 秒），冷连接上少收一半正文就能早一秒就绪，
+/// 后面的数据走预开留下的热连接
+const PREWARM_BLOCK_BYTES: u64 = 64 * 1024;
+/// 下一首、鼠标停着的那首，外加切换途中的余量
+const WARM_PROBE_LIMIT: usize = 4;
+static WARM_PROBES: Mutex<Vec<WarmProbe>> = Mutex::new(Vec::new());
+
+/// 正在预开的地址：正式打开撞上时等它，别对同一台冷主机再建一条连接互相抢带宽
+static WARMING: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 等预开的上限：超过就自己拉，预开卡住不能拖住起播
+const WARMING_JOIN_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 同一地址的预开还在路上就等它出结果；返回时预开已结束或等不及了
+async fn join_warming_probe(url: &str) {
+    let Some(notify) = WARMING.lock().ok().and_then(|warming| warming.get(url).cloned()) else {
+        return;
+    };
+    // Notified 一创建就能收到 notify_waiters，先建再复查，不会漏掉中间的完成通知
+    let notified = notify.notified();
+    if !WARMING.lock().is_ok_and(|warming| warming.contains_key(url)) {
+        return;
+    }
+    let _ = tokio::time::timeout(WARMING_JOIN_TIMEOUT, notified).await;
+}
+
+fn take_warm_probe(url: &str) -> Option<WarmProbe> {
+    let mut probes = WARM_PROBES.lock().ok()?;
+    probes.retain(|probe| probe.fetched_at.elapsed() < WARM_PROBE_TTL);
+    let index = probes.iter().position(|probe| probe.url == url)?;
+    Some(probes.swap_remove(index))
+}
+
+/// 预开即将播放的直链：先把总长和首包拿到手，连接也留在池里。之后正式打开同一个地址时
+/// 跳过首包请求，切到下一首几乎立即出声。已经预开过的地址不重复请求
+pub async fn prewarm(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+    duration_hint_ms: u64,
+) -> AppResult<bool> {
+    let already_warm = WARM_PROBES.lock().is_ok_and(|probes| {
+        probes.iter().any(|probe| probe.url == url && probe.fetched_at.elapsed() < WARM_PROBE_TTL)
+    });
+    if already_warm {
+        return Ok(false);
+    }
+    let notify = {
+        let Ok(mut warming) = WARMING.lock() else {
+            return Ok(false);
+        };
+        if warming.contains_key(url) {
+            return Ok(false);
+        }
+        let notify = Arc::new(tokio::sync::Notify::new());
+        warming.insert(url.to_owned(), Arc::clone(&notify));
+        notify
+    };
+    // 不管成败都要摘掉登记并唤醒等待方，否则正式打开会白等到超时
+    struct WarmingGuard<'a> {
+        url: &'a str,
+        notify: Arc<tokio::sync::Notify>,
+    }
+    impl Drop for WarmingGuard<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut warming) = WARMING.lock() {
+                warming.remove(self.url);
+            }
+            self.notify.notify_waiters();
+        }
+    }
+    let _guard = WarmingGuard { url, notify };
+    let started = Instant::now();
+    let full_block = initial_block_bytes(duration_hint_ms);
+    let block = if full_block > REMOTE_INITIAL_BLOCK_BYTES { full_block } else { PREWARM_BLOCK_BYTES };
+    let (mut total_len, mut data) = probe_range_len(client, url, referer, block).await?;
+    if block < full_block.min(total_len) && !probe_head_is_self_contained(&data) {
+        // MP4 文件头比预开块大：补拉完整首包，打开阶段建索引要用
+        (total_len, data) = probe_range_len(client, url, referer, full_block).await?;
+    }
+    let probe = WarmProbe {
+        url: url.to_owned(),
+        total_len,
+        data,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        fetched_at: Instant::now(),
+    };
+    if let Ok(mut probes) = WARM_PROBES.lock() {
+        probes.retain(|existing| existing.url != url && existing.fetched_at.elapsed() < WARM_PROBE_TTL);
+        if probes.len() >= WARM_PROBE_LIMIT {
+            probes.remove(0);
+        }
+        probes.push(probe);
+    }
+    Ok(true)
+}
+
 async fn probe_range_len(
     client: &reqwest::Client,
     url: &str,
     referer: &str,
     initial_block_bytes: u64,
 ) -> AppResult<(u64, Vec<u8>)> {
-    let range_end = initial_block_bytes.max(REMOTE_INITIAL_BLOCK_BYTES).saturating_sub(1);
-    let response = client
+    let head = probe_range_head(client, url, referer, initial_block_bytes, false).await?;
+    Ok((head.total_len, head.data))
+}
+
+/// 首包收到这么多、并且文件头已经完整，就可以开始解码；同一响应剩下的部分在后台接着收
+const PROBE_EARLY_RETURN_BYTES: usize = 32 * 1024;
+
+struct ProbeHead {
+    total_len: u64,
+    data: Vec<u8>,
+    /// 提前返回时还没收完的部分：(物理尾偏移, 仍在传输的响应)
+    rest: Option<(u64, reqwest::Response)>,
+}
+
+/// 打开阶段只从首包解析 MP4 文件头（moov、sidx 都在第一个 moof/mdat 之前）。
+/// 其它容器不靠首包建任何状态，解码器读到哪拉到哪
+fn probe_head_is_self_contained(head: &[u8]) -> bool {
+    let is_iso_bmff = head.len() >= 8
+        && matches!(&head[4..8], b"ftyp" | b"styp" | b"moov" | b"sidx" | b"free" | b"skip" | b"wide" | b"moof" | b"mdat");
+    !is_iso_bmff || detect_mp4_header_end(head).is_some()
+}
+
+/// 慢链路上新连接的拥塞窗口要好几个往返才撑得开，128KB 首包光收完正文就要 1 秒左右；
+/// allow_early 时收够文件头和开头一小段就返回，让解码先跑起来
+async fn probe_range_head(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+    initial_block_bytes: u64,
+    allow_early: bool,
+) -> AppResult<ProbeHead> {
+    let range_end = initial_block_bytes.max(1).saturating_sub(1);
+    let mut response = client
         .get(url)
         .header(REFERER, referer)
         .header(USER_AGENT, playback_user_agent(url))
@@ -3055,15 +3233,87 @@ async fn probe_range_len(
         .ok_or_else(|| {
             AppError::Audio("Remote Range response did not include a valid byte range".into())
         })?;
-    let data = response
-        .bytes()
-        .await
-        .map_err(AppError::Network)?
-        .to_vec();
+    if content_range.start != 0 || content_range.end > range_end {
+        return Err(AppError::Audio(format!(
+            "unexpected Content-Range {}-{}/{} for request 0-{range_end}",
+            content_range.start, content_range.end, content_range.total,
+        )));
+    }
+    let expected_len = (content_range.end - content_range.start).saturating_add(1) as usize;
+    let mut data = Vec::with_capacity(expected_len);
+    while data.len() < expected_len {
+        let Some(chunk) = response.chunk().await.map_err(AppError::Network)? else {
+            break;
+        };
+        data.extend_from_slice(&chunk);
+        if allow_early
+            && data.len() >= PROBE_EARLY_RETURN_BYTES
+            && data.len() < expected_len
+            && probe_head_is_self_contained(&data)
+        {
+            return Ok(ProbeHead {
+                total_len: content_range.total,
+                data,
+                rest: Some((content_range.end, response)),
+            });
+        }
+    }
     validate_http_range_data(content_range, 0, range_end, &data)
         .map_err(|err| AppError::Audio(err.to_string()))?;
 
-    Ok((content_range.total, data))
+    Ok(ProbeHead { total_len: content_range.total, data, rest: None })
+}
+
+/// 提前返回的首包剩下的部分登记成在途请求：解码线程读到这里会等它，不会另发一次请求。
+/// 收完入缓存后接着按正常节奏预取；中途失败只是撤销登记，读的人自己去拉
+fn continue_probe_in_background(
+    inner: &Arc<RemoteAudioInner>,
+    start: u64,
+    end: u64,
+    mut response: reqwest::Response,
+    started: Instant,
+) {
+    let Some(entry) = claim_prefetch_start(inner, start, end) else {
+        return;
+    };
+    let inner = Arc::clone(inner);
+    tauri::async_runtime::spawn(async move {
+        let expected_len = (end - start).saturating_add(1) as usize;
+        let mut data = Vec::with_capacity(expected_len);
+        let complete = loop {
+            if inner.playback_cancelled() {
+                break false;
+            }
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    data.extend_from_slice(&chunk);
+                    if data.len() >= expected_len {
+                        break data.len() == expected_len;
+                    }
+                }
+                Ok(None) => break data.len() == expected_len,
+                Err(error) => {
+                    log::warn!(target: "remote-range", "probe tail interrupted at {}: {}", start + data.len() as u64, error.without_url());
+                    break false;
+                }
+            }
+        };
+        if complete {
+            inner.record_fetch_success(end.saturating_add(1), started.elapsed().as_millis() as u64);
+            if let Ok(mut cache) = inner.cache.lock() {
+                if !cache_contains_position(&cache, start) {
+                    cache.push(CachedSegment { start, data: data.clone() });
+                    cache.sort_by_key(|segment| segment.start);
+                    trim_cache(&inner, &mut cache, cache_center(&inner, start));
+                }
+            }
+            write_disk_range(&inner, start, &data);
+        }
+        release_prefetch_start(&inner, start, &entry);
+        if complete {
+            replenish_prefetch_window(&inner, start);
+        }
+    });
 }
 
 fn fetch_range_block(
@@ -3891,6 +4141,7 @@ fn build_seek_index_for_long_form(
         index = Some(RemoteSeekIndex {
             duration_ms: duration_hint_ms,
             entries,
+            exact_times: false,
         });
         log::info!(
             target: "remote-audio",
@@ -4153,6 +4404,7 @@ fn parse_sidx_body(
     Some(RemoteSeekIndex {
         duration_ms: duration_ms.max(entries.last().map(|e| e.time_ms).unwrap_or(0)),
         entries,
+        exact_times: true,
     })
 }
 
@@ -4566,6 +4818,212 @@ mod tests {
         ));
         server.join().unwrap();
         assert_flac_source_info(SymphoniaAudioDecoder::new_remote(source.unwrap()).unwrap());
+    }
+
+    /// 首包收够文件头就开始解码，剩下的部分沿用同一个响应在后台收完：
+    /// 打开不等首包传完，整段读出来逐字节一致，服务端只收到一次请求
+    #[test]
+    fn open_returns_before_the_first_block_finishes_streaming() {
+        let mut body = b"fLaC".to_vec();
+        body.extend((0..(super::REMOTE_INITIAL_BLOCK_BYTES as usize - 4)).map(|index| (index % 251) as u8));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/streaming.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served[..40 * 1024]).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(400));
+            stream.write_all(&served[40 * 1024..]).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let started = Instant::now();
+        let mut source = runtime
+            .block_on(RemoteAudioSource::open(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+                url,
+                String::new(),
+                None,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                1,
+            ))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(350), "打开要在首包传完之前返回: {:?}", started.elapsed());
+
+        let mut read_back = Vec::new();
+        source.read_to_end(&mut read_back).unwrap();
+        server.join().unwrap();
+        assert!(read_back == body, "流式收完的首包要与原文件一致");
+    }
+
+    /// 首包剩下的部分传到一半断了：撤销在途登记，读的人自己按 Range 补拉，数据照样完整
+    #[test]
+    fn a_broken_probe_tail_is_refetched_by_the_reader() {
+        let mut body = b"fLaC".to_vec();
+        body.extend((0..(super::REMOTE_INITIAL_BLOCK_BYTES as usize - 4)).map(|index| (index % 241) as u8));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/broken.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let read_request = |stream: &mut std::net::TcpStream| {
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                String::from_utf8_lossy(&request).to_ascii_lowercase()
+            };
+            let (mut first, _) = listener.accept().unwrap();
+            read_request(&mut first);
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            first.write_all(header.as_bytes()).unwrap();
+            first.write_all(&served[..40 * 1024]).unwrap();
+            first.flush().unwrap();
+            thread::sleep(Duration::from_millis(100));
+            drop(first);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                let request = read_request(&mut stream);
+                let range = request.split("range: bytes=").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("0-");
+                let (start, end) = range.split_once('-').unwrap();
+                let start: usize = start.trim().parse().unwrap();
+                let end: usize = end.trim().parse::<usize>().unwrap_or(served.len() - 1).min(served.len() - 1);
+                let header = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    served.len(), end - start + 1,
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.write_all(&served[start..=end]).unwrap();
+                if end == served.len() - 1 {
+                    break;
+                }
+            }
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut source = runtime
+            .block_on(RemoteAudioSource::open(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+                url,
+                String::new(),
+                None,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                1,
+            ))
+            .unwrap();
+
+        let mut read_back = Vec::new();
+        source.read_to_end(&mut read_back).unwrap();
+        assert!(read_back == body, "断掉的部分要由读的人补拉回来");
+        drop(source);
+        server.join().unwrap();
+    }
+
+    /// 点下去时预开还在路上：正式打开等它出结果，不对同一主机再发一次首包请求
+    #[test]
+    fn open_joins_a_prewarm_that_is_still_in_flight() {
+        let body = silent_flac_24bit_stereo();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/joining.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            thread::sleep(Duration::from_millis(300));
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let warming = {
+            let (client, url) = (client.clone(), url.clone());
+            runtime.spawn(async move { super::prewarm(&client, &url, "", 0).await })
+        };
+        thread::sleep(Duration::from_millis(50));
+
+        let source = runtime
+            .block_on(RemoteAudioSource::open(client, url, String::new(), None, 0, Arc::new(AtomicU64::new(1)), 1))
+            .expect("等到预开的首包就能打开，不该再发请求");
+        assert!(runtime.block_on(warming).unwrap().unwrap());
+        server.join().unwrap();
+        assert_eq!(source.inner.total_len, body.len() as u64);
+    }
+
+    /// 预开过的直链正式打开时不再请求首包：本地服务只应答一次，之后再连就被拒
+    #[test]
+    fn prewarmed_url_opens_without_another_probe() {
+        let body = silent_flac_24bit_stereo();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/prewarmed.flac", listener.local_addr().unwrap());
+        let served = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1, served.len(), served.len(),
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served).unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        assert!(runtime.block_on(super::prewarm(&client, &url, "", 0)).unwrap());
+        server.join().unwrap();
+        assert!(!runtime.block_on(super::prewarm(&client, &url, "", 0)).unwrap(), "同一地址不重复预开");
+
+        let source = runtime
+            .block_on(RemoteAudioSource::open(client, url.clone(), String::new(), None, 0, Arc::new(AtomicU64::new(1)), 1))
+            .expect("预开的首包足够打开，不能再发请求");
+        assert_eq!(source.inner.total_len, body.len() as u64);
+        assert!(super::take_warm_probe(&url).is_none(), "打开后首包从预开缓存里取走");
     }
 
     fn pcm_wav(sample_count: u32) -> Vec<u8> {
@@ -5218,6 +5676,7 @@ mod tests {
                     byte_offset: 100_000_000,
                 },
             ],
+            exact_times: true,
         };
         let source = RemoteAudioSource {
             inner: Arc::new(RemoteAudioInner {
@@ -5441,6 +5900,7 @@ mod tests {
                             SeekIndexEntry { time_ms: 0, byte_offset: 10_799 },
                             SeekIndexEntry { time_ms: 10_000, byte_offset: 172_000 },
                         ],
+                        exact_times: true,
                     })),
                     throughput_ewma_bps: AtomicU64::new(0),
                     bitrate_bps: 0,
@@ -5893,6 +6353,7 @@ mod tests {
                     byte_offset: 100_000,
                 },
             ],
+            exact_times: true,
         };
         assert_eq!(index.estimate_segment_start(0), 1_000);
         assert_eq!(index.estimate_segment_start(49_999), 1_000);
@@ -5966,6 +6427,7 @@ mod tests {
                     byte_offset: 1_000,
                 },
             ],
+            exact_times: false,
         };
         assert_eq!(index.estimate_byte(0), 0);
         assert_eq!(index.estimate_byte(25_000), 250);
@@ -6911,6 +7373,7 @@ mod tests {
                     byte_offset: 500_000,
                 },
             ],
+            exact_times: true,
         });
         let source = RemoteAudioSource {
             inner: Arc::clone(&inner),
@@ -6988,9 +7451,129 @@ mod tests {
         // seek 到 15s 应落在 10s 段起点（首个 moof 后 1MB 处）
         let atom_len = sidx_atom_two_segments().len() as u64;
         assert_eq!(
-            index.estimate_segment(15_000).0,
-            atom_len + 1024 * 1024,
+            index.estimate_segment(15_000),
+            (atom_len + 1024 * 1024, 10_000),
+            "落点分片从 10s 开始出声，播放器要丢掉 10s 到 15s 之间的音频",
         );
+        assert!(index.exact_times);
+    }
+
+    /// 起播首包耗时实测：NERI_PROBE_URL=<直链> cargo test -- --ignored --nocapture probe_timing
+    #[test]
+    #[ignore]
+    fn probe_timing_against_a_real_url() {
+        let Ok(url) = std::env::var("NERI_PROBE_URL") else {
+            eprintln!("NERI_PROBE_URL 未设置，跳过");
+            return;
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let build = || {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(30))
+                .no_proxy()
+                .build()
+                .unwrap()
+        };
+        let configs: [(&str, fn() -> reqwest::Client); 3] = [
+            ("default", || reqwest::Client::builder().no_proxy().build().unwrap()),
+            ("http1", || reqwest::Client::builder().no_proxy().http1_only().build().unwrap()),
+            ("ipv4", || {
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .local_address(std::net::IpAddr::from([0, 0, 0, 0]))
+                    .build()
+                    .unwrap()
+            }),
+        ];
+        for round in 0..2 {
+            for (label, make) in configs {
+                let client = make();
+                let started = Instant::now();
+                let response = runtime.block_on(
+                    client
+                        .get(&url)
+                        .header(super::RANGE, "bytes=0-32767")
+                        .header(super::USER_AGENT, super::playback_user_agent(&url))
+                        .send(),
+                );
+                eprintln!(
+                    "round {round} {label}: headers status={:?} version={:?} ttfb_ms={}",
+                    response.as_ref().map(|r| r.status()).ok(),
+                    response.as_ref().map(|r| r.version()).ok(),
+                    started.elapsed().as_millis(),
+                );
+            }
+        }
+        let shared = build();
+        for round in 0..3 {
+            for (label, client) in [("fresh", build()), ("shared", shared.clone())] {
+                let started = Instant::now();
+                let result = runtime.block_on(super::probe_range_len(&client, &url, "", super::REMOTE_INITIAL_BLOCK_BYTES));
+                eprintln!(
+                    "round {round} {label}: ok={} bytes={} elapsed_ms={}",
+                    result.is_ok(),
+                    result.as_ref().map_or(0, |(_, data)| data.len()),
+                    started.elapsed().as_millis(),
+                );
+            }
+        }
+    }
+
+    /// 真实 B 站 fMP4（FLAC）实测：字节跳转后丢掉分片开头，出声的第一个样本必须就是目标位置
+    ///
+    /// NERI_BILI_REPRO_FILE=<下载完的 .m4s> [NERI_BILI_REPRO_TARGET_MS=32700] cargo test -- --ignored bili_virtual_body
+    #[test]
+    #[ignore]
+    fn bili_virtual_body_seek_starts_exactly_at_the_target() {
+        let Ok(path) = std::env::var("NERI_BILI_REPRO_FILE") else {
+            eprintln!("NERI_BILI_REPRO_FILE 未设置，跳过");
+            return;
+        };
+        let target_ms: u64 = std::env::var("NERI_BILI_REPRO_TARGET_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32_700);
+        let bytes = std::fs::read(&path).expect("repro file");
+        let inner = forbidden_test_inner("http://127.0.0.1:1/bili.m4s".into(), bytes.len() as u64);
+        let header_end = super::detect_mp4_header_end(&bytes).expect("mp4 header end");
+        inner.header_end.store(header_end, Ordering::Release);
+        inner.cache.lock().expect("cache lock").push(CachedSegment { start: 0, data: bytes });
+        assert!(super::build_seek_index_from_head(&inner, 0), "B 站 fMP4 首包带 sidx");
+        let source = RemoteAudioSource {
+            inner: Arc::clone(&inner),
+            pos: 0,
+            access_mode: RemoteAccessMode::StandardSeekable,
+            read_cancellation: None,
+        };
+
+        let segment_start_ms = source
+            .configure_virtual_body_for_time(target_ms)
+            .expect("configure virtual body")
+            .expect("sidx 落点要给出分片起点");
+        assert!(segment_start_ms <= target_ms && target_ms - segment_start_ms < 10_000);
+        let mut seeked = SymphoniaAudioDecoder::new_remote_virtual(source, true).expect("virtual body open");
+        let samples_per_ms = |ms: u64, decoder: &SymphoniaAudioDecoder| {
+            (ms * u64::from(decoder.sample_rate()) / 1_000 * u64::from(decoder.channels())) as usize
+        };
+        let lead = samples_per_ms(target_ms - segment_start_ms, &seeked);
+        assert_eq!(seeked.by_ref().take(lead).count(), lead);
+        let seeked: Vec<f32> = seeked.take(4_096).collect();
+
+        // sidx 时间按整毫秒记，允许 1ms 以内的错位
+        let mut reference = SymphoniaAudioDecoder::new_file(std::path::Path::new(&path)).expect("reference open");
+        let one_ms = samples_per_ms(1, &reference);
+        let channels = usize::from(reference.channels());
+        let skip = samples_per_ms(target_ms, &reference) - one_ms;
+        assert_eq!(reference.by_ref().take(skip).count(), skip);
+        let reference: Vec<f32> = reference.take(4_096 + 2 * one_ms).collect();
+
+        assert_eq!(seeked.len(), 4_096);
+        let shift = (0..=2 * one_ms)
+            .step_by(channels)
+            .find(|&shift| reference[shift..shift + seeked.len()] == seeked[..])
+            .expect("跳转后的音频与从头解码到目标处不一致");
+        eprintln!("target {target_ms}ms segment {segment_start_ms}ms offset {} samples", shift as i64 - one_ms as i64);
     }
 
     /// 回归（Bilibili 2 小时 fMP4 seek 爬 12s）：FragmentedProgressive

@@ -811,7 +811,7 @@ function playTrack(track: TrackInfo) {
 }
 
 function prefetchTrack(track: TrackInfo) {
-  player.prefetchPlaybackTracks([track])
+  player.prefetchIntent(track)
 }
 
 // 歌单封面：取第一首有 cover 的曲目

@@ -47,6 +47,7 @@ const settingsModule = load(await read('../src/stores/settings.ts'), {
   vue,
   '@tauri-apps/api/core': bridge,
   '@/utils/logger': { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) },
+  '@/modules/desktopLyrics/style': load(await read('../src/modules/desktopLyrics/style.ts')),
 })
 const { roundToStepPrecision } = load(await read('../src/utils/editableRange.ts'))
 
