@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <title>NeriPlayer menu bar template</title>
+  <g fill="#000">
+    <polygon points="13,9 30,5 30,25 27,25 27,12 16,15 16,29 13,29"/>
+    <ellipse cx="10" cy="29" rx="6" ry="4"/>
+    <ellipse cx="24" cy="25" rx="6" ry="4"/>
+  </g>
+</svg>

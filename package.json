@@ -10,6 +10,7 @@
     "test:debug-log-viewer": "node scripts/test-debug-log-viewer.mjs",
     "test:cover-export": "node scripts/test-cover-export.mjs",
     "test:tray-popup": "node scripts/test-tray-popup.mjs",
+    "test:title-bar-window-state": "node scripts/test-title-bar-window-state.mjs",
     "test:collection-menus": "node scripts/test-collection-menus.mjs",
     "test:context-menu-utils": "node scripts/test-context-menu-utils.mjs",
     "dev": "vite",

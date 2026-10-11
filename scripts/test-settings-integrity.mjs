@@ -94,6 +94,18 @@ const RUST_INTEGER_KEYS = [...rustStruct.matchAll(/pub (\w+): (?:i32|u32),/g)]
   .map(match => camel(match[1]))
   .filter(key => key !== 'formatVersion')
 
+await regression('the menu bar lyric preference defaults off and survives persistence', async store => {
+  await store.hydrate()
+  assert.equal(store.showMenuBarLyrics, false)
+  store.showMenuBarLyrics = true
+  await flushPersist()
+  assert.equal(saved.at(-1).showMenuBarLyrics, true)
+  store.applySnapshot(saved.at(-1))
+  assert.equal(store.showMenuBarLyrics, true)
+  store.applySnapshot({ showMenuBarLyrics: 'true' })
+  assert.equal(store.showMenuBarLyrics, false)
+})
+
 await regression('integer-backed settings never reach save_settings as fractions', async store => {
   await store.hydrate()
   await flushPersist()

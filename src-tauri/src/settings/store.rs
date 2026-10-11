@@ -151,6 +151,8 @@ pub struct AppSettings {
     /// 桌面歌词外观（字体、颜色、布局、锁定、窗口位置……），逐项规整在前端
     /// normalizeDesktopLyricsStyle；这里只保证是对象且不过大
     pub desktop_lyrics: serde_json::Value,
+    /// macOS 菜单栏歌词独立于桌面歌词窗口，默认关闭以免占用菜单栏空间
+    pub show_menu_bar_lyrics: bool,
     /// 快捷键改键：{ local: {动作: 组合键}, global: {...} }，只存与默认不同的项，
     /// 逐项规整在前端 normalizeShortcutBindings；这里只保证是对象且不过大
     pub shortcut_bindings: serde_json::Value,
@@ -285,6 +287,7 @@ impl Default for AppSettings {
             equalizer_preset_id: "flat".into(),
             equalizer_bands: vec![0; EQUALIZER_BAND_COUNT],
             desktop_lyrics: serde_json::Value::Object(serde_json::Map::new()),
+            show_menu_bar_lyrics: false,
             shortcut_bindings: serde_json::Value::Object(serde_json::Map::new()),
             global_shortcuts_enabled: false,
         }
@@ -922,6 +925,21 @@ mod tests {
             settings.normalize();
             assert_eq!(settings.desktop_lyrics, serde_json::json!({}));
         }
+    }
+
+    #[test]
+    fn menu_bar_lyrics_are_opt_in_and_survive_settings_round_trip() {
+        let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!missing.show_menu_bar_lyrics);
+        let mut enabled: AppSettings = serde_json::from_value(serde_json::json!({
+            "showMenuBarLyrics": true,
+        })).unwrap();
+        enabled.normalize();
+        assert!(enabled.show_menu_bar_lyrics);
+        let saved = serde_json::to_value(enabled).unwrap();
+        assert_eq!(saved["showMenuBarLyrics"], true);
+        let restored: AppSettings = serde_json::from_value(saved).unwrap();
+        assert!(restored.show_menu_bar_lyrics);
     }
 
     #[test]

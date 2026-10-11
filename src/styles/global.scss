@@ -75,6 +75,11 @@ html.platform-mac {
   --titlebar-height: 52px;
 }
 
+/* 原生全屏时红绿灯随系统栏隐藏，内容无需继续预留较高的安全区 */
+html.platform-mac.window-fullscreen {
+  --titlebar-height: 36px;
+}
+
 *, *::before, *::after {
   margin: 0;
   padding: 0;

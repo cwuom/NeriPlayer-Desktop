@@ -1337,6 +1337,8 @@
     "seek_here": "跳到这一句"
   },
   "desktop_lyrics": {
+    "menu_bar": "在 macOS 菜单栏显示歌词",
+    "menu_bar_desc": "在状态栏图标旁显示当前歌词，无歌词时显示歌名；可独立于桌面歌词开启",
     "title": "桌面歌词",
     "desc": "在桌面最上层显示逐字歌词，可拖动、缩放、锁定",
     "open": "显示桌面歌词",
@@ -1414,6 +1416,7 @@
   },
   "tray": {
     "menu_label": "托盘菜单",
+    "menu_bar_lyrics": "菜单栏歌词",
     "previous": "上一首",
     "play": "播放",
     "pause": "暂停",

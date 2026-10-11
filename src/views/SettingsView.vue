@@ -77,6 +77,7 @@ import { applyTheme, switchThemeWithRipple, type ThemeMode } from '@/utils/theme
 import { THEME_COLORS, getSwatchColor, applyThemeColor, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import ShortcutSettings from '@/components/settings/ShortcutSettings.vue'
 import { SETTINGS_SEARCH_INDEX } from '@/modules/settings/searchIndex'
+import { isMacPlatform } from '@/modules/shortcuts/platform'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
@@ -94,7 +95,7 @@ const lt = useListenTogetherStore()
 const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle,
-  defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
+  defaultScreen, closeToTray, showMenuBarLyrics, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
   normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
@@ -296,7 +297,7 @@ const settingsSearchResults = computed<SettingsSearchResult[]>(() => {
       key: `section:${item.id}`, section: item.id, title: item.label, desc: item.description, keywords: [], isSection: true,
     })),
     ...SETTINGS_SEARCH_INDEX
-      .filter(entry => SETTINGS_SECTION_IDS.includes(entry.section as SettingsSectionId))
+      .filter(entry => SETTINGS_SECTION_IDS.includes(entry.section as SettingsSectionId) && (isMacPlatform || !entry.macOnly))
       .map(entry => ({
         key: `${entry.section}:${entry.title}`,
         section: entry.section as SettingsSectionId,
@@ -2413,6 +2414,15 @@ useEscapeClose(
         {{ t(desktopLyricsStyle.locked ? 'desktop_lyrics.unlock' : 'desktop_lyrics.lock') }}
       </button>
       <label class="m3-switch"><input type="checkbox" :checked="desktopLyricsOpen" :disabled="desktopLyricsBusy" @change="toggleDesktopLyrics(($event.target as HTMLInputElement).checked)" /><span class="track"><span class="thumb"><span v-if="desktopLyricsOpen" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
+
+    <div v-if="isMacPlatform" class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">lyrics</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('desktop_lyrics.menu_bar') }}</div>
+        <div class="setting-desc">{{ t('desktop_lyrics.menu_bar_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="showMenuBarLyrics" :aria-label="t('desktop_lyrics.menu_bar')" /><span class="track"><span class="thumb"><span v-if="showMenuBarLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
     <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('desktop_lyrics')">

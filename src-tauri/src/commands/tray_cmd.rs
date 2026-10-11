@@ -41,12 +41,15 @@ const REOPEN_GUARD: Duration = Duration::from_millis(300);
 const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
 const TOOLTIP_MAX_CHARS: usize = 100;
 const MENU_TRACK_MAX_CHARS: usize = 40;
+const MENU_BAR_LYRIC_MAX_CHARS: usize = 25;
 const MAX_COVER_URL_BYTES: usize = 1_000_000;
 
 const STATE_EVENT: &str = "tray-popup:state";
 const SHOWN_EVENT: &str = "tray-popup:shown";
 const OPEN_NOW_PLAYING_EVENT: &str = "tray:open-now-playing";
 const TOGGLE_DESKTOP_LYRICS_EVENT: &str = "tray:toggle-desktop-lyrics";
+#[cfg(target_os = "macos")]
+const TOGGLE_MENU_BAR_LYRICS_EVENT: &str = "tray:toggle-menu-bar-lyrics";
 const QUIT_EVENT: &str = "tray:quit";
 
 static TRAY: Mutex<Option<TrayRuntime>> = Mutex::new(None);
@@ -88,6 +91,10 @@ pub struct TraySnapshot {
     pub theme: TrayTheme,
     #[serde(default)]
     pub desktop_lyrics_open: bool,
+    #[serde(default)]
+    pub show_menu_bar_lyrics: bool,
+    #[serde(default)]
+    pub menu_bar_lyric: String,
 }
 
 /// 发给面板窗口的完整状态
@@ -109,6 +116,8 @@ struct NativeMenu {
     next: MenuItem<Wry>,
     show_main: MenuItem<Wry>,
     desktop_lyrics: CheckMenuItem<Wry>,
+    #[cfg(target_os = "macos")]
+    menu_bar_lyrics: CheckMenuItem<Wry>,
     quit: MenuItem<Wry>,
 }
 
@@ -122,6 +131,10 @@ struct MenuLabels {
     show_main: String,
     desktop_lyrics: String,
     desktop_lyrics_open: bool,
+    #[cfg(any(target_os = "macos", test))]
+    menu_bar_lyrics: String,
+    #[cfg(any(target_os = "macos", test))]
+    show_menu_bar_lyrics: bool,
     quit: String,
 }
 
@@ -190,6 +203,8 @@ struct TrayRuntime {
     sent_state: Option<TrayPopupState>,
     sent_labels: Option<MenuLabels>,
     sent_tooltip: Option<String>,
+    #[cfg(any(target_os = "macos", test))]
+    sent_menu_bar_title: Option<String>,
 }
 
 impl TrayRuntime {
@@ -230,6 +245,10 @@ impl TrayRuntime {
             show_main: self.text("show_main", "显示主界面"),
             desktop_lyrics: self.text("desktop_lyrics", "桌面歌词"),
             desktop_lyrics_open: self.snapshot.desktop_lyrics_open,
+            #[cfg(any(target_os = "macos", test))]
+            menu_bar_lyrics: self.text("menu_bar_lyrics", "菜单栏歌词"),
+            #[cfg(any(target_os = "macos", test))]
+            show_menu_bar_lyrics: self.snapshot.show_menu_bar_lyrics,
             quit: self.text("quit", "退出 NeriPlayer"),
         }
     }
@@ -239,6 +258,25 @@ impl TrayRuntime {
             Some(track) => truncate_chars(&track_line(track), TOOLTIP_MAX_CHARS),
             None => "NeriPlayer".into(),
         }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn menu_bar_title(&self) -> String {
+        if self.snapshot.show_menu_bar_lyrics && self.snapshot.track.is_some() {
+            self.snapshot.menu_bar_lyric.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn take_menu_bar_title_update(&mut self) -> Option<String> {
+        let title = self.menu_bar_title();
+        if self.sent_menu_bar_title.as_ref() == Some(&title) {
+            return None;
+        }
+        self.sent_menu_bar_title = Some(title.clone());
+        Some(title)
     }
 }
 
@@ -276,6 +314,22 @@ fn sanitize(snapshot: &mut TraySnapshot) {
             track.cover_url.clear();
         }
     }
+    if snapshot.show_menu_bar_lyrics && snapshot.track.is_some() {
+        let text: String = snapshot.menu_bar_lyric.chars()
+            .filter(|character| !character.is_control() || character.is_whitespace())
+            .collect();
+        snapshot.menu_bar_lyric = truncate_chars(
+            &text.split_whitespace().collect::<Vec<_>>().join(" "),
+            MENU_BAR_LYRIC_MAX_CHARS,
+        );
+    } else {
+        snapshot.menu_bar_lyric.clear();
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar_icon() -> tauri::image::Image<'static> {
+    tauri::include_image!("icons/tray-template.png")
 }
 
 /// 面板左上角：默认贴在光标左上方（任务栏在底部、右侧时），放不下就翻到另一侧，最后限制在工作区内
@@ -361,6 +415,15 @@ fn build_native_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, NativeMenu)> 
             false,
             None::<&str>,
         )?,
+        #[cfg(target_os = "macos")]
+        menu_bar_lyrics: CheckMenuItem::with_id(
+            app,
+            "menu-bar-lyrics",
+            "菜单栏歌词",
+            true,
+            false,
+            None::<&str>,
+        )?,
         quit: MenuItem::with_id(app, "quit", "退出 NeriPlayer", true, None::<&str>)?,
     };
     let menu = Menu::with_items(
@@ -374,10 +437,11 @@ fn build_native_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, NativeMenu)> 
             &PredefinedMenuItem::separator(app)?,
             &items.show_main,
             &items.desktop_lyrics,
-            &PredefinedMenuItem::separator(app)?,
-            &items.quit,
         ],
     )?;
+    #[cfg(target_os = "macos")]
+    menu.append(&items.menu_bar_lyrics)?;
+    menu.append_items(&[&PredefinedMenuItem::separator(app)?, &items.quit])?;
     Ok((menu, items))
 }
 
@@ -398,6 +462,11 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     if let Some((menu, _)) = native.as_ref() {
         builder = builder.menu(menu);
     }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.icon(menu_bar_icon()).icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
@@ -458,6 +527,10 @@ fn handle_action(app: &AppHandle, action: &str) {
         "show-main" => show_main_window(app),
         "desktop-lyrics" => {
             let _ = app.emit_to("main", TOGGLE_DESKTOP_LYRICS_EVENT, ());
+        }
+        #[cfg(target_os = "macos")]
+        "menu-bar-lyrics" => {
+            let _ = app.emit_to("main", TOGGLE_MENU_BAR_LYRICS_EVENT, ());
         }
         "quit" => request_quit(app),
         _ => log::warn!(target: "tray", "unknown tray action: {action}"),
@@ -690,11 +763,33 @@ fn refresh(app: &AppHandle) {
         let _ = menu.show_main.set_text(&labels.show_main);
         let _ = menu.desktop_lyrics.set_text(&labels.desktop_lyrics);
         let _ = menu.desktop_lyrics.set_checked(labels.desktop_lyrics_open);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = menu.menu_bar_lyrics.set_text(&labels.menu_bar_lyrics);
+            let _ = menu.menu_bar_lyrics.set_checked(labels.show_menu_bar_lyrics);
+        }
         let _ = menu.quit.set_text(&labels.quit);
     }
     if let Some(tooltip) = tooltip {
         if let Some(tray) = app.tray_by_id(TRAY_ID) {
             let _ = tray.set_tooltip(Some(tooltip));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let title = TRAY.lock().as_mut().and_then(TrayRuntime::take_menu_bar_title_update);
+        if let Some(title) = title {
+            if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                let next = (!title.is_empty()).then_some(title.as_str());
+                if let Err(error) = tray.set_title(next) {
+                    log::warn!(target: "tray", "menu bar lyrics not updated: {error}");
+                    if let Some(runtime) = TRAY.lock().as_mut() {
+                        if runtime.sent_menu_bar_title.as_ref() == Some(&title) {
+                            runtime.sent_menu_bar_title = None;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -858,6 +953,80 @@ mod tests {
             false,
         );
         assert_eq!(runtime.tooltip(), "Song");
+    }
+
+    #[test]
+    fn menu_bar_lyrics_follow_the_switch_and_clear_without_a_track() {
+        let mut runtime = runtime_with(
+            Some(TrayTrack { title: "Song".into(), ..Default::default() }),
+            true,
+        );
+        runtime.snapshot.menu_bar_lyric = "当前歌词".into();
+        assert_eq!(runtime.menu_bar_title(), "");
+        assert!(!runtime.menu_labels().show_menu_bar_lyrics);
+
+        runtime.snapshot.show_menu_bar_lyrics = true;
+        assert_eq!(runtime.menu_bar_title(), "当前歌词");
+        assert!(runtime.menu_labels().show_menu_bar_lyrics);
+        assert_eq!(runtime.menu_labels().menu_bar_lyrics, "菜单栏歌词");
+        runtime.snapshot.texts.insert("menu_bar_lyrics".into(), "Menu bar lyrics".into());
+        assert_eq!(runtime.menu_labels().menu_bar_lyrics, "Menu bar lyrics");
+
+        runtime.snapshot.track = None;
+        assert_eq!(runtime.menu_bar_title(), "");
+    }
+
+    #[test]
+    fn menu_bar_title_updates_only_on_text_changes_and_clears_on_disable() {
+        let mut runtime = runtime_with(
+            Some(TrayTrack { title: "Song".into(), ..Default::default() }),
+            true,
+        );
+        runtime.snapshot.show_menu_bar_lyrics = true;
+        runtime.snapshot.menu_bar_lyric = "First line".into();
+        assert_eq!(runtime.take_menu_bar_title_update(), Some("First line".into()));
+        assert_eq!(runtime.take_menu_bar_title_update(), None);
+        runtime.is_playing = false;
+        assert_eq!(runtime.take_menu_bar_title_update(), None);
+        runtime.snapshot.menu_bar_lyric = "Second line".into();
+        assert_eq!(runtime.take_menu_bar_title_update(), Some("Second line".into()));
+        runtime.snapshot.show_menu_bar_lyrics = false;
+        assert_eq!(runtime.take_menu_bar_title_update(), Some(String::new()));
+        assert_eq!(runtime.take_menu_bar_title_update(), None);
+    }
+
+    #[test]
+    fn sanitize_bounds_menu_bar_text_without_splitting_unicode() {
+        let mut snapshot = TraySnapshot {
+            show_menu_bar_lyrics: true,
+            track: Some(TrayTrack::default()),
+            menu_bar_lyric: "  hello\n\tworld\0  ".into(),
+            ..Default::default()
+        };
+        sanitize(&mut snapshot);
+        assert_eq!(snapshot.menu_bar_lyric, "hello world");
+        snapshot.menu_bar_lyric = "🎵".repeat(26);
+        sanitize(&mut snapshot);
+        assert_eq!(snapshot.menu_bar_lyric, format!("{}…", "🎵".repeat(24)));
+        assert_eq!(snapshot.menu_bar_lyric.chars().count(), 25);
+        snapshot.track = None;
+        sanitize(&mut snapshot);
+        assert_eq!(snapshot.menu_bar_lyric, "");
+    }
+
+    #[test]
+    fn menu_bar_icon_is_a_monochrome_mask_with_a_transparent_background() {
+        let icon = menu_bar_icon();
+        assert_eq!((icon.width(), icon.height()), (36, 36));
+        let pixels: Vec<_> = icon.rgba().chunks_exact(4).collect();
+        assert!(pixels.iter().all(|pixel| pixel[..3] == [0, 0, 0]));
+        assert!(pixels.iter().any(|pixel| pixel[3] == 255));
+        assert!(pixels.iter().any(|pixel| pixel[3] == 0));
+        assert!(pixels.iter().any(|pixel| pixel[3] > 0 && pixel[3] < 255));
+        for x in 0..36 {
+            assert_eq!(pixels[x][3], 0);
+            assert_eq!(pixels[35 * 36 + x][3], 0);
+        }
     }
 
     #[test]

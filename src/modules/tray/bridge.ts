@@ -5,6 +5,11 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import i18n from '@/i18n'
 import { usePlayerStore } from '@/stores/player'
+import { useSettingsStore } from '@/stores/settings'
+import { useCurrentLyricsStore } from '@/stores/currentLyrics'
+import { useLyricOffsetStore } from '@/stores/lyricOffset'
+import { isMacPlatform } from '@/modules/shortcuts/platform'
+import { activeLineIndex } from '@/modules/desktopLyrics/timeline'
 import {
   closeDesktopLyricsWindow,
   desktopLyricsOpen,
@@ -33,8 +38,10 @@ export const TRAY_THEME_VARS = [
   '--md-outline-variant',
 ] as const
 
-const MENU_TEXT_KEYS = ['previous', 'play', 'pause', 'next', 'show_main', 'desktop_lyrics', 'quit', 'idle'] as const
+const MENU_TEXT_KEYS = ['previous', 'play', 'pause', 'next', 'show_main', 'desktop_lyrics', 'menu_bar_lyrics', 'quit', 'idle'] as const
 const PUBLISH_DEBOUNCE_MS = 120
+const MENU_BAR_LYRIC_POLL_MS = 200
+const MENU_BAR_LYRIC_MAX_CHARS = 24
 // data URL 是 ASCII 字符串，长度上限与托盘后端的 MAX_COVER_URL_BYTES 一致
 const MAX_TRAY_COVER_URL_CHARS = 1_000_000
 
@@ -77,11 +84,52 @@ export async function quitApp(flush: () => Promise<unknown>): Promise<void> {
 export function installTrayBridge(options: TrayBridgeOptions): () => void {
   if (!isTauri()) return () => {}
   const player = usePlayerStore()
+  const settings = useSettingsStore()
+  const lyrics = isMacPlatform ? useCurrentLyricsStore() : null
+  const offsets = isMacPlatform ? useLyricOffsetStore() : null
   let disposed = false
   let timer: ReturnType<typeof setTimeout> | null = null
   let lastSent = ''
   let releases: UnlistenFn[] = []
   const coverUrl = ref('')
+  const menuBarLyric = ref('')
+  let lyricTimer: ReturnType<typeof setInterval> | null = null
+  let releaseLyrics: (() => void) | null = null
+
+  function updateMenuBarLyric() {
+    if (!lyrics || !offsets || !settings.showMenuBarLyrics || !player.hasPlaybackSession) {
+      menuBarLyric.value = ''
+      return
+    }
+    const position = player.livePositionMs() + offsets.effectiveOffsetMs(player.currentTrack)
+    const index = activeLineIndex(lyrics.lines, position)
+    const text = lyrics.lines[index]?.text?.trim() || player.currentTrack?.title || ''
+    const characters = Array.from(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim())
+    menuBarLyric.value = characters.length > MENU_BAR_LYRIC_MAX_CHARS
+      ? characters.slice(0, MENU_BAR_LYRIC_MAX_CHARS).join('') + '…'
+      : characters.join('')
+  }
+
+  const stopLyricWatch = watch(
+    () => isMacPlatform && settings.showMenuBarLyrics && player.hasPlaybackSession,
+    enabled => {
+      if (lyricTimer) clearInterval(lyricTimer)
+      lyricTimer = null
+      releaseLyrics?.()
+      releaseLyrics = null
+      if (enabled && lyrics) {
+        releaseLyrics = lyrics.acquire()
+        // 主窗口隐藏后 rAF 会停，菜单栏仍按播放时钟换行
+        lyricTimer = setInterval(updateMenuBarLyric, MENU_BAR_LYRIC_POLL_MS)
+      }
+      updateMenuBarLyric()
+    },
+    { immediate: true },
+  )
+  const stopLyricContentWatch = watch(
+    () => [player.currentTrack, lyrics?.lines],
+    updateMenuBarLyric,
+  )
 
   function snapshot() {
     const texts: Record<string, string> = {}
@@ -95,6 +143,8 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
         : null,
       theme: readTheme(),
       desktopLyricsOpen: desktopLyricsOpen.value,
+      showMenuBarLyrics: isMacPlatform && settings.showMenuBarLyrics,
+      menuBarLyric: menuBarLyric.value,
     }
   }
 
@@ -144,6 +194,8 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
       coverUrl.value,
       currentLocale(),
       desktopLyricsOpen.value,
+      settings.showMenuBarLyrics,
+      menuBarLyric.value,
     ],
     schedule,
   )
@@ -158,6 +210,9 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
     listen('tray:toggle-desktop-lyrics', () => {
       const task = desktopLyricsOpen.value ? closeDesktopLyricsWindow() : openDesktopLyricsWindow()
       void task.catch(error => log.warn('desktop lyrics toggle failed:', summarizeLogError(error)))
+    }),
+    listen('tray:toggle-menu-bar-lyrics', () => {
+      if (isMacPlatform) settings.showMenuBarLyrics = !settings.showMenuBarLyrics
     }),
     listen('tray:quit', () => {
       void quitApp(options.flushBeforeQuit).catch(error => {
@@ -177,6 +232,10 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
     timer = null
     stopWatch()
     stopCoverWatch()
+    stopLyricWatch()
+    stopLyricContentWatch()
+    if (lyricTimer) clearInterval(lyricTimer)
+    releaseLyrics?.()
     observer.disconnect()
     releases.forEach(release => release())
     releases = []

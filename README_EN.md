@@ -323,6 +323,9 @@ the sidebar.
 - 🪟 **Desktop integration**:
   system media keys with SMTC / MPRIS sessions, single instance, and a
   frameless custom title bar (native traffic lights on macOS).
+  macOS uses a monochrome menu bar icon that follows the system appearance.
+  Enable menu bar lyrics independently in Desktop Lyrics settings or the tray menu;
+  the song title appears when lyrics are unavailable, and long text is truncated.
 - ⌨️ **Keyboard shortcuts**: see
   [Keyboard Shortcuts](#keyboard-shortcuts).
 - 🧾 **Friendly login**:

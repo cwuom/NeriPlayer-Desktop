@@ -30,22 +30,29 @@ const titleBarLabel = computed(() => (
 const titleBarTrackKey = computed(() => `${props.nowPlaying ? 'np' : 'base'}:${titleBarTrackText.value || 'empty'}`)
 
 const isMaximized = ref(false)
+const isFullscreen = ref(false)
 let unlistenResize: UnlistenFn | null = null
+let disposed = false
+let windowStateVersion = 0
 
 // macOS 使用系统原生红绿灯，隐藏自绘控制并在左侧留出安全区
 const isMac = isMacPlatform
-/** 拖动改变窗口大小时 resize 事件一秒几十次，最大化状态等停下来再查 */
+/** 拖动改变窗口大小时 resize 事件一秒几十次，窗口状态等停下来再查 */
 const MAXIMIZED_REFRESH_DELAY_MS = 120
 let maximizedRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 const appWindow = getCurrentWindow()
 
 async function refreshMaximized() {
-  try {
-    isMaximized.value = await appWindow.isMaximized()
-  } catch {
-    isMaximized.value = false
-  }
+  const version = ++windowStateVersion
+  const [maximized, fullscreen] = await Promise.all([
+    appWindow.isMaximized().catch(() => false),
+    isMac ? appWindow.isFullscreen().catch(() => false) : Promise.resolve(false),
+  ])
+  if (disposed || version !== windowStateVersion) return
+  isMaximized.value = maximized
+  isFullscreen.value = fullscreen
+  if (isMac) document.documentElement.classList.toggle('window-fullscreen', fullscreen)
 }
 
 function minimize() {
@@ -61,6 +68,7 @@ function close() {
 }
 
 function scheduleMaximizedRefresh() {
+  if (disposed) return
   if (maximizedRefreshTimer) clearTimeout(maximizedRefreshTimer)
   maximizedRefreshTimer = setTimeout(() => {
     maximizedRefreshTimer = null
@@ -69,15 +77,20 @@ function scheduleMaximizedRefresh() {
 }
 
 onMounted(async () => {
-  await refreshMaximized()
   try {
-    unlistenResize = await appWindow.onResized(scheduleMaximizedRefresh)
+    const release = await appWindow.onResized(scheduleMaximizedRefresh)
+    if (disposed) { release(); return }
+    unlistenResize = release
   } catch {}
+  if (!disposed) await refreshMaximized()
 })
 
 onUnmounted(() => {
+  disposed = true
+  windowStateVersion++
   if (unlistenResize) unlistenResize()
   if (maximizedRefreshTimer) clearTimeout(maximizedRefreshTimer)
+  if (isMac) document.documentElement.classList.remove('window-fullscreen')
 })
 </script>
 
@@ -91,11 +104,12 @@ onUnmounted(() => {
       'tb-opening': transitionState === 'opening',
       'tb-closing': transitionState === 'closing',
       'tb-mac': isMac,
+      'tb-fullscreen': isFullscreen,
     }"
     data-tauri-drag-region
   >
     <!-- macOS 原生红绿灯安全区（92px，红绿灯 x=20 起），避免内容压住系统交通灯 -->
-    <div v-if="isMac" class="tb-traffic-safe-area" data-tauri-drag-region></div>
+    <div v-if="isMac && !isFullscreen" class="tb-traffic-safe-area" data-tauri-drag-region></div>
 
     <div class="tb-left-slot">
       <!-- 同槽绝对叠层：宽度固定，避免品牌/箭头切换时整栏右移 -->
@@ -135,7 +149,7 @@ onUnmounted(() => {
 
     <!-- 拖拽占位 -->
     <div class="tb-drag" data-tauri-drag-region></div>
-    <div v-if="isMac" class="tb-drag" data-tauri-drag-region></div>
+    <div v-if="isMac && !isFullscreen" class="tb-drag" data-tauri-drag-region></div>
 
     <div class="tb-right-slot">
       <!-- 固定宽度槽，避免 more 显隐时右侧跳动 -->
@@ -505,17 +519,17 @@ onUnmounted(() => {
 }
 
 /* mac：更高顶栏下放大播放信息两行字号，与红绿灯/菜单按钮同轴垂直居中 */
-.tb-mac .tb-np-center {
+.tb-mac:not(.tb-fullscreen) .tb-np-center {
   gap: 3px;
 }
 
-.tb-mac .tb-np-label {
+.tb-mac:not(.tb-fullscreen) .tb-np-label {
   font-size: 12px;
   letter-spacing: 1px;
   line-height: 1.25;
 }
 
-.tb-mac .tb-np-track {
+.tb-mac:not(.tb-fullscreen) .tb-np-track {
   font-size: 15px;
   line-height: 1.35;
 }

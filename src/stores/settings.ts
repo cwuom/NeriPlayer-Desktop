@@ -29,6 +29,7 @@ export interface AppSettings {
   defaultScreen: string
   /** 关闭主窗口时收进托盘继续播放；关掉后关闭即退出 */
   closeToTray: boolean
+  showMenuBarLyrics: boolean
   showCoverBadge: boolean
   showNowPlayingTitle: boolean
   showToolbarDock: boolean
@@ -257,6 +258,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   equalizerPresetId: 'flat',
   equalizerBands: [0, 0, 0, 0, 0],
   desktopLyrics: normalizeDesktopLyricsStyle(null),
+  showMenuBarLyrics: false,
   shortcutBindings: { local: {}, global: {} },
   globalShortcutsEnabled: false,
 }
@@ -641,6 +643,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const equalizerPresetId = ref(initial.equalizerPresetId)
   const equalizerBands = ref([...initial.equalizerBands])
   const desktopLyrics = ref<DesktopLyricsStyle>(initial.desktopLyrics)
+  const showMenuBarLyrics = ref(initial.showMenuBarLyrics)
   const shortcutBindings = ref<ShortcutBindings>(initial.shortcutBindings)
   const globalShortcutsEnabled = ref(initial.globalShortcutsEnabled)
 
@@ -666,7 +669,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadYoutubeQuality, downloadBiliQuality,
     ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
     playbackSpeed, loudnessGainMb, equalizerEnabled, equalizerPresetId,
-    equalizerBands, desktopLyrics, shortcutBindings, globalShortcutsEnabled,
+    equalizerBands, desktopLyrics, showMenuBarLyrics, shortcutBindings, globalShortcutsEnabled,
   }
 
   const isHydrated = ref(false)
@@ -763,7 +766,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
     downloadYoutubeQuality, downloadBiliQuality,
     ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed,
-    loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, desktopLyrics,
+    loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, desktopLyrics, showMenuBarLyrics,
     shortcutBindings, globalShortcutsEnabled,
   }
 })

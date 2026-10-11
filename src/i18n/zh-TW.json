@@ -1337,6 +1337,8 @@
     "seek_here": "跳到這一句"
   },
   "desktop_lyrics": {
+    "menu_bar": "在 macOS 選單列顯示歌詞",
+    "menu_bar_desc": "在狀態列圖示旁顯示目前歌詞，沒有歌詞時顯示歌名；可獨立於桌面歌詞開啟",
     "title": "桌面歌詞",
     "desc": "在桌面最上層顯示逐字歌詞，可拖曳、縮放、鎖定",
     "open": "顯示桌面歌詞",
@@ -1414,6 +1416,7 @@
   },
   "tray": {
     "menu_label": "系統匣選單",
+    "menu_bar_lyrics": "選單列歌詞",
     "previous": "上一首",
     "play": "播放",
     "pause": "暫停",

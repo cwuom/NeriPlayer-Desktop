@@ -239,15 +239,20 @@ async function loadCommonJs(path) {
 
 const coverCacheModule = await loadCommonJs('../src/utils/bilibiliCoverCache.ts')
 const trackCoverModule = await loadCommonJs('../src/utils/trackCover.ts')
+const lyricTimeline = await loadCommonJs('../src/modules/desktopLyrics/timeline.ts')
 const bridgeSource = await readFile(new URL('../src/modules/tray/bridge.ts', import.meta.url), 'utf8')
 const bridgeCompiled = ts.transpileModule(bridgeSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText
 const dataUrl = text => `data:image/png;base64,${Buffer.from(text).toString('base64')}`
 
-function bridgeRuntime(url) {
-  const requests = new Map(), timers = new Set(), events = new Map(), snapshots = []
-  const player = vue.reactive({ hasPlaybackSession: true, currentTrack: { id: '1', title: 'First song', artist: 'Artist', coverUrl: url } })
+function bridgeRuntime(url, mac = false) {
+  const requests = new Map(), timers = new Set(), intervals = new Set(), events = new Map(), snapshots = []
+  const player = vue.reactive({ hasPlaybackSession: true, currentTrack: { id: '1', title: 'First song', artist: 'Artist', coverUrl: url }, positionMs: 0, livePositionMs() { return this.positionMs } })
+  const settings = vue.reactive({ showMenuBarLyrics: false })
+  const offsets = vue.reactive({ value: 0, effectiveOffsetMs() { return this.value } })
+  let consumers = 0
+  const lyrics = vue.reactive({ lines: [], acquire() { consumers++; return () => { consumers-- } } })
   const cache = new coverCacheModule.BilibiliCoverCache(
     source => {
       const request = deferred()
@@ -268,6 +273,11 @@ function bridgeRuntime(url) {
     '@tauri-apps/api/event': { listen: async (event, callback) => { events.set(event, callback); return () => events.delete(event) } },
     '@/i18n': { default: { global: { locale: vue.ref('en'), t: key => key } } },
     '@/stores/player': { usePlayerStore: () => player },
+    '@/stores/settings': { useSettingsStore: () => settings },
+    '@/stores/currentLyrics': { useCurrentLyricsStore: () => lyrics },
+    '@/stores/lyricOffset': { useLyricOffsetStore: () => offsets },
+    '@/modules/shortcuts/platform': { isMacPlatform: mac },
+    '@/modules/desktopLyrics/timeline': lyricTimeline,
     '@/modules/desktopLyrics/bridge': { desktopLyricsOpen: vue.ref(false) },
     '@/utils/trackCover': trackCoverModule,
     '@/utils/bilibiliCover': {
@@ -278,15 +288,18 @@ function bridgeRuntime(url) {
     '@/utils/logSanitizer': { summarizeLogError: error => error.message },
   }
   const exports = {}
-  new Function('require', 'exports', 'document', 'getComputedStyle', 'MutationObserver', 'setTimeout', 'clearTimeout', bridgeCompiled)(
+  new Function('require', 'exports', 'document', 'getComputedStyle', 'MutationObserver', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', bridgeCompiled)(
     name => { assert.ok(name in dependencies, `missing bridge dependency ${name}`); return dependencies[name] },
     exports, { documentElement: root }, () => ({ getPropertyValue: () => '' }),
     class { observe() { observers++ } disconnect() { observers-- } },
     callback => { timers.add(callback); return callback }, timer => timers.delete(timer),
+    callback => { intervals.add(callback); return callback }, timer => intervals.delete(timer),
   )
   let stop = () => {}
   return {
-    player, snapshots,
+    player, snapshots, settings, lyrics, offsets, events,
+    get consumers() { return consumers },
+    tick() { for (const callback of intervals) callback() },
     prepare: source => cache.resolve(source),
     resolve: (source, value) => {
       const request = requests.get(source)
@@ -304,9 +317,82 @@ function bridgeRuntime(url) {
       assert.equal(timers.size, 0)
       assert.equal(observers, 0)
       assert.equal(events.size, 0)
+      assert.equal(intervals.size, 0)
+      assert.equal(consumers, 0)
     },
   }
 }
+
+await test('macOS menu bar lyrics load independently and follow the live playback clock and lyric offset', async () => {
+  const bridge = bridgeRuntime('', true)
+  bridge.start()
+  try {
+    assert.equal(bridge.consumers, 0)
+    bridge.settings.showMenuBarLyrics = true
+    bridge.lyrics.lines = [{ startMs: 1000, text: '第一句' }, { startMs: 2000, text: '第二句' }]
+    await bridge.flush()
+    assert.equal(bridge.consumers, 1)
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, 'First song')
+    bridge.player.positionMs = 1200
+    bridge.tick()
+    await bridge.flush()
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, '第一句')
+    bridge.offsets.value = 1000
+    bridge.tick()
+    await bridge.flush()
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, '第二句')
+    bridge.settings.showMenuBarLyrics = false
+    await bridge.flush()
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, '')
+    assert.equal(bridge.consumers, 0)
+  } finally { bridge.stop() }
+})
+
+await test('menu bar lyrics are bounded, single line, and cleared when playback ends', async () => {
+  const bridge = bridgeRuntime('', true)
+  bridge.settings.showMenuBarLyrics = true
+  bridge.lyrics.lines = [{ startMs: 0, text: ' a\n\tb\u0000 ' }]
+  bridge.start()
+  try {
+    await bridge.flush()
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, 'a b')
+    bridge.lyrics.lines = [{ startMs: 0, text: '🎵'.repeat(30) }]
+    bridge.tick()
+    await bridge.flush()
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, `${'🎵'.repeat(24)}…`)
+    const count = bridge.snapshots.length
+    bridge.tick()
+    await bridge.flush()
+    assert.equal(bridge.snapshots.length, count, 'unchanged lyric lines must not be republished')
+    bridge.player.hasPlaybackSession = false
+    await bridge.flush()
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, '')
+    assert.equal(bridge.consumers, 0)
+  } finally { bridge.stop() }
+})
+
+await test('the macOS tray menu toggles the persistent lyric preference', async () => {
+  const bridge = bridgeRuntime('', true)
+  bridge.start()
+  try {
+    await bridge.flush()
+    bridge.events.get('tray:toggle-menu-bar-lyrics')()
+    await bridge.flush()
+    assert.equal(bridge.settings.showMenuBarLyrics, true)
+    assert.equal(bridge.snapshots.at(-1).showMenuBarLyrics, true)
+  } finally { bridge.stop() }
+})
+
+await test('other platforms do not acquire lyrics for a restored macOS preference', async () => {
+  const bridge = bridgeRuntime('')
+  bridge.settings.showMenuBarLyrics = true
+  bridge.start()
+  try {
+    await bridge.flush()
+    assert.equal(bridge.consumers, 0)
+    assert.equal(bridge.snapshots.at(-1).menuBarLyric, '')
+  } finally { bridge.stop() }
+})
 
 await test('a cover resolved after the first tray snapshot is republished as validated image data', async () => {
   const url = 'https://p4.music.126.net/song.jpg'

@@ -126,36 +126,6 @@ fn main() {
                 pause_rendering_while_minimized(win);
             }
 
-            // macOS: 挂载空 NSToolbar 并启用 Unified 工具栏样式（macOS 11+），
-            // 由 AppKit 将标题栏加高到约 52pt 并把红绿灯垂直居中，与前端
-            // 52px 的 CSS 标题栏对齐；全屏进出时按钮位置由系统自动管理，
-            // 无需 tao 的 traffic_light_inset 手动平移
-            #[cfg(target_os = "macos")]
-            if let Some(win) = app.get_webview_window("main") {
-                use objc2::{available, MainThreadMarker, MainThreadOnly};
-                use objc2_app_kit::{
-                    NSTitlebarSeparatorStyle, NSToolbar, NSWindow, NSWindowTitleVisibility,
-                    NSWindowToolbarStyle,
-                };
-
-                if available!(macos = 11.0) {
-                    if let Ok(ns_window_ptr) = win.ns_window() {
-                        // Tauri 的 setup 钩子在 macOS 上运行于主线程
-                        let mtm = MainThreadMarker::new()
-                            .expect("setup 必须在主线程执行");
-                        let ns_window = unsafe { &*ns_window_ptr.cast::<NSWindow>() };
-                        let toolbar = NSToolbar::init(NSToolbar::alloc(mtm));
-                        ns_window.setToolbar(Some(&toolbar));
-                        ns_window.setToolbarStyle(NSWindowToolbarStyle::Unified);
-                        // 去掉工具栏底部的系统分隔线, 由前端自行绘制标题栏视觉
-                        ns_window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
-                        // Overlay 已设置透明标题栏与隐藏标题, 此处显式兜底防止被覆盖
-                        ns_window.setTitlebarAppearsTransparent(true);
-                        ns_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-                    }
-                }
-            }
-
             // 系统托盘：关闭主窗口后收进托盘继续播放
             tray_cmd::setup(app)?;
 
