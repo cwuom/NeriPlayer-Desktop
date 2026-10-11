@@ -49,6 +49,7 @@ let layoutSyncToken = 0
 let lastFrameAt = 0
 let lastSyncedTime = Number.NaN
 let lastFeedAt = 0
+let needsForegroundSync = false
 let resizeObserver: ResizeObserver | null = null
 let lastHostWidth = 0
 let lastHostHeight = 0
@@ -436,12 +437,30 @@ function wakeFrameLoop(): void {
   startFrameLoop()
 }
 
+function syncForeground(): void {
+  if (document.hidden || !lyricPlayer) return
+  // 等播放时钟的恢复帧先校准位置，再重置当前行的逐字动画
+  needsForegroundSync = true
+  stopFrameLoop()
+  wakeFrameLoop()
+}
+
+function onVisibilityChange(): void {
+  if (document.hidden) stopFrameLoop()
+  else syncForeground()
+}
+
 function startFrameLoop(): void {
-  if (rafId) return
+  if (rafId || document.hidden) return
   lastFrameAt = performance.now()
   rafId = requestAnimationFrame(function tick(now) {
     const delta = Math.min(64, now - lastFrameAt)
     lastFrameAt = now
+    if (needsForegroundSync) {
+      needsForegroundSync = false
+      syncCurrentTime(true)
+      syncPlayState()
+    }
     lyricPlayer?.update(delta)
     if (!props.isPlaying && now >= idleDeadline) {
       rafId = 0
@@ -623,6 +642,8 @@ onMounted(() => {
     for (const type of WAKE_EVENTS) {
       wakeTarget.addEventListener(type, wakeFrameLoop, { passive: true })
     }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('focus', syncForeground)
 
     startResizeObserver()
     reloadLyrics()
@@ -630,6 +651,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('focus', syncForeground)
   stopFrameLoop()
   cancelLayoutSync()
   stopResizeObserver()

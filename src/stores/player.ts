@@ -1186,9 +1186,11 @@ export const usePlayerStore = defineStore('player', () => {
 
       // 按自然速度推进，同时把与后端预测值的偏差按指数平滑收敛：
       // 落后时略快、超前时略慢（超前太多则停住等后端追上），从不往回拉
-      const error = clamped - _interpRenderedMs
+      // 先扣除本帧自然推进量，避免后台恢复时把同一段经过时间重复算进校正
+      const naturalStep = dt * _interpSpeed
+      const error = clamped - (_interpRenderedMs + naturalStep)
       const correction = error * Math.min(1, dt / POSITION_SLEW_TAU_MS)
-      const step = Math.max(0, dt * _interpSpeed + correction)
+      const step = Math.max(0, naturalStep + correction)
       _interpRenderedMs = Math.min(_interpRenderedMs + step, Math.max(_interpRenderedMs, _interpDurationMs))
 
       interpolatedPositionMs.value = Math.round(_interpRenderedMs)
