@@ -20,8 +20,11 @@ Rust 入口为 [audio/ffmpeg.rs](../../src/audio/ffmpeg.rs)，解码选择见 [a
 2. 应用启动时由 Tauri `resource_dir()` 设置的资源目录下 `ffmpeg/`。
 3. 可执行文件旁的 `ffmpeg/`，以及可执行文件所在目录；macOS 另查 `../Frameworks`。
 4. 仅 Debug：仓库 `.cache/ffmpeg-build/<os>-<arch>/`，再查 `.cache/ffmpeg/<os>-<arch>/bin`（Windows）或 `lib`（其它平台）。
+5. 仅 Linux，最后兜底：发行版的系统库目录 `/usr/lib/<多架构三元组>`、`/usr/local/lib`、`/usr/lib64`、`/usr/lib`、`/lib64`、`/lib`。
 
 匹配后使用第一份成功加载的库。结果在进程内缓存，调整目录或替换库后重启应用/测试进程。Release 不自动查开发缓存；在开发缓存里放库不能证明安装包已经包含它们。
+
+第 5 条排在随包目录之后，只是给「发行版已经装了同版本 FFmpeg」的机器兜底：Arch 的 `ffmpeg 9.0.2` 正好提供 avutil 61 / avcodec 63 / avformat 63，实测可直接解码 Opus、E-AC-3、FLAC。版本检查仍然生效——主版本不同或次版本低于头文件时该目录会被判为失败并记进原因，不会被误用，也不会与随包库混用（一次只加载同一个目录里的三个库）。
 
 ## 🏗️ 准备共享库
 
@@ -147,4 +150,4 @@ NERI_FFMPEG_DIR="$PWD/.cache/ffmpeg-build/<目标>" NERI_REQUIRE_FFMPEG=1 \
 3. 同步检查结构体布局、函数签名与 Rust C 接口；主版本变化同步库名、版本说明、测试、构建脚本版本与源码哈希。
 4. 重新核查解码器/容器/parser 清单，执行随包库解码测试、配置检查和平台安装包验证。
 
-不要单独替换版本宏或仅为了通过校验修改 `BUILDINFO.txt`。主版本不匹配的系统 FFmpeg 不能替代当前随包库。
+不要单独替换版本宏或仅为了通过校验修改 `BUILDINFO.txt`。主版本不匹配的系统 FFmpeg 不能替代当前随包库；主版本一致、次版本不低于头文件的系统库可以按上面的第 5 条兜底使用。

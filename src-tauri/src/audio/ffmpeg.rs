@@ -165,7 +165,50 @@ fn candidate_directories() -> Vec<PathBuf> {
     if cfg!(debug_assertions) {
         directories.extend(development_directories());
     }
+    directories.extend(system_directories());
     directories
+}
+
+/// Dynamic library directories provided by the distribution, tried last.
+///
+/// A distribution FFmpeg is usable as long as its major versions match the bundled
+/// headers and its minor versions are not older (Arch's ffmpeg 9.0.2 ships avutil 61 /
+/// avcodec 63 / avformat 63 and decodes Opus / E-AC-3 / FLAC in tests). Previously only
+/// the bundled directory and the directory next to the executable were searched, so a
+/// Linux build installed from a package always reported "not loaded" even though a fully
+/// compatible library was already present.
+///
+/// Always ordered after the bundled directories: the bundled library wins and the system
+/// one is only a fallback. Incompatible versions are rejected by `version_compatible` and
+/// recorded as a failure reason, never used.
+#[cfg(target_os = "linux")]
+fn system_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    // Debian/Ubuntu multiarch directory
+    let multiarch = match std::env::consts::ARCH {
+        "x86_64" => Some("x86_64-linux-gnu"),
+        "aarch64" => Some("aarch64-linux-gnu"),
+        "arm" => Some("arm-linux-gnueabihf"),
+        "riscv64" => Some("riscv64-linux-gnu"),
+        "powerpc64" => Some("powerpc64le-linux-gnu"),
+        _ => None,
+    };
+    if let Some(triple) = multiarch {
+        directories.push(PathBuf::from(format!("/usr/lib/{triple}")));
+    }
+    directories.extend([
+        PathBuf::from("/usr/local/lib"),
+        PathBuf::from("/usr/lib64"),
+        PathBuf::from("/usr/lib"),
+        PathBuf::from("/lib64"),
+        PathBuf::from("/lib"),
+    ]);
+    directories
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_directories() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// 开发机上的动态库（仅调试构建会找这里）：先找 scripts/ffmpeg/build-ffmpeg.sh 的输出
