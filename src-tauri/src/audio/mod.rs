@@ -9,6 +9,10 @@ pub mod media_session;
 pub mod metrics;
 pub mod pcm;
 pub mod player;
+pub mod quiet;
+/// Sound server sinks are a Linux desktop concept; other targets keep using cpal.
+#[cfg(target_os = "linux")]
+pub mod system_sinks;
 pub mod queue;
 pub mod remote;
 pub mod stretch;

@@ -1114,6 +1114,19 @@ pub async fn list_audio_output_devices() -> AppResult<Vec<crate::audio::player::
 
 #[tauri::command]
 pub async fn set_audio_output_device(name: Option<String>, state: State<'_, AppState>) -> AppResult<()> {
+    // Linux sound server sinks: playback already goes through the server's default
+    // node, so selecting a sink means making it the server default and reopening
+    // that stream at the current position.
+    #[cfg(target_os = "linux")]
+    if let Some(sink) = name.as_deref() {
+        if crate::audio::system_sinks::list().is_some_and(|sinks| sinks.iter().any(|item| item.name == sink)) {
+            crate::audio::system_sinks::set_default(sink).map_err(AppError::Audio)?;
+            let request = state.player.lock().request_output_device(None)?;
+            return tokio::task::spawn_blocking(move || request.wait())
+                .await
+                .map_err(|error| AppError::Other(error.to_string()))?;
+        }
+    }
     let request = state.player.lock().request_output_device(name)?;
     tokio::task::spawn_blocking(move || request.wait())
         .await.map_err(|error| AppError::Other(error.to_string()))?

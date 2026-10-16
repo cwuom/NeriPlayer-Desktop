@@ -385,6 +385,7 @@ struct OutputDeviceProfile {
 
 impl OutputDeviceProfile {
     fn open_default() -> Result<Self, String> {
+        super::quiet::silence_library_diagnostics();
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -393,6 +394,7 @@ impl OutputDeviceProfile {
     }
 
     fn open_named(name: &str) -> Result<Self, String> {
+        super::quiet::silence_library_diagnostics();
         let device = render_devices(&cpal::default_host())
             .map_err(|error| format!("Could not list audio output devices: {error}"))?
             .find(|device| device.name().is_ok_and(|candidate| candidate == name))
@@ -421,8 +423,155 @@ impl OutputDeviceProfile {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioOutputDevice {
+    /// Device identifier sent back when switching; opaque to the frontend
     pub name: String,
+    /// Fallback display name: the alsa-lib description, or the PCM name
+    pub label: String,
+    /// `sink` for a sound server output, `device` for a cpal/ALSA device
+    pub kind: String,
+    /// Card display name matching KDE (e.g. `Example USB Audio`); None off Linux
+    pub card: Option<String>,
+    /// Role key (`analog_stereo`, `hdmi`, ...) resolved to text by the frontend
+    pub role: Option<String>,
+    /// Role detail (surround layout, HDMI index)
+    pub detail: Option<String>,
     pub is_default: bool,
+}
+
+/// Splits a PCM name such as `front:CARD=USB0,DEV=0` into (prefix, card id, device)
+#[cfg(target_os = "linux")]
+fn split_pcm_name(name: &str) -> (&str, Option<&str>, Option<&str>) {
+    let mut parts = name.splitn(2, ':');
+    let prefix = parts.next().unwrap_or(name);
+    let mut card = None;
+    let mut device = None;
+    if let Some(rest) = parts.next() {
+        for field in rest.split(',') {
+            if let Some(value) = field.strip_prefix("CARD=") {
+                card = Some(value);
+            } else if let Some(value) = field.strip_prefix("DEV=") {
+                device = Some(value);
+            }
+        }
+    }
+    (prefix, card, device)
+}
+
+/// Maps a PCM prefix to (role key, role detail)
+///
+/// The role drives the label shown in the UI (`Example USB Audio 模拟立体声`), matching how
+/// KDE/Plasma names a card together with its profile.
+#[cfg(target_os = "linux")]
+fn pcm_role(prefix: &str, device: Option<&str>) -> Option<(&'static str, Option<String>)> {
+    let surround = |layout: &str| Some(("surround", Some(layout.to_string())));
+    let numbered = |role: &'static str| Some((role, device.map(str::to_string)));
+    match prefix {
+        "sysdefault" => Some(("system_default", None)),
+        "front" | "analog" => Some(("analog_stereo", None)),
+        "surround21" => surround("2.1"),
+        "surround40" => surround("4.0"),
+        "surround41" => surround("4.1"),
+        "surround50" => surround("5.0"),
+        "surround51" => surround("5.1"),
+        "surround71" => surround("7.1"),
+        "hdmi" => numbered("hdmi"),
+        "iec958" => numbered("spdif"),
+        "hw" => Some(("hardware", None)),
+        "plughw" => Some(("hardware_converted", None)),
+        "dmix" => Some(("software_mix", None)),
+        "usbstream" => Some(("usb_stream", None)),
+        "lavrate" | "samplerate" | "speexrate" | "speex" | "upmix" | "vdownmix" => {
+            Some(("converter", None))
+        }
+        _ => None,
+    }
+}
+
+/// Card id from `/proc/asound/cards` to the name the driver reports, e.g.
+/// ` 1 [USB0          ]: USB-Audio - Example USB Audio` → `USB0` → `Example USB Audio`
+#[cfg(target_os = "linux")]
+fn alsa_card_names() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string("/proc/asound/cards")
+        .map(|text| parse_alsa_cards(&text))
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn alsa_card_names() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_alsa_cards(text: &str) -> std::collections::HashMap<String, String> {
+    let mut cards = std::collections::HashMap::new();
+    for line in text.lines() {
+        // Only the "index [id]: driver - name" line counts; indented continuation
+        // lines (the device path and irq) are skipped
+        let Some((head, tail)) = line.split_once("]: ") else { continue };
+        let Some(id) = head.split_once('[').map(|(_, id)| id.trim()) else { continue };
+        let Some(name) = tail.split_once(" - ").map(|(_, name)| name.trim()) else { continue };
+        if !id.is_empty() && !name.is_empty() {
+            cards.insert(id.to_string(), name.to_string());
+        }
+    }
+    cards
+}
+
+/// The first line of an alsa-lib description is "card name, chip name"; this is the
+/// fallback when `/proc/asound/cards` has no entry
+#[cfg(target_os = "linux")]
+fn card_name_from_hint(description: &str) -> Option<String> {
+    let first = description.lines().next()?.trim();
+    let name = first.split(',').next().unwrap_or(first).trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Linux: reads alsa-lib PCM hints for (name, human readable description) without ever
+/// opening a device
+///
+/// Returns an empty list when the hints are unavailable; callers then fall back to the
+/// cpal enumeration.
+#[cfg(target_os = "linux")]
+fn alsa_pcm_hints() -> Vec<(String, Option<String>)> {
+    use alsa::device_name::HintIter;
+    use alsa::Direction;
+    let Ok(hints) = HintIter::new_str(None, "pcm") else {
+        return Vec::new();
+    };
+    hints
+        .filter_map(|hint| {
+            let alsa::device_name::Hint { name, desc, direction } = hint;
+            // A PCM whose IOID is Input can only record (alsa-lib does not filter hints
+            // by direction)
+            if direction == Some(Direction::Capture) {
+                return None;
+            }
+            name.map(|name| (name, desc))
+        })
+        .collect()
+}
+
+/// On Linux cpal only knows the PCM name (`sysdefault:CARD=ONBOARD`, `dmix:CARD=ONBOARD,DEV=0`),
+/// while the alsa-lib hint carries a human readable description (`Example Onboard Audio, ALC000
+/// Analog`)
+#[cfg(target_os = "linux")]
+fn device_labels() -> std::collections::HashMap<String, String> {
+    let mut labels = std::collections::HashMap::new();
+    for (name, description) in alsa_pcm_hints() {
+        let Some(description) = description else { continue };
+        // The description may span lines (device name plus purpose); squash it into one
+        // before handing it to the UI
+        let label = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !label.is_empty() {
+            labels.entry(name).or_insert(label);
+        }
+    }
+    labels
+}
+
+#[cfg(not(target_os = "linux"))]
+fn device_labels() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
 }
 
 pub struct OutputDeviceChangeRequest {
@@ -457,20 +606,84 @@ fn render_devices(host: &cpal::Host) -> Result<impl Iterator<Item = Device>, cpa
 }
 
 pub fn list_audio_output_devices() -> AppResult<Vec<AudioOutputDevice>> {
+    super::quiet::silence_library_diagnostics();
+    // Linux with a sound server: list its sinks instead of ALSA PCMs, because the
+    // server holds the active card exclusively and that card is exactly the one
+    // missing from the cpal list (see `audio::system_sinks`).
+    #[cfg(target_os = "linux")]
+    if let Some(sinks) = super::system_sinks::list() {
+        return Ok(sinks
+            .into_iter()
+            .map(|sink| AudioOutputDevice {
+                is_default: sink.is_default,
+                name: sink.name,
+                label: sink.description,
+                kind: "sink".to_string(),
+                card: None,
+                role: None,
+                detail: None,
+            })
+            .collect());
+    }
     let host = cpal::default_host();
     let default_name = host.default_output_device().and_then(|device| device.name().ok());
     let devices = render_devices(&host).map_err(|error| AppError::Audio(error.to_string()))?;
+    let labels = device_labels();
+    let cards = alsa_card_names();
     let mut result = Vec::new();
     for device in devices {
         let Ok(name) = device.name() else { continue };
-        if !result.iter().any(|item: &AudioOutputDevice| item.name == name) {
-            result.push(AudioOutputDevice {
-                is_default: default_name.as_deref() == Some(name.as_str()),
-                name,
-            });
+        if result.iter().any(|item: &AudioOutputDevice| item.name == name) {
+            continue;
         }
+        let description = labels.get(&name);
+        let label = description.cloned().unwrap_or_else(|| name.clone());
+        let (card, role, detail) = describe_output_device(&name, description, &cards);
+        result.push(AudioOutputDevice {
+            is_default: default_name.as_deref() == Some(name.as_str()),
+            name,
+            label,
+            kind: "device".to_string(),
+            card,
+            role,
+            detail,
+        });
     }
     Ok(result)
+}
+
+/// Splits out "card + role" so the UI can render KDE-style names such as
+/// `Example USB Audio 模拟立体声`
+///
+/// The card name comes from `/proc/asound/cards` first (identical to what KDE shows),
+/// then from the first line of the alsa-lib description. When neither is available the
+/// card stays unset instead of being guessed, and the description is shown as-is.
+#[cfg(target_os = "linux")]
+fn describe_output_device(
+    name: &str,
+    description: Option<&String>,
+    cards: &std::collections::HashMap<String, String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let (prefix, card_id, device) = split_pcm_name(name);
+    let Some((role, detail)) = pcm_role(prefix, device) else {
+        return (None, None, None);
+    };
+    let card = card_id.and_then(|id| {
+        cards
+            .get(id)
+            .cloned()
+            .or_else(|| description.and_then(|text| card_name_from_hint(text)))
+    });
+    (card, Some(role.to_string()), detail)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn describe_output_device(
+    _name: &str,
+    _description: Option<&String>,
+    _cards: &std::collections::HashMap<String, String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    (None, None, None)
 }
 
 struct OutputDeviceState {
@@ -498,6 +711,22 @@ fn output_device_to_switch(
     (current != Some(target)).then(|| target.to_string())
 }
 
+/// Snapshot for the device watcher: ALSA device names plus the ALSA default.
+///
+/// Deliberately not `list_audio_output_devices()`: that one may list sound server
+/// sinks through `pactl`, which must not be spawned on every poll. The engine also
+/// matches its preferred ALSA device against these names, so sinks do not belong here.
+fn poll_alsa_output_devices() -> AppResult<(Vec<String>, Option<String>)> {
+    super::quiet::silence_library_diagnostics();
+    let host = cpal::default_host();
+    let default = host.default_output_device().and_then(|device| device.name().ok());
+    let available = render_devices(&host)
+        .map_err(|error| AppError::Audio(error.to_string()))?
+        .filter_map(|device| device.name().ok())
+        .collect();
+    Ok((available, default))
+}
+
 /// 在独立线程里定期枚举输出设备，把结果交给控制线程
 ///
 /// Windows 上一次枚举要 250–300 ms。放在控制线程里时，这段时间到达的
@@ -510,12 +739,12 @@ fn spawn_output_device_watch(commands: mpsc::Sender<AudioCmd>) -> Option<mpsc::S
             let mut last_error: Option<String> = None;
             let mut active = false;
             while wait_for_output_device_poll(&activity_rx, &mut active) {
-                let devices = match list_audio_output_devices() {
-                    Ok(devices) => {
+                let (available, default) = match poll_alsa_output_devices() {
+                    Ok(snapshot) => {
                         if last_error.take().is_some() {
                             log::info!(target: "cpal-output", "output device enumeration recovered");
                         }
-                        devices
+                        snapshot
                     }
                     Err(error) => {
                         let message = error.to_string();
@@ -526,11 +755,6 @@ fn spawn_output_device_watch(commands: mpsc::Sender<AudioCmd>) -> Option<mpsc::S
                         continue;
                     }
                 };
-                let default = devices
-                    .iter()
-                    .find(|device| device.is_default)
-                    .map(|device| device.name.clone());
-                let available = devices.into_iter().map(|device| device.name).collect();
                 if commands
                     .send(AudioCmd::OutputDevicesListed { available, default })
                     .is_err()
@@ -3763,6 +3987,58 @@ fn duration_to_frames(duration: Duration, sample_rate: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// Device names have to split into card and role so the UI can render KDE-style labels
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_output_device_names_split_into_card_and_role() {
+        use super::{card_name_from_hint, parse_alsa_cards, pcm_role, split_pcm_name};
+        use std::collections::HashMap;
+
+        let cards = parse_alsa_cards(
+            " 0 [ONBOARD            ]: HDA-Intel - Example Onboard Audio\n\
+             \x20                     Example Onboard Audio at 0x0 irq 0\n\
+             \x20 1 [USB0          ]: USB-Audio - Example USB Audio\n\
+             \x20 3 [USB1           ]: USB-Audio - Example Surround Audio\n",
+        );
+        assert_eq!(cards.get("USB0").map(String::as_str), Some("Example USB Audio"));
+        assert_eq!(cards.get("ONBOARD").map(String::as_str), Some("Example Onboard Audio"));
+        assert_eq!(cards.get("USB1").map(String::as_str), Some("Example Surround Audio"));
+        assert_eq!(cards.len(), 3, "缩进的续行不能当成卡片");
+
+        assert_eq!(split_pcm_name("front:CARD=USB0,DEV=0"), ("front", Some("USB0"), Some("0")));
+        assert_eq!(split_pcm_name("sysdefault:CARD=ONBOARD"), ("sysdefault", Some("ONBOARD"), None));
+        assert_eq!(split_pcm_name("default"), ("default", None, None));
+        assert_eq!(split_pcm_name("pipewire"), ("pipewire", None, None));
+
+        assert_eq!(pcm_role("front", Some("0")), Some(("analog_stereo", None)));
+        assert_eq!(pcm_role("sysdefault", None), Some(("system_default", None)));
+        assert_eq!(pcm_role("surround51", Some("0")), Some(("surround", Some("5.1".into()))));
+        assert_eq!(pcm_role("hdmi", Some("2")), Some(("hdmi", Some("2".into()))));
+        assert_eq!(pcm_role("iec958", Some("0")), Some(("spdif", Some("0".into()))));
+        assert_eq!(pcm_role("hw", Some("0")), Some(("hardware", None)));
+        assert_eq!(pcm_role("pipewire", None), None, "插件 PCM 没有卡片角色，用描述显示");
+        assert_eq!(pcm_role("jack", None), None);
+
+        // The card name prefers /proc/asound/cards, then the description's first line
+        let mut missing = HashMap::new();
+        let description = "Example USB Audio, USB\nFront output".to_string();
+        assert_eq!(
+            super::describe_output_device("front:CARD=USB0,DEV=0", Some(&description), &missing).0,
+            Some("Example USB Audio".to_string()),
+        );
+        missing.insert("USB0".to_string(), "来自 /proc 的名字".to_string());
+        assert_eq!(
+            super::describe_output_device("front:CARD=USB0,DEV=0", Some(&description), &missing).0,
+            Some("来自 /proc 的名字".to_string()),
+        );
+        assert_eq!(
+            super::describe_output_device("default", Some(&description), &missing),
+            (None, None, None),
+        );
+        assert_eq!(card_name_from_hint("Example Onboard Audio, ALC000 Analog\nDefault Audio Device"),
+            Some("Example Onboard Audio".to_string()));
+    }
+
     #[test]
     fn android_alignment_stale_device_error_does_not_match_a_rebuilt_session() {
         let previous = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));

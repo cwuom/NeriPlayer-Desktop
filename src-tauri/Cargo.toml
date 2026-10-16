@@ -74,6 +74,10 @@ winreg = "0.55"
 # 桌面歌词锁定时直接读鼠标左键状态，解锁不依赖穿透窗口能否收到点击
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Reads alsa-lib device hints for human readable output labels; same version cpal uses
+alsa = "0.9"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSToolbar", "NSWindow"] }
