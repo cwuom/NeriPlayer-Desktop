@@ -826,12 +826,18 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  /** 队列插入后更新 shuffle 索引 */
-  function shiftShuffleIndicesForInsert(insertIdx: number) {
+  /**
+   * Shifts shuffle indices after a "play next" insertion.
+   *
+   * The new slot must join the queued-future stack, not the unplayed bag: the next
+   * shuffled track only pops from `shuffleFuture` (LIFO), so a slot pushed into the bag
+   * is shuffled to a random position and the insertion looks like it did nothing.
+   */
+  function shiftShuffleIndicesForPlayNext(insertIdx: number) {
     shuffleBag = shuffleBag.map(i => i >= insertIdx ? i + 1 : i)
     shuffleHistory = shuffleHistory.map(i => i >= insertIdx ? i + 1 : i)
     shuffleFuture = shuffleFuture.map(i => i >= insertIdx ? i + 1 : i)
-    shuffleBag.push(insertIdx) // 新曲目加入未播放池
+    shuffleFuture.push(insertIdx)
   }
 
   /** 队列移除后更新 shuffle 索引 */
@@ -3339,9 +3345,17 @@ export const usePlayerStore = defineStore('player', () => {
     play(shuffled[0])
   }
 
-  // 插入到当前曲目之后
+  // Insert directly after the current track ("play next")
   function addToQueueNext(track: TrackInfo) {
     const existing = queue.value.findIndex(t => t.id === track.id)
+    // The target is the current track: neither its slot nor the playback index may move,
+    // it only has to become the next track. The remove-then-insert path below would drag
+    // queueIndex onto the previous track and desynchronize the queue highlight.
+    if (existing !== -1 && existing === queueIndex.value) {
+      if (shuffleEnabled.value) shuffleFuture.push(existing)
+      savePlayerState()
+      return
+    }
     if (existing !== -1) {
       if (shuffleEnabled.value) shiftShuffleIndicesForRemove(existing)
       queue.value.splice(existing, 1)
@@ -3349,7 +3363,7 @@ export const usePlayerStore = defineStore('player', () => {
     }
     const idx = queueIndex.value + 1
     queue.value.splice(idx, 0, track)
-    if (shuffleEnabled.value) shiftShuffleIndicesForInsert(idx)
+    if (shuffleEnabled.value) shiftShuffleIndicesForPlayNext(idx)
     savePlayerState()
   }
 

@@ -30,6 +30,7 @@
     "test:now-playing-local-audio": "node scripts/test-now-playing-local-audio.mjs",
     "test:playback-queue": "node scripts/playback-queue.test.mjs",
     "test:queue-reorder": "node scripts/test-queue-reorder.mjs",
+    "test:queue-play-next": "node scripts/test-queue-play-next.mjs",
     "test:queue-panel-reorder": "node scripts/test-queue-panel-reorder.mjs",
     "test:playback-source": "node scripts/test-playback-source.mjs",
     "test:playback-fallback-resources": "node scripts/test-playback-fallback-resources.mjs",
