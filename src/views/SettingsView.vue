@@ -110,7 +110,7 @@ const {
   keepProgress, rememberLongFormProgress, keepPlaybackMode,
   showTranslation, showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
   advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
-  coverBlurBg, coverBlurAmount, coverBlurDarken,
+  lowPerformanceMode, coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
   bypassProxy, internationalizationEnabled, exploreSearchHistoryEnabled,
@@ -171,12 +171,42 @@ function changeYouTubePlaybackSource(value: string) {
   if (source) youtubePlaybackSource.value = source
 }
 
-const audioOutputDevices = ref<Array<{ name: string; isDefault: boolean }>>([])
+interface AudioOutputDeviceOption {
+  name: string
+  /** Fallback display name from the backend: alsa-lib description or PCM name */
+  label: string
+  /** `sink` for a sound server output, `device` for a cpal/ALSA device */
+  kind?: string | null
+  /** Card display name, matching KDE */
+  card?: string | null
+  /** Role key composed into `<card> <role>`; absent for sound server sinks */
+  role?: string | null
+  detail?: string | null
+  isDefault: boolean
+}
+
+const audioOutputDevices = ref<AudioOutputDeviceOption[]>([])
 const audioOutputSwitching = ref(false)
+
+/** KDE-style `<card> <role>` for ALSA devices; the server's own text for sinks */
+function audioOutputLabel(device: AudioOutputDeviceOption): string {
+  const base = device.role
+    ? (() => {
+        const role = t(`settings.audio_output_role_${device.role}`, { detail: device.detail ?? '' }).trim()
+        return device.card ? `${device.card} ${role}` : role
+      })()
+    : device.label || device.name
+  // A sound server sink can stop being the active output when another desktop
+  // changes it, so mark the one the server currently routes to
+  return device.kind === 'sink' && device.isDefault
+    ? `${base} ${t('settings.audio_output_system_default')}`
+    : base
+}
+
 const audioOutputOptions = computed(() => {
   const devices = audioOutputDevices.value.map(device => ({
     value: device.name,
-    label: device.name,
+    label: audioOutputLabel(device),
   }))
   if (audioOutputDevice.value && !devices.some(device => device.value === audioOutputDevice.value)) {
     devices.unshift({ value: audioOutputDevice.value, label: t('settings.audio_output_unavailable', { name: audioOutputDevice.value }) })
@@ -401,6 +431,7 @@ watch(dynamicBackground, on => {
 watch(coverBlurBg, on => {
   if (on && dynamicBackground.value) dynamicBackground.value = false
 })
+
 
 // 文件日志开关仅在下次启动生效（受插件限制）：用户切换时提示需重启。
 // 用 @change 而非 watch，避免启动 hydrate 时误触发提示
@@ -2790,6 +2821,15 @@ useEscapeClose(
         </div>
       </template>
     </div></Transition>
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">speed</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.low_performance_mode') }}</div>
+        <div class="setting-desc">{{ t('settings.low_performance_mode_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" v-model="lowPerformanceMode" /><span class="track"><span class="thumb"><span v-if="lowPerformanceMode" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
         </div>
 
     <!-- 播放源 -->

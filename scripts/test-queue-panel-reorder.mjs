@@ -7,8 +7,8 @@ const source = await readFile(new URL('../src/components/QueuePanel.vue', import
 const script = source.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
 const parsed = ts.createSourceFile('QueuePanel.ts', script, ts.ScriptTarget.ES2022, true)
 const names = [
-  'canReorderQueue', 'queueDragIndex', 'queueDropIndex', 'queueDragOffset',
-  'queueDragPointerId', 'queueDragHandle', 'queueDragSnapshot', 'queueDragStartY',
+  'canReorderQueue', 'queueDragIndex', 'queueDropIndex', 'queueDragRowStyle',
+  'queueDragPointerId', 'queueDragHandle', 'queueDragRow', 'queueDragSnapshot', 'queueDragStartY',
   'queueDragPointerY', 'queueDragStartScrollTop', 'queueDragFrame',
   'cancelQueueDrag', 'updateQueueDragTarget', 'tickQueueDrag',
   'startQueueDrag', 'moveQueueDrag', 'finishQueueDrag', 'moveQueueByKeyboard',
@@ -38,9 +38,18 @@ function fixture(count = 4) {
     })),
   }
   const captured = new Set()
+  // The drag offset is written to a CSS variable on the dragged row, not to reactive state
+  const rowStyle = new Map()
+  const row = {
+    style: {
+      setProperty: (name, value) => rowStyle.set(name, value),
+      removeProperty: name => rowStyle.delete(name),
+    },
+  }
   const handle = {
     setPointerCapture: id => captured.add(id), hasPointerCapture: id => captured.has(id),
     releasePointerCapture: id => captured.delete(id),
+    closest: () => row,
   }
   player.moveQueueItem = (from, to, snapshot) => { calls.push({ from, to, snapshot }); return true }
   const context = {
@@ -56,14 +65,14 @@ function fixture(count = 4) {
   }
   const methods = new Function(...Object.keys(context), `${compiled}\nreturn {
     startQueueDrag, moveQueueDrag, finishQueueDrag, cancelQueueDrag, moveQueueByKeyboard,
-    queueDragIndex, queueDropIndex, queueDragOffset, canReorderQueue,
+    queueDragIndex, queueDropIndex, queueDragRowStyle, canReorderQueue,
   }`)(...Object.values(context))
   const event = (y, extra = {}) => ({
     pointerId: 7, pointerType: 'mouse', button: 0, clientY: y, currentTarget: handle,
     preventDefault() { this.prevented = true }, stopPropagation() {}, ...extra,
   })
   return {
-    ...methods, player, listenTogether, list, calls, ensured, focused, listeners, frames, captured, event,
+    ...methods, player, listenTogether, list, calls, ensured, focused, listeners, frames, captured, event, rowStyle,
     get menuClosed() { return menuClosed }, get expansions() { return expansions },
     tick() { const [id, fn] = frames.entries().next().value; frames.delete(id); fn() },
   }
@@ -81,9 +90,13 @@ await test('dragging down uses the final queue index and never plays a song', as
   state.startQueueDrag(state.event(125), 0)
   state.moveQueueDrag(state.event(280))
   assert.equal(state.queueDropIndex.value, 3)
+  // The offset goes into a CSS variable on the dragged row: pointermove must not write
+  // reactive state, which re-rendered the whole panel on every move
+  assert.equal(state.rowStyle.get('--queue-drag-offset'), '155px')
   const original = [...state.player.queue]
   await state.finishQueueDrag(state.event(280))
   assert.deepEqual(state.calls, [{ from: 0, to: 3, snapshot: original }])
+  assert.equal(state.rowStyle.has('--queue-drag-offset'), false)
   assert.equal(state.queueDragIndex.value, -1)
   assert.equal(state.listeners.size, 0)
   assert.equal(state.frames.size, 0)

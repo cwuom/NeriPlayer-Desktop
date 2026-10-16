@@ -59,6 +59,10 @@ const richLyrics = [{
 async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   let now = 1000, frameId = 0
   const frames = new Map()
+  // The component now uses the shared frame loop (@/utils/frameLoop); wire it to the same
+  // fake frame table here
+  const scheduleFrame = callback => { const id = ++frameId; frames.set(id, callback); return id }
+  const cancelFrame = id => frames.delete(id)
   const document = Object.assign(new ListenerTarget(), { hidden: false, fonts: { status: 'loaded' } })
   const window = new ListenerTarget()
   const players = []
@@ -106,6 +110,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
         return () => null
       },
     } },
+    '@/utils/frameLoop': { scheduleFrame, cancelFrame },
     '@/utils/contextMenu': { createContextMenuItem: (label, options) => ({ label, ...options }) },
   }
   const component = new Function(
@@ -114,11 +119,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   )(name => {
     assert.ok(name in dependencies, `unexpected dependency: ${name}`)
     return dependencies[name]
-  }, {}, document, window, { now: () => now }, callback => {
-    const id = ++frameId
-    frames.set(id, callback)
-    return id
-  }, id => frames.delete(id), undefined)
+  }, {}, document, window, { now: () => now }, scheduleFrame, cancelFrame, undefined)
   const clock = vue.ref(4200)
   const seekEvents = []
   const props = vue.reactive({ lyrics, currentTimeMs: () => clock.value, isPlaying: true, lyricOffsetMs: 700 })

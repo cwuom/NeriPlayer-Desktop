@@ -102,6 +102,9 @@ pub struct AppSettings {
     pub dynamic_color: bool,
     pub dynamic_background: bool,
     pub audio_reactive: bool,
+    /// Low performance mode. Defaults stay visual-first; when enabled it caps the frame
+    /// rate and pauses background animation while a full-screen overlay is open.
+    pub low_performance_mode: bool,
     pub cover_blur_bg: bool,
     pub cover_blur_amount: f32,
     pub cover_blur_darken: f32,
@@ -259,6 +262,7 @@ impl Default for AppSettings {
             dynamic_color: false,
             dynamic_background: true,
             audio_reactive: true,
+            low_performance_mode: false,
             cover_blur_bg: false,
             cover_blur_amount: 1.5,
             cover_blur_darken: 0.2,

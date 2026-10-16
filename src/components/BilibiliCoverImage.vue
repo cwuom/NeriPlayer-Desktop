@@ -35,7 +35,9 @@ watch(() => props.src, (src) => {
   if (!src) return
 
   if (cachedSrc) {
-    log.info('memory cache displayed:', {
+    // Memory cache hits appear a screenful at a time (dozens on the comments page) and
+    // every info entry is forwarded to the backend log plugin over IPC
+    log.debug('memory cache displayed:', {
       source: describeSource(cachedSrc),
       chars: cachedSrc.length,
     })
@@ -85,7 +87,10 @@ async function loadCover(src: string, forceRefresh: boolean) {
 function handleLoad(event: Event) {
   const src = (event.currentTarget as HTMLImageElement).src
   if (src.startsWith('data:')) {
-    log.info('proxied image loaded:', { source: describeSource(src), chars: src.length })
+    // Every successfully proxied cover ends up here. Logging at info level forwards each
+    // entry to the backend log plugin over IPC, and with dozens of covers per screen on the
+    // comments page that visibly slowed the page down.
+    log.debug('proxied image loaded:', { source: describeSource(src), chars: src.length })
   }
 }
 

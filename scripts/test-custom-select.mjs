@@ -169,6 +169,24 @@ await test('device refresh preserves the highlighted value and empty results clo
   } finally { select.stop() }
 })
 
+/** Renders labels with the real zh-CN messages to verify the KDE-style device names */
+async function audioOutputLabel() {
+  const source = await readFile(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8')
+  const script = ts.createSourceFile('settings.ts', parse(source).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const functions = script.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'audioOutputLabel')
+  assert.equal(functions.length, 1, 'SettingsView exposes audioOutputLabel')
+  const compiled = ts.transpileModule(functions.map(node => ts.createPrinter().printNode(ts.EmitHint.Unspecified, node, script)).join('\n'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const messages = JSON.parse(await readFile(new URL('../src/i18n/zh-CN.json', import.meta.url), 'utf8'))
+  const t = (key, params = {}) => {
+    const value = key.split('.').reduce((node, part) => node?.[part], messages)
+    if (typeof value !== 'string') throw new Error(`missing message: ${key}`)
+    return value.replace(/\{(\w+)\}/g, (_, name) => params[name] ?? '')
+  }
+  return new Function('t', `${compiled}\nreturn audioOutputLabel`)(t)
+}
+
 async function audioSettings() {
   const source = await readFile(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8')
   const script = ts.createSourceFile('settings.ts', parse(source).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
@@ -211,5 +229,39 @@ await test('failed system-default selection sends null and retains the last conf
   assert.deepEqual(settings.errors, ['settings.audio_output_failed'])
   assert.equal(settings.calls[1].command, 'list_audio_output_devices')
 })
+await test('Linux device names compose into KDE-style <card> <role> labels', async () => {
+  const label = await audioOutputLabel()
+  assert.equal(
+    label({ name: 'front:CARD=USB0,DEV=0', label: 'Example USB Audio, USB Front output', card: 'Example USB Audio', role: 'analog_stereo', detail: '0', isDefault: false }),
+    'Example USB Audio 模拟立体声')
+  assert.equal(
+    label({ name: 'surround51:CARD=USB1,DEV=0', label: 'Example Surround Audio, USB 5.1 Surround', card: 'Example Surround Audio', role: 'surround', detail: '5.1', isDefault: false }),
+    'Example Surround Audio 5.1 环绕')
+  assert.equal(
+    label({ name: 'hdmi:CARD=HDMI0,DEV=1', label: 'Example HDMI Audio, HDMI 1', card: 'Example HDMI Audio', role: 'hdmi', detail: '1', isDefault: false }),
+    'Example HDMI Audio HDMI 1')
+  assert.equal(
+    label({ name: 'spdif', label: 'Example Onboard Audio, S/PDIF', card: 'Example Onboard Audio', role: 'spdif', detail: null, isDefault: false }),
+    'Example Onboard Audio S/PDIF')
+  // Plugin PCMs (pipewire/pulse/default) have no card role and keep the backend description;
+  // a missing card name leaves the role alone
+  assert.equal(
+    label({ name: 'pipewire', label: 'PipeWire Sound Server', isDefault: false }),
+    'PipeWire Sound Server')
+  assert.equal(
+    label({ name: 'front:CARD=X,DEV=0', label: 'raw pcm name', role: 'analog_stereo', detail: '0', isDefault: false }),
+    '模拟立体声')
+  assert.equal(
+    label({ name: 'weird:DEV=3', label: '', isDefault: false }),
+    'weird:DEV=3')
+  // Sound server sinks keep the server's own text, and only the active one is marked
+  assert.equal(
+    label({ name: 'alsa_output.usb-Example.analog-stereo', label: 'Example USB Audio 模拟立体声', kind: 'sink', isDefault: true }),
+    'Example USB Audio 模拟立体声 （系统默认）')
+  assert.equal(
+    label({ name: 'alsa_output.usb-Example2.analog-stereo', label: 'Example Surround Audio 模拟立体声', kind: 'sink', isDefault: false }),
+    'Example Surround Audio 模拟立体声')
+})
+
 console.log(`Custom select regressions: ${total - failed} passed, ${failed} failed`)
 if (failed) process.exitCode = 1

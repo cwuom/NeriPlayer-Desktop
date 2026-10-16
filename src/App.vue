@@ -17,6 +17,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
 import { applyFontSettings } from '@/modules/settings/fonts'
+import { LOW_PERFORMANCE_INTERVAL_MS, setFrameInterval } from '@/utils/frameLoop'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { useDownloadStore } from '@/stores/download'
@@ -56,6 +57,15 @@ const settingsStore = useSettingsStore()
 watch(
   () => [settingsStore.appFontFamily, settingsStore.lyricFontFamily] as const,
   ([appFontFamily, lyricFontFamily]) => applyFontSettings(appFontFamily, lyricFontFamily),
+  { immediate: true },
+)
+// Low performance mode is a global rendering preference, applied as soon as the main
+// window mounts instead of waiting for the settings page to be opened. The three per-frame
+// animations (background shader, lyrics, waveform) share one scheduler, so capping the
+// frame rate is a single call here.
+watch(
+  () => settingsStore.lowPerformanceMode,
+  on => setFrameInterval(on ? LOW_PERFORMANCE_INTERVAL_MS : 0),
   { immediate: true },
 )
 const likedSongs = useLikedSongsStore()

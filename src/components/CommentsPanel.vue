@@ -435,11 +435,26 @@ function withCode(message: string, code: number | null | undefined): string {
 
 type Segment = { kind: 'text'; text: string } | { kind: 'emote'; emote: CommentEmote }
 
-/** 按表情标记切分正文（对齐 Android splitCommentContent）：长标记优先，未命中的原样保留 */
+/**
+ * Splits a comment body on its emote placeholders (matching Android's
+ * splitCommentContent): longer placeholders win and unmatched text is kept as-is.
+ *
+ * The template calls this per comment, and every page change replaces `items`, which
+ * re-renders the whole column: without a cache each page rescanned every comment loaded so
+ * far character by character (O(loaded comments squared)). A comment's body and emotes are
+ * never mutated in place, so caching per comment object is safe.
+ */
+const segmentCache = new WeakMap<CommentItem, Segment[]>()
 function segments(comment: CommentItem): Segment[] {
+  const cached = segmentCache.get(comment)
+  if (cached) return cached
   const candidates = [...new Map(comment.emotes.filter(emote => emote.placeholder).map(emote => [emote.placeholder, emote])).values()]
     .sort((a, b) => b.placeholder.length - a.placeholder.length)
-  if (!candidates.length) return [{ kind: 'text', text: comment.content }]
+  if (!candidates.length) {
+    const plain: Segment[] = [{ kind: 'text', text: comment.content }]
+    segmentCache.set(comment, plain)
+    return plain
+  }
   const result: Segment[] = []
   let pending = ''
   let index = 0
@@ -457,6 +472,7 @@ function segments(comment: CommentItem): Segment[] {
     index += matched.placeholder.length
   }
   if (pending) result.push({ kind: 'text', text: pending })
+  segmentCache.set(comment, result)
   return result
 }
 

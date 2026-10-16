@@ -35,6 +35,10 @@ class ListenerTarget {
 async function mount(overrides = {}) {
   let now = 1000, frameId = 0
   const frames = new Map()
+  // The component now uses the shared frame loop (@/utils/frameLoop); wire it to the same
+  // fake frame table here
+  const scheduleFrame = callback => { const id = ++frameId; frames.set(id, callback); return id }
+  const cancelFrame = id => frames.delete(id)
   const document = Object.assign(new ListenerTarget(), {
     visibilityState: 'visible', fonts: Object.assign(new ListenerTarget(), { status: 'loaded' }),
   })
@@ -82,6 +86,7 @@ async function mount(overrides = {}) {
     'vue-i18n': { useI18n: () => ({ t: key => key }) },
     '@tauri-apps/plugin-clipboard-manager': { writeText: async () => {} },
     '@/components/ui/ContextMenu.vue': { default: {} },
+    '@/utils/frameLoop': { scheduleFrame, cancelFrame },
     '@/utils/contextMenu': { createContextMenuItem: (label, options) => ({ label, ...options }) },
   }
   const component = new Function(
@@ -90,11 +95,7 @@ async function mount(overrides = {}) {
   )(name => {
     assert.ok(name in dependencies, `unexpected dependency: ${name}`)
     return dependencies[name]
-  }, {}, document, window, { now: () => now }, callback => {
-    const id = ++frameId
-    frames.set(id, callback)
-    return id
-  }, id => frames.delete(id), undefined)
+  }, {}, document, window, { now: () => now }, scheduleFrame, cancelFrame, undefined)
   const setup = component.setup
   component.setup = (props, context) => {
     const state = setup(props, context)

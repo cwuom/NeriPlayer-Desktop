@@ -164,6 +164,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'motion', title: 'settings.advanced_lyrics', desc: 'settings.advanced_lyrics_desc' },
   { section: 'motion', title: 'settings.dynamic_bg', desc: 'settings.dynamic_bg_desc' },
   { section: 'motion', title: 'settings.audio_reactive', desc: 'settings.audio_reactive_desc' },
+  { section: 'motion', title: 'settings.low_performance_mode', desc: 'settings.low_performance_mode_desc' },
   { section: 'motion', title: 'settings.cover_blur', desc: 'settings.cover_blur_desc' },
   { section: 'motion', title: 'settings.blur_amount' },
   { section: 'motion', title: 'settings.bg_darken' },

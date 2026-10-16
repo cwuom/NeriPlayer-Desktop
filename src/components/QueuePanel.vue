@@ -41,7 +41,12 @@ const queueListRef = ref<HTMLElement | null>(null)
 const canReorderQueue = computed(() => player.queue.length > 1 && !listenTogether.localControlRestriction)
 const queueDragIndex = ref(-1)
 const queueDropIndex = ref(-1)
-const queueDragOffset = ref(0)
+// The drag offset goes into a CSS variable on the dragged row instead of reactive state:
+// pointermove fires hundreds of times per second while dragging, and every reactive write
+// re-rendered the whole queue panel (visibly dropping frames with thousands of rows).
+// This style object keeps one identity, so a re-render only rebinds the same transform.
+const queueDragRowStyle = { transform: 'translateY(var(--queue-drag-offset, 0px))' }
+let queueDragRow: HTMLElement | null = null
 let queueDragPointerId: number | null = null
 let queueDragHandle: HTMLElement | null = null
 let queueDragSnapshot: typeof player.queue = []
@@ -65,16 +70,18 @@ function cancelQueueDrag() {
   }
   queueDragPointerId = null
   queueDragHandle = null
+  queueDragRow?.style.removeProperty('--queue-drag-offset')
+  queueDragRow = null
   queueDragSnapshot = []
   queueDragIndex.value = -1
   queueDropIndex.value = -1
-  queueDragOffset.value = 0
 }
 
 function updateQueueDragTarget() {
   const list = queueListRef.value
   if (!list || queueDragIndex.value < 0) return
-  queueDragOffset.value = queueDragPointerY - queueDragStartY + list.scrollTop - queueDragStartScrollTop
+  const offset = queueDragPointerY - queueDragStartY + list.scrollTop - queueDragStartScrollTop
+  queueDragRow?.style.setProperty('--queue-drag-offset', `${offset}px`)
   let targetIndex = 0
   const rows = list.querySelectorAll<HTMLElement>('.queue-item')
   rows.forEach((row, index) => {
@@ -115,6 +122,7 @@ function startQueueDrag(event: PointerEvent, index: number) {
   queueDragIndex.value = index
   queueDragPointerId = event.pointerId
   queueDragHandle = event.currentTarget as HTMLElement
+  queueDragRow = queueDragHandle.closest<HTMLElement>('.queue-item')
   queueDragStartY = queueDragPointerY = event.clientY
   queueDragStartScrollTop = queueListRef.value?.scrollTop ?? 0
   queueDragHandle.setPointerCapture(event.pointerId)
@@ -284,7 +292,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
             'drop-before': queueDragIndex >= 0 && queueDropIndex < queueDragIndex && index === queueDropIndex,
             'drop-after': queueDragIndex >= 0 && queueDropIndex > queueDragIndex && index === queueDropIndex,
           }"
-          :style="index === queueDragIndex ? { transform: `translateY(${queueDragOffset}px)` } : undefined"
+          :style="index === queueDragIndex ? queueDragRowStyle : undefined"
           @click="playFromQueue(index)"
           @contextmenu.prevent.stop="openQueueContextMenu($event, index)"
         >

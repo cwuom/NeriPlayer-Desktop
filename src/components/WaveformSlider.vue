@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { cancelFrame, scheduleFrame } from '@/utils/frameLoop'
 
 const props = withDefaults(defineProps<{
   /** 传读取函数时只有本组件逐帧跟随，父组件不必因进度变化每帧重渲染 */
@@ -7,9 +8,13 @@ const props = withDefaults(defineProps<{
   isPlaying: boolean
   activeColor?: string
   inactiveColor?: string
+  /** Suspended while a full-screen overlay covers the waveform in low performance mode:
+   * the wave stays on its last frame and a watcher restarts it afterwards */
+  suspended?: boolean
 }>(), {
   activeColor: '#fff',
   inactiveColor: 'rgba(255,255,255,0.35)',
+  suspended: false,
 })
 
 const emit = defineEmits<{
@@ -60,6 +65,11 @@ function wavePath(startX: number, endX: number, cy: number): string {
 }
 
 function animate(timestamp: number) {
+  if (props.suspended) {
+    looping = false
+    lastTime = 0
+    return
+  }
   if (!lastTime) lastTime = timestamp
   const dt = timestamp - lastTime
   lastTime = timestamp
@@ -96,14 +106,14 @@ function animate(timestamp: number) {
     lastTime = 0
     return
   }
-  animFrame = requestAnimationFrame(animate)
+  animFrame = scheduleFrame(animate)
 }
 
 function startLoop() {
-  if (looping) return
+  if (looping || props.suspended) return
   looping = true
   lastTime = 0
-  animFrame = requestAnimationFrame(animate)
+  animFrame = scheduleFrame(animate)
 }
 
 onMounted(() => {
@@ -117,10 +127,11 @@ onMounted(() => {
 
 // 播放态/拖拽/进度变化时重启渲染循环（停表后需要更新一帧位置或恢复波动）
 watch(() => props.isPlaying, startLoop)
+watch(() => props.suspended, startLoop)
 watch(isDragging, startLoop)
 watch(currentProgress, startLoop)
 onUnmounted(() => {
-  cancelAnimationFrame(animFrame)
+  cancelFrame(animFrame)
   // 拖拽中被重建（切歌时按 key 重建）时兜底复位；pointer capture 随元素销毁自动释放
   isDragging.value = false
 })

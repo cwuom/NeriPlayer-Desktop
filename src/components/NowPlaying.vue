@@ -148,6 +148,18 @@ const showMoreSheet = ref(false)
 const showLtPanel = ref(false)
 const isTrackSwitchAnimating = ref(false)
 const trackSwitchDirection = ref<'prev' | 'next' | 'neutral'>('neutral')
+
+// Low performance mode (opt-in, off by default): with a full-screen overlay open the
+// background shader, lyrics and waveform all sit underneath it, invisible yet still burning
+// CPU/GPU. While the mode is off every per-frame animation keeps running unchanged.
+const fullScreenOverlayOpen = computed(() =>
+  showComments.value
+  || showQueue.value
+  || showMoreSheet.value
+  || showLtPanel.value
+  || showAddToPlaylist.value
+  || showBiliVideoSkip.value)
+const frameLoopSuspended = computed(() => settings.lowPerformanceMode && fullScreenOverlayOpen.value)
 const controlFeedbackPulse = ref(0)
 const lastControlDirection = ref<'prev' | 'next' | 'misc' | null>(null)
 let trackSwitchAnimTimer: ReturnType<typeof setTimeout> | null = null
@@ -886,6 +898,10 @@ const coverWrapRef = ref<HTMLDivElement>()
 // 逐帧变化的播放位置以读取函数交给进度条与歌词，本组件的模板不读它，播放时不会每帧整页重渲染
 const readInterpolatedProgress = () => player.interpolatedProgress
 const readInterpolatedPositionMs = () => player.interpolatedPositionMs
+// Level and beat impulse change with the 200ms audio-level event, so they are read inside
+// the background frame loop only
+const readAudioLevel = () => (settings.audioReactive ? player.audioLevel : 0)
+const readBeatImpulse = () => (settings.audioReactive ? player.beatImpulse : 0)
 
 function onVolumeWheel(event: WheelEvent) {
   const next = wheelAdjustedVolume(player.volume, event.deltaY)
@@ -2072,11 +2088,18 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
       :blur-amount="settings.coverBlurAmount * COVER_BLUR_PX_PER_UNIT"
       :darken-alpha="Math.min(Math.max(settings.coverBlurDarken, 0), 0.8)"
     />
+    <!-- Level and beat impulse are passed as readers: they change with the 200ms backend
+         event, and binding the values directly re-rendered this component (including the
+         whole more-options panel below) every 200ms. The readers return exactly the same
+         values and the background frame loop still reads them per frame, so nothing about
+         the rendering changes. -->
     <HyperBackground
       v-else-if="shouldRenderDynamicBackground"
       :playing="player.isPlaying"
-      :music-level="settings.audioReactive ? player.audioLevel : 0"
-      :beat-impulse="settings.audioReactive ? player.beatImpulse : 0"
+      :low-performance="settings.lowPerformanceMode"
+      :suspended="frameLoopSuspended"
+      :music-level="readAudioLevel"
+      :beat-impulse="readBeatImpulse"
       :colors="extractedColors"
       :is-dark="true"
       :light-offset="paletteResult?.lightOffset ?? 0"
@@ -2203,6 +2226,7 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
           <WaveformSlider
             :progress="readInterpolatedProgress"
             :is-playing="player.isPlaying"
+            :suspended="frameLoopSuspended"
             :active-color="sliderActiveColor"
             @seek="onSeek"
             @preview="onSliderPreview"
@@ -2466,6 +2490,7 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
           :is-playing="player.isPlaying"
           :lyric-offset-ms="currentLyricTotalOffsetMs"
           :seek-seq="player.lastSeekCommand.seq"
+          :suspended="frameLoopSuspended"
           @seek="onLyricSeek"
         />
         <div v-else-if="isFetchingLyrics" class="lyrics-empty">
