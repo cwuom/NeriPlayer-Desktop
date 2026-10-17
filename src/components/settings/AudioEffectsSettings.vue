@@ -191,7 +191,6 @@ async function readAutoEqFile(event: Event) {
 
 <template>
   <div ref="root" class="audio-effects-settings">
-    <p class="effects-intro">{{ t('settings.audio_effects_desc') }}</p>
     <div class="setting-card effects-master">
       <div class="effects-heading">
         <div class="setting-info"><div class="setting-title">{{ t('dsp.enabled') }}</div><div class="setting-desc">{{ t('dsp.enabled_help') }}</div></div>
@@ -359,7 +358,6 @@ async function readAutoEqFile(event: Event) {
 
 <style scoped lang="scss">
 .audio-effects-settings { min-width: 0; }
-.effects-intro { margin: 0 4px 14px; color: var(--md-on-surface-variant); font-size: 12px; line-height: 1.6; }
 .setting-card { padding: 16px; border-radius: var(--radius-md); background: var(--md-surface-container); }
 .setting-title { font-size: 14px; font-weight: 500; }
 .setting-desc { margin: 4px 0 0; color: var(--md-on-surface-variant); font-size: 12px; line-height: 1.6; }

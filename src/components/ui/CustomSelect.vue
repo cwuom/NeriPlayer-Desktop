@@ -393,17 +393,15 @@ watch(() => props.options.map(option => option.value), (values, previous) => {
 
 /* 入场/退场动画 */
 .cs-menu-enter-active {
-  transition: opacity 120ms ease, transform 120ms cubic-bezier(0.05, 0.7, 0.1, 1);
+  transition: opacity 120ms ease;
 }
 .cs-menu-leave-active {
-  transition: opacity 80ms ease, transform 80ms ease;
+  transition: opacity 80ms ease;
 }
 .cs-menu-enter-from {
   opacity: 0;
-  transform: scaleY(0.92);
 }
 .cs-menu-leave-to {
   opacity: 0;
-  transform: scaleY(0.96);
 }
 </style>
