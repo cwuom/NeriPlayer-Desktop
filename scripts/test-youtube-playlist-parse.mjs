@@ -54,7 +54,7 @@ const quickPicks = parseYouTubeHomeFeed({ contents: { singleColumnBrowseResultsR
 }] } } } }] } } })
 assert.equal(quickPicks[0].items[0].title, 'First song')
 assert.equal(quickPicks[0].items[0].subtitle, 'Artist • Album')
-assert.equal(quickPicks[0].items[0].coverUrl, 'https://lh3.googleusercontent.com/quick=w1200-h1200')
+assert.equal(quickPicks[0].items[0].coverUrl, 'https://lh3.googleusercontent.com/quick=w226-h226')
 assert.equal(quickPicks[0].items[0].videoId, 'responsive-video')
 assert.equal(quickPicks[0].items[1].browseId, 'VL-home')
 assert.equal(quickPicks[0].items[1].coverUrl, 'https://i.ytimg.com/cover.jpg')

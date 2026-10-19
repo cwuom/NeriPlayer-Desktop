@@ -11,7 +11,7 @@ const compiled = ts.transpileModule(source, {
   },
 }).outputText
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
-const { getTrackCoverUrl, upgradeYouTubeThumbnailUrl } = await import(moduleUrl)
+const { COVER_SIZE_DETAIL, COVER_SIZE_LIST, getTrackCoverUrl, upgradeYouTubeThumbnailUrl, withCoverSize } = await import(moduleUrl)
 
 assert.equal(getTrackCoverUrl(null), '')
 assert.equal(getTrackCoverUrl({ coverUrl: '  https://img.example/direct.jpg  ' }), 'https://img.example/direct.jpg')
@@ -36,26 +36,30 @@ assert.equal(
   'https://img.example/direct.jpg',
 )
 
-// YouTube 缩略图尺寸升级（对齐 Android upgradeYouTubeThumbnailUrl）
+// YouTube 缩略图尺寸：列表 226（解码约 0.2 MB），详情 1200
 assert.equal(
   upgradeYouTubeThumbnailUrl('https://lh3.googleusercontent.com/abc123=w226-h226-l90-rj'),
-  'https://lh3.googleusercontent.com/abc123=w1200-h1200',
+  'https://lh3.googleusercontent.com/abc123=w226-h226',
 )
 assert.equal(
   upgradeYouTubeThumbnailUrl('https://lh3.googleusercontent.com/abc123=w60-h60-l90-rj'),
-  'https://lh3.googleusercontent.com/abc123=w1200-h1200',
+  'https://lh3.googleusercontent.com/abc123=w226-h226',
 )
 assert.equal(
   upgradeYouTubeThumbnailUrl('https://lh3.googleusercontent.com/abc123'),
-  'https://lh3.googleusercontent.com/abc123=w1200-h1200',
+  'https://lh3.googleusercontent.com/abc123=w226-h226',
 )
 assert.equal(
   upgradeYouTubeThumbnailUrl('https://yt3.ggpht.com/abc123=w120-h120'),
-  'https://yt3.ggpht.com/abc123=w1200-h1200',
+  'https://yt3.ggpht.com/abc123=w226-h226',
 )
 assert.equal(
   upgradeYouTubeThumbnailUrl('https://yt3.ggpht.com/avatar=s88'),
-  'https://yt3.ggpht.com/avatar=w1200-h1200',
+  'https://yt3.ggpht.com/avatar=w226-h226',
+)
+assert.equal(
+  upgradeYouTubeThumbnailUrl('https://lh3.googleusercontent.com/abc123=w60-h60', 'detail'),
+  'https://lh3.googleusercontent.com/abc123=w1200-h1200',
 )
 assert.equal(
   upgradeYouTubeThumbnailUrl('https://i.ytimg.com/vi/abc123/maxresdefault.jpg'),
@@ -69,7 +73,33 @@ assert.equal(
   getTrackCoverUrl({
     coverUrl: 'https://lh3.googleusercontent.com/cover=w60-h60-l90-rj',
   }),
+  'https://lh3.googleusercontent.com/cover=w226-h226',
+)
+assert.equal(
+  getTrackCoverUrl({ coverUrl: 'https://lh3.googleusercontent.com/cover=w60-h60' }, 'detail'),
   'https://lh3.googleusercontent.com/cover=w1200-h1200',
+)
+
+// 网易云封面：按展示尺寸追加 ?param，幂等且只升不降
+assert.equal(
+  withCoverSize('https://p1.music.126.net/abc.jpg', COVER_SIZE_LIST),
+  'https://p1.music.126.net/abc.jpg?param=300y300',
+)
+assert.equal(
+  withCoverSize('https://p1.music.126.net/abc.jpg?param=300y300', COVER_SIZE_LIST),
+  'https://p1.music.126.net/abc.jpg?param=300y300',
+)
+assert.equal(
+  withCoverSize('https://p1.music.126.net/abc.jpg?param=300y300', COVER_SIZE_DETAIL),
+  'https://p1.music.126.net/abc.jpg?param=640y640',
+)
+assert.equal(
+  withCoverSize('https://p1.music.126.net/abc.jpg?param=1200y1200', COVER_SIZE_LIST),
+  'https://p1.music.126.net/abc.jpg?param=1200y1200',
+)
+assert.equal(
+  withCoverSize('https://img.example/abc.jpg', COVER_SIZE_LIST),
+  'https://img.example/abc.jpg',
 )
 
 console.log('track cover tests passed')

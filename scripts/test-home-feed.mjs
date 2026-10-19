@@ -26,7 +26,10 @@ async function load(path, dependencies = {}) {
   try { return await import(`data:text/javascript;base64,${Buffer.from(`const deps = globalThis[${JSON.stringify(key)}];\n${compiled}`).toString('base64')}`) }
   finally { delete globalThis[key] }
 }
-const parser = await load(parserPath)
+const parser = await load(parserPath, {
+  // 解析器只做 URL 规整；尺寸参数由展示层决定，测试里透传
+  '@/utils/trackCover': { COVER_SIZE_LIST: 300, withCoverSize: (url) => url },
+})
 const { NETEASE_HOME_SECTIONS, normalizeHomeSection } = parser
 const sources = ['personal_radar', 'radar_playlists', 'daily_recommend', 'private_fm', 'top_soaring', 'personalized_new_songs', 'top_hot', 'top_new', 'personalized', 'daily_resource', 'high_quality', 'hot_playlists', 'acg_playlists']
 const privateSources = ['daily_recommend', 'private_fm', 'daily_resource']

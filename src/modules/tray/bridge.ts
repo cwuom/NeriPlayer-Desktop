@@ -168,7 +168,7 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
 
   // 缓存解析结果不会改变曲目的原始 URL，需要单独发布给托盘窗口
   const stopCoverWatch = watch(
-    () => player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
+    () => player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack, 'original') : '',
     (raw, _, onCleanup) => {
       let active = true
       onCleanup(() => { active = false })
@@ -190,7 +190,7 @@ export function installTrayBridge(options: TrayBridgeOptions): () => void {
       player.currentTrack?.id,
       player.currentTrack?.title,
       player.currentTrack?.artist,
-      getTrackCoverUrl(player.currentTrack),
+      getTrackCoverUrl(player.currentTrack, 'original'),
       coverUrl.value,
       currentLocale(),
       desktopLyricsOpen.value,

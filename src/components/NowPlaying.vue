@@ -553,7 +553,7 @@ function extractColorsFromCover(url: string): Promise<boolean> {
 watch(
   () => [
     player.hasPlaybackSession,
-    player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack) : '',
+    player.hasPlaybackSession ? getTrackCoverUrl(player.currentTrack, 'detail') : '',
     player.hasPlaybackSession ? player.currentTrack?.id || '' : '',
   ] as const,
   async ([, rawUrl], _, onCleanup) => {
@@ -645,7 +645,7 @@ async function handleNowPlayingCoverError(event: Event) {
   const image = event.currentTarget as HTMLImageElement
   const failedSrc = image.getAttribute('src') || image.src
   const track = player.currentTrack
-  const rawUrl = getTrackCoverUrl(track)
+  const rawUrl = getTrackCoverUrl(track, 'detail')
   const proxiedUrl = normalizeProxiedCoverUrl(rawUrl)
   if (
     !track
@@ -680,7 +680,7 @@ async function handleNowPlayingCoverError(event: Event) {
     const refreshedUrl = await resolveCoverImage(proxiedUrl, { forceRefresh: true })
     if (
       player.currentTrack?.id !== expectedTrackId
-      || getTrackCoverUrl(player.currentTrack) !== expectedRawUrl
+      || getTrackCoverUrl(player.currentTrack, 'detail') !== expectedRawUrl
     ) {
       log.info('cover refresh ignored: stale track')
       return

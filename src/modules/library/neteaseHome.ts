@@ -1,4 +1,5 @@
 import type { TrackInfo } from '@/stores/player'
+import { COVER_SIZE_LIST, withCoverSize } from '@/utils/trackCover'
 
 export const NETEASE_HOME_SECTIONS = [
   { key: 'personal_radar', titleKey: 'home.radar', kind: 'songs', requiresLogin: false, icon: 'radar' },
@@ -58,7 +59,8 @@ function nonnegativeInteger(value: unknown, fallback = 0): number {
 }
 
 function coverUrl(value: string): string {
-  return value.replace(/^http:\/\//i, 'https://')
+  // Home cards render at 120-180 CSS px, so request 300 instead of the original
+  return withCoverSize(value.replace(/^http:\/\//i, 'https://'), COVER_SIZE_LIST)
 }
 
 function firstArray(values: unknown[]): unknown[] {
