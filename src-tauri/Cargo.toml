@@ -3,6 +3,9 @@ name = "neri-player-desktop"
 version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+# 除主程序外还有 src/bin/nerid.rs（后台进程），不指定默认二进制时 Tauri 打包会报
+# "failed to find main binary"
+default-run = "neri-player-desktop"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
