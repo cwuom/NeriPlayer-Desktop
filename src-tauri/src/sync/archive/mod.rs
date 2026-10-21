@@ -1546,6 +1546,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_bilibili_lyric_archive_round_trip_restores_the_latest_body() {
+        let committed = SyncSong {
+            id: "1".into(),
+            album: "Bilibili|123|BVtest".into(),
+            channel_id: Some("bilibili".into()),
+            audio_id: Some("BVtest".into()),
+            lyric_sync_edited: Some(true),
+            lyric_sync_revision: 10,
+            matched_lyric: Some("committed\n".into()),
+            ..Default::default()
+        };
+        let mut data = SyncData::default();
+        data.playlists.push(SyncPlaylist {
+            id: "1".into(),
+            name: "legacy".into(),
+            songs: vec![SyncSong {
+                sub_audio_id: Some("123".into()),
+                matched_lyric: None,
+                lyric_sync_revision: 9,
+                ..committed.clone()
+            }],
+            created_at: 0,
+            modified_at: 0,
+            is_deleted: false,
+            song_order_version: 1,
+        });
+        data.extensions
+            .insert("lyricOverrides".into(), serde_json::json!([committed]));
+        let prepared = prepare(&data, None).unwrap();
+        let restored = load(&prepared.content, |path| {
+            std::future::ready(
+                prepared
+                    .objects
+                    .get(&path)
+                    .cloned()
+                    .ok_or_else(|| invalid("missing test object")),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            restored.data.playlists[0].songs[0].matched_lyric.as_deref(),
+            Some("committed\n")
+        );
+        assert_eq!(restored.data.playlists[0].songs[0].lyric_sync_revision, 10);
+        assert_eq!(
+            restored.data.extensions["lyricOverrides"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn corrupted_or_missing_remote_object_never_applies_partial_data() {
         let prepared = prepare(&SyncData::default(), None).unwrap();
         assert!(load(&prepared.content, |_| std::future::ready(Ok(vec![0])))

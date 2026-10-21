@@ -2275,6 +2275,60 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bilibili_lyric_reference_restores_the_committed_override() {
+        let committed = SyncSong {
+            id: "1".into(),
+            album: "Bilibili|123|BVtest".into(),
+            channel_id: Some("bilibili".into()),
+            audio_id: Some("BVtest".into()),
+            lyric_sync_edited: Some(true),
+            lyric_sync_revision: 10,
+            matched_lyric: Some("committed\n".into()),
+            original_lyric: Some("original\n".into()),
+            ..Default::default()
+        };
+        let reference = SyncSong {
+            sub_audio_id: Some("123".into()),
+            matched_lyric: None,
+            original_lyric: None,
+            lyric_sync_revision: 9,
+            ..committed.clone()
+        };
+        let mut data = sync_data(vec![playlist(vec![reference.clone()])]);
+        data.extensions
+            .insert("lyricOverrides".into(), serde_json::json!([committed]));
+        converge_lyrics(&mut data, true).unwrap();
+        let restored = &data.playlists[0].songs[0];
+        assert_eq!(restored.matched_lyric.as_deref(), Some("committed\n"));
+        assert_eq!(restored.original_lyric.as_deref(), Some("original\n"));
+        assert_eq!(restored.lyric_sync_revision, 10);
+        assert_eq!(
+            data.extensions["lyricOverrides"].as_array().unwrap().len(),
+            1
+        );
+
+        for invalid in [
+            Vec::new(),
+            vec![SyncSong {
+                sub_audio_id: Some("124".into()),
+                ..committed.clone()
+            }],
+            vec![SyncSong {
+                lyric_sync_revision: 8,
+                ..committed.clone()
+            }],
+        ] {
+            let mut data = sync_data(vec![playlist(vec![reference.clone()])]);
+            data.extensions
+                .insert("lyricOverrides".into(), serde_json::json!(invalid));
+            let error = converge_lyrics(&mut data, true).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("Sync lyric reference has no committed override"));
+        }
+    }
+
+    #[test]
     fn bili_skip_merge_applies_android_interval_limit_before_merging() {
         let intervals: Vec<_> = (0..102).map(|start| serde_json::json!({"startMs": start, "endMs": start + 1})).collect();
         let local = serde_json::Map::from_iter([("biliVideoSkipRules".into(), serde_json::json!([{

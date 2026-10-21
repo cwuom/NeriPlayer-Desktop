@@ -251,6 +251,10 @@ Current writes use **V4 ProtoBuf manifests + Zstd chunked archives**, with suppo
 
 Archive leaf chunks download in batches of up to four concurrent requests. GitHub reuses local objects after checking them against a fixed commit tree, publishes small changes with one conditional commit, and retains staged uploads for larger changes. WebDAV continues to verify remote content and protect writes with leases and conditions.
 
+WebDAV follows Android's Nutstore compatibility behavior: an initial LOCK response of 403/405/501 permits unlocked sync, while targets that previously granted a finite lease cannot downgrade. Reads request identity encoding, and Nutstore's unquoted ETags are sent unchanged in conditional writes. The manifest is checked before publication and read back afterwards. Without a usable ETag, fingerprint checks and readback cannot guarantee atomic concurrent writes; automatic removal of old chunks still requires a finite lease and strong ETags.
+
+Legacy Bilibili metadata in the form `Bilibili|CID|BV-id` uses only the CID as the sub-audio identity, matching Android so lyric references resolve to their independent overrides. Archives with missing overrides or insufficient revisions are still rejected.
+
 Cross-platform use requires both clients to support the current protocol. The repository includes frozen Android test vectors and a [Kotlin interoperability validation script](./scripts/test-sync-android-interop.ps1). Codec checks do not replace testing real accounts, a shared remote and alternating sync across multiple devices.
 
 ### Manual backups

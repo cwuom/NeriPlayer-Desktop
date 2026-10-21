@@ -17,6 +17,7 @@ const MAX_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
 const DIRECTORY_PROBE_BODY: &[u8] =
     b"<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>";
 const CONFLICT_PREFIX: &str = "WebDAV archive conflict";
+const PRECONDITION_FAILURE: &str = "precondition failed (412)";
 static FINITE_LEASE_TARGETS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub fn is_conflict(error: &AppError) -> bool {
@@ -49,6 +50,7 @@ pub fn is_recoverable_release_failure(error: &AppError) -> bool {
 pub struct RemoteFile {
     pub content: Vec<u8>,
     pub fingerprint: String,
+    // 裸 ETag 仅供无锁发布，清理和恢复仍需单独检查强 ETag
     pub etag: Option<String>,
 }
 
@@ -196,7 +198,7 @@ impl WebDavArchiveClient {
         let start = Instant::now();
         let response=self.request(Method::from_bytes(b"LOCK").unwrap(),self.collection.clone()).header("Depth","infinity").header("Timeout","Second-300").header("Content-Type","application/xml; charset=utf-8").body("<d:lockinfo xmlns:d=\"DAV:\"><d:lockscope><d:exclusive/></d:lockscope><d:locktype><d:write/></d:locktype></d:lockinfo>").timeout(Duration::from_secs(60)).send().await.map_err(reqwest::Error::without_url)?;
         let status = response.status();
-        if matches!(status.as_u16(), 405 | 501) && !known {
+        if matches!(status.as_u16(), 403 | 405 | 501) && !known {
             return Ok(None);
         }
         let redirected = response.url() != &self.collection;
@@ -295,7 +297,12 @@ impl WebDavArchiveClient {
             (None, Duration::from_secs(60))
         };
         let xml = method.as_str() == "PROPFIND";
+        let reading = method == Method::GET;
         let mut request = self.request(method, url.clone());
+        if reading {
+            // 压缩可能让服务端把强 ETag 降为弱 ETag
+            request = request.header(reqwest::header::ACCEPT_ENCODING, "identity");
+        }
         if let Some(token) = token {
             request = request.header("If", format!("<{}> (<{}>)", self.collection, token));
         }
@@ -326,7 +333,10 @@ impl WebDavArchiveClient {
             lease.require_live().await?;
         }
         let status = response.status();
-        if matches!(status.as_u16(), 412 | 423) {
+        if status == StatusCode::PRECONDITION_FAILED {
+            return Err(conflict(PRECONDITION_FAILURE));
+        }
+        if status == StatusCode::LOCKED {
             return Err(conflict("condition changed or lease lost"));
         }
         let etag = response
@@ -334,7 +344,7 @@ impl WebDavArchiveClient {
             .get(reqwest::header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
-            .filter(|value| strong_etag(value))
+            .filter(|value| strong_etag(value) || opaque_etag(value))
             .map(String::from);
         let body = bounded_body(response, maximum).await?;
         if let Some(lease) = lease {
@@ -374,6 +384,27 @@ impl WebDavArchiveClient {
         }))
     }
 
+    async fn require_unchanged_manifest(
+        &self,
+        observed: Option<&RemoteFile>,
+        lease: Option<&Lease>,
+    ) -> AppResult<()> {
+        let current = self
+            .get(archive::MANIFEST_FILE, lease, archive::MAX_OBJECT_BYTES)
+            .await?;
+        match (observed, current.as_ref()) {
+            (None, None) => Ok(()),
+            (Some(old), Some(current))
+                if old.fingerprint == current.fingerprint
+                    && (old.etag.as_deref().is_none_or(|etag| !strong_etag(etag))
+                        || old.etag == current.etag) =>
+            {
+                Ok(())
+            }
+            _ => Err(conflict("manifest changed before publication")),
+        }
+    }
+
     pub async fn put_archive(
         &self,
         prepared: &PreparedArchive,
@@ -381,22 +412,8 @@ impl WebDavArchiveClient {
         verified_paths: &HashSet<String>,
         lease: Option<&Lease>,
     ) -> AppResult<RemoteFile> {
-        // 持锁服务器也可能忽略条件头，先重新读取本次合并依据的清单
-        if lease.is_some() {
-            let current = self
-                .get(archive::MANIFEST_FILE, lease, archive::MAX_OBJECT_BYTES)
-                .await?;
-            match (observed, current.as_ref()) {
-                (None, None) => {}
-                (Some(old), Some(current))
-                    if old.fingerprint == current.fingerprint
-                        && (old.etag.is_none() || old.etag == current.etag) => {}
-                _ => return Err(conflict("manifest changed before publication")),
-            }
-        }
-        if observed.is_some_and(|file| file.etag.is_none()) && lease.is_none() {
-            return Err(SyncFailure::WebDavMissingCondition.into());
-        }
+        // 部分服务端忽略条件头，无锁时也要先核对本次合并依据的清单
+        self.require_unchanged_manifest(observed, lease).await?;
         for (path, content) in &prepared.objects {
             if !archive::canonical_object_path(path) || content.len() > archive::MAX_OBJECT_BYTES {
                 return Err(invalid("invalid upload object"));
@@ -434,14 +451,16 @@ impl WebDavArchiveClient {
                 Err(error) => return Err(error),
             }
         }
-        let condition = if let Some(etag) = observed.and_then(|file| file.etag.as_deref()) {
+        let etag = observed.and_then(|file| file.etag.as_deref());
+        let opaque = lease.is_none() && etag.is_some_and(opaque_etag);
+        let condition = if let Some(etag) = etag.filter(|etag| strong_etag(etag) || opaque) {
             Some(("If-Match", etag))
         } else if observed.is_none() {
             Some(("If-None-Match", "*"))
         } else {
             None
         };
-        let (status, _, _) = self
+        let result = self
             .execute(
                 Method::PUT,
                 self.file_url(archive::MANIFEST_FILE)?,
@@ -450,7 +469,25 @@ impl WebDavArchiveClient {
                 Some(&prepared.content),
                 64 * 1024,
             )
-            .await?;
+            .await;
+        // 坚果云的裸 ETag 必须原样传递，仅在 412 后确认清单未变才兼容不认该值的服务端
+        let result = if opaque
+            && matches!(&result, Err(AppError::Api(message)) if message == &format!("{CONFLICT_PREFIX}: {PRECONDITION_FAILURE}"))
+        {
+            self.require_unchanged_manifest(observed, lease).await?;
+            self.execute(
+                Method::PUT,
+                self.file_url(archive::MANIFEST_FILE)?,
+                lease,
+                None,
+                Some(&prepared.content),
+                64 * 1024,
+            )
+            .await
+        } else {
+            result
+        };
+        let (status, _, _) = result?;
         if !status.is_success() {
             return Err(self.write_failure(status, "manifest PUT", lease).await);
         }
@@ -543,7 +580,7 @@ impl WebDavArchiveClient {
         uptime: i64,
     ) -> AppResult<RemoteFile> {
         let mut current = published.clone();
-        if lease.is_none() || self.collection.query().is_some() || published.etag.is_none() {
+        if lease.is_none() || self.collection.query().is_some() || published.etag.as_deref().is_none_or(|etag| !strong_etag(etag)) {
             return Ok(current);
         }
         let result=async {
@@ -565,7 +602,7 @@ impl WebDavArchiveClient {
             if eligible.is_empty() {return Ok(());}
             let refreshed=archive::PreparedArchive {content:archive::renew_publication_id(&current.content)?,objects:std::collections::BTreeMap::new()};
             current=self.put_archive(&refreshed,Some(&current),&HashSet::new(),lease).await?;
-            if current.etag.is_none() {return Err(invalid("maintenance fence requires strong ETag"));}
+            if current.etag.as_deref().is_none_or(|etag| !strong_etag(etag)) {return Err(invalid("maintenance fence requires strong ETag"));}
             let checked=archive::load(&current.content,|object|async move {
                 self.get(&object,lease,archive::MAX_OBJECT_BYTES).await?.map(|file|file.content).ok_or_else(||invalid("maintenance closure missing object"))
             }).await?;
@@ -933,6 +970,12 @@ pub fn strong_etag(value: &str) -> bool {
             .chars()
             .any(|character| character == '"' || character.is_control())
 }
+fn opaque_etag(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| (b'!'..=b'~').contains(&byte) && !matches!(byte, b'"' | b','))
+}
 fn valid_token(token: &str) -> bool {
     token.len() <= 1024
         && !token.is_empty()
@@ -1284,20 +1327,247 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nutstore_lock_refusal_falls_back_only_before_a_lease_was_granted() {
+        for status in [
+            "403 Forbidden",
+            "405 Method Not Allowed",
+            "501 Not Implemented",
+        ] {
+            let (api, task) = server(vec![response(status, "", b"")]).await;
+            assert!(api.acquire_lease().await.unwrap().is_none());
+            assert_eq!(task.await.unwrap().len(), 1);
+
+            let (api, task) = server(vec![response(status, "", b"")]).await;
+            mark_known_lease(&api.scope()).unwrap();
+            assert!(api.acquire_lease().await.is_err());
+            assert_eq!(task.await.unwrap().len(), 1);
+        }
+        for status in [
+            "401 Unauthorized",
+            "423 Locked",
+            "500 Internal Server Error",
+        ] {
+            let (api, task) = server(vec![response(status, "", b"")]).await;
+            assert!(api.acquire_lease().await.is_err());
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn nutstore_reads_request_identity_and_preserve_opaque_etags() {
+        let (api, task) = server(vec![response(
+            "200 OK",
+            "ETag: 8sKBsnMc5tH71U67xjQTCQ\r\n",
+            b"old",
+        )])
+        .await;
+        let file = api
+            .get(archive::MANIFEST_FILE, None, 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.etag.as_deref(), Some("8sKBsnMc5tH71U67xjQTCQ"));
+        let requests = task.await.unwrap();
+        assert!(String::from_utf8_lossy(&requests[0])
+            .to_ascii_lowercase()
+            .contains("accept-encoding: identity\r\n"));
+    }
+
+    #[tokio::test]
+    async fn nutstore_unlocked_publication_uses_opaque_etag_verbatim() {
+        let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        let (api, task) = server(vec![
+            response("200 OK", "ETag: opaque-token\r\n", b"old"),
+            response("204 No Content", "", b""),
+            b"ECHO_LAST_PUT".to_vec(),
+        ])
+        .await;
+        let observed = RemoteFile {
+            content: b"old".to_vec(),
+            fingerprint: archive::digest(b"old"),
+            etag: Some("opaque-token".into()),
+        };
+        api.put_archive(
+            &prepared,
+            Some(&observed),
+            &prepared.objects.keys().cloned().collect(),
+            None,
+        )
+        .await
+        .unwrap();
+        let requests = task.await.unwrap();
+        assert!(String::from_utf8_lossy(&requests[1])
+            .to_ascii_lowercase()
+            .contains("if-match: opaque-token\r\n"));
+    }
+
+    #[tokio::test]
+    async fn nutstore_opaque_conflict_rechecks_before_falling_back() {
+        let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        for changed in [false, true] {
+            let mut responses = vec![
+                response("200 OK", "ETag: opaque-token\r\n", b"old"),
+                response("412 Precondition Failed", "", b""),
+                response("200 OK", "", if changed { b"new" } else { b"old" }),
+            ];
+            if !changed {
+                responses.push(response("204 No Content", "", b""));
+                responses.push(b"ECHO_LAST_PUT".to_vec());
+            }
+            let (api, task) = server(responses).await;
+            let observed = RemoteFile {
+                content: b"old".to_vec(),
+                fingerprint: archive::digest(b"old"),
+                etag: Some("opaque-token".into()),
+            };
+            let result = api
+                .put_archive(
+                    &prepared,
+                    Some(&observed),
+                    &prepared.objects.keys().cloned().collect(),
+                    None,
+                )
+                .await;
+            if changed {
+                assert!(is_conflict(&result.unwrap_err()));
+            } else {
+                result.unwrap();
+            }
+            let requests = task.await.unwrap();
+            assert_eq!(requests.len(), if changed { 3 } else { 5 });
+            assert!(String::from_utf8_lossy(&requests[1])
+                .to_ascii_lowercase()
+                .contains("if-match: opaque-token\r\n"));
+            if !changed {
+                assert!(!String::from_utf8_lossy(&requests[3])
+                    .to_ascii_lowercase()
+                    .contains("if-match:"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unlocked_publication_without_an_etag_checks_fingerprints_and_rereads() {
+        let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        for etag in ["", "ETag: W/\"weak\"\r\n"] {
+            let (api, task) = server(vec![
+                response("200 OK", etag, b"old"),
+                response("204 No Content", "", b""),
+                b"ECHO_LAST_PUT".to_vec(),
+            ])
+            .await;
+            let observed = RemoteFile {
+                content: b"old".to_vec(),
+                fingerprint: archive::digest(b"old"),
+                etag: None,
+            };
+            api.put_archive(
+                &prepared,
+                Some(&observed),
+                &prepared.objects.keys().cloned().collect(),
+                None,
+            )
+            .await
+            .unwrap();
+            let requests = task.await.unwrap();
+            assert!(!String::from_utf8_lossy(&requests[1])
+                .to_ascii_lowercase()
+                .contains("if-match:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn unlocked_publication_rejects_a_manifest_changed_before_or_after_put() {
+        let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        for before in [false, true] {
+            let mut responses = vec![response("200 OK", "", if before { b"new" } else { b"old" })];
+            if !before {
+                responses.push(response("204 No Content", "", b""));
+                responses.push(response("200 OK", "", b"new"));
+            }
+            let (api, task) = server(responses).await;
+            let observed = RemoteFile {
+                content: b"old".to_vec(),
+                fingerprint: archive::digest(b"old"),
+                etag: None,
+            };
+            let error = api
+                .put_archive(
+                    &prepared,
+                    Some(&observed),
+                    &prepared.objects.keys().cloned().collect(),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert!(is_conflict(&error));
+            assert_eq!(task.await.unwrap().len(), if before { 1 } else { 3 });
+        }
+    }
+
+    #[tokio::test]
+    async fn unlocked_preflight_failure_stops_before_any_object_upload() {
+        let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
+        let (api, task) = server(vec![response("403 Forbidden", "", b"")]).await;
+        let error = api
+            .put_archive(&prepared, None, &HashSet::new(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Sync(SyncFailure::WebDavAccessDenied)
+        ));
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with(b"GET "));
+    }
+
+    #[tokio::test]
+    async fn opaque_or_missing_etags_never_authorize_gc_even_with_a_lease() {
+        let (api, task) = server(Vec::new()).await;
+        task.await.unwrap();
+        let lease = test_lease(&api, Instant::now() + Duration::from_secs(300));
+        for etag in [None, Some("opaque-token"), Some("W/\"weak\"")] {
+            let published = RemoteFile {
+                content: b"old".to_vec(),
+                fingerprint: archive::digest(b"old"),
+                etag: etag.map(String::from),
+            };
+            let result = api
+                .maintain_gc_at(
+                    &published,
+                    &HashSet::new(),
+                    &HashSet::new(),
+                    Some(&lease),
+                    1000,
+                    1000,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.fingerprint, published.fingerprint);
+            assert_eq!(result.etag, published.etag);
+        }
+    }
+
+    #[tokio::test]
     async fn initial_archive_upload_uses_create_only_for_every_object_and_manifest() {
         let prepared = archive::prepare(
             &super::super::models::SyncData::default(),
             Some("initial".into()),
         )
         .unwrap();
-        let mut responses = vec![response("201 Created", "", b""); prepared.objects.len() + 1];
+        let mut responses = vec![
+            response("404 Not Found", "", b""),
+            response("207 Multi-Status", "", COLLECTION.as_bytes()),
+        ];
+        responses.extend(vec![response("201 Created", "", b""); prepared.objects.len() + 1]);
         responses.push(response("200 OK", "ETag: \"root\"\r\n", &prepared.content));
         let (api, task) = server(responses).await;
         api.put_archive(&prepared, None, &HashSet::new(), None)
             .await
             .unwrap();
         let requests = task.await.unwrap();
-        for request in &requests[..requests.len() - 1] {
+        for request in &requests[2..requests.len() - 1] {
             let text = String::from_utf8_lossy(request).to_ascii_lowercase();
             assert!(text.starts_with("put "));
             assert!(text.contains("if-none-match: *\r\n"));
@@ -1336,10 +1606,13 @@ mod tests {
     #[tokio::test]
     async fn stale_strong_etag_fails_without_an_unconditional_overwrite() {
         let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
-        let (api, task) = server(vec![response("412 Precondition Failed", "", b"")]).await;
+        let (api, task) = server(vec![
+            response("200 OK", "ETag: \"old\"\r\n", b"old"),
+            response("412 Precondition Failed", "", b""),
+        ]).await;
         let observed = RemoteFile {
-            content: vec![1],
-            fingerprint: "old".into(),
+            content: b"old".to_vec(),
+            fingerprint: archive::digest(b"old"),
             etag: Some("\"old\"".into()),
         };
         let error = api
@@ -1353,20 +1626,10 @@ mod tests {
             .unwrap_err();
         assert!(is_conflict(&error));
         let requests = task.await.unwrap();
-        assert_eq!(requests.len(), 1);
-        assert!(String::from_utf8_lossy(&requests[0])
+        assert_eq!(requests.len(), 2);
+        assert!(String::from_utf8_lossy(&requests[1])
             .to_ascii_lowercase()
             .contains("if-match: \"old\""));
-        let weak = RemoteFile {
-            etag: None,
-            ..observed
-        };
-        assert!(matches!(
-            api.put_archive(&prepared, Some(&weak), &HashSet::new(), None)
-                .await
-                .unwrap_err(),
-            AppError::Sync(SyncFailure::WebDavMissingCondition)
-        ));
     }
 
     const COLLECTION: &str = "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
@@ -1427,6 +1690,8 @@ mod tests {
         let prepared = archive::prepare(&super::super::models::SyncData::default(), None).unwrap();
         let verified: HashSet<String> = prepared.objects.keys().cloned().collect();
         let (api, task) = server(vec![
+            response("404 Not Found", "", b""),
+            response("207 Multi-Status", "", COLLECTION.as_bytes()),
             response("409 Conflict", "", b""),
             response("207 Multi-Status", "", COLLECTION.as_bytes()),
         ])
@@ -1436,6 +1701,8 @@ mod tests {
         task.await.unwrap();
 
         let (api, task) = server(vec![
+            response("404 Not Found", "", b""),
+            response("207 Multi-Status", "", COLLECTION.as_bytes()),
             response("409 Conflict", "", b""),
             response("404 Not Found", "", b""),
         ])

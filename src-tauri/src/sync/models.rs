@@ -248,8 +248,9 @@ fn normalized_sub_audio_id(channel: &str, raw_sub_audio_id: Option<&str>, album:
         .map(ToString::to_string)
         .or_else(|| {
             album
-                .split_once('|')
-                .map(|(_, value)| value.trim().to_string())
+                .split('|')
+                .nth(1)
+                .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         })
         .unwrap_or_default()
@@ -1146,6 +1147,28 @@ pub struct WebDavSyncConfig {
 mod legacy_json_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn legacy_bilibili_lyric_identity_uses_only_the_cid_from_the_album() {
+        for (explicit, album, expected) in [
+            (None, "Bilibili|123|BVtest", "123"),
+            (Some(" 456 "), "Bilibili|123|BVtest", "456"),
+            (Some(" "), "Bilibili|123|BVtest", "123"),
+            (None, "Bilibili||BVtest", ""),
+            (None, "Bilibili| |BVtest", ""),
+            (None, "Bilibili|123", "123"),
+            (None, "Bilibili", ""),
+        ] {
+            assert_eq!(
+                normalized_sub_audio_id("bilibili", explicit, album),
+                expected
+            );
+        }
+        assert_eq!(
+            normalized_sub_audio_id("netease", Some("123"), "Bilibili|123|BVtest"),
+            ""
+        );
+    }
 
     #[test]
     fn only_covers_other_devices_can_open_are_uploaded() {
