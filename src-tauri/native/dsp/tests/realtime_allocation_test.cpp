@@ -41,17 +41,30 @@ int main() {
         params[kMasterEnabled] = iteration % 7 == 0 ? 0.0f : 1.0f;
         params[kGraphicEqEnabled] = 1.0f;
         params[kGraphicEqGain0 + 5] = static_cast<float>(iteration % 12);
+        params[kBassGainDb] = iteration % 2 == 0 ? 9.0f : -6.0f;
+        params[kBassFrequencyHz] = 40.0f + static_cast<float>(iteration % 211);
+        params[kTrebleGainDb] = iteration % 3 == 0 ? -6.0f : 9.0f;
+        params[kTrebleFrequencyHz] = 1000.0f + static_cast<float>((iteration * 137) % 15001);
+        params[kVirtualBassAmount] = iteration % 5 == 0 ? 0.0f : 0.6f;
+        params[kVirtualBassFrequencyHz] = 50.0f + static_cast<float>(iteration % 151);
         params[kWarmthAmount] = 0.8f;
         params[kSurroundAmount] = 0.8f;
         params[kReverbAmount] = 0.8f;
         params[kReverbPreDelayMs] = static_cast<float>(iteration % 100);
         params[kSpeakerEnabled] = 1.0f;
+        params[kSpeakerBassHarmonics] = 0.5f;
         params[kSpeakerHighPassHz] = 40.0f + static_cast<float>((iteration * 17) % 360);
         params[kSpeakerLoudness] = static_cast<float>(iteration % 101) / 100.0f;
         params[kCompressorEnabled] = 1.0f;
         params[kCompressorMakeupDb] = static_cast<float>(iteration % 19);
         params[kLimiterEnabled] = 1.0f;
-        for (size_t i = 0; i < samples.size(); ++i) samples[i] = 0.2f * std::sin(static_cast<float>(i));
+        for (size_t frame = 0; frame < samples.size() / 2; ++frame) {
+            const double phase = 2.0 * kPi * static_cast<double>(frame) / kSampleRate;
+            const float sample = static_cast<float>(0.2 * std::sin(55.0 * phase)
+                + 0.1 * std::sin(1000.0 * phase) + 0.1 * std::sin(12000.0 * phase));
+            samples[frame * 2] = sample;
+            samples[frame * 2 + 1] = sample;
+        }
         valid = neri_desktop_dsp_set_params(desktop, params.data(), kParamCount) != 0 && valid;
         valid = neri_desktop_dsp_process(desktop, samples.data(), samples.size()) >= 0 && valid;
         for (float sample : samples) valid = std::isfinite(sample) && valid;

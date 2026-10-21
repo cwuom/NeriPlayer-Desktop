@@ -97,6 +97,8 @@ private:
     SmoothedValue mix_;
     FilterBankStage graphicEq_;
     FilterBankStage parametricEq_;
+    BassBoostStage bass_;
+    EnhancementLimiter enhancementLimiter_;
     FilterBankStage tone_;
     FilterBankStage loudness_;
     FilterBankStage vocalClarity_;

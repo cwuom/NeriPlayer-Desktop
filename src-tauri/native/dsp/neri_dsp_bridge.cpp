@@ -97,7 +97,7 @@ void neri_desktop_dsp_stats(void* pointer, NeriDesktopDspStats* output) noexcept
 }
 
 float neri_desktop_dsp_headroom(const float* p) noexcept {
-    std::array<BiquadCoefficients, 24> filters;
+    std::array<BiquadCoefficients, kGraphicBandCount + kParametricBandCount + 5> filters;
     size_t count = 0;
     if (p[kGraphicEqEnabled] > 0.5f) {
         for (int band = 0; band < kGraphicBandCount; ++band) {
@@ -114,7 +114,16 @@ float neri_desktop_dsp_headroom(const float* p) noexcept {
             }
         }
     }
-    if (p[kBassGainDb] != 0.0f) filters[count++] = designBiquad(FilterType::LowShelf, 48000.0, p[kBassFrequencyHz], p[kBassGainDb], 0.707);
+    if (p[kBassGainDb] != 0.0f) {
+        // 增强限量承担低频峰值，前级只保留三成正搁架余量，避免把中高频一起压低
+        constexpr float kBassShelfHeadroomShare = 0.3f;
+        const float gainDb = p[kBassGainDb] > 0.0f ? p[kBassGainDb] * kBassShelfHeadroomShare : p[kBassGainDb];
+        filters[count++] = designBiquad(FilterType::LowShelf, 48000.0, p[kBassFrequencyHz], gainDb, 0.707);
+        const float subsonicHz = bassSubsonicFrequencyHz(p[kBassGainDb], p[kBassFrequencyHz]);
+        if (subsonicHz > 0.0f) {
+            filters[count++] = designBiquad(FilterType::HighPass, 48000.0, subsonicHz, 0.0, 0.707);
+        }
+    }
     if (p[kTrebleGainDb] != 0.0f) filters[count++] = designBiquad(FilterType::HighShelf, 48000.0, p[kTrebleFrequencyHz], p[kTrebleGainDb], 0.707);
     if (p[kLoudnessBassDb] > 0.0f) filters[count++] = designBiquad(FilterType::LowShelf, 48000.0, kLoudnessBassHz, p[kLoudnessBassDb], 0.707);
     if (p[kLoudnessTrebleDb] > 0.0f) filters[count++] = designBiquad(FilterType::HighShelf, 48000.0, kLoudnessTrebleHz, p[kLoudnessTrebleDb], 0.707);

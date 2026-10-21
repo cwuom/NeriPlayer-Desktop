@@ -269,6 +269,35 @@ regression('frequency response is an actual RBJ cascade with preamp and section 
   assert.ok(disabled.every(point => Math.abs(point.gainDb) < 1e-9))
 })
 
+regression('bass response shows Android subsonic protection only for positive gain', () => {
+  const boosted = m.audioEffectsFrequencyResponse(sound({ bassDb: 6, bassFrequencyHz: 100 }), 1, 1000)
+  const at = hz => boosted.reduce((closest, point) =>
+    Math.abs(point.frequencyHz - hz) < Math.abs(closest.frequencyHz - hz) ? point : closest)
+  assert.ok(boosted[0].gainDb < 2, `20 Hz gain ${boosted[0].gainDb}`)
+  assert.ok(Math.abs(at(40).gainDb - 6) < 1, `40 Hz gain ${at(40).gainDb}`)
+  assert.ok(Math.abs(at(2000).gainDb) < 0.1)
+  const cut = m.audioEffectsFrequencyResponse(sound({ bassDb: -6, bassFrequencyHz: 100 }))
+  assert.ok(Math.abs(cut[0].gainDb + 6) < 0.2)
+  const disabled = m.audioEffectsFrequencyResponse(sound({ bassDb: 6, toneEnabled: false }))
+  assert.ok(disabled.every(point => Math.abs(point.gainDb) < 1e-9))
+})
+
+regression('bass presets match Android punch tuning without changing saved custom sounds', () => {
+  const original = profile({ bassDb: 4, virtualBass: 0.8 })
+  const boost = m.applyAudioEffectPreset(original, 'bass_boost').sound
+  assert.deepEqual(boost.equalizerBandsDb, [1, 1, 0.5, 0, 0, 0, 0, 0, 0, 0])
+  assert.equal(boost.bassDb, 7)
+  assert.equal(boost.virtualBass, 0.25)
+  const deep = m.applyAudioEffectPreset(original, 'deep_bass').sound
+  assert.deepEqual(deep.equalizerBandsDb, [2, 1.5, 0.5, 0, -0.5, 0, 0, 0, 0, 0])
+  assert.equal(deep.bassDb, 8)
+  assert.equal(deep.bassFrequencyHz, 80)
+  assert.equal(deep.virtualBass, 0.45)
+  assert.equal(deep.monoBassHz, 120)
+  assert.equal(original.sound.bassDb, 4)
+  assert.equal(original.sound.virtualBass, 0.8)
+})
+
 regression('legacy five-band migration preserves the existing Q and headroom instead of reinterpreting gains as ten bands', () => {
   const settings = m.migrateLegacyAudioEffects({ equalizerEnabled: true, equalizerPresetId: 'custom',
     equalizerBands: [300, 100, -100, 100, 300], loudnessGainMb: 1200 })

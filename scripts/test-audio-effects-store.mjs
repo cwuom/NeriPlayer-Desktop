@@ -210,7 +210,7 @@ await regression('native edits coalesce and preserve A/B bypass, presets enable 
   assert.equal(native[0][1].outputDevice, 'Headphones')
   r.setAudioEffectsPreset('deep_bass')
   assert.equal(r.audioEffectsProfile.value.enabled, true)
-  assert.equal(r.audioEffectsProfile.value.sound.bassDb, 6)
+  assert.equal(r.audioEffectsProfile.value.sound.bassDb, 8)
 })
 
 await regression('device profiles follow actual output and edit that device only', async r => {

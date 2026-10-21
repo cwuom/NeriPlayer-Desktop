@@ -390,9 +390,9 @@ export const AUDIO_EFFECT_PRESETS: AudioEffectPreset[] = [
   preset('acg', 'style', { equalizerBandsDb: [1, 1, 0.5, 0, 0, 0.5, 1.5, 2.5, 3, 2.5], vocal: 0.3, clarity: 0.2 }),
   preset('piano', 'style', { equalizerBandsDb: [0, 0, 0.5, 1, 0.5, 0, 0.5, 1, 1.5, 1], reverb: 0.08 }),
   preset('vocal_boost', 'tone', { equalizerBandsDb: [-2, -1.5, -1, 0, 1, 2.5, 3, 2.5, 1, 0], vocal: 0.4 }),
-  preset('bass_boost', 'tone', { equalizerBandsDb: [2, 2, 1, 0, 0, 0, 0, 0, 0, 0], bassDb: 6, virtualBass: 0.2 }),
-  preset('deep_bass', 'tone', { equalizerBandsDb: [5, 4, 2, 0, -0.5, 0, 0, 0, 0, 0], bassDb: 6,
-    bassFrequencyHz: 80, virtualBass: 0.5, monoBassHz: 120 }),
+  preset('bass_boost', 'tone', { equalizerBandsDb: [1, 1, 0.5, 0, 0, 0, 0, 0, 0, 0], bassDb: 7, virtualBass: 0.25 }),
+  preset('deep_bass', 'tone', { equalizerBandsDb: [2, 1.5, 0.5, 0, -0.5, 0, 0, 0, 0, 0], bassDb: 8,
+    bassFrequencyHz: 80, virtualBass: 0.45, monoBassHz: 120 }),
   preset('treble_boost', 'tone', { trebleDb: 5, trebleFrequencyHz: 6000, clarity: 0.2 }),
   preset('warm', 'tone', { warmth: 0.6, trebleDb: -3, trebleFrequencyHz: 9000, crossfeed: 0.1 }),
   preset('live', 'scene', { stereoWidth: 1.3, surround: 0.2, reverb: 0.35, reverbRoom: 0.85,
@@ -852,7 +852,15 @@ function responseFilters(sound: AudioEffectsSound, volume: number): BiquadCoeffi
   if (sound.parametricEnabled) for (const band of sound.parametricBands) {
     if (band.enabled) filters.push(designBiquad(band.type, band.frequencyHz, band.gainDb, band.q))
   }
-  if (sound.bassDb !== 0) filters.push(designBiquad('low_shelf', sound.bassFrequencyHz, sound.bassDb, 0.707))
+  if (sound.bassDb !== 0) {
+    filters.push(designBiquad('low_shelf', sound.bassFrequencyHz, sound.bassDb, 0.707))
+    if (sound.bassDb > 0) {
+      // 与原生低音一致，只在提升时逐渐收紧次声高通
+      const targetHz = Math.max(16, Math.min(30, 0.25 * sound.bassFrequencyHz))
+      const subsonicHz = 5 + (targetHz - 5) * Math.min(1, sound.bassDb / 4)
+      filters.push(designBiquad('high_pass', subsonicHz, 0, 0.707))
+    }
+  }
   if (sound.trebleDb !== 0) filters.push(designBiquad('high_shelf', sound.trebleFrequencyHz, sound.trebleDb, 0.707))
   const loudness = loudnessCompensationDb(sound.loudnessCompensation, volume)
   if (loudness.bassDb !== 0) filters.push(designBiquad('low_shelf', LOUDNESS_BASS_HZ, loudness.bassDb, 0.707))

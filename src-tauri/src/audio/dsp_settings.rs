@@ -813,6 +813,33 @@ mod tests {
     }
 
     #[test]
+    fn bass_headroom_matches_android_without_reducing_static_cuts() {
+        let mut settings = AudioEffectsSettings::default();
+        settings.main.enabled = true;
+        settings.main.sound.bass_db = 6.0;
+        let boosted = settings.resolve("").params;
+        assert!(
+            (boosted[PREAMP_DB] + 1.25).abs() < 0.15,
+            "preamp {}",
+            boosted[PREAMP_DB]
+        );
+        assert_eq!(boosted[BASS_GAIN_DB], 6.0);
+
+        settings.main.sound.bass_db = -6.0;
+        let cut = settings.resolve("").params;
+        assert_eq!(cut[PREAMP_DB], 0.0);
+        assert_eq!(cut[BASS_GAIN_DB], -6.0);
+
+        settings.main.sound.bass_db = 6.0;
+        settings.main.sound.loudness_compensation = 1.0;
+        let quiet = settings.resolve_with_volume("", 0.1).params;
+        assert!(quiet[PREAMP_DB] < boosted[PREAMP_DB] - 4.0);
+        assert_eq!(quiet[LOUDNESS_BASS_DB], 6.0);
+        settings.auto_headroom = false;
+        assert_eq!(settings.resolve("").params[PREAMP_DB], 0.0);
+    }
+
+    #[test]
     fn auto_headroom_uses_the_real_combined_filter_response() {
         let mut settings = AudioEffectsSettings::default();
         settings.main.enabled = true;
