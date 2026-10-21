@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { writeClipboardText } from '@/utils/clipboard'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
@@ -514,7 +515,7 @@ async function onMenuClick(item: ContextMenuActionItem) {
   if (!comment) return
   if (item.id === 'copy') {
     try {
-      await navigator.clipboard.writeText(comment.content)
+      await writeClipboardText(comment.content)
       toast.success(t('player.comments_copied'))
     } catch {
       toast.error(t('player.comments_copy_failed'))

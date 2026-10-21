@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { writeClipboardText } from '@/utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { isTauri } from '@tauri-apps/api/core'
@@ -171,7 +172,7 @@ async function importPresetFile(event: Event) {
 }
 async function copyShareCode() {
   try {
-    await navigator.clipboard.writeText(player.exportAudioEffectsPreset(currentUserPreset.value?.id))
+    await writeClipboardText(player.exportAudioEffectsPreset(currentUserPreset.value?.id))
     copied.value = true
     clearTimeout(copiedTimer)
     copiedTimer = setTimeout(() => { copied.value = false }, 2000)

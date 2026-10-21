@@ -54,6 +54,7 @@ const select = {
 }
 const translate = (key, args) => args?.frequency != null ? `${key}:${args.frequency}` : args?.number != null ? `${key}:${args.number}` : key
 const components = {}
+let clipboardWrite = ''
 async function component(path, dependencyOverrides = {}) {
   const script = compileScript(parse(await read(path)).descriptor, { id: path, genDefaultAs: 'component', inlineTemplate: true })
   const dependencies = {
@@ -62,6 +63,7 @@ async function component(path, dependencyOverrides = {}) {
     '@/stores/player': { usePlayerStore: () => player },
     '@/modules/audioEffects/model': model,
     '@/modules/audioEffects/listening': listening,
+    '@/utils/clipboard': { writeClipboardText: async text => { clipboardWrite = text } },
     '@/utils/editableRange': loadModule(await read('../src/utils/editableRange.ts')),
     './ui/CustomSelect.vue': { default: select }, '@/components/ui/CustomSelect.vue': { default: select },
     ...components, ...dependencyOverrides,
@@ -244,19 +246,16 @@ try {
   assert.equal(findAll(detailTree, node => node.type === 'button' && node.matches('.effects-preset-card')).length, 30)
   assert.equal(findAll(detailTree, node => node.text === 'dsp.user_preset_note').length, 0, 'user preset cards carry no filler description')
   byLabel(detailTree, 'My headphones').props.onClick(); await vue.nextTick()
-  let copiedText = ''
-  globalThis.navigator ??= {}
-  Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value: { writeText: async text => { copiedText = text } } })
   const transferButton = text => findAll(detailTree, node => node.type === 'button' && node.closest('.effects-transfer-actions')
     && findAll(node, child => child.text === text).length > 0)[0]
   await transferButton('dsp.transfer.copy').props.onClick(); await vue.nextTick()
-  const shared = JSON.parse(copiedText)
+  const shared = JSON.parse(clipboardWrite)
   assert.equal(shared.name, 'Exported')
   assert.ok(shared.id && shared.sound, 'share codes carry the top-level fields Android requires')
   assert.ok(transferButton('dsp.transfer.copied'), 'the copy button confirms in place instead of a toast')
   assert.equal(findAll(detailTree, node => node instanceof TestElement && node.matches('.effects-paste')).length, 0)
   transferButton('dsp.transfer.paste').props.onClick(); await vue.nextTick()
-  byLabel(detailTree, 'dsp.transfer.paste_placeholder').props['onUpdate:modelValue'](copiedText); await vue.nextTick()
+  byLabel(detailTree, 'dsp.transfer.paste_placeholder').props['onUpdate:modelValue'](clipboardWrite); await vue.nextTick()
   button(detailTree, 'dsp.transfer.import').props.onClick(); await vue.nextTick()
   assert.ok(calls.some(call => call[0] === 'import'))
   assert.equal(findAll(detailTree, node => node instanceof TestElement && node.matches('.effects-paste')).length, 0, 'a successful paste import closes the box')
