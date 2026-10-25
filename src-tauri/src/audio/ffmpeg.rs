@@ -297,7 +297,7 @@ unsafe extern "C" fn io_read(opaque: *mut c_void, buffer: *mut u8, size: i32) ->
         let target = std::slice::from_raw_parts_mut(buffer, length);
         match state.input.read(target) {
             Ok(read) => i32::try_from(read).unwrap_or(IO_ERROR),
-            // 远程读取器取消时报 Interrupted，边下边播的读取器报普通错误，两者都要按取消处理
+            // 读取器的永久 I/O 错误也要按输入状态保留取消语义
             Err(error) if error.kind() == io::ErrorKind::Interrupted || state.input.interrupted() => {
                 state.interrupted = true;
                 IO_INTERRUPTED
@@ -328,7 +328,7 @@ unsafe extern "C" fn io_seek(opaque: *mut c_void, offset: i64, whence: i32) -> i
         match state.input.seek(target) {
             Ok(position) => i64::try_from(position).unwrap_or(-1),
             Err(error) => {
-                if error.kind() == io::ErrorKind::Interrupted {
+                if error.kind() == io::ErrorKind::Interrupted || state.input.interrupted() {
                     state.interrupted = true;
                 } else {
                     state.last_error = Some(error.to_string());
@@ -575,6 +575,55 @@ mod tests {
             (sum + f64::from(value) * f64::from(value), count + 1)
         });
         (sum / count.max(1) as f64).sqrt()
+    }
+
+    #[test]
+    fn callbacks_recognize_cancelled_inputs_with_permanent_io_errors() {
+        struct FailingInput {
+            cancelled: bool,
+        }
+
+        impl std::io::Read for FailingInput {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("input unavailable"))
+            }
+        }
+
+        impl std::io::Seek for FailingInput {
+            fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+                Err(std::io::Error::other("input unavailable"))
+            }
+        }
+
+        impl super::ByteInput for FailingInput {
+            fn byte_len(&mut self) -> Option<u64> {
+                None
+            }
+
+            fn interrupted(&self) -> bool {
+                self.cancelled
+            }
+        }
+
+        for cancelled in [false, true] {
+            let mut state = super::IoState {
+                input: Box::new(FailingInput { cancelled }),
+                interrupted: false,
+                last_error: None,
+            };
+            let opaque = (&mut state as *mut super::IoState).cast::<std::ffi::c_void>();
+            let mut byte = [0u8];
+            let status = unsafe { super::io_read(opaque, byte.as_mut_ptr(), 1) };
+            assert_eq!(status, if cancelled { super::IO_INTERRUPTED } else { super::IO_ERROR });
+            assert_eq!(state.interrupted, cancelled);
+            assert_eq!(state.last_error.is_some(), !cancelled);
+
+            state.interrupted = false;
+            state.last_error = None;
+            assert_eq!(unsafe { super::io_seek(opaque, 0, 0) }, -1);
+            assert_eq!(state.interrupted, cancelled, "seek must preserve cancellation independently of the I/O error kind");
+            assert_eq!(state.last_error.is_some(), !cancelled);
+        }
     }
 
     /// 安装包里的目录排在手动覆盖之后、可执行文件旁边的目录之前

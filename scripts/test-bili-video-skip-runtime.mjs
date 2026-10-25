@@ -20,9 +20,9 @@ new Function('exports', ts.transpileModule(readFileSync(new URL('../src/modules/
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(policy)
 const track = { id: 'bilibili:BVtest', album: 'Bilibili|101', syncPayload: { originalName: 'Song' } }
-function runtime({ roomId = null, playing = true, loading = false, generation = 7, loadedGeneration = 7 } = {}) {
+function runtime({ roomId = null, playing = true, loading = false, generation = 7, loadedGeneration = 7, fixtureTrack = track } = {}) {
   const calls = [], state = { roomId }
-  const currentTrack = ref({ ...track, syncPayload: { ...track.syncPayload } })
+  const currentTrack = ref({ ...fixtureTrack, syncPayload: { ...fixtureTrack.syncPayload } })
   const currentBiliVideoSkipTarget = ref(null), rules = ref([{ bvid: 'BVtest', cid: 101, intervals: [{ startMs: 1000, endMs: 5000 }], modifiedAt: 100, isDeleted: false }])
   const context = {
     ...policy, currentTrack, currentBiliVideoSkipTarget, biliVideoSkipTracker: new policy.BiliVideoSkipTracker(),
@@ -30,6 +30,7 @@ function runtime({ roomId = null, playing = true, loading = false, generation = 
     useListenTogetherStore: () => state, useBiliVideoSkipStore: () => ({ rules: rules.value }),
     seekTo: async (ms, commandSource) => { calls.push({ ms, commandSource }) },
     handleTrackEnded: async () => { calls.push({ ended: true }) },
+    invoke: async command => { assert.equal(command, 'get_bili_video_skip_targets'); return [] },
     savePlayerState: () => {}, log: { warn: () => {} },
   }
   const methods = new Function(...Object.keys(context), `let playbackRequestToken=${generation}, loadedPlaybackRequestToken=${loadedGeneration}, biliVideoSkipRequestToken=0, _needsReload=false, pendingSeek=null;\n${compiled}\nreturn {prepareBiliVideoSkipTrack, applyResolvedBiliVideoSkipTarget, maybeAutoSkipBiliVideoInterval, changeGeneration: () => playbackRequestToken++, setPendingSeek: value => pendingSeek = value };`)(...Object.values(context))
@@ -70,6 +71,36 @@ regression('resolved targets replace pages and persist offline origin identity',
   assert.equal(r.currentTrack.value.syncPayload.subAudioId, '102')
   assert.equal(r.currentTrack.value.syncPayload.album, 'Bilibili|102|BVtest')
   assert.equal(r.maybeAutoSkipBiliVideoInterval(1000, 10000), false)
+})
+regression('active room playback retains its received source identity while resolving the runtime target', () => {
+  for (const fixtureTrack of [
+    { id: 'bilibili:BVtest', album: '', syncPayload: { channelId: 'bilibili', audioId: 'BVtest' } },
+    { id: 'bilibili:12345', album: '', syncPayload: { channelId: 'bilibili', audioId: '12345' } },
+    { id: 'bilibili:BVtest', album: 'Bilibili|101', syncPayload: { channelId: 'bilibili', audioId: 'BVtest', subAudioId: '101' } },
+  ]) {
+    const r = runtime({ roomId: 'room', fixtureTrack })
+    const received = JSON.parse(JSON.stringify(r.currentTrack.value))
+    r.applyResolvedBiliVideoSkipTarget(r.currentTrack.value, { bvid: 'BVtest', cid: 102 }, 7)
+    assert.deepEqual(r.currentBiliVideoSkipTarget.value, { bvid: 'BVtest', cid: 102 })
+    assert.deepEqual(r.currentTrack.value, received, 'resolving a stream cannot rewrite the room track or its album CID')
+    assert.equal(r.maybeAutoSkipBiliVideoInterval(1000, 10000), false)
+  }
+})
+regression('leaving a room restores local metadata completion despite a retained queue reference', () => {
+  const r = runtime({ roomId: 'room', fixtureTrack: {
+    id: 'bilibili:12345', album: '',
+    playlistKey: JSON.stringify({ stableKey: 'bilibili:12345', occurrence: 0 }),
+    syncPayload: { channelId: 'bilibili', audioId: '12345', originalName: 'Song' },
+  } })
+  r.applyResolvedBiliVideoSkipTarget(r.currentTrack.value, { bvid: 'BVtest', cid: 102 }, 7)
+  assert.equal(r.currentTrack.value.album, '')
+  assert.equal(r.currentTrack.value.syncPayload.audioId, '12345')
+  r.state.roomId = null
+  r.applyResolvedBiliVideoSkipTarget(r.currentTrack.value, { bvid: 'BVtest', cid: 102 }, 7)
+  assert.equal(r.currentTrack.value.album, 'Bilibili|102|BVtest')
+  assert.equal(r.currentTrack.value.syncPayload.audioId, 'BVtest')
+  assert.equal(r.currentTrack.value.syncPayload.subAudioId, '102')
+  assert.equal(r.currentTrack.value.syncPayload.originalName, 'Song')
 })
 regression('late resolutions cannot change another playback request', () => {
   const r = runtime(); r.changeGeneration()

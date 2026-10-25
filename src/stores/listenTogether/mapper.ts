@@ -170,7 +170,7 @@ export function trackInfoToLtTrack(
     // 优先 syncPayload.subAudioId, 否则从 album 字段提取 cid
     subAudioId = payloadSubAudioId
     if (!subAudioId) {
-      const cidMatch = track.album?.match(/^Bilibili\|(.+)$/i)
+      const cidMatch = track.album?.match(/^Bilibili\|([^|]+)(?:\|.*)?$/i)
       if (cidMatch?.[1]) subAudioId = cidMatch[1]
     }
   } else if (

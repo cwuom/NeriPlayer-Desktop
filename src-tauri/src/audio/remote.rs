@@ -391,10 +391,7 @@ impl RemoteAudioInner {
 
     fn ensure_playback_current(&self) -> io::Result<()> {
         if self.playback_cancelled() {
-            Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "playback request superseded",
-            ))
+            Err(io::Error::other("playback request superseded"))
         } else {
             Ok(())
         }
@@ -1129,10 +1126,8 @@ impl RemoteAudioSource {
 
     fn ensure_read_current(&self) -> io::Result<()> {
         if self.read_cancelled() {
-            Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "remote read superseded",
-            ))
+            // 取消是永久态；read_exact 和 Symphonia 会对 Interrupted 无界重试
+            Err(io::Error::other("remote read superseded"))
         } else {
             Ok(())
         }
@@ -2944,9 +2939,7 @@ impl Iterator for SymphoniaAudioDecoder {
                     Err(SymphoniaError::IoError(err))
                         if self.retry_virtual_body_edges
                             && consecutive_io < MAX_VIRTUAL_BODY_SKIP_PACKETS
-                            // Interrupted 一律是取消令牌（superseded/停会话），对本次
-                            // 操作是永久态：重试 3 次只是把新 seek 的接管拖慢 60ms，
-                            // 还会在日志里刷出误导性的 retry 噪音
+                            // 主动取消使用永久 I/O 错误，只有短暂的预取边缘错误才重试
                             && (err.kind() == std::io::ErrorKind::UnexpectedEof
                                 || err.kind() == std::io::ErrorKind::WouldBlock) =>
                     {
@@ -3339,10 +3332,7 @@ async fn fetch_range_block_async(
     let request_started = Instant::now();
     inner.ensure_playback_current()?;
     if read_cancellation.is_some_and(RemoteReadCancellation::is_cancelled) {
-        return Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "remote read superseded",
-        ));
+        return Err(io::Error::other("remote read superseded"));
     }
     let requested_len = end.saturating_sub(start).saturating_add(1);
     // 超时预算随块大小/近期吞吐缩放：块大或网慢时给足传输时间，
@@ -3412,10 +3402,7 @@ async fn fetch_range_block_async(
                 end,
                 request_started.elapsed().as_millis(),
             );
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "remote read superseded",
-            ));
+            return Err(io::Error::other("remote read superseded"));
         }
     };
 
@@ -3595,10 +3582,10 @@ fn halved_fetch_len(len: u64) -> u64 {
 }
 
 /// 超时/传输中断类错误：可通过折半重试恢复；
-/// 4xx/长度变化/取消（Interrupted）等永久失败不在此列
+/// 4xx、长度变化和主动取消等永久失败不在此列
 /// splice 打开期能否把 next_packet/decode 错误当「moov 假样本区」继续跳过：
 /// 解码/格式类错误可跳；IO 错误里只有预取边缘的瞬时类可跳。
-/// PermissionDenied（403 直链失效）、Interrupted（读已被更新操作取消）等
+/// PermissionDenied（403 直链失效）、Other（读已被更新操作取消）等
 /// 永久态必须立即上抛——每次重试都会对同一 range 重发注定失败的网络请求，
 /// 4096 次上限等于无限刷 403（实机日志：seek 后每 ~600ms 一次 403 卡死）
 fn splice_skip_retryable(err: &SymphoniaError) -> bool {
@@ -3879,7 +3866,7 @@ async fn prefetch_lane(
             }
             Err(err) => {
                 release_prefetch_start(&inner, start, &entry);
-                if err.kind() != io::ErrorKind::Interrupted {
+                if err.kind() != io::ErrorKind::Interrupted && !inner.playback_cancelled() {
                     log::warn!(
                         target: "remote-audio",
                         "prefetch stopped at {}: {}",
@@ -5443,8 +5430,102 @@ mod tests {
         super::release_prefetch_start(&inner, 256, &entry);
     }
 
+    fn assert_cancelled_read_is_not_retried(source: RemoteAudioSource, use_symphonia: bool) {
+        struct CountedSource {
+            source: RemoteAudioSource,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl Read for CountedSource {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let reads = self.reads.fetch_add(1, Ordering::Relaxed);
+                if reads >= 32 {
+                    return Err(std::io::Error::other("cancelled read retry limit"));
+                }
+                self.source.read(out)
+            }
+        }
+
+        impl std::io::Seek for CountedSource {
+            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+                std::io::Seek::seek(&mut self.source, position)
+            }
+        }
+
+        impl symphonia::core::io::MediaSource for CountedSource {
+            fn is_seekable(&self) -> bool {
+                true
+            }
+
+            fn byte_len(&self) -> Option<u64> {
+                Some(self.source.inner.total_len)
+            }
+        }
+
+        assert!(crate::audio::ffmpeg::ByteInput::interrupted(&source));
+        let seek_error = std::io::Seek::seek(&mut source.clone(), std::io::SeekFrom::Start(0))
+            .expect_err("cancelled seek");
+        assert_eq!(seek_error.kind(), std::io::ErrorKind::Other);
+        let fetch_error = tokio::runtime::Runtime::new().unwrap().block_on(
+            super::fetch_range_block_async(&source.inner, 0, 3, source.read_cancellation.as_ref()),
+        ).expect_err("cancelled fetch must stop before network I/O");
+        assert_eq!(fetch_error.kind(), std::io::ErrorKind::Other);
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut counted = CountedSource { source, reads: Arc::clone(&reads) };
+        let error = if use_symphonia {
+            let mut stream = symphonia::core::io::MediaSourceStream::new(
+                Box::new(counted),
+                symphonia::core::io::MediaSourceStreamOptions::default(),
+            );
+            symphonia::core::io::ReadBytes::read_buf_exact(&mut stream, &mut [0; 4])
+                .expect_err("cancelled symphonia read")
+        } else {
+            counted.read_exact(&mut [0; 4]).expect_err("cancelled exact read")
+        };
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "permanent cancellation must escape exact reads without retrying");
+        assert!(!super::is_transient_fetch_error(&error));
+        assert!(!splice_skip_retryable(&symphonia::core::errors::Error::IoError(error)));
+    }
+
+    #[tokio::test]
+    async fn cancelled_inflight_range_read_is_permanent() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inner = forbidden_test_inner(format!("http://{}/cancel", listener.local_addr().unwrap()), 4);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let cancellation = RemoteReadCancellation::new(Arc::clone(&stopped), None);
+        let (released, release_wait) = tokio::sync::oneshot::channel();
+        let request = async {
+            let result = super::fetch_range_block_async(&inner, 0, 3, Some(&cancellation)).await;
+            let _ = released.send(());
+            result
+        };
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            stopped.store(true, Ordering::Release);
+            let _ = release_wait.await;
+            drop(stream);
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(request, server)
+        }).await.expect("in-flight cancellation must finish without the request timeout");
+        let error = result.expect_err("cancelled in-flight fetch");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(!super::is_transient_fetch_error(&error));
+        assert!(!splice_skip_retryable(&symphonia::core::errors::Error::IoError(error)));
+    }
+
     #[test]
-    fn superseded_remote_source_stops_before_network_or_cache_io() {
+    fn superseded_remote_source_cancels_before_network_or_cache_io() {
         let playback_generation = Arc::new(AtomicU64::new(1));
         let inner = Arc::new(RemoteAudioInner {
             client: reqwest::Client::new(),
@@ -5486,7 +5567,8 @@ mod tests {
 
         let error = source.read(&mut byte).expect_err("superseded read");
 
-        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_cancelled_read_is_not_retried(source, false);
     }
 
     #[test]
@@ -5537,7 +5619,8 @@ mod tests {
             .read(&mut [0])
             .expect_err("stopped session read");
 
-        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_cancelled_read_is_not_retried(source, true);
     }
 
     #[test]
@@ -7617,7 +7700,7 @@ mod tests {
     }
 
     /// splice 打开期的错误分类：解码类可跳；IO 里只有瞬时类可跳，
-    /// 403（PermissionDenied）与取消（Interrupted）必须立即上抛
+    /// 403（PermissionDenied）与主动取消必须立即上抛
     #[test]
     fn splice_skip_bails_on_permanent_io_errors() {
         use symphonia::core::errors::Error as SymphoniaError;
@@ -7626,10 +7709,7 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "remote range request forbidden: 403 Forbidden",
         ));
-        let cancelled = SymphoniaError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "remote read superseded",
-        ));
+        let cancelled = SymphoniaError::IoError(std::io::Error::other("remote read superseded"));
         let transient = SymphoniaError::IoError(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "prefetch edge",

@@ -191,6 +191,24 @@ assert.equal(isTrustedInboundStreamUrl('https://music.126.net.evil.test/a', 'net
   assert.equal(back.album, 'Bilibili|888')
 }
 
+// 三段 album 只提取 CID，保留显式分 P 和数字 AV 身份
+{
+  const base = {
+    id: 'bilibili:BV1xx', title: 'Bili', artist: 'UP', album: 'Bilibili|888|BV1xx',
+    durationMs: 2000, coverUrl: '', audioUrl: '', source: 'bilibili',
+  }
+  const legacy = trackInfoToLtTrack(base)
+  assert.equal(legacy.subAudioId, '888', 'a stored BV suffix is not part of the CID')
+  assert.equal(legacy.stableKey, 'bilibili:BV1xx:888')
+  const explicit = trackInfoToLtTrack({ ...base, syncPayload: { channelId: 'bilibili', audioId: 'BV1xx', subAudioId: '777' } })
+  assert.equal(explicit.subAudioId, '777', 'an explicit room part retains priority over the album')
+  assert.equal(explicit.stableKey, 'bilibili:BV1xx:777')
+  const numeric = trackInfoToLtTrack({ ...base, id: 'bilibili:12345', syncPayload: { channelId: 'bilibili', audioId: '12345' } })
+  assert.equal(numeric.audioId, '12345')
+  assert.equal(numeric.stableKey, 'bilibili:12345:888')
+  assert.notEqual(explicit.stableKey, legacy.stableKey, 'different Bilibili parts remain different room tracks')
+}
+
 // YouTube: playlistContext 进入 stableKey, mediaUri 回填
 {
   const track = {

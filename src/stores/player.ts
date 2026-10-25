@@ -1276,6 +1276,8 @@ export const usePlayerStore = defineStore('player', () => {
     if (previous?.bvid !== normalized.bvid || previous.cid !== normalized.cid) biliVideoSkipTracker.reset()
     currentBiliVideoSkipTarget.value = normalized
     if (!isBiliVideoSkipTrack(track)) return
+    // 房间曲目身份来自权威状态，本机解析的 BV/CID 只用于当前播放
+    if (useListenTogetherStore().roomId) return
     // 保存真正播放的分 P，缓存或下载播放时仍能恢复同一条区间规则
     track.album = `Bilibili|${normalized.cid}|${normalized.bvid}`
     if (track.syncPayload) {

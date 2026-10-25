@@ -171,6 +171,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
   const _recentOutboundEventIds = new Set<string>()
   // 记录最后上报的 track id，避免重复上报
   let _lastReportedTrackId: string | null = null
+  let _lastAppliedSharedStreamSignature: string | null = null
   let _lastReportedQueueKeys: string[] = []
   let _queueEventInFlight: ListenTogetherEvent | null = null
   let _queueEventSnapshot: ListenTogetherEvent | null = null
@@ -439,6 +440,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _outbox.clear()
     _hostControlledOffline = false
     _lastReportedTrackId = null
+    _lastAppliedSharedStreamSignature = null
     _lastReportedQueueKeys = []
     _queueEventInFlight = null
     _queueEventSnapshot = null
@@ -493,6 +495,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     const unlistenConnected = await listen<{ connectionId?: string }>('lt:connected', (event) => {
       if (generation !== _sessionGeneration) return
       _activeWsConnectionId = event.payload.connectionId || null
+      _lastAppliedSharedStreamSignature = null
       const reconnected = _reconnectAttempt > 0
       connectionState.value = 'connected'
       if (reconnected) {
@@ -1123,6 +1126,7 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
     _suppressPlayerWatch = true
     try {
       if (!effectiveLtTrack) {
+        _lastAppliedSharedStreamSignature = null
         replacePlayerQueue(queue, -1)
         setSyncRate(null)
         if (player.isPlaying) void player.pause('remote_sync')
@@ -1142,9 +1146,16 @@ export const useListenTogetherStore = defineStore('listenTogether', () => {
       if (!isController.value && roomSettings.value.shareAudioLinks && !remoteTrack.audioUrl) {
         requestLinkForTrack(effectiveLtTrack, targetIndex)
       }
+      const sharedStreamUrls = trustedInboundStreamUrls(effectiveLtTrack.channelId,
+        effectiveLtTrack.streamUrls, effectiveLtTrack.streamUrl)
+      const sharedStreamSignature = JSON.stringify(sharedStreamUrls.slice().sort())
+      const playbackUnavailable = !player.hasPlaybackSession && !player.isLoadingAudio
+        && _pendingRemotePlaybackLoads.size === 0
+      // 保留已成功的备用音源；失败会话需要重载，进行中的加载仍等待原请求完成
       const streamChanged = !!remoteTrack.audioUrl
-        && !trustedInboundStreamUrls(effectiveLtTrack.channelId, effectiveLtTrack.streamUrls, effectiveLtTrack.streamUrl)
-          .includes(player.getCurrentStreamUrl(remoteTrack.id) || '')
+        && (playbackUnavailable || (!sharedStreamUrls.includes(player.getCurrentStreamUrl(remoteTrack.id) || '')
+          && sharedStreamSignature !== _lastAppliedSharedStreamSignature))
+      _lastAppliedSharedStreamSignature = sharedStreamSignature
       replacePlayerQueue(queue, targetIndex)
       if (playbackContextChanged || streamChanged || forceReload) {
         _trackSwitchAt = Date.now()

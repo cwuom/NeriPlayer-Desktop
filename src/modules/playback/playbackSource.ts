@@ -79,6 +79,8 @@ export interface PlaybackResolveOptions {
   allowFallback?: boolean
   /** YouTube 优先 m4a 容器（对齐 Android 的下载取流：WebM 写不了标签） */
   preferM4a?: boolean
+  /** 前台接管时传 true，按当前播放需求判断，避免清预取误取消正在播放的请求 */
+  shouldContinue?: (foreground?: boolean) => boolean
 }
 
 export interface PlaybackCacheWriteOptions {
@@ -313,7 +315,12 @@ export class PlaybackUrlResolver {
     result: ResolvedPlaybackSource
     expiresAt: number
   }>()
-  private readonly inFlight = new Map<string, { promise: Promise<PlaybackResolution>; requestGeneration?: number }>()
+  private readonly inFlight = new Map<string, {
+    promise: Promise<PlaybackResolution>
+    requestGeneration?: number
+    isActive: () => boolean
+    retain: () => void
+  }>()
 
   constructor(private readonly retryDelay?: (ms: number) => Promise<void>) {}
 
@@ -369,15 +376,21 @@ export class PlaybackUrlResolver {
         if (cached.expiresAt > Date.now()) return cached.result
         this.cache.delete(cacheKey)
       }
-      // 无代际的请求（预取）不会被新播放取消，任何请求都可以等它；
+      // 未作废的无代际预取可以被前台接管，避免切歌时重复完整的换源搜索；
       // 带代际的请求只能共享同一代际，旧代际的请求随时会被后端作废
       const existing = this.inFlight.get(cacheKey)
-      if (existing && (existing.requestGeneration === undefined || existing.requestGeneration === options.requestGeneration)) {
+      if (existing?.isActive() && (existing.requestGeneration === undefined || existing.requestGeneration === options.requestGeneration)) {
+        if (!options.shouldContinue) existing.retain()
         return existing.promise
       }
     }
 
-    const attempt = (): Promise<PlaybackResolution> => adapter.resolve(track, resolvedSettings, options)
+    let retained = !options.shouldContinue
+    const isActive = () => this.inFlight.get(cacheKey)?.promise === pending
+      && options.shouldContinue?.(retained) !== false
+    const attempt = (): Promise<PlaybackResolution> => adapter.resolve(track, resolvedSettings, {
+      ...options, shouldContinue: isActive,
+    })
       .then((result): PlaybackResolution => result ?? {
         type: 'failure',
         reason: 'no_play_url',
@@ -386,12 +399,12 @@ export class PlaybackUrlResolver {
       })
       .catch(error => classifyPlaybackError(error))
     // 重试整体留在同一个 in-flight 条目里：并发请求共享结果，缓存被清空或强制刷新取代后停止
-    const pending: Promise<PlaybackResolution> = retrySongUrlResolution(attempt, {
+    const pending: Promise<PlaybackResolution> = Promise.resolve().then(() => retrySongUrlResolution(attempt, {
       delay: this.retryDelay,
-      shouldContinue: () => this.inFlight.get(cacheKey)?.promise === pending,
-    })
+      shouldContinue: isActive,
+    }))
       .then(result => {
-        if (result.type === 'success' && this.inFlight.get(cacheKey)?.promise === pending) {
+        if (result.type === 'success' && isActive()) {
           if (!this.cache.has(cacheKey) && this.cache.size >= MAX_RESOLUTION_CACHE_ENTRIES) {
             const oldest = this.cache.keys().next().value
             if (oldest !== undefined) this.cache.delete(oldest)
@@ -408,7 +421,10 @@ export class PlaybackUrlResolver {
         if (this.inFlight.get(cacheKey)?.promise === pending) this.inFlight.delete(cacheKey)
       })
 
-    this.inFlight.set(cacheKey, { promise: pending, requestGeneration: options.requestGeneration })
+    this.inFlight.set(cacheKey, {
+      promise: pending, requestGeneration: options.requestGeneration,
+      isActive, retain: () => { retained = true },
+    })
     return pending
   }
 
@@ -691,6 +707,10 @@ function createAudioInfo(
   }
 }
 
+function ensurePlaybackResolutionActive(options: PlaybackResolveOptions): void {
+  if (options.shouldContinue?.() === false) throw new Error('Playback request superseded')
+}
+
 function resolveNetease(
   track: TrackInfo,
   settings: PlaybackSourceSettings,
@@ -708,6 +728,7 @@ function resolveNetease(
     // 只有平台明确答复「该音质不可用 / 仅试听」才降一档；传输错误直接抛出交给外层重试，
     // 否则一次超时就会静默降成低音质并被缓存（对齐 Android）
     for (const quality of qualities) {
+      ensurePlaybackResolutionActive(options)
       const result = await invoke<{
         url: string | null
         bitrate: number
@@ -723,6 +744,7 @@ function resolveNetease(
         'get_netease_song_url',
         { songId, quality, requestGeneration },
       )
+      ensurePlaybackResolutionActive(options)
       if (result.unavailable_reason === 'requires_login') {
         requiresLogin = true
         continue
@@ -792,6 +814,7 @@ async function resolveNeteaseFallback(
   settings: PlaybackSourceSettings,
   options: PlaybackResolveOptions,
 ): Promise<ResolvedPlaybackSource | null> {
+  ensurePlaybackResolutionActive(options)
   const identity = {
     title: syncPayloadString(track, 'originalName', 'original_name') ?? track.title,
     artist: syncPayloadString(track, 'originalArtist', 'original_artist') ?? track.artist,
@@ -801,6 +824,7 @@ async function resolveNeteaseFallback(
     const local = await invoke<FallbackTrack[]>('find_netease_local_sources', {
       ...identity, songId: trackValue(track, 'netease'),
     }).catch(() => [])
+    ensurePlaybackResolutionActive(options)
     if (local.length > 0) {
       const details = local.map(candidate => {
         const format = candidate.url.split(/[\\/]/).pop()?.split('.').pop()?.toLowerCase()
@@ -820,20 +844,24 @@ async function resolveNeteaseFallback(
     }
   }
   if (settings.neteaseAutoSourceSwitch) {
+    ensurePlaybackResolutionActive(options)
     const candidates = await invoke<FallbackTrack[]>('find_netease_bili_sources', {
       ...identity, requestGeneration: options.requestGeneration,
     }).catch(error => {
       if (/superseded/i.test(String(error))) throw error
       return []
     })
+    ensurePlaybackResolutionActive(options)
     let primary: ResolvedPlaybackSource | null = null
     const alternates: PlaybackCandidateDetails[] = []
     for (const candidate of candidates) {
+      ensurePlaybackResolutionActive(options)
       try {
         const alternate = await resolveBilibili({
           ...track, ...candidate, durationMs: candidate.duration_ms, audioUrl: '',
           source: 'bilibili', syncPayload: undefined,
         }, settings, options)
+        ensurePlaybackResolutionActive(options)
         if (!alternate) continue
         if (!primary) {
           primary = { ...alternate, durationMs: candidate.duration_ms || track.durationMs }

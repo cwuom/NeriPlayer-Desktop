@@ -8,14 +8,22 @@ const indexSource = await readFile(new URL('index.ts', sourceRoot), 'utf8')
 const playerSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
 const playerParsed = ts.createSourceFile('player.ts', playerSource, ts.ScriptTarget.ES2022, true)
 const playerCommandFunctions = new Map()
+let resolvedBiliTargetFunction
 function findPlayerCommandFunction(node) {
   if (ts.isFunctionDeclaration(node) && ['markCommandSource', 'isRemoteSyncGuardActive', 'markOptimisticSeek', 'moveQueueItem'].includes(node.name?.text)) {
     playerCommandFunctions.set(node.name.text, node.getText(playerParsed))
+  }
+  if (ts.isFunctionDeclaration(node) && node.name?.text === 'applyResolvedBiliVideoSkipTarget') {
+    resolvedBiliTargetFunction = node.getText(playerParsed)
   }
   ts.forEachChild(node, findPlayerCommandFunction)
 }
 findPlayerCommandFunction(playerParsed)
 assert.equal(playerCommandFunctions.size, 4)
+assert.ok(resolvedBiliTargetFunction)
+const resolvedBiliTargetCode = ts.transpileModule(resolvedBiliTargetFunction, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText
 const commandSourceCode = ts.transpileModule([...playerCommandFunctions].filter(([name]) => name !== 'moveQueueItem').map(([, code]) => code).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText
@@ -190,7 +198,7 @@ async function harness(options = {}) {
   const markSource = source => commandSource.markCommandSource(source ?? 'local')
   const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value))
   const player = vue.reactive({
-    queue: [], queueIndex: -1, currentTrack: null, isPlaying: false, isLoadingAudio: false,
+    queue: [], queueIndex: -1, currentTrack: null, hasPlaybackSession: false, isPlaying: false, isLoadingAudio: false,
     positionMs: 0, repeatMode: 'off', shuffleEnabled: false,
     lastCommandSource, lastCommandSequence,
     lastSeekCommand,
@@ -215,11 +223,13 @@ async function harness(options = {}) {
       if (positionMs > 1000) {
         commandSource.markOptimisticSeek(positionMs, source ?? 'local', { fromPlaybackStart: true, durationMs: track.durationMs })
       } else if (positionMs !== undefined) player.positionMs = positionMs
+      player.hasPlaybackSession = true
       player.isLoadingAudio = true
       const gate = playGates.shift()
       if (gate) await gate.promise
       player.isLoadingAudio = false
       player.isPlaying = true
+      player.hasPlaybackSession = true
     },
     async pause(source) {
       markSource(source)
@@ -300,6 +310,7 @@ async function harness(options = {}) {
         player.queueIndex = 0
         player.currentTrack = player.queue[0]
       }
+      player.hasPlaybackSession = true
       await store.createRoom()
       await flush()
     },
@@ -875,6 +886,250 @@ await test('heartbeats keep a successful fallback stream while it remains in the
   }
   assert.equal(h.player.getCurrentStreamUrl(), fallback)
   assert.equal(h.playback.filter(entry => entry.type === 'play').length, plays)
+})
+
+async function metadataEnrichingBiliRoom(h, queue) {
+  const helpers = await loadHelper(new URL('../../modules/playback/biliVideoSkip.ts', sourceRoot))
+  const runtimeTarget = vue.ref(null)
+  const applyResolvedTarget = new Function('currentTrack', 'currentBiliVideoSkipTarget',
+    'normalizeBiliVideoSkipTarget', 'isBiliVideoSkipTrack', 'useListenTogetherStore', 'savePlayerState', `
+      const playbackRequestToken = 1, biliVideoSkipRequestToken = 1
+      const biliVideoSkipTracker = { reset() {} }
+      ${resolvedBiliTargetCode}
+      return applyResolvedBiliVideoSkipTarget
+    `)(vue.toRef(h.player, 'currentTrack'), runtimeTarget,
+      helpers.normalizeBiliVideoSkipTarget, helpers.isBiliVideoSkipTrack,
+      () => vue.proxyRefs(h.store), () => {})
+  const play = h.player.play
+  h.player.play = async (track, ...args) => {
+    await play(track, ...args)
+    const subAudioId = track.syncPayload?.subAudioId
+    const cid = /^\d+$/.test(subAudioId ?? '') ? Number(subAudioId) : 123456
+    applyResolvedTarget(h.player.currentTrack, { bvid: 'BV1ZJ4m1b7Zz', cid }, 1)
+  }
+  h.player.getCurrentStreamUrl = () => 'https://a.bilivideo.com/fixture.m4a'
+  h.player.getCurrentStreamUrls = () => [h.player.getCurrentStreamUrl()]
+  await h.join()
+  const initial = room(queue, { settings: { ...room().settings, shareAudioLinks: true },
+    playback: { ...room().playback, state: 'playing' } })
+  await h.message({ type: 'welcome', state: initial, role: 'listener' })
+  await flush()
+  return { initial, runtimeTarget }
+}
+
+const biliMetadataCases = [
+  { name: 'a missing room CID', audioId: 'BV1ZJ4m1b7Zz', album: 'Bilibili' },
+  { name: 'a three-part local album', audioId: 'BV1ZJ4m1b7Zz', album: 'Bilibili|123456|BV1ZJ4m1b7Zz' },
+  { name: 'a numeric room AV identity', audioId: '12345', album: 'Bilibili' },
+]
+for (const { name, audioId, album } of biliMetadataCases) {
+  await test(`resolved Bilibili metadata preserves ${name} through heartbeat and watchdog checks`, async h => {
+    const track = mapper.trackInfoToLtTrack({ id: `bilibili:${audioId}`, source: 'bilibili',
+      title: 'fixture', artist: 'artist', album, durationMs: 272_000, audioUrl: '' })
+    const { initial, runtimeTarget } = await metadataEnrichingBiliRoom(h, [track])
+    assert.deepEqual(runtimeTarget.value, { bvid: 'BV1ZJ4m1b7Zz', cid: 123456 })
+    const plays = () => h.playback.filter(entry => entry.type === 'play').length
+    for (let seconds = 8; seconds <= 40; seconds += 8) {
+      h.player.positionMs = 5000 + seconds * 1000
+      await h.timers.advance(8000)
+      await h.message({ type: 'room_state_updated', state: { ...initial, version: seconds },
+        causedBy: { type: 'HEARTBEAT' } })
+    }
+    assert.equal(plays(), 1, 'runtime CID/BV enrichment must not create a new room playback identity')
+    assert.equal(h.player.currentTrack.id, `bilibili:${audioId}`)
+    assert.equal(h.player.currentTrack.audioUrl, '')
+    assert.ok(h.player.currentTrack.syncPayload)
+    assert.equal(mapper.trackInfoToLtTrack(h.player.currentTrack).stableKey, track.stableKey)
+  })
+}
+
+await test('resolved Bilibili metadata still allows real part changes and duplicate occurrence selection', async h => {
+  const part = cid => wireTrack('BV1ZJ4m1b7Zz', { channelId: 'bilibili', audioId: 'BV1ZJ4m1b7Zz',
+    subAudioId: String(cid), stableKey: `bilibili:BV1ZJ4m1b7Zz:${cid}`, durationMs: 272_000 })
+  const queue = [part(123456), part(123457), part(123457)]
+  const { initial, runtimeTarget } = await metadataEnrichingBiliRoom(h, queue)
+  await h.message({ type: 'room_state_updated', state: { ...initial, version: 2,
+    currentIndex: 1, track: queue[1] }, causedBy: { type: 'SET_TRACK' } })
+  await flush()
+  assert.equal(runtimeTarget.value.cid, 123457)
+  assert.equal(h.player.queueIndex, 1)
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
+  await h.message({ type: 'room_state_updated', state: { ...initial, version: 3,
+    currentIndex: 2, track: queue[2] }, causedBy: { type: 'SET_TRACK' } })
+  await flush()
+  assert.equal(h.player.queueIndex, 2)
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 3)
+})
+
+async function sharedNeteaseFallback(h, tracks = [wireTrack(1)]) {
+  const failedUrl = 'https://music.126.net/unavailable.mp3'
+  const biliUrl = 'https://a.bilivideo.com/BVfallback.m4a'
+  const settings = { neteaseQuality: 'exhigh', qqMusicQuality: 'high', biliQuality: 'high',
+    youtubeQuality: 'high', neteaseAutoSourceSwitch: true }
+  const sourceCommands = []
+  const source = await readFile(new URL('../../modules/playback/playbackSource.ts', sourceRoot), 'utf8')
+  const { PlaybackUrlResolver } = await loadSource(source, {
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      sourceCommands.push({ command, args })
+      if (command === 'get_netease_song_url') {
+        return { url: null, bitrate: 0, format: 'mp3', unavailable_reason: 'no_permission' }
+      }
+      if (command === 'find_netease_bili_sources') {
+        return [{ id: 'bilibili:BVfallback', title: args.title, artist: args.artist,
+          album: 'Bilibili|12', url: '', duration_ms: 60_000 }]
+      }
+      assert.equal(command, 'get_bili_audio_url')
+      return { url: biliUrl, bandwidth: 128_000, codecs: 'mp4a.40.2', quality_key: 'high',
+        candidates: [], bvid: 'BVfallback', cid: 12 }
+    } },
+    '@/stores/listenTogether/mapper': mapper,
+    './playbackFailure': await loadHelper(new URL('../../modules/playback/playbackFailure.ts', sourceRoot)),
+  })
+  const resolver = new PlaybackUrlResolver()
+  const play = h.player.play
+  const nativeStarts = []
+  let currentUrl = null
+  h.player.getCurrentStreamUrl = id => !id || id === h.player.currentTrack?.id ? currentUrl : null
+  h.player.getCurrentStreamUrls = () => currentUrl ? [currentUrl] : []
+  h.player.play = async (track, ...args) => {
+    await play(track, ...args)
+    let resolved = await resolver.resolve(track, settings)
+    assert.equal(resolved.type, 'success')
+    nativeStarts.push(resolved.url)
+    // 原生直链失败后，播放器强制重新解析，并允许网易云自动换源
+    if (resolved.url === failedUrl) {
+      resolver.invalidate(track, settings)
+      resolved = await resolver.resolve(track, settings, { forceRefresh: true })
+      assert.equal(resolved.type, 'success')
+      nativeStarts.push(resolved.url)
+    }
+    currentUrl = resolved.url
+    h.player.audioInfo = { source: resolved.source }
+  }
+  await h.join()
+  const queue = tracks.map(track => ({ ...track, streamUrl: failedUrl, streamUrls: [failedUrl] }))
+  const initial = room(queue, { settings: { ...room().settings, shareAudioLinks: true },
+    playback: { ...room().playback, state: 'playing' } })
+  await h.message({ type: 'welcome', state: initial, role: 'listener' })
+  await flush()
+  assert.equal(h.player.currentTrack.id, 'netease:1')
+  assert.equal(h.player.currentTrack.source, 'netease')
+  assert.equal(h.player.currentTrack.syncPayload.channelId, 'netease')
+  assert.equal(h.player.audioInfo.source, 'bilibili')
+  assert.equal(h.player.getCurrentStreamUrl(), biliUrl)
+  assert.deepEqual(nativeStarts, [failedUrl, biliUrl])
+  return { initial, sourceCommands, nativeStarts, failedUrl, biliUrl }
+}
+
+await test('heartbeats preserve a Bilibili fallback after the shared Netease stream fails', async h => {
+  const { initial, sourceCommands, nativeStarts } = await sharedNeteaseFallback(h)
+  const calls = sourceCommands.length
+  for (const version of [2, 3, 4]) {
+    await h.message({ type: 'room_state_updated', state: { ...initial, version }, causedBy: { type: 'HEARTBEAT' } })
+    await flush()
+  }
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 1,
+    'an unchanged shared stream must not restart a successful automatic fallback')
+  assert.equal(sourceCommands.length, calls, 'heartbeats must not repeat the restricted-source lookup')
+  assert.equal(nativeStarts.length, 2)
+})
+
+for (const missingUrl of [true, false]) {
+  await test(`a failed shared-stream session reloads unchanged URLs with ${missingUrl ? 'no current URL' : 'a stale current URL'}`, async h => {
+    const { initial, failedUrl } = await sharedNeteaseFallback(h)
+    h.player.getCurrentStreamUrl = () => missingUrl ? null : failedUrl
+    h.player.hasPlaybackSession = false
+    h.player.isPlaying = false
+    h.player.isLoadingAudio = false
+    await h.message({ type: 'room_state_updated', state: { ...initial, version: 2 },
+      causedBy: { type: 'HEARTBEAT' } })
+    await flush()
+    assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2,
+      'a failed pipeline needs a new load even when the advertised URL set did not change')
+    assert.equal(h.playback.filter(entry => entry.type === 'resume').length, 0,
+      'resuming an empty backend cannot recreate the failed playback session')
+  })
+}
+
+await test('a paused successful fallback retains its session without reloading shared URLs', async h => {
+  const { initial } = await sharedNeteaseFallback(h)
+  await h.player.pause('remote_sync')
+  assert.equal(h.player.hasPlaybackSession, true)
+  await h.message({ type: 'room_state_updated', state: { ...initial, version: 2,
+    playback: { ...initial.playback, state: 'paused' } }, causedBy: { type: 'HEARTBEAT' } })
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 1)
+  assert.equal(h.player.isPlaying, false)
+})
+
+await test('an ongoing shared-stream load is not restarted by unchanged heartbeats', async h => {
+  const { initial } = await sharedNeteaseFallback(h)
+  const gate = deferred()
+  h.playGates.push(gate)
+  const pending = h.player.play(h.player.currentTrack, 'remote_sync', h.player.positionMs)
+  try {
+    h.player.getCurrentStreamUrl = () => null
+    assert.equal(h.player.isLoadingAudio, true)
+    for (const version of [2, 3, 4]) {
+      await h.message({ type: 'room_state_updated', state: { ...initial, version },
+        causedBy: { type: 'HEARTBEAT' } })
+    }
+    assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
+  } finally {
+    gate.resolve()
+    await pending
+  }
+})
+
+await test('new shared URLs replace a Bilibili fallback and duplicate occurrences still reload', async h => {
+  const { initial } = await sharedNeteaseFallback(h, [wireTrack(1), wireTrack(1)])
+  const refreshedUrl = 'https://music.126.net/refreshed.mp3'
+  const refreshed = { ...initial, version: 2, queue: initial.queue.map(track => ({ ...track,
+    streamUrl: refreshedUrl, streamUrls: [refreshedUrl] })), track: { ...initial.track,
+    streamUrl: refreshedUrl, streamUrls: [refreshedUrl] } }
+  await h.message({ type: 'room_state_updated', state: refreshed, causedBy: { type: 'LINK_READY' } })
+  await flush()
+  assert.equal(h.player.getCurrentStreamUrl(), refreshedUrl, 'a genuinely refreshed shared URL is tried')
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
+  await h.message({ type: 'room_state_updated', state: { ...refreshed, version: 3, currentIndex: 1 },
+    causedBy: { type: 'SET_TRACK' } })
+  await flush()
+  assert.equal(h.player.queueIndex, 1)
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 3,
+    'selecting another occurrence is a new playback context even with the same shared URL')
+})
+
+await test('removing an earlier duplicate keeps the current Bilibili fallback playing', async h => {
+  const { initial } = await sharedNeteaseFallback(h, [wireTrack(1), wireTrack(1)])
+  const selected = { ...initial, version: 2, currentIndex: 1 }
+  await h.message({ type: 'room_state_updated', state: selected, causedBy: { type: 'SET_TRACK' } })
+  await flush()
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
+  await h.message({ type: 'room_state_updated', state: { ...selected, version: 3,
+    queue: selected.queue.slice(1), currentIndex: 0 }, causedBy: { type: 'SET_QUEUE' } })
+  await flush()
+  assert.equal(h.player.queueIndex, 0)
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2,
+    'rebasing the current occurrence after a queue edit does not select another song')
+})
+
+await test('the watchdog can force-reload a stalled automatic fallback with unchanged shared URLs', async h => {
+  await sharedNeteaseFallback(h)
+  h.player.isPlaying = false
+  h.player.isLoadingAudio = true
+  await h.timers.advance(16_000)
+  await flush()
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
+})
+
+await test('reconnecting retries the shared Netease stream after a Bilibili fallback', async h => {
+  const { initial, nativeStarts } = await sharedNeteaseFallback(h)
+  h.emit('lt:disconnected', { connectionId: 'connection-current', code: 1006, reason: '' })
+  await flush()
+  await h.timers.advance(2000)
+  await h.message({ type: 'welcome', state: initial, role: 'listener' })
+  await flush()
+  assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
+  assert.equal(nativeStarts.length, 4)
 })
 
 for (const role of ['controller', 'listener']) {

@@ -51,6 +51,9 @@ export class PlaybackPrefetchManager {
   // 被取代或清除的任务立即让出名额
   private readonly youtubeQueue: QueuedPrefetch[] = []
   private youtubeSlot: { cacheKey: string; token: symbol } | null = null
+  // 自动换源会连做多轮搜索和取流，后台串行执行，避免扫过歌单时堆积请求
+  private readonly autoSourceQueue: QueuedPrefetch[] = []
+  private autoSourceSlot: { cacheKey: string; token: symbol } | null = null
 
   /** ttlMs 省略时按来源的解析有效期（YouTube 8 分钟，其余 90 秒） */
   constructor(ttlMs?: number, maxEntries = DEFAULT_MAX_ENTRIES) {
@@ -59,6 +62,12 @@ export class PlaybackPrefetchManager {
   }
 
   replacePlaybackDemand(cacheKey: string | null): void {
+    if (this.currentDemandKey !== cacheKey) {
+      for (const queued of this.autoSourceQueue) {
+        if (this.jobs.get(queued.cacheKey)?.token === queued.token) this.jobs.delete(queued.cacheKey)
+      }
+      this.autoSourceQueue.length = 0
+    }
     this.demandArbiter.replacePlaybackDemand(this.currentDemandKey, cacheKey)
     this.currentDemandKey = cacheKey
   }
@@ -77,9 +86,16 @@ export class PlaybackPrefetchManager {
     const existing = this.jobs.get(cacheKey)
     if (existing && existing.requestGeneration === requestGeneration) return
 
+    const source = getPlaybackSourceKind(track)
+    const autoSource = source === 'netease' && !!settings.neteaseAutoSourceSwitch
     const token = Symbol(cacheKey)
     this.jobs.set(cacheKey, { token, requestGeneration })
-    const run = () => resolver.resolve(track, settings, { requestGeneration }).then((resolution) => {
+    const run = () => resolver.resolve(track, settings, {
+      requestGeneration,
+      shouldContinue: foreground => foreground
+        ? !autoSource || this.currentDemandKey === cacheKey
+        : this.jobs.get(cacheKey)?.token === token,
+    }).then((resolution) => {
       if (resolution.type !== 'success') return
       if (this.demandArbiter.shouldYieldPrefetch(cacheKey)) return
       // clearForTrack/clear 可能在解析完成前删除了令牌，此时丢弃旧结果
@@ -92,7 +108,15 @@ export class PlaybackPrefetchManager {
       if (this.jobs.get(cacheKey)?.token === token) this.jobs.delete(cacheKey)
     })
 
-    if (getPlaybackSourceKind(track) !== 'youtube') {
+    if (autoSource) {
+      for (let index = this.autoSourceQueue.length - 1; index >= 0; index--) {
+        if (this.autoSourceQueue[index].cacheKey === cacheKey) this.autoSourceQueue.splice(index, 1)
+      }
+      this.autoSourceQueue.push({ cacheKey, token, run })
+      this.pumpAutoSourceQueue()
+      return
+    }
+    if (source !== 'youtube') {
       void run()
       return
     }
@@ -119,10 +143,12 @@ export class PlaybackPrefetchManager {
     this.intentJob = null
     // 只撤意图自己发起、还在排队的那个任务；同一首若已被下一首预取排上，那是别人的任务
     if (previous && previous.cacheKey !== cacheKey && this.jobs.get(previous.cacheKey)?.token === previous.token) {
-      const queued = this.youtubeQueue.findIndex(entry => entry.token === previous.token)
-      if (queued >= 0) {
-        this.youtubeQueue.splice(queued, 1)
-        this.jobs.delete(previous.cacheKey)
+      for (const queue of [this.youtubeQueue, this.autoSourceQueue]) {
+        const queued = queue.findIndex(entry => entry.token === previous.token)
+        if (queued >= 0) {
+          queue.splice(queued, 1)
+          this.jobs.delete(previous.cacheKey)
+        }
       }
     }
     const fresh = this.hasFresh(cacheKey) ? this.entries.get(cacheKey) : undefined
@@ -159,6 +185,7 @@ export class PlaybackPrefetchManager {
     this.entries.delete(cacheKey)
     this.jobs.delete(cacheKey)
     this.pumpYoutubeQueue()
+    this.pumpAutoSourceQueue()
   }
 
   clear(): void {
@@ -166,6 +193,8 @@ export class PlaybackPrefetchManager {
     this.jobs.clear()
     this.youtubeQueue.length = 0
     this.youtubeSlot = null
+    // 保留运行中的 autoSourceSlot，已发出的 IPC 结束前不能制造额外的物理并发
+    this.autoSourceQueue.length = 0
   }
 
   private youtubeSlotBusy(): boolean {
@@ -187,6 +216,23 @@ export class PlaybackPrefetchManager {
       void next.run().finally(() => {
         if (this.youtubeSlot === slot) this.youtubeSlot = null
         this.pumpYoutubeQueue()
+      })
+    }
+  }
+
+  private pumpAutoSourceQueue(): void {
+    while (!this.autoSourceSlot && this.autoSourceQueue.length > 0) {
+      const next = this.autoSourceQueue.shift()!
+      if (this.jobs.get(next.cacheKey)?.token !== next.token) continue
+      if (this.demandArbiter.shouldYieldPrefetch(next.cacheKey)) {
+        this.jobs.delete(next.cacheKey)
+        continue
+      }
+      const slot = { cacheKey: next.cacheKey, token: next.token }
+      this.autoSourceSlot = slot
+      void next.run().finally(() => {
+        if (this.autoSourceSlot === slot) this.autoSourceSlot = null
+        this.pumpAutoSourceQueue()
       })
     }
   }
