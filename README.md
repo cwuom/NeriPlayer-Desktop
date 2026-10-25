@@ -301,6 +301,7 @@ Android 的 USB 独占播放、SAF、悬浮/状态栏歌词等移动平台能力
 | 全局快捷键不响应 | 开启全局开关，查看注册失败提示并检查系统/其它程序占用 |
 | 旧客户端同步失败 | 更新全部客户端，升级远端前备份并阅读确认提示 |
 | 应用升级 | 当前不提供应用内自动更新，下载对应预览版手动安装 |
+| Linux 播放页卡顿、白屏或切换界面闪烁（WebKitGTK 渲染） | 默认启用 WebKitGTK 的 DMABUF 硬件合成；关掉后合成退化为共享内存回读，实测同一 WebGL 负载 2560×1440 下约 56fps 对 12fps。检测到 NVIDIA 私有驱动时会自动设置 `__NV_DISABLE_EXPLICIT_SYNC=1`、`__GL_MaxFramesAllowed=1` 、`WEBKIT_DISABLE_DMABUF_ATLAS=1` 和 `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1`：前两项处理 explicit sync 与在途帧，atlas 项避免复用仍在呈现的 GPU 缓冲区，SHM 项让合成走共享内存以稳定切换动画（实测不闪且可接受）。想保留硬件合成可用 `NERI_WEBKIT_KEEP_DMABUF=1`，想调整在途帧上限可用 `NERI_NVIDIA_FRAMES_ALLOWED=N`（0 为不设置），想关垂直同步可用 `NERI_NVIDIA_NO_VSYNC=1`（可能撕裂），想保留 atlas 可用 `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1`，完全跳过自动设置可设 `NERI_DISABLE_NVIDIA_QUIRK=1`。若仍闪烁，依次试 `NERI_WEBKIT_DMABUF_NO_GBM=1`或 `NERI_WEBKIT_FORCE_VBLANK_TIMER=1`；最后才用 `NERI_WEBKIT_DISABLE_DMABUF=1` 或 `NERI_WEBKIT_SOFTWARE_COMPOSITING=1`。检测到 NVIDIA 时前端还会把路由切换、播放页开合与压暗遮罩降为瞬时切换，避免整页动画触发重绘闪烁；其他平台保留原动画。显式设置的环境变量始终优先 |
 
 代理设置提供「绕过系统代理」开关，可按实际网络切换并测试。Debug 连通性探针只判断传输层是否收到响应，不证明登录有效、内容可播放或业务接口成功。
 

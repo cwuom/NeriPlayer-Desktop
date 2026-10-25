@@ -59,13 +59,17 @@ fn main() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--enable-gpu --enable-gpu-rasterization --enable-zero-copy --enable-features=CanvasOopRasterization");
 
-    // WebKitGTK 的 DMABUF 渲染在 Nvidia 私有驱动与虚拟机上有已知的白屏/
-    // WebGL 失效问题，而本应用重度依赖 WebGL 背景。取舍：禁用 DMABUF 牺牲
-    // 少量合成性能，换取这类环境下能正常显示。用户已显式设置时尊重用户选择
+    // Linux NVIDIA 私有驱动：在 GTK/WebKit 初始化前应用兼容设置，消除页面切换闪烁。
+    // 默认只限制在途帧数并关闭 explicit sync，不关闭 DMA-BUF/硬件加速；确需退回
+    // 共享内存合成时用 NERI_WEBKIT_DISABLE_DMABUF=1，完全跳过用
+    // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
+    // Linux + NVIDIA proprietary: apply compatibility settings before GTK/WebKit init to
+    // stop page-switch flicker. By default this only caps in-flight frames and disables
+    // explicit sync; DMA-BUF/hardware acceleration stays on. Use
+    // NERI_WEBKIT_DISABLE_DMABUF=1 for the shared-memory fallback, or
+    // NERI_DISABLE_NVIDIA_QUIRK=1 to skip the layer. Explicit env vars always win.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
+    neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();
 
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）
@@ -92,6 +96,17 @@ fn main() {
             let handle = app.handle().clone();
             // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
             neri_player_desktop::logging::set_runtime_level(log_cfg.level);
+
+            #[cfg(target_os = "linux")]
+            if let Some(quirk) = neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds() {
+                log::info!(
+                    target: "linux-graphics",
+                    "NVIDIA WebKitGTK workaround active: explicit_sync_disabled={}, frames_allowed={:?}, vsync_disabled={}, dmabuf_atlas_disabled={}, dmabuf_shm_forced={}, dmabuf_disabled={}, software_compositing={}",
+                    quirk.explicit_sync_disabled, quirk.frames_allowed, quirk.vsync_disabled,
+                    quirk.dmabuf_atlas_disabled, quirk.dmabuf_shm_forced, quirk.dmabuf_disabled,
+                    quirk.software_compositing,
+                );
+            }
 
             // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
             match app.path().resource_dir() {
@@ -545,6 +560,7 @@ fn main() {
             settings_cmd::save_file_bytes,
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
+            settings_cmd::get_linux_graphics_compat,
             settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,

@@ -555,6 +555,39 @@ pub struct BuildInfo {
     pub version: String,
 }
 
+/// Linux 图形兼容状态：前端据此关闭整页过渡，避免 WebKitGTK 在大面积重绘时闪烁。
+/// Linux graphics compatibility state; the frontend uses it to disable full-page
+/// transitions that make WebKitGTK flicker during large repaints.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxGraphicsCompat {
+    pub nvidia: bool,
+    pub dmabuf_atlas_disabled: bool,
+    pub dmabuf_shm_forced: bool,
+    pub dmabuf_disabled: bool,
+    pub software_compositing: bool,
+}
+
+#[tauri::command]
+pub fn get_linux_graphics_compat() -> LinuxGraphicsCompat {
+    let mut compat = LinuxGraphicsCompat {
+        nvidia: false,
+        dmabuf_atlas_disabled: false,
+        dmabuf_shm_forced: false,
+        dmabuf_disabled: false,
+        software_compositing: false,
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
+        compat.nvidia = true;
+        compat.dmabuf_atlas_disabled = quirk.dmabuf_atlas_disabled;
+        compat.dmabuf_shm_forced = quirk.dmabuf_shm_forced;
+        compat.dmabuf_disabled = quirk.dmabuf_disabled;
+        compat.software_compositing = quirk.software_compositing;
+    }
+    compat
+}
+
 #[tauri::command]
 pub async fn get_build_info() -> AppResult<BuildInfo> {
     Ok(BuildInfo {

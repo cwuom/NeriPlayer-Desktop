@@ -158,6 +158,38 @@ select,
   transition: transform 400ms var(--ease-emphasized-accel);
 }
 .slide-up-enter-from { transform: translateY(100%); }
+/* NVIDIA + WebKitGTK：整页 opacity/transform 会提升为合成层并触发重绘闪烁，
+   切页改为瞬时切换；其他平台保留 M3 过渡。 */
+/* NVIDIA + WebKitGTK: a full-page opacity/transform promotes the page to a
+   compositor layer and flickers on repaint, so switch pages instantly; other
+   platforms keep the M3 transition. */
+html.nvidia-compat .fade-enter-active,
+html.nvidia-compat .fade-leave-active {
+  transition: none;
+}
+html.nvidia-compat .fade-enter-from,
+html.nvidia-compat .fade-leave-to {
+  opacity: 1;
+  transform: none;
+}
+
+/* NVIDIA + WebKitGTK：播放页整页滑入/滑出同样是大图层重绘，改为瞬时切换。 */
+/* NVIDIA + WebKitGTK: the full-screen now-playing slide is another large-layer
+   repaint, so switch instantly. */
+html.nvidia-compat .slide-up-enter-active,
+html.nvidia-compat .slide-up-leave-active {
+  transition: none;
+}
+html.nvidia-compat .slide-up-enter-from,
+html.nvidia-compat .slide-up-leave-to {
+  transform: none;
+}
+
+/* 压暗遮罩也是一层全屏 opacity 动画，NVIDIA 下同样改为瞬时切换。 */
+/* The dimming scrim is another full-screen opacity animation; make it instant too. */
+html.nvidia-compat .np-underlay-scrim {
+  transition: none;
+}
 .slide-up-leave-to { transform: translateY(100%); }
 .slide-up-enter-to,
 .slide-up-leave-from { transform: translateY(0); }

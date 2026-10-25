@@ -1,5 +1,9 @@
 pub mod api;
 pub mod audio;
+/// Linux WebKitGTK/NVIDIA 图形兼容（启动前设置环境变量）。
+/// Linux WebKitGTK/NVIDIA graphics compatibility (sets env vars before startup).
+#[cfg(target_os = "linux")]
+pub mod linux_graphics;
 pub mod auth;
 pub mod commands;
 pub mod db;
