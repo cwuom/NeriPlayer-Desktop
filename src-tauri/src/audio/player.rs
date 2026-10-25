@@ -3439,7 +3439,7 @@ fn scan_track_loudness(
     while converter.next_frame(output_rate, &mut frame) {
         scanner.observe(&frame[..measured_channels]);
         frames += 1;
-        if frames % LOUDNESS_SCAN_CHECK_FRAMES == 0 && cancel.load(Ordering::Acquire) {
+        if frames.is_multiple_of(LOUDNESS_SCAN_CHECK_FRAMES) && cancel.load(Ordering::Acquire) {
             return Err(LOUDNESS_SCAN_CANCELLED.into());
         }
     }
