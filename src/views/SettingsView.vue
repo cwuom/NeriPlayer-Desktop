@@ -32,10 +32,14 @@ import {
 } from '@/modules/desktopLyrics/style'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import {
   COVER_BLUR_PX_PER_UNIT,
+  UI_SCALE_DEFAULT,
+  UI_SCALE_MIN,
+  UI_SCALE_STEP,
+  normalizeUiScale,
   LYRIC_DEFAULT_OFFSET_RANGE_MS,
   LYRIC_DEFAULT_OFFSET_STEP_MS,
   LYRIC_EMPHASIS_THRESHOLD_MAX_MS,
@@ -84,6 +88,7 @@ import ShortcutSettings from '@/components/settings/ShortcutSettings.vue'
 import FontFamilyControl from '@/components/settings/FontFamilyControl.vue'
 import AudioEffectsSettings from '@/components/settings/AudioEffectsSettings.vue'
 import { SETTINGS_SEARCH_INDEX } from '@/modules/settings/searchIndex'
+import { uiScaleSupported, uiScaleError, uiScaleMax } from '@/modules/settings/uiScale'
 import { isMacPlatform } from '@/modules/shortcuts/platform'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { useEscapeClose } from '@/composables/useEscapeClose'
@@ -101,7 +106,7 @@ const player = usePlayerStore()
 const lt = useListenTogetherStore()
 const toast = useToastStore()
 const {
-  darkMode, themeColor: selectedColor, coverStyle, appFontFamily, lyricFontFamily,
+  darkMode, themeColor: selectedColor, coverStyle, appFontFamily, lyricFontFamily, uiScale,
   defaultScreen, closeToTray, showMenuBarLyrics, showCoverBadge, showNowPlayingTitle, showToolbarDock,
   showQualitySwitch, lyricFontScale,
   normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
@@ -124,6 +129,14 @@ const {
   ltServerUrl, ltNickname, ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks,
   locale: settingLocale,
 } = storeToRefs(settings)
+
+const uiScaleOptions = computed(() => Array.from(
+  { length: (uiScaleMax.value - UI_SCALE_MIN) / UI_SCALE_STEP + 1 },
+  (_, index) => {
+    const value = UI_SCALE_MIN + index * UI_SCALE_STEP
+    return { value: String(value), label: `${value}%` }
+  },
+))
 
 const audioDisplayOptions = [
   { key: 'showAudioBitrate', label: 'audio_bitrate', icon: 'speed' },
@@ -1639,6 +1652,34 @@ useEscapeClose(
             <span v-if="activeColorKey === c.key" class="material-symbols-rounded" style="font-size: 16px; color: white">check</span>
           </button>
         </div>
+      </div>
+    </div>
+
+    <div class="setting-card ui-scale-card">
+      <div class="ui-scale-heading">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">display_settings</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.ui_scale') }}</div>
+          <div class="setting-desc">{{ t('settings.ui_scale_desc') }}</div>
+          <div v-if="uiScaleSupported" class="setting-desc">{{ t('settings.ui_scale_limit', { value: uiScaleMax }) }}</div>
+          <div v-if="uiScaleError" class="setting-desc" role="alert">{{ t('settings.ui_scale_failed') }}</div>
+          <div v-else-if="!uiScaleSupported" class="setting-desc">{{ t(isTauri() ? 'settings.ui_scale_unsupported' : 'settings.ui_scale_preview') }}</div>
+        </div>
+      </div>
+      <div class="ui-scale-controls">
+        <input
+          type="range" class="m3-slider" :value="uiScale"
+          :min="UI_SCALE_MIN" :max="uiScaleMax" :step="UI_SCALE_STEP"
+          :disabled="!uiScaleSupported" :aria-label="t('settings.ui_scale')"
+          @change="uiScale = normalizeUiScale(Number(($event.target as HTMLInputElement).value))"
+        />
+        <CustomSelect
+          :model-value="String(uiScale)"
+          :options="uiScaleOptions"
+          :label="t('settings.ui_scale')" :disabled="!uiScaleSupported"
+          @update:model-value="uiScale = normalizeUiScale(Number($event))"
+        />
+        <button class="m3-chip sm" :disabled="!uiScaleSupported || uiScale === UI_SCALE_DEFAULT" @click="uiScale = UI_SCALE_DEFAULT">{{ t('settings.ui_scale_reset') }}</button>
       </div>
     </div>
 
@@ -4077,6 +4118,24 @@ useEscapeClose(
 }
 
 .setting-info { flex: 1; min-width: 0; }
+.ui-scale-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+.ui-scale-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.ui-scale-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+
+  .m3-slider { flex: 1 1 120px; width: auto; min-width: 80px; }
+}
 .font-setting-card {
   flex-direction: column;
   align-items: stretch;

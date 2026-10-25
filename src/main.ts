@@ -10,6 +10,8 @@ import { installHostBackgroundSync } from './utils/hostBackground'
 import { preloadUserData } from './modules/persistence/userData'
 import { removeLegacyCacheBuckets } from './utils/persistentCache'
 import { installNativeContextMenuPolicy } from './utils/nativeContextMenu'
+import { useSettingsStore } from './stores/settings'
+import { installUiScale } from './modules/settings/uiScale'
 import '@fontsource-variable/fraunces'
 import '@fontsource-variable/fraunces/wght-italic.css'
 import '@fontsource-variable/geist-mono'
@@ -78,9 +80,13 @@ async function mountWindow() {
   if (await preloadUserData()) removeLegacyCacheBuckets()
 
   const app = createApp(App)
-  app.use(createPinia())
+  const pinia = createPinia()
+  app.use(pinia)
   app.use(router)
   app.use(i18n)
+  const settings = useSettingsStore(pinia)
+  await settings.hydrate()
+  app.onUnmount(await installUiScale(settings))
   app.mount('#app')
   installHostBackgroundSync()
 
