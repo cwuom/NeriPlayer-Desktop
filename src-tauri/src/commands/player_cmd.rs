@@ -251,6 +251,11 @@ fn advance_playback_request(state: &State<'_, AppState>) -> u64 {
     state.playback_generation.fetch_add(1, Ordering::AcqRel) + 1
 }
 
+// Tauri 命令的参数与前端 invoke 字段一一对应；把布尔项打包成结构体会改变 IPC
+// 形状，并破坏与 Android 端播放请求字段的对齐。保持扁平签名。
+// Tauri command parameters map 1:1 to frontend invoke fields; grouping them would
+// change the IPC shape and break alignment with Android's playback request fields.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn begin_playback_request(
     request_generation: u64,
