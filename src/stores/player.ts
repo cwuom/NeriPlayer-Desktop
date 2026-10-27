@@ -1196,6 +1196,11 @@ export const usePlayerStore = defineStore('player', () => {
     return Math.round(Math.max(_interpRenderedMs, clamped))
   }
 
+  // seek 待确认时播放状态不变，但进度时钟必须和主窗口一起停在目标位置
+  function isPlaybackClockAdvancing(): boolean {
+    return _interpIsPlaying && !pendingSeek
+  }
+
   /** 按需启动 rAF 插值循环：暂停且无待确认 seek 时自动停表，状态恢复时重启 */
   function _startInterpolationLoop() {
     if (_interpLoopStarted) return
@@ -3597,7 +3602,7 @@ export const usePlayerStore = defineStore('player', () => {
     listeningTuning, setListeningTuning, resetListeningTuning,
     updateAudioEffectsSound, setAudioEffectsPreset, resetAudioEffectsSection, saveAudioEffectsPreset,
     deleteAudioEffectsPreset, exportAudioEffectsPreset, importAudioEffectsPreset, importAutoEq, refreshAudioEffectsStats,
-    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs, effectivePlaybackSpeed,
+    progress, interpolatedPositionMs, interpolatedProgress, livePositionMs, isPlaybackClockAdvancing, effectivePlaybackSpeed,
     currentTimeFormatted, durationFormatted,
     play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,

@@ -78,6 +78,8 @@ pub struct DesktopLyricsFrame {
     title: String,
     artist: String,
     is_playing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clock_running: Option<bool>,
     position_ms: f64,
     anchor_at: f64,
     rate: f64,
@@ -715,6 +717,23 @@ mod tests {
         let mut nested = value;
         nested["lines"][0]["html"] = serde_json::Value::String("<b>".into());
         assert!(serde_json::from_value::<DesktopLyricsFrame>(nested).is_err());
+    }
+
+    #[test]
+    fn frame_preserves_a_frozen_clock_without_pausing_playback() {
+        let mut value = serde_json::to_value(frame_with_line(DesktopLyricsLine::default())).unwrap();
+        value["isPlaying"] = serde_json::json!(true);
+        value["clockRunning"] = serde_json::json!(false);
+        let frame: DesktopLyricsFrame = serde_json::from_value(value.clone()).unwrap();
+        assert!(frame.validate().is_ok());
+        assert_eq!(serde_json::to_value(frame).unwrap(), value);
+
+        value.as_object_mut().unwrap().remove("clockRunning");
+        let legacy: DesktopLyricsFrame = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap(), value);
+
+        value["clockRunning"] = serde_json::json!("false");
+        assert!(serde_json::from_value::<DesktopLyricsFrame>(value).is_err());
     }
 
     #[test]

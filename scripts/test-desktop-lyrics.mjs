@@ -84,6 +84,7 @@ assert.ok(Buffer.byteLength(JSON.stringify(worst)) < 128 * 1024, 'escaped text m
 const playerCalls = []
 const player = {
   currentTrack: track, livePositionMs: () => 1000, isPlaying: true,
+  isPlaybackClockAdvancing: () => player.isPlaying,
   effectivePlaybackSpeed: () => 1,
   pause: async () => { playerCalls.push('pause') },
   resume: async () => { playerCalls.push('resume') },

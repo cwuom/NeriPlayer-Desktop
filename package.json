@@ -22,6 +22,7 @@
     "test:lyrics-display-controls": "node scripts/test-lyrics-display-controls.mjs",
     "test:lyric-animation": "node scripts/test-lyric-animation.mjs",
     "test:desktop-lyrics": "node scripts/test-desktop-lyrics.mjs",
+    "test:desktop-lyrics-seek": "node scripts/test-desktop-lyrics-seek.mjs",
     "test:current-lyrics": "node scripts/test-current-lyrics.mjs",
     "test:playback-request": "node scripts/playback-request.test.mjs",
     "test:playback-audio-info": "node scripts/test-playback-audio-info.mjs",

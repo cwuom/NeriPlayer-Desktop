@@ -21,6 +21,8 @@ export interface PlaybackAnchor {
   anchorAt: number
   rate: number
   isPlaying: boolean
+  /** seek 等待后端确认时冻结时钟；旧帧省略时沿用播放状态 */
+  clockRunning?: boolean
 }
 
 /** 没有行时长也没有下一行时，最后一行按这么长算 */
@@ -42,7 +44,7 @@ export function longLineScrollOffset(overflow: number, elapsedMs: number): numbe
 }
 
 export function anchoredPositionMs(anchor: PlaybackAnchor, now: number): number {
-  if (!anchor.isPlaying) return anchor.positionMs
+  if (!anchor.isPlaying || anchor.clockRunning === false) return anchor.positionMs
   const rate = Number.isFinite(anchor.rate) && anchor.rate > 0 ? anchor.rate : 1
   // 时钟回拨或锚点来自未来时不倒退
   return anchor.positionMs + Math.max(0, now - anchor.anchorAt) * rate

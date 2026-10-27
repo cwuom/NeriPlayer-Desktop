@@ -45,6 +45,7 @@ function accept(payload: DesktopLyricsFrame) {
   frame.value = {
     ...emptyDesktopLyricsFrame(),
     ...payload,
+    clockRunning: payload.clockRunning ?? payload.isPlaying,
     lines: Array.isArray(payload.lines) ? payload.lines : [],
     style: normalizeDesktopLyricsStyle(payload.style),
   }
@@ -178,7 +179,7 @@ onUnmounted(() => {
         :lines="frame.lines"
         :first-index="frame.firstIndex"
         :clock="clock"
-        :playing="frame.isPlaying"
+        :playing="frame.isPlaying && frame.clockRunning !== false"
         :clock-key="`${frame.positionMs}|${frame.offsetMs}`"
         :style="style"
         :accent="frame.accent || null"

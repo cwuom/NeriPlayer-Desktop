@@ -180,6 +180,7 @@ Offsets can be set per source or per track. Check the track version and duration
 
 - Toggle the separate desktop lyrics window through Settings, the tray or shortcuts. It supports one/two/three lines, word-synced/full-line display, translation/romanization, fonts, gradient colors, outlines, shadows, opacity and backgrounds; window position and size are remembered.
 - Desktop lyrics can be locked with click-through enabled, while an unlock control remains available on hover.
+- When seeking through lyrics or the progress bar, desktop lyrics hold at the target with the main window and resume highlighting after the playback position is confirmed.
 - With Close to Tray enabled, closing the main window keeps playback running in the background. The tray provides window, playback, lyrics and quit actions.
 - macOS menu bar lyrics can be enabled independently; the track title appears when lyrics are unavailable, and long text is truncated.
 - System media keys and sessions use `souvlaki` for Windows SMTC, Linux MPRIS and macOS Now Playing. Presentation depends on the OS and desktop environment.

@@ -251,6 +251,8 @@ assert.equal(style.stepDesktopLyricsFontSize({ ...defaults, fontSize: 16 }, -1).
 const anchor = { positionMs: 10_000, anchorAt: 1_000, rate: 1.5, isPlaying: true }
 assert.equal(timeline.anchoredPositionMs(anchor, 3_000), 13_000, '按倍速推进')
 assert.equal(timeline.anchoredPositionMs({ ...anchor, isPlaying: false }, 3_000), 10_000, '暂停时停在锚点')
+assert.equal(timeline.anchoredPositionMs({ ...anchor, clockRunning: false }, 3_000), 10_000, '播放中等待 seek 确认时也停在锚点')
+assert.equal(timeline.anchoredPositionMs({ ...anchor, clockRunning: true }, 3_000), 13_000, 'seek 确认后按倍速恢复时钟')
 assert.equal(timeline.anchoredPositionMs(anchor, 500), 10_000, '时钟回拨时不倒退')
 assert.equal(timeline.anchoredPositionMs({ ...anchor, rate: Number.NaN }, 2_000), 11_000, '倍速无效按 1')
 

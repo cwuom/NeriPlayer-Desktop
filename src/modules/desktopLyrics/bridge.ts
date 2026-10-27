@@ -126,7 +126,10 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
     const accent = currentStyle.theme === 'accent' ? readAccent() : null
     const index = desktopLyricsLineIndex(lyrics.lines, positionMs, offset)
     const trackId = track?.id ?? ''
-    const anchor: PlaybackAnchor = { positionMs, anchorAt: now, rate, isPlaying: player.isPlaying }
+    const anchor: PlaybackAnchor = {
+      positionMs, anchorAt: now, rate, isPlaying: player.isPlaying,
+      clockRunning: player.isPlaybackClockAdvancing(),
+    }
     const previous = published
     const due = force
       || !previous
@@ -136,6 +139,7 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
       || previous.styleKey !== styleKey
       || previous.accent !== accent
       || previous.anchor.isPlaying !== anchor.isPlaying
+      || previous.anchor.clockRunning !== anchor.clockRunning
       || previous.anchor.rate !== anchor.rate
       || Math.abs(anchoredPositionMs(previous.anchor, now) - positionMs) > DRIFT_TOLERANCE_MS
       || now - previous.anchor.anchorAt > ANCHOR_REFRESH_MS
@@ -147,6 +151,7 @@ export function installDesktopLyricsBridge(options: DesktopLyricsBridgeOptions =
       positionMs,
       lyricOffsetMs: offset,
       isPlaying: anchor.isPlaying,
+      clockRunning: anchor.clockRunning,
       rate,
       now,
       accent,
