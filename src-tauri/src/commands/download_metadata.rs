@@ -434,20 +434,21 @@ pub(crate) fn prepare_audio_tags(
     let tag = tagged
         .primary_tag_mut()
         .ok_or_else(|| AppError::Metadata("无法创建音频标签".into()))?;
-    if let Some(title) = &metadata.name {
+    if let Some(title) = metadata.name.as_ref().filter(|text| !text.trim().is_empty()) {
         tag.set_title(title.clone());
     }
-    if let Some(artist) = &metadata.artist {
+    if let Some(artist) = metadata.artist.as_ref().filter(|text| !text.trim().is_empty()) {
         tag.set_artist(artist.clone());
         tag.insert_text(ItemKey::AlbumArtist, artist.clone());
     }
-    if let Some(album) = &metadata.album {
+    if let Some(album) = metadata.album.as_ref().filter(|text| !text.trim().is_empty()) {
         tag.set_album(album.clone());
     }
-    if let Some(lyrics) = embedded_lyrics(metadata, standardized) {
+    let lyrics = embedded_lyrics(metadata, standardized);
+    if let Some(lyrics) = &lyrics {
         tag.insert_text(ItemKey::Lyrics, lyrics.clone());
         if tag_type == TagType::Mp4Ilst {
-            tag.insert_text(ItemKey::Description, lyrics);
+            tag.insert_text(ItemKey::Description, lyrics.clone());
         } else if audio
             .extension()
             .is_some_and(|extension| extension == "aac")
@@ -488,9 +489,18 @@ pub(crate) fn prepare_audio_tags(
     let expected_cover = metadata
         .cover_path
         .as_deref()
-        .and_then(|reference| resolve_asset(audio, reference, "Covers"))
-        .map(|cover| read_cover_picture(&cover))
+        .filter(|reference| !reference.trim().is_empty())
+        .map(|reference| {
+            let cover = resolve_asset(audio, reference, "Covers")
+                .ok_or_else(|| AppError::Metadata("下载封面文件缺失或路径无效".into()))?;
+            read_cover_picture(&cover)
+        })
         .transpose()?;
+    if expected_cover.is_none()
+        && metadata.cover_url.as_deref().is_some_and(|url| !url.trim().is_empty())
+    {
+        return Err(AppError::Metadata("下载封面尚未获取，无法完整嵌入元信息".into()));
+    }
     if let Some(picture) = &expected_cover {
         tag.remove_picture_type(PictureType::CoverFront);
         tag.push_picture(picture.clone());
@@ -518,30 +528,26 @@ pub(crate) fn prepare_audio_tags(
                 .unwrap_or(metadata.duration_ms),
             &AtomicBool::new(false),
         )? > 0;
-    if tag.title().as_deref() != metadata.name.as_deref()
-        || tag.artist().as_deref() != metadata.artist.as_deref()
-        || !has_verified_duration
-        || metadata.stable_key.as_deref().is_some_and(|expected| {
-            tag.get_string(&custom_key(tag_type, "NERI_STABLE_KEY")) != Some(expected)
-        })
-        || metadata
-            .original_lyric
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-            .is_some_and(|_| tag.get_string(&ItemKey::Lyrics).is_none())
-        || translated
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-            .is_some_and(|expected| {
-                tag.get_string(&custom_key(tag_type, "NERI_LYRICS_TRANSLATED")) != Some(expected)
-            })
-        || romanized
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-            .is_some_and(|expected| {
-                tag.get_string(&custom_key(tag_type, "NERI_LYRICS_ROMANIZED")) != Some(expected)
-            })
-        || expected_cover.as_ref().is_some_and(|expected| {
+    for (key, expected) in [
+        (ItemKey::TrackTitle, metadata.name.as_deref()),
+        (ItemKey::TrackArtist, metadata.artist.as_deref()),
+        (ItemKey::AlbumArtist, metadata.artist.as_deref()),
+        (ItemKey::AlbumTitle, metadata.album.as_deref()),
+        (ItemKey::Lyrics, lyrics.as_deref()),
+        (custom_key(tag_type, "NERI_LYRICS_ORIGINAL"), original.as_deref()),
+        (custom_key(tag_type, "NERI_LYRICS_TRANSLATED"), translated.as_deref()),
+        (custom_key(tag_type, "NERI_LYRICS_ROMANIZED"), romanized.as_deref()),
+        (custom_key(tag_type, "NERI_STABLE_KEY"), metadata.stable_key.as_deref()),
+        (custom_key(tag_type, "NERI_MEDIA_URI"), metadata.media_uri.as_deref()),
+        (custom_key(tag_type, "NERI_SOURCE"), metadata.channel_id.as_deref()),
+    ] {
+        if let Some(expected) = expected.filter(|text| !text.trim().is_empty()) {
+            if tag.get_string(&key) != Some(expected) {
+                return Err(AppError::Metadata(format!("音频标签写入验证失败：{key:?}")));
+            }
+        }
+    }
+    if !has_verified_duration || expected_cover.as_ref().is_some_and(|expected| {
             !tag.pictures().iter().any(|picture| {
                 // MP4 的 covr 不保存封面类型，回读时按实际图片数据校验
                 (tag_type == TagType::Mp4Ilst || picture.pic_type() == PictureType::CoverFront)
@@ -750,6 +756,92 @@ mod tests {
         assert!(tag
             .get_string(&custom_key(tag.tag_type(), "NERI_LYRICS_ROMANIZED"))
             .is_none());
+    }
+
+    #[test]
+    fn missing_cover_asset_cannot_be_reported_as_verified_embedding() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        let mut metadata = fixture(&audio);
+        let original = std::fs::read(&audio).unwrap();
+        metadata.cover_path = Some("Covers/missing.jpg".into());
+        assert!(prepare_audio_tags(&audio, &metadata, false).is_err());
+        assert_eq!(std::fs::read(&audio).unwrap(), original);
+    }
+
+    #[test]
+    fn advertised_cover_must_be_downloaded_before_embedding_is_verified() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        let mut metadata = fixture(&audio);
+        metadata.cover_url = Some("https://example.test/cover.jpg".into());
+        assert!(prepare_audio_tags(&audio, &metadata, false).is_err());
+    }
+
+    #[test]
+    fn absent_optional_values_preserve_existing_embedded_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("Song.aac");
+        let mut metadata = fixture(&audio);
+        let prepared = prepare_audio_tags(&audio, &metadata, false).unwrap();
+        prepared.persist(&audio).unwrap();
+        metadata.name = None;
+        metadata.artist = None;
+        metadata.album = Some(String::new());
+        let prepared = prepare_audio_tags(&audio, &metadata, false).unwrap();
+        let tagged = Probe::open(prepared.path()).unwrap().guess_file_type().unwrap().read().unwrap();
+        let tag = tagged.primary_tag().unwrap();
+        assert_eq!(tag.title().as_deref(), Some("测试歌曲"));
+        assert_eq!(tag.artist().as_deref(), Some("测试歌手"));
+        assert_eq!(tag.album().as_deref(), Some("测试专辑"));
+    }
+
+    #[test]
+    fn supported_download_containers_roundtrip_all_available_metadata_and_audio() {
+        let root = tempfile::tempdir().unwrap();
+        for (extension, bytes) in [
+            ("aac", include_bytes!("../audio/fixtures/hls-silence.aac").as_slice()),
+            ("mp3", include_bytes!("../audio/fixtures/ffmpeg/mp3-stereo-1s.mp3").as_slice()),
+            ("flac", include_bytes!("../audio/fixtures/ffmpeg/flac-s16-stereo-0.5s.flac").as_slice()),
+            ("m4a", include_bytes!("../audio/fixtures/ffmpeg/aac-stereo-1s.m4a").as_slice()),
+            ("wav", include_bytes!("../audio/fixtures/ffmpeg/pcm-s16-stereo-0.5s.wav").as_slice()),
+        ] {
+            let audio = root.path().join(format!("Song.{extension}"));
+            let mut metadata = fixture(&audio);
+            // 极短 ADTS 的标签大于音频时会触发 Symphonia 0.5 的帧数估算溢出
+            let bytes = if extension == "aac" { bytes.repeat(64) } else { bytes.to_vec() };
+            std::fs::write(&audio, &bytes).unwrap();
+            metadata.media_uri = Some("https://example.test/track/42".into());
+            metadata.channel_id = Some("netease".into());
+            let cover = root.path().join("Covers/cover.png");
+            std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+            image::RgbImage::from_pixel(2, 2, image::Rgb([40, 80, 120])).save(&cover).unwrap();
+            metadata.cover_path = Some(cover.to_string_lossy().into());
+            let before: Vec<_> = crate::audio::remote::SymphoniaAudioDecoder::new_file(&audio).unwrap().collect();
+            let prepared = prepare_audio_tags(&audio, &metadata, true)
+                .unwrap_or_else(|error| panic!("{extension}: {error}"));
+            let tagged = Probe::open(prepared.path()).unwrap().guess_file_type().unwrap().read().unwrap();
+            let tag = tagged.primary_tag().unwrap();
+            assert_eq!(tag.title().as_deref(), Some("测试歌曲"), "{extension}");
+            assert_eq!(tag.artist().as_deref(), Some("测试歌手"), "{extension}");
+            assert_eq!(tag.album().as_deref(), Some("测试专辑"), "{extension}");
+            assert_eq!(tag.get_string(&ItemKey::AlbumArtist), Some("测试歌手"), "{extension}");
+            assert_eq!(tag.get_string(&ItemKey::Lyrics), Some("[ar:测试歌手]\n[00:01.00]你好\n[00:01.00]Hello"), "{extension}");
+            for (name, expected) in [
+                ("NERI_LYRICS_ORIGINAL", "[ar:测试歌手]\n[00:01.00]你好"),
+                ("NERI_LYRICS_TRANSLATED", "[00:01.50]Hello"),
+                ("NERI_LYRICS_ROMANIZED", "[00:01.00]ni hao"),
+                ("NERI_STABLE_KEY", "42|Netease专辑|"),
+                ("NERI_MEDIA_URI", "https://example.test/track/42"),
+                ("NERI_SOURCE", "netease"),
+            ] {
+                assert_eq!(tag.get_string(&custom_key(tag.tag_type(), name)), Some(expected), "{extension}: {name}");
+            }
+            assert_eq!(tag.pictures().len(), 1, "{extension}");
+            assert_eq!(tag.pictures()[0].data(), std::fs::read(&cover).unwrap(), "{extension}");
+            assert_eq!(crate::audio::remote::SymphoniaAudioDecoder::new_file(prepared.path()).unwrap().collect::<Vec<_>>(), before, "{extension}");
+            assert_eq!(std::fs::read(&audio).unwrap(), bytes, "{extension}");
+        }
     }
 
     #[test]

@@ -20,6 +20,9 @@ mod recovery;
 #[path = "download_metadata.rs"]
 pub(crate) mod metadata;
 
+#[path = "download_artwork.rs"]
+mod artwork;
+
 #[path = "download_catalog.rs"]
 pub(crate) mod catalog;
 
@@ -355,18 +358,6 @@ fn ext_from_content_type(content_type: &str) -> &str {
     }
 }
 
-fn ext_from_image_content_type(content_type: &str) -> &str {
-    if content_type.contains("png") {
-        "png"
-    } else if content_type.contains("webp") {
-        "webp"
-    } else if content_type.contains("gif") {
-        "gif"
-    } else {
-        "jpg"
-    }
-}
-
 fn make_lrc_timestamp(ms: u64) -> String {
     let total_seconds = ms / 1000;
     let minutes = total_seconds / 60;
@@ -458,6 +449,7 @@ async fn write_download_sidecars(
     file_path: &std::path::Path,
     track: &DownloadedTrack,
     metadata: &mut metadata::DownloadMetadata,
+    require_cover: bool,
 ) -> AppResult<()> {
     let root = file_path.parent().ok_or_else(|| AppError::Metadata("下载路径无效".into()))?;
     let stem = file_path.file_stem().ok_or_else(|| AppError::Metadata("下载文件名无效".into()))?.to_string_lossy();
@@ -465,28 +457,46 @@ async fn write_download_sidecars(
     let covers_dir = root.join("Covers");
     std::fs::create_dir_all(&lyrics_dir)?;
     std::fs::create_dir_all(&covers_dir)?;
-    let lyrics_manager = LyricsManager::new(client);
-    let youtube_video_id = track.id
-        .strip_prefix("youtube:")
-        .filter(|id| !id.is_empty());
-    let original_bundle = fetch_original_download_lyrics(client, track).await;
-    let lyrics = if let Some((original, _, _)) = &original_bundle {
-        crate::lyrics::parser::parse_auto(original)
-    } else { tokio::time::timeout(Duration::from_secs(60), lyrics_manager
-        .fetch_lyrics(
-            &track.title,
-            &track.artist,
-            track.duration_ms / 1000,
-            None,
-            extract_netease_id(&track.id),
-            extract_qq_song_mid(&track.id),
-            youtube_video_id,
-        ))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .map(|fetched| fetched.lines)
-        .unwrap_or_default() };
+    let fetch_cover = async {
+        match track.cover_url.as_deref().filter(|url| !url.trim().is_empty()) {
+            Some(url) => match artwork::fetch_cover(client, url).await {
+                Ok(cover) => Ok(Some(cover)),
+                Err(error) if !require_cover => {
+                    log::warn!(target: "download", "optional download cover failed: {error}");
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            },
+            None => Ok(None),
+        }
+    };
+    let fetch_lyrics = async {
+        let lyrics_manager = LyricsManager::new(client);
+        let youtube_video_id = track.id
+            .strip_prefix("youtube:")
+            .filter(|id| !id.is_empty());
+        let original_bundle = fetch_original_download_lyrics(client, track).await;
+        let lyrics = if let Some((original, _, _)) = &original_bundle {
+            crate::lyrics::parser::parse_auto(original)
+        } else {
+            tokio::time::timeout(Duration::from_secs(60), lyrics_manager.fetch_lyrics(
+                &track.title,
+                &track.artist,
+                track.duration_ms / 1000,
+                None,
+                extract_netease_id(&track.id),
+                extract_qq_song_mid(&track.id),
+                youtube_video_id,
+            ))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|fetched| fetched.lines)
+            .unwrap_or_default()
+        };
+        Ok::<_, AppError>((original_bundle, lyrics))
+    };
+    let (cover, (original_bundle, lyrics)) = tokio::try_join!(fetch_cover, fetch_lyrics)?;
     if let Some(lrc_text) = original_bundle.as_ref().map(|bundle| bundle.0.clone()).or_else(|| metadata::original_lyrics(&lyrics)) {
         let lrc_path = lyrics_dir.join(format!("{stem}.lrc"));
         crate::fsutil::atomic_write(&lrc_path, lrc_text.as_bytes())?;
@@ -505,43 +515,12 @@ async fn write_download_sidecars(
         metadata.romanized_lyric_path = Some(roman_path.to_string_lossy().to_string());
         metadata.original_romanized_lyric = Some(roman_text);
     }
-    if let Some(raw_cover_url) = track.cover_url.as_deref() {
-        let normalized_cover_url = if raw_cover_url.starts_with("//") {
-            format!("https:{}", raw_cover_url)
-        } else {
-            raw_cover_url.to_string()
-        };
-        if !normalized_cover_url.trim().is_empty() {
-            if let Ok(resp) = client
-                .get(&normalized_cover_url)
-                .timeout(Duration::from_secs(30))
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                .send()
-                .await
-            {
-                if resp.status().is_success() {
-                    let content_type = resp
-                        .headers()
-                        .get("content-type")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("image/jpeg")
-                        .to_lowercase();
-                    if content_type.starts_with("image/") {
-                        if let Ok(bytes) = resp.bytes().await {
-                            if !bytes.is_empty() {
-                                let ext = ext_from_image_content_type(&content_type);
-                                let key = metadata.stable_key.as_deref().unwrap_or(&track.id);
-                                let cover_path = covers_dir.join(format!("{stem}-{}.{ext}", metadata::cover_suffix(key)));
-                                crate::fsutil::atomic_write(&cover_path, &bytes)?;
-                                metadata.cover_path = Some(cover_path.to_string_lossy().to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if let Some((bytes, ext)) = cover {
+        let key = metadata.stable_key.as_deref().unwrap_or(&track.id);
+        let cover_path = covers_dir.join(format!("{stem}-{}.{ext}", metadata::cover_suffix(key)));
+        crate::fsutil::atomic_write(&cover_path, &bytes)?;
+        metadata.cover_path = Some(cover_path.to_string_lossy().to_string());
     }
-
     Ok(())
 }
 
@@ -1635,14 +1614,19 @@ async fn perform_download(
     let mut metadata = metadata::DownloadMetadata::for_track(&track);
     metadata.download_finalized = Some(false);
     metadata.write(&file_path)?;
+    let settings = crate::settings::store::load_settings(&app)?.settings;
     if let Err(e) = write_download_sidecars(
         &client,
         &file_path,
         &track,
         &mut metadata,
+        settings.download_auto_fill_metadata,
     )
     .await
     {
+        if settings.download_auto_fill_metadata {
+            return Err(e);
+        }
         log::warn!(
             target: "download",
             "write sidecars failed: track_id={}, title={}, error={}",
@@ -1650,28 +1634,18 @@ async fn perform_download(
         );
     }
 
-    let settings = crate::settings::store::load_settings(&app)?.settings;
     metadata.metadata_embedding_state = Some(if settings.download_auto_fill_metadata {
         let audio = file_path.clone();
         let tag_metadata = metadata.clone();
         let standardized = settings.download_embed_lyrics;
         let prepared = tokio::task::spawn_blocking(move || {
             metadata::prepare_audio_tags(&audio, &tag_metadata, standardized)
-        }).await.map_err(|error| AppError::Metadata(error.to_string()))?;
+        }).await.map_err(|error| AppError::Metadata(error.to_string()))??;
         if cancel_flag.load(Ordering::Relaxed) {
             return Err(AppError::Other("Download cancelled".into()));
         }
-        match prepared {
-            Ok(prepared) => {
-                prepared.persist(&file_path).map_err(|error| AppError::Io(error.error))?;
-                "EMBEDDED_VERIFIED"
-            }
-            Err(error) => {
-                log::warn!(target: "download", "metadata embedding failed for {}: {}", track_id, error);
-                emit_download_progress(&app, &track_id, "processing", Some(&error.to_string()), None, Some(file_size), total_bytes);
-                "LEGACY_UNVERIFIED"
-            }
-        }
+        prepared.persist(&file_path).map_err(|error| AppError::Io(error.error))?;
+        "EMBEDDED_VERIFIED"
     } else {
         "USER_DISABLED"
     }.into());

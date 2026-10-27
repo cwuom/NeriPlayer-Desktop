@@ -39,6 +39,7 @@ const root = new URL('../src/', import.meta.url)
 const source = await readFile(new URL('stores/download.ts', root), 'utf8')
 const queue = await load(await readFile(new URL('modules/download/downloadQueue.ts', root), 'utf8'))
 const cancellation = await load(await readFile(new URL('modules/download/downloadCancellation.ts', root), 'utf8'))
+const trackCover = await load(await readFile(new URL('utils/trackCover.ts', root), 'utf8'))
 const deferred = () => {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -94,6 +95,7 @@ async function runtime(options = {}) {
     './toast': { useToastStore: () => Object.fromEntries(['show', 'error', 'success'].map(method => [method, (...args) => messages.push({ method, args })])) },
     '@/i18n': { default: { global: { t: (key, params) => params ? `${key}:${JSON.stringify(params)}` : key } } },
     '@/utils/logger': { createLogger: () => ({ error() {}, warn() {} }) },
+    '@/utils/trackCover': trackCover,
     '@/modules/playback/playbackSource': { resolveDownloadSource: async (item, quality) => {
       resolved.push({ item, quality })
       return options.resolve ? options.resolve(item) : stream
@@ -108,6 +110,26 @@ async function runtime(options = {}) {
     emit: payload => events.get('download-progress')({ payload }),
     emitEvent: (name, payload) => events.get(name)?.({ payload }),
   }
+}
+
+for (const [name, coverFields, expectedCover] of [
+  ['synced custom cover', { coverUrl: ' ', syncPayload: { customCoverUrl: ' //p1.music.126.net/custom.jpg ' } }, 'https://p1.music.126.net/custom.jpg'],
+  ['synced original cover', { coverUrl: '', syncPayload: { original_cover_url: 'http://p1.music.126.net/original.jpg' } }, 'https://p1.music.126.net/original.jpg'],
+  ['YouTube full size cover', { coverUrl: 'https://lh3.googleusercontent.com/cover=w60-h60-l90-rj' }, 'https://lh3.googleusercontent.com/cover=w1200-h1200'],
+  ['local asset cover', { coverUrl: 'http://asset.localhost/C%3A/Music/cover.jpg' }, 'http://asset.localhost/C%3A/Music/cover.jpg'],
+  ['local custom path', { coverUrl: '', syncPayload: { customCoverUrl: 'C:\\Music\\cover.jpg' } }, 'C:\\Music\\cover.jpg'],
+]) {
+  const r = await runtime()
+  const item = { ...track(name), ...coverFields }
+  await r.store.downloadTrack(item)
+  await flush()
+  const launched = r.invoked.find(call => call.command === 'download_track')
+  assert.equal(launched.args.coverUrl, expectedCover, `${name} reaches the downloaded file metadata`)
+  assert.equal(r.store.downloading.get(item.id).coverUrl, expectedCover, `${name} is retained in the active task`)
+  const pending = JSON.parse(storage.get('neri:pending-downloads'))
+  assert.equal(pending[0].coverUrl, expectedCover, `${name} survives an unfinished download restart`)
+  r.emit({ trackId: item.id, status: 'complete' })
+  await flush()
 }
 
 {
