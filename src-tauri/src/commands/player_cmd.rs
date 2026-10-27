@@ -1126,11 +1126,12 @@ pub async fn set_audio_output_device(name: Option<String>, state: State<'_, AppS
     if let Some(sink) = name.clone() {
         // pactl is blocking and has no timeout; keep both the lookup and the
         // set-default call off the Tokio worker thread.
+        let pactl_sink = sink.clone();
         let switched = tokio::task::spawn_blocking(move || {
             let known = crate::audio::system_sinks::list()
-                .is_some_and(|sinks| sinks.iter().any(|item| item.name == sink));
+                .is_some_and(|sinks| sinks.iter().any(|item| item.name == pactl_sink));
             if known {
-                crate::audio::system_sinks::set_default(&sink).map(|_| true)
+                crate::audio::system_sinks::set_default(&pactl_sink).map(|_| true)
             } else {
                 Ok(false)
             }
@@ -1141,7 +1142,7 @@ pub async fn set_audio_output_device(name: Option<String>, state: State<'_, AppS
         if switched {
             // The sink is now the server default, but the ALSA profile name is still
             // `default`; force a rebuild so the running stream follows the new route.
-            let request = state.player.lock().request_output_device_force(None)?;
+            let request = state.player.lock().request_output_device_force(None, Some(sink))?;
             return tokio::task::spawn_blocking(move || request.wait())
                 .await
                 .map_err(|error| AppError::Other(error.to_string()))?;

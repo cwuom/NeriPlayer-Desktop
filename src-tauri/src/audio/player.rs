@@ -210,6 +210,8 @@ enum AudioCmd {
     SetVolume(f32),
     SetOutputDevice {
         name: Option<String>,
+        /// User-visible sink name, kept as the DSP profile key when the ALSA profile is default.
+        display_name: Option<String>,
         force: bool,
         cancel: Arc<AtomicBool>,
         reply: mpsc::Sender<Result<(), String>>,
@@ -690,6 +692,8 @@ fn describe_output_device(
 struct OutputDeviceState {
     preferred_name: Option<String>,
     profile: Option<OutputDeviceProfile>,
+    /// Sound-server sink label to keep as the DSP profile key when the ALSA profile is default.
+    dsp_output_name: Option<String>,
 }
 
 fn effective_output_name<'a>(
@@ -1467,7 +1471,7 @@ impl PlayerEngine {
         &self,
         name: Option<String>,
     ) -> AppResult<OutputDeviceChangeRequest> {
-        self.request_output_device_inner(name, false)
+        self.request_output_device_inner(name, None, false)
     }
 
     /// Rebuild the output stream even when the selected profile name is unchanged.
@@ -1477,18 +1481,20 @@ impl PlayerEngine {
     pub fn request_output_device_force(
         &self,
         name: Option<String>,
+        display_name: Option<String>,
     ) -> AppResult<OutputDeviceChangeRequest> {
-        self.request_output_device_inner(name, true)
+        self.request_output_device_inner(name, display_name, true)
     }
 
     fn request_output_device_inner(
         &self,
         name: Option<String>,
+        display_name: Option<String>,
         force: bool,
     ) -> AppResult<OutputDeviceChangeRequest> {
         let (reply, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cmd_tx.send(AudioCmd::SetOutputDevice { name, force, cancel: Arc::clone(&cancel), reply })
+        self.cmd_tx.send(AudioCmd::SetOutputDevice { name, display_name, force, cancel: Arc::clone(&cancel), reply })
             .map_err(|error| AppError::Audio(error.to_string()))?;
         Ok(OutputDeviceChangeRequest { receiver, cancel, completed: false })
     }
@@ -1996,7 +2002,7 @@ fn audio_control_loop(
     };
 
     if let Some(profile) = &profile { effects.dsp.select_output(&profile.name); }
-    let mut output_profile = OutputDeviceState { preferred_name: None, profile };
+    let mut output_profile = OutputDeviceState { preferred_name: None, profile, dsp_output_name: None };
     let mut reporter = MetricsReporter::new();
     loop {
         let output_in_use = current
@@ -2043,7 +2049,11 @@ fn audio_control_loop(
                         Arc::new(AtomicBool::new(false)),
                     )
                 });
-                if let Err(error) = result {
+                if result.is_ok() {
+                    if let Some(display_name) = &output_profile.dsp_output_name {
+                        effects.dsp.select_output(display_name);
+                    }
+                } else if let Err(error) = result {
                     log::warn!(target: "cpal-output", "output device change deferred: {error}");
                 }
             }
@@ -2100,6 +2110,11 @@ fn audio_control_loop(
                     .is_err_and(|error| error.starts_with("Could not build audio output"))
                 {
                     output_profile.profile = None;
+                }
+                if prepared.is_ok() {
+                    if let Some(display_name) = &output_profile.dsp_output_name {
+                        effects.dsp.select_output(display_name);
+                    }
                 }
                 let next = match prepared {
                     Ok(next) => next,
@@ -2246,7 +2261,7 @@ fn audio_control_loop(
                     session.shared.volume.store(volume);
                 }
             }
-            AudioCmd::SetOutputDevice { name, force, cancel, reply } => {
+            AudioCmd::SetOutputDevice { name, display_name, force, cancel, reply } => {
                 if cancel.load(Ordering::Acquire) {
                     let _ = reply.send(Err("Audio output change cancelled".into()));
                     continue;
@@ -2271,7 +2286,11 @@ fn audio_control_loop(
                 });
                 if result.is_ok() {
                     output_profile.preferred_name = name;
-                    if let Some(profile) = &output_profile.profile { effects.dsp.select_output(&profile.name); }
+                    output_profile.dsp_output_name = display_name.clone();
+                    let dsp_name = display_name
+                        .as_deref()
+                        .or_else(|| output_profile.profile.as_ref().map(|profile| profile.name.as_str()));
+                    if let Some(dsp_name) = dsp_name { effects.dsp.select_output(dsp_name); }
                 }
                 let _ = reply.send(result);
             }
