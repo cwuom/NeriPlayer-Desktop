@@ -61,8 +61,17 @@ function insertNumericText(target: HTMLInputElement, text: string): void {
   // Number inputs have no selection API. Accept only a complete number and
   // replace the whole value; do not let the number-input setter silently clear
   // an invalid paste.
-  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value)) return
+  // HTML number inputs reject a leading `+`, a trailing `.`, and other
+  // spreadsheet-style spellings by sanitizing to "". Use the same grammar the
+  // value setter accepts (including exponent notation) and keep the old value
+  // if the browser still sanitizes it away.
+  if (!/^-?(?:(?:\d+(?:\.\d+)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/.test(value)) return
+  const previous = target.value
   target.value = value
+  if (target.value === '') {
+    target.value = previous
+    return
+  }
   target.dispatchEvent(new Event('input', { bubbles: true }))
 }
 

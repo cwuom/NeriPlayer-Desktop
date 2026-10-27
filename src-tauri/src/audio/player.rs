@@ -696,6 +696,18 @@ struct OutputDeviceState {
     dsp_output_name: Option<String>,
 }
 
+/// `prepare_session` always selects the ALSA profile name; restore the sink label
+/// afterwards so per-output DSP profiles survive seeks, rebuilds, and device loss.
+fn restore_dsp_output_identity(effects: &EffectsControl, output: &OutputDeviceState) {
+    let name = output
+        .dsp_output_name
+        .as_deref()
+        .or_else(|| output.profile.as_ref().map(|profile| profile.name.as_str()));
+    if let Some(name) = name {
+        effects.dsp.select_output(name);
+    }
+}
+
 fn effective_output_name<'a>(
     preferred: Option<&'a str>,
     available: &[&str],
@@ -2111,11 +2123,7 @@ fn audio_control_loop(
                 {
                     output_profile.profile = None;
                 }
-                if prepared.is_ok() {
-                    if let Some(display_name) = &output_profile.dsp_output_name {
-                        effects.dsp.select_output(display_name);
-                    }
-                }
+                restore_dsp_output_identity(&effects, &output_profile);
                 let next = match prepared {
                     Ok(next) => next,
                     Err(error) => {
@@ -2446,6 +2454,7 @@ fn audio_control_loop(
                     {
                         output_profile.profile = None;
                     }
+                    restore_dsp_output_identity(&effects, &output_profile);
                     match prepared {
                         Ok(next) => {
                             if ensure_generation(&playback_generation, latest_generation)
@@ -2695,10 +2704,15 @@ fn switch_output_device_in_place(
                 previous.stop();
             }
             output.profile = Some(candidate);
+            if let Some(display_name) = &output.dsp_output_name {
+                effects.dsp.select_output(display_name);
+            } else {
+                effects.dsp.select_output(&output.profile.as_ref().unwrap().name);
+            }
             Ok(())
         }
         Err(error) => {
-            if let Some(profile) = &output.profile { effects.dsp.select_output(&profile.name); }
+            restore_dsp_output_identity(effects, output);
             if !paused && ensure_generation(playback_generation, previous.playback_generation).is_ok() {
                 let _ = previous.play();
             }
@@ -2768,6 +2782,7 @@ fn rebuild_session_in_place(
         );
         build()
     });
+    restore_dsp_output_identity(effects, output_profile);
     match prepared {
         Ok(next) => {
             if !paused {
@@ -2845,6 +2860,7 @@ fn rebuild_after_failed_seek(
             loopback_tx,
         )
     })();
+    restore_dsp_output_identity(effects, output_profile);
     match restored {
         Ok(restored) => {
             if !paused {
