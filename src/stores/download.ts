@@ -7,7 +7,7 @@ import { useSettingsStore } from './settings'
 import { useToastStore } from './toast'
 import i18n from '@/i18n'
 import { createLogger } from '@/utils/logger'
-import { getTrackCoverUrl } from '@/utils/trackCover'
+import { getDownloadCoverUrl } from '@/utils/trackCover'
 import { resolveDownloadSource } from '@/modules/playback/playbackSource'
 import { DownloadQueue } from '@/modules/download/downloadQueue'
 import { consumeResolvingCancellation } from '@/modules/download/downloadCancellation'
@@ -490,7 +490,7 @@ export const useDownloadStore = defineStore('download', () => {
       }))
       return
     }
-    track = { ...track, coverUrl: getTrackCoverUrl(track) }
+    track = { ...track, coverUrl: getDownloadCoverUrl(track) }
     batch ??= { outcomes: new Map(), usedDefaultDir: false }
     batch.outcomes.delete(track.id)
     const attempt: DownloadAttempt = { batch, queueId: `${track.id}:${++attemptSequence}`, backendSubmitted: false }

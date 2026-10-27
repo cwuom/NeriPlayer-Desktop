@@ -106,11 +106,7 @@ function stripOriginalCoverSize(url: string): string {
   return url
 }
 
-/** Resolvable cover URL: thumbnails by default, pass `detail` on the player page */
-export function getTrackCoverUrl(
-  track: TrackCoverSource | null | undefined,
-  size: CoverSize = 'list',
-): string {
+function firstCoverValue(track: TrackCoverSource | null | undefined): string {
   const payload = track?.syncPayload
   const candidates = [
     track?.coverUrl,
@@ -123,15 +119,34 @@ export function getTrackCoverUrl(
     payload?.original_cover_url,
   ]
   const value = candidates.find(candidate => typeof candidate === 'string' && candidate.trim())
-  if (typeof value !== 'string') return ''
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/** Resolvable cover URL: thumbnails by default, pass `detail` on the player page */
+export function getTrackCoverUrl(
+  track: TrackCoverSource | null | undefined,
+  size: CoverSize = 'list',
+): string {
+  const value = firstCoverValue(track)
+  if (!value) return ''
   // Synced NetEase tracks often carry http:// covers while the CSP allows https only
-  const https = toHttpsImageUrl(value.trim())
+  const https = toHttpsImageUrl(value)
   if (size === 'original') return stripOriginalCoverSize(https)
   return withCoverSize(
     upgradeYouTubeThumbnailUrl(https, size),
     size === 'detail' ? COVER_SIZE_DETAIL : COVER_SIZE_LIST,
     size === 'list',
   )
+}
+
+/**
+ * Cover written into downloaded file metadata: keep custom/original artwork untouched
+ * (no NetEase `param`), but upgrade YouTube thumbnails to the full 1200px image.
+ */
+export function getDownloadCoverUrl(track: TrackCoverSource | null | undefined): string {
+  const value = firstCoverValue(track)
+  if (!value) return ''
+  return upgradeYouTubeThumbnailUrl(toHttpsImageUrl(value), 'detail')
 }
 
 function isGoogleImageHost(url: string): boolean {
