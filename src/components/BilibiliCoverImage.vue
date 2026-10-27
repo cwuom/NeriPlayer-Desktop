@@ -34,14 +34,6 @@ watch(() => props.src, (src) => {
   renderRetryCount = 0
   if (!src) return
 
-  if (cachedSrc) {
-    // Memory cache hits appear a screenful at a time (dozens on the comments page) and
-    // every info entry is forwarded to the backend log plugin over IPC
-    log.debug('memory cache displayed:', {
-      source: describeSource(cachedSrc),
-      chars: cachedSrc.length,
-    })
-  }
 }, { immediate: true })
 
 function describeSource(src: string): string {
@@ -84,16 +76,6 @@ async function loadCover(src: string, forceRefresh: boolean) {
   }
 }
 
-function handleLoad(event: Event) {
-  const src = (event.currentTarget as HTMLImageElement).src
-  if (src.startsWith('data:')) {
-    // Every successfully proxied cover ends up here. Logging at info level forwards each
-    // entry to the backend log plugin over IPC, and with dozens of covers per screen on the
-    // comments page that visibly slowed the page down.
-    log.debug('proxied image loaded:', { source: describeSource(src), chars: src.length })
-  }
-}
-
 function handleError(event: Event) {
   const image = event.currentTarget as HTMLImageElement
   const failedSrc = image.getAttribute('src') || image.src
@@ -126,7 +108,6 @@ function handleError(event: Event) {
     loading="lazy"
     decoding="async"
     referrerpolicy="no-referrer"
-    @load="handleLoad"
     @error="handleError"
   />
   <slot v-else />

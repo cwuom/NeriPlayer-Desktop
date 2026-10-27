@@ -15,7 +15,7 @@ import {
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
-import { resolveNeteaseCover } from '@/utils/neteaseCover'
+import { resolveNeteaseCover, resolveNeteaseCoverSized } from '@/utils/neteaseCover'
 import { createLogger } from '@/utils/logger'
 import { useToastStore } from '@/stores/toast'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
@@ -104,8 +104,8 @@ function parseHeader(raw: any): ArtistHeader {
   return {
     name: String(artist.name || route.query.name || ''),
     alias: aliasList.join(' / ') || String(route.query.subtitle || ''),
-    coverUrl: resolveNeteaseCover(artist.cover, artist.picUrl) || String(route.query.cover || ''),
-    avatarUrl: resolveNeteaseCover(artist.avatar, artist.img1v1Url),
+    coverUrl: resolveNeteaseCoverSized('detail', artist.cover, artist.picUrl) || String(route.query.cover || ''),
+    avatarUrl: resolveNeteaseCoverSized('list', artist.avatar, artist.img1v1Url),
     briefDesc: String(artist.briefDesc || ''),
     musicSize: Number(artist.musicSize) || 0,
     albumSize: Number(artist.albumSize) || 0,

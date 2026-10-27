@@ -176,7 +176,7 @@ async function openNowPlaying() {
   // 动画进行中允许打断，避免连点卡住
   resetFlipState()
   nowPlayingMotionState.value = 'opening'
-  scheduleNowPlayingMotionCleanup(520)
+  scheduleNowPlayingMotionCleanup()
   playerTransitionPulse.value = Date.now()
   isNowPlayingOpen.value = true
 }
@@ -215,7 +215,7 @@ async function closeNowPlaying() {
   }
   resetFlipState()
   nowPlayingMotionState.value = 'closing'
-  scheduleNowPlayingMotionCleanup(520)
+  scheduleNowPlayingMotionCleanup()
   skipMiniEnter.value = true
   isNowPlayingOpen.value = false
   await nextTick()

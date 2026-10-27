@@ -98,6 +98,20 @@ assert.equal(
   'https://p1.music.126.net/abc.jpg?param=1200y1200',
 )
 assert.equal(
+  withCoverSize('https://p1.music.126.net/abc.jpg?param=1200y1200', COVER_SIZE_LIST, true),
+  'https://p1.music.126.net/abc.jpg?param=300y300',
+  'list requests downgrade an oversized cover to the exact list size',
+)
+assert.equal(
+  withCoverSize('https://p1.music.126.net/abc.jpg?param=1200y1200', COVER_SIZE_DETAIL),
+  'https://p1.music.126.net/abc.jpg?param=1200y1200',
+  'detail requests keep a larger existing parameter',
+)
+assert.equal(
+  getTrackCoverUrl({ coverUrl: 'https://p1.music.126.net/abc.jpg?param=1200y1200' }),
+  'https://p1.music.126.net/abc.jpg?param=300y300',
+)
+assert.equal(
   withCoverSize('https://img.example/abc.jpg', COVER_SIZE_LIST),
   'https://img.example/abc.jpg',
 )

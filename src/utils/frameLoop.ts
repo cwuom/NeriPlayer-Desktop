@@ -59,24 +59,30 @@ export function setFrameInterval(milliseconds: number): void {
 function runFrame(nowMs: number): void {
   running = true
   frameHandle = 0
-  const sinceLastRun = lastRunMs ? nowMs - lastRunMs : 0
-  if (minIntervalMs > 0 && sinceLastRun > 0 && sinceLastRun < minIntervalMs - 2) {
+  try {
+    const sinceLastRun = lastRunMs ? nowMs - lastRunMs : 0
+    if (minIntervalMs > 0 && sinceLastRun > 0 && sinceLastRun < minIntervalMs - 2) {
+      return
+    }
+    lastRunMs = nowMs
+
+    // Take and remove each callback before running it, exactly like rAF: a callback runs
+    // once and re-queues itself to continue, and one cancelled during this frame is
+    // skipped. Callbacks added while running wait for the next frame.
+    for (const handle of [...pending.keys()]) {
+      const callback = pending.get(handle)
+      if (!callback) continue
+      pending.delete(handle)
+      try {
+        callback(nowMs)
+      } catch (error) {
+        // One shader/lyric/waveform callback must not stop the shared scheduler or the
+        // other two loops; keep the frame loop alive and report the failure.
+        console.error('[frame-loop] callback failed', error)
+      }
+    }
+  } finally {
     running = false
-    frameHandle = requestAnimationFrame(runFrame)
-    return
+    if (pending.size > 0 && !frameHandle) frameHandle = requestAnimationFrame(runFrame)
   }
-  lastRunMs = nowMs
-
-  // Take and remove each callback before running it, exactly like rAF: a callback runs
-  // once and re-queues itself to continue, and one cancelled during this frame is
-  // skipped. Callbacks added while running wait for the next frame.
-  for (const handle of [...pending.keys()]) {
-    const callback = pending.get(handle)
-    if (!callback) continue
-    pending.delete(handle)
-    callback(nowMs)
-  }
-  running = false
-
-  if (pending.size > 0 && !frameHandle) frameHandle = requestAnimationFrame(runFrame)
 }

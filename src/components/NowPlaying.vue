@@ -1131,7 +1131,8 @@ function imageExtension(subtype: string): string {
 
 async function saveCoverArt() {
   closeContextMenu()
-  const src = coverUrl.value || player.currentTrack?.coverUrl
+  // Export the original artwork, not the detail-sized URL used for display.
+  const src = getTrackCoverUrl(player.currentTrack, 'original') || coverUrl.value || player.currentTrack?.coverUrl
   if (!src) return
 
   try {

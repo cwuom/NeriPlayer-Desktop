@@ -10,8 +10,14 @@ import { readText } from '@tauri-apps/plugin-clipboard-manager'
 
 type Editable = HTMLInputElement | HTMLTextAreaElement | HTMLElement
 
+/** Input types that support selectionStart/selectionEnd and are safe to edit. */
+const SELECTABLE_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'password'])
+
 function editableTarget(target: EventTarget | null): Editable | null {
-  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return target
+  if (target instanceof HTMLInputElement) {
+    return SELECTABLE_INPUT_TYPES.has(target.type) && !target.readOnly ? target : null
+  }
+  if (target instanceof HTMLTextAreaElement) return target.readOnly ? null : target
   if (target instanceof HTMLElement && target.isContentEditable) return target
   return null
 }
@@ -20,11 +26,7 @@ function insertPlainText(target: Editable, text: string): void {
   if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
     const start = target.selectionStart ?? target.value.length
     const end = target.selectionEnd ?? start
-    try {
-      target.setRangeText(text, start, end, 'end')
-    } catch {
-      target.value += text
-    }
+    target.setRangeText(text, start, end, 'end')
     target.dispatchEvent(new Event('input', { bubbles: true }))
     return
   }

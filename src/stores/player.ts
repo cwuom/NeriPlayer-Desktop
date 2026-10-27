@@ -391,6 +391,9 @@ let _lastStallRecovery: { key: string; at: number } | null = null
 let shuffleBag: number[] = []       // 未播放索引池
 let shuffleHistory: number[] = []   // 已播放栈 (previous 回溯)
 let shuffleFuture: number[] = []    // 预排队栈 (next 或 previous 回退)
+// “下一首播放”选中当前曲目、且未开 shuffle 时，不能移动队列游标；记下待重播的 id，
+// 让下一次 next() 消费。只在本次会话有效，不持久化。
+let pendingReplayTrackId: string | null = null
 
 // playbackRequestToken 防竞态
 let playbackRequestToken = Date.now() * 1000
@@ -1479,6 +1482,8 @@ export const usePlayerStore = defineStore('player', () => {
       }
       return
     }
+    // Any explicit play supersedes a queued replay of the previous current track.
+    pendingReplayTrackId = null
     if (startPositionMs <= 0 && allowRememberedPosition && !forceResolve && commandSource === 'local') {
       startPositionMs = rememberedLongFormStart(track)
     }
@@ -2521,6 +2526,16 @@ export const usePlayerStore = defineStore('player', () => {
       consecutiveLoginSkips = 0
     }
 
+    if (!shuffleEnabled.value && pendingReplayTrackId) {
+      const replayId = pendingReplayTrackId
+      pendingReplayTrackId = null
+      const replayIndex = queue.value.findIndex(item => item.id === replayId)
+      if (replayIndex >= 0) {
+        await play(queue.value[replayIndex], commandSource, 0, false, false)
+        return
+      }
+    }
+
     let nextIdx: number
     if (shuffleEnabled.value) {
       // Shuffle 三栈模型
@@ -2618,6 +2633,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function toggleShuffle() {
+    pendingReplayTrackId = null
     // 同 PB-03: 本地翻转, 不采信后端 toggle_shuffle 返回值
     shuffleEnabled.value = !shuffleEnabled.value
     // Shuffle 三栈管理
@@ -3353,6 +3369,7 @@ export const usePlayerStore = defineStore('player', () => {
     // queueIndex onto the previous track and desynchronize the queue highlight.
     if (existing !== -1 && existing === queueIndex.value) {
       if (shuffleEnabled.value) shuffleFuture.push(existing)
+      else pendingReplayTrackId = queue.value[existing]?.id ?? null
       savePlayerState()
       return
     }

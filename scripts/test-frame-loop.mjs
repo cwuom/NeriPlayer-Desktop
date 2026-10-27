@@ -105,4 +105,27 @@ test('callbacks receive the shared dispatch timestamp instead of reading their o
   assert.deepEqual(stamps, [16])
 })
 
+
+test('a throwing callback does not stop the other callbacks or the shared scheduler', () => {
+  const loop = loadFrameLoop()
+  const ran = []
+  const originalError = console.error
+  console.error = () => {}
+  try {
+    const retry = () => {
+      ran.push('retry')
+      loop.scheduleFrame(retry)
+    }
+    loop.scheduleFrame(retry)
+    loop.scheduleFrame(() => { throw new Error('shader exploded') })
+    loop.scheduleFrame(() => ran.push('lyrics'))
+    loop.advance()
+    loop.advance()
+  } finally {
+    console.error = originalError
+  }
+  assert.deepEqual(ran, ['retry', 'lyrics', 'retry'], 'the throwing callback is isolated and the loop continues')
+  assert.equal(loop.scheduledFrames, 1, 'the re-queued callback still owns one rAF')
+})
+
 console.log(`Shared frame loop: ${passed} passed`)

@@ -40,7 +40,7 @@ const NET_EASE_COVER_HOST = /(^|\.)music\.126\.net$/i
  * megabytes. An existing `param` is only upgraded when it is smaller, which keeps the call
  * idempotent and never downgrades the player page.
  */
-export function withCoverSize(raw: string, px: number): string {
+export function withCoverSize(raw: string, px: number, exact = false): string {
   if (typeof raw !== 'string') return ''
   const url = raw.trim()
   if (!url) return ''
@@ -52,7 +52,7 @@ export function withCoverSize(raw: string, px: number): string {
   }
   if (!NET_EASE_COVER_HOST.test(parsed.hostname)) return url
   const match = /^(\d+)y(\d+)$/i.exec(parsed.searchParams.get('param') || '')
-  if (match && Math.min(Number(match[1]), Number(match[2])) >= px) return url
+  if (!exact && match && Math.min(Number(match[1]), Number(match[2])) >= px) return url
   parsed.searchParams.set('param', `${px}y${px}`)
   return parsed.toString()
 }
@@ -110,6 +110,7 @@ export function getTrackCoverUrl(
   return withCoverSize(
     upgradeYouTubeThumbnailUrl(https, size),
     size === 'detail' ? COVER_SIZE_DETAIL : COVER_SIZE_LIST,
+    size === 'list',
   )
 }
 

@@ -75,6 +75,7 @@ async function mountArtist(data = fixture) {
     previewCachedDetail: () => ({ markFresh() {}, shown: async () => false }),
     writePlaylistDetailCache() {},
     resolveNeteaseCover: () => '',
+    resolveNeteaseCoverSized: () => '',
     formatTrackDuration: () => '1:00',
     createLogger: () => ({ error() {} }),
     BilibiliCoverImage: defineComponent({ setup: () => () => h('img') }),

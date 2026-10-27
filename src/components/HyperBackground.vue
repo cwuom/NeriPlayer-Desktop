@@ -99,6 +99,9 @@ function adjustQuality(nowMs: number): void {
   // global frame cap and the tier gate cannot stack into two layers of throttling
   if (props.lowPerformance) {
     scaleTier = QUALITY_SCALES.length - 1
+    // The shared frame loop already caps to 30fps; leaving an adapted 20fps tier here
+    // would stack and render at ~15fps.
+    fpsTier = 0
     return
   }
   if (nowMs - lastQualityCheckAt < QUALITY_ADJUST_INTERVAL_MS) return
