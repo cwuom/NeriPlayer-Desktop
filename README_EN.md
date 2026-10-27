@@ -141,7 +141,7 @@ Track context menus and bulk selection provide download actions. The Downloads p
 
 - Concurrency is **1–8**, default **6**. Download quality follows playback by default, or can be configured per platform.
 - Custom directories and filename templates are supported. Download validation checks decodable content, duration and available length/checksum information, including fragmented audio.
-- Metadata completion is enabled by default; standardized lyric embedding is disabled by default. Original lyrics are preserved when it is enabled. Lyrics and covers are embedded where the format supports them and read back for verification; NP metadata and sidecar files are retained if embedding fails.
+- Metadata completion is enabled by default; standardized lyric embedding is disabled by default. Original lyrics are preserved when it is enabled. Downloads embed and verify the title, artist, album and available artwork, lyrics, translations and romanization. Artwork retrieval or tag-writing failures are reported as failed downloads that can be retried; completion requires successful verification. Unavailable source information is not invented, and disabling metadata completion makes embedding optional.
 - Unfinished queues are recovered on restart by resolving the URL again and downloading again. **Byte-range download resume is not supported.**
 - Before an operation on a downloaded file that is playing, its local decoder releases the file; playback then resumes according to the latest playback intent. Deletion can switch playback back to an online source.
 

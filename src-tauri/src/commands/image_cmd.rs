@@ -554,7 +554,7 @@ fn cover_data_url(bytes: &[u8], mime_type: &str) -> String {
     format!("data:{};base64,{}", mime_type, STANDARD.encode(bytes))
 }
 
-fn cover_referer(url: &Url) -> &'static str {
+pub(crate) fn cover_referer(url: &Url) -> &'static str {
     match url.host_str().unwrap_or_default().to_ascii_lowercase().as_str() {
         host if is_host_or_subdomain(host, "hdslb.com")
             || is_host_or_subdomain(host, "biliimg.com") => BILIBILI_REFERER,
