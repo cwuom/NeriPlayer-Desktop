@@ -56,6 +56,16 @@ function selectionUnchanged(target: Editable, captured: TextSelection): boolean 
     && current.endOffset === saved.endOffset
 }
 
+function insertNumericText(target: HTMLInputElement, text: string): void {
+  const value = text.trim()
+  // Number inputs have no selection API. Accept only a complete number and
+  // replace the whole value; do not let the number-input setter silently clear
+  // an invalid paste.
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value)) return
+  target.value = value
+  target.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 function insertPlainText(target: Editable, text: string, captured: TextSelection): void {
   if (captured.kind === 'input') {
     if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return
@@ -81,7 +91,20 @@ export function installClipboardPasteGuard(): () => void {
     // Block the default even outside editable controls so WebKit never reads GTK targets.
     event.preventDefault()
     event.stopPropagation()
-    const target = editableTarget(event.target)
+    const rawTarget = event.target
+    if (rawTarget instanceof HTMLInputElement && rawTarget.type === 'number' && !rawTarget.readOnly) {
+      const target = rawTarget
+      void readText()
+        .then((text) => {
+          if (!text || document.activeElement !== target) return
+          insertNumericText(target, text)
+        })
+        .catch(() => {
+          // 没有剪贴板权限时保持原样
+        })
+      return
+    }
+    const target = editableTarget(rawTarget)
     if (!target) return
     const captured = captureSelection(target)
     if (!captured) return
