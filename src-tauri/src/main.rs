@@ -61,12 +61,12 @@ fn main() {
 
     // Linux NVIDIA 私有驱动：在 GTK/WebKit 初始化前应用兼容设置，消除页面切换闪烁。
     // 默认只限制在途帧数并关闭 explicit sync，不关闭 DMA-BUF/硬件加速；确需退回
-    // 共享内存合成时用 NERI_WEBKIT_DISABLE_DMABUF=1，完全跳过用
+    // 共享内存合成时显式设置 WEBKIT_DISABLE_DMABUF_RENDERER=1，完全跳过用
     // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
     // Linux + NVIDIA proprietary: apply compatibility settings before GTK/WebKit init to
     // stop page-switch flicker. By default this only caps in-flight frames and disables
     // explicit sync; DMA-BUF/hardware acceleration stays on. Use
-    // NERI_WEBKIT_DISABLE_DMABUF=1 for the shared-memory fallback, or
+    // set WEBKIT_DISABLE_DMABUF_RENDERER=1 explicitly for the slow fallback, or
     // NERI_DISABLE_NVIDIA_QUIRK=1 to skip the layer. Explicit env vars always win.
     #[cfg(target_os = "linux")]
     neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();

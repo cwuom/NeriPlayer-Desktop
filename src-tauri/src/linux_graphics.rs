@@ -12,13 +12,10 @@
 //! disables hardware acceleration.
 //!
 //! 为什么不再默认关闭 DMA-BUF / Why DMA-BUF is no longer disabled by default:
-//! `WEBKIT_DISABLE_DMABUF_RENDERER=1` 会退化为共享内存合成，WebGL 背景帧率会明显
-//! 下降，用户反馈不可接受。它现在只在显式请求时启用（`NERI_WEBKIT_DISABLE_DMABUF=1`），
-//! 或者用户自己设置了 `WEBKIT_DISABLE_DMABUF_RENDERER` 时原样尊重。
-//! `WEBKIT_DISABLE_DMABUF_RENDERER=1` falls back to shared-memory compositing and
-//! visibly lowers WebGL frame rate, which users rejected. It is now opt-in through
-//! `NERI_WEBKIT_DISABLE_DMABUF=1`, and an explicitly set `WEBKIT_DISABLE_DMABUF_RENDERER`
-//! is always respected.
+//! 用户显式设置 `WEBKIT_DISABLE_DMABUF_RENDERER` 时原样尊重，但不会再叠加 SHM；
+//! 两者同时设置会让 WebKit 走到没有有效 backing store 的分支。
+//! An explicit `WEBKIT_DISABLE_DMABUF_RENDERER` is respected without also forcing SHM;
+//! setting both can leave WebKit without a valid backing store.
 //!
 //! 开关 / Knobs:
 //! - `NERI_DISABLE_NVIDIA_QUIRK=1`：完全跳过本兼容层 / skip this layer entirely.
@@ -31,8 +28,6 @@
 //!   keep the DMA-BUF atlas (disabled by default to remove flicker).
 //! - `NERI_WEBKIT_DMABUF_NO_GBM=1`：绕过 NVIDIA 的 GBM 分配路径 / avoid NVIDIA GBM allocation.
 //! - `NERI_WEBKIT_FORCE_VBLANK_TIMER=1`：改用定时 vblank / use the timer-based vblank.
-//! - `NERI_WEBKIT_DISABLE_DMABUF=1`：退回共享内存合成（慢，但最稳）/
-//!   fall back to shared-memory compositing (slow but most reliable).
 //! - `NERI_WEBKIT_SOFTWARE_COMPOSITING=1`：完全关闭加速合成（最慢）/
 //!   disable accelerated compositing entirely (slowest).
 //!
@@ -161,6 +156,13 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
         {
             std::env::set_var("WEBKIT_FORCE_VBLANK_TIMER", "1");
         }
+        // 用户显式关闭 DMA-BUF renderer 时，不要再叠加 FORCE_SHM：WebKit 会先走
+        // disable 分支，两者同时设置会落到没有有效 backing store 的崩溃路径。
+        // When the user explicitly disables the DMA-BUF renderer, do not also force
+        // SHM: WebKit takes the disable branch first, and setting both can crash with
+        // no valid backing store.
+        let dmabuf_disabled = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
+
         // DMA-BUF 共享内存合成：WebKitGTK 在 NVIDIA 下用 GPU 缓冲区直接合成时，
         // 切换页面/播放页仍会闪；强制 SHM 后实测稳定，代价是少量合成开销。
         // 想保留硬件合成可用 NERI_WEBKIT_KEEP_DMABUF=1，显式设置的环境变量优先。
@@ -168,25 +170,16 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
         // flickers on NVIDIA when switching pages/now-playing; SHM is stable in
         // testing at a small compositing cost. Set NERI_WEBKIT_KEEP_DMABUF=1 to keep
         // hardware compositing; explicit environment variables win.
-        let dmabuf_shm_forced = if std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some()
+        let dmabuf_shm_forced = if dmabuf_disabled
+            || std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some()
+            || std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some()
             || env_truthy("NERI_WEBKIT_KEEP_DMABUF")
+            || env_truthy("NERI_WEBKIT_SOFTWARE_COMPOSITING")
         {
             false
         } else {
             std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
             true
-        };
-
-        // DMA-BUF：不默认关闭 renderer；仅显式请求时完全退回共享内存合成。
-        // DMA-BUF: the renderer stays on by default; full shared-memory fallback only
-        // on explicit request.
-        let dmabuf_disabled = if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
-            false
-        } else if env_truthy("NERI_WEBKIT_DISABLE_DMABUF") {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-            true
-        } else {
-            false
         };
 
         // 兜底：仍闪烁时用户可显式要求软件合成（完全关闭加速合成，代价最大）。
