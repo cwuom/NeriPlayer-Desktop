@@ -210,6 +210,7 @@ enum AudioCmd {
     SetVolume(f32),
     SetOutputDevice {
         name: Option<String>,
+        force: bool,
         cancel: Arc<AtomicBool>,
         reply: mpsc::Sender<Result<(), String>>,
     },
@@ -1466,9 +1467,28 @@ impl PlayerEngine {
         &self,
         name: Option<String>,
     ) -> AppResult<OutputDeviceChangeRequest> {
+        self.request_output_device_inner(name, false)
+    }
+
+    /// Rebuild the output stream even when the selected profile name is unchanged.
+    /// Used after switching the sound server's default sink, where the ALSA profile
+    /// (`default`) stays the same but the actual route moved.
+    /// Rebuild even when the profile name matches, for a switched server default.
+    pub fn request_output_device_force(
+        &self,
+        name: Option<String>,
+    ) -> AppResult<OutputDeviceChangeRequest> {
+        self.request_output_device_inner(name, true)
+    }
+
+    fn request_output_device_inner(
+        &self,
+        name: Option<String>,
+        force: bool,
+    ) -> AppResult<OutputDeviceChangeRequest> {
         let (reply, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cmd_tx.send(AudioCmd::SetOutputDevice { name, cancel: Arc::clone(&cancel), reply })
+        self.cmd_tx.send(AudioCmd::SetOutputDevice { name, force, cancel: Arc::clone(&cancel), reply })
             .map_err(|error| AppError::Audio(error.to_string()))?;
         Ok(OutputDeviceChangeRequest { receiver, cancel, completed: false })
     }
@@ -2226,7 +2246,7 @@ fn audio_control_loop(
                     session.shared.volume.store(volume);
                 }
             }
-            AudioCmd::SetOutputDevice { name, cancel, reply } => {
+            AudioCmd::SetOutputDevice { name, force, cancel, reply } => {
                 if cancel.load(Ordering::Acquire) {
                     let _ = reply.send(Err("Audio output change cancelled".into()));
                     continue;
@@ -2239,7 +2259,7 @@ fn audio_control_loop(
                     if cancel.load(Ordering::Acquire) {
                         return Err("Audio output change cancelled".into());
                     }
-                    if output_profile.profile.as_ref().is_some_and(|profile| profile.name == candidate.name) {
+                    if !force && output_profile.profile.as_ref().is_some_and(|profile| profile.name == candidate.name) {
                         Ok(())
                     } else {
                         switch_output_device_in_place(

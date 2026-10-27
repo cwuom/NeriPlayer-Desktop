@@ -1123,10 +1123,25 @@ pub async fn set_audio_output_device(name: Option<String>, state: State<'_, AppS
     // node, so selecting a sink means making it the server default and reopening
     // that stream at the current position.
     #[cfg(target_os = "linux")]
-    if let Some(sink) = name.as_deref() {
-        if crate::audio::system_sinks::list().is_some_and(|sinks| sinks.iter().any(|item| item.name == sink)) {
-            crate::audio::system_sinks::set_default(sink).map_err(AppError::Audio)?;
-            let request = state.player.lock().request_output_device(None)?;
+    if let Some(sink) = name.clone() {
+        // pactl is blocking and has no timeout; keep both the lookup and the
+        // set-default call off the Tokio worker thread.
+        let switched = tokio::task::spawn_blocking(move || {
+            let known = crate::audio::system_sinks::list()
+                .is_some_and(|sinks| sinks.iter().any(|item| item.name == sink));
+            if known {
+                crate::audio::system_sinks::set_default(&sink).map(|_| true)
+            } else {
+                Ok(false)
+            }
+        })
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+        .map_err(AppError::Audio)?;
+        if switched {
+            // The sink is now the server default, but the ALSA profile name is still
+            // `default`; force a rebuild so the running stream follows the new route.
+            let request = state.player.lock().request_output_device_force(None)?;
             return tokio::task::spawn_blocking(move || request.wait())
                 .await
                 .map_err(|error| AppError::Other(error.to_string()))?;
