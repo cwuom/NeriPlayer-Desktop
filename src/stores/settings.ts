@@ -26,6 +26,7 @@ export interface AppSettings {
   formatVersion: number
   darkMode: ThemeMode
   themeColor: string
+  uiScale: number
   appFontFamily: string
   lyricFontFamily: string
   locale: string
@@ -155,6 +156,10 @@ export const MAX_DOWNLOAD_PARALLELISM = 8
 export const DEFAULT_DOWNLOAD_PARALLELISM = 6
 export const MIN_MEDIA_CACHE_SIZE_MB = 256
 export const MAX_MEDIA_CACHE_SIZE_MB = 512 * 1024
+export const UI_SCALE_DEFAULT = 100
+export const UI_SCALE_MIN = 25
+export const UI_SCALE_MAX = 1000
+export const UI_SCALE_STEP = 5
 // 对齐 Android LyricFontScale 0.5–1.6
 export const LYRIC_FONT_SCALE_MIN = 0.5
 export const LYRIC_FONT_SCALE_MAX = 1.6
@@ -182,6 +187,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   formatVersion: SETTINGS_FORMAT_VERSION,
   darkMode: 'dark',
   themeColor: 'purple',
+  uiScale: UI_SCALE_DEFAULT,
   appFontFamily: '',
   lyricFontFamily: '',
   locale: detectLocale(),
@@ -287,6 +293,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   darkMode: 'dark_mode',
   themeColor: 'theme_color',
+  uiScale: 'ui_scale',
   appFontFamily: 'app_font_family',
   lyricFontFamily: 'lyric_font_family',
   defaultScreen: 'default_screen',
@@ -453,6 +460,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   }
 
   if (!['system', 'dark', 'light'].includes(result.darkMode)) result.darkMode = DEFAULT_SETTINGS.darkMode
+  result.uiScale = normalizeUiScale(result.uiScale)
   result.appFontFamily = sanitizeFontFamily(result.appFontFamily)
   result.lyricFontFamily = sanitizeFontFamily(result.lyricFontFamily)
   if (!['disc', 'card'].includes(result.coverStyle)) result.coverStyle = DEFAULT_SETTINGS.coverStyle
@@ -553,6 +561,11 @@ function canonicalNeteaseQuality(value: string): string {
   return value.trim() === 'high' ? 'higher' : value
 }
 
+export function normalizeUiScale(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return UI_SCALE_DEFAULT
+  return Math.round(Math.min(UI_SCALE_MAX, Math.max(UI_SCALE_MIN, value)) / UI_SCALE_STEP) * UI_SCALE_STEP
+}
+
 /** 歌词来源的默认偏移：按 50ms 对齐并夹到 ±5000ms（Android normalizeLyricDefaultOffsetMs）；非数值回到默认 */
 export function normalizeLyricDefaultOffset(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback
@@ -617,6 +630,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const initial = normalizeSnapshot(readLegacySnapshot())
   const darkMode = ref<ThemeMode>(initial.darkMode)
   const themeColor = ref(initial.themeColor)
+  const uiScale = ref(initial.uiScale)
   const appFontFamily = ref(initial.appFontFamily)
   const lyricFontFamily = ref(initial.lyricFontFamily)
   const locale = ref(initial.locale)
@@ -719,7 +733,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const globalShortcutsEnabled = ref(initial.globalShortcutsEnabled)
 
   const settingRefs: SettingRefs = {
-    darkMode, themeColor, appFontFamily, lyricFontFamily, locale, defaultScreen, closeToTray, showCoverBadge,
+    darkMode, themeColor, uiScale, appFontFamily, lyricFontFamily, locale, defaultScreen, closeToTray, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
     showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
@@ -817,7 +831,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   return {
     isHydrated, hydrate, snapshot, applySnapshot,
-    darkMode, themeColor, appFontFamily, lyricFontFamily, locale, coverStyle,
+    darkMode, themeColor, uiScale, appFontFamily, lyricFontFamily, locale, coverStyle,
     defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,

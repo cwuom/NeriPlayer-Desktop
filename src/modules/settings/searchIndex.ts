@@ -17,6 +17,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'general', title: 'settings.internationalization' },
   { section: 'general', title: 'settings.explore_search_history', desc: 'settings.explore_search_history_desc' },
   { section: 'appearance', title: 'settings.dark_mode' },
+  { section: 'appearance', title: 'settings.ui_scale', desc: 'settings.ui_scale_desc', keywords: ['缩放', '高分屏', '4K', 'HiDPI', 'DPI', 'zoom', 'scale', 'scaling', 'size'] },
   { section: 'appearance', title: 'settings.theme_color' },
   { section: 'appearance', title: 'settings.app_font', desc: 'settings.app_font_desc', keywords: ['字体', '界面字体', 'font', 'typeface', 'family'] },
   { section: 'appearance', title: 'settings.lyric_font', desc: 'settings.lyric_font_desc', keywords: ['歌词字体', 'font', 'lyrics', 'typeface', 'family'] },

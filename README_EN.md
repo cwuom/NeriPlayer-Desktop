@@ -98,7 +98,7 @@ CI builds and Releases may correspond to different commits. When reporting issue
 | Lyrics | AMLL word-synced rendering, translation/romanization, automatic multi-source retrieval and manual matching, editing, local lyrics, per-source and per-track offsets, and a separate desktop lyrics window |
 | Desktop | System tray, close to tray, configurable global shortcuts, system media sessions, single instance and macOS menu bar lyrics |
 | Data | SQLite persistence, playlist and full-configuration import/export, GitHub / WebDAV metadata sync, playback stats and recent-play management |
-| Interface | 简体中文, 繁體中文, English and 日本語; light/dark themes, cover-derived colors, custom backgrounds, fluid animation and audio response, and settings search |
+| Interface | 简体中文, 繁體中文, English and 日本語; light/dark themes, cover-derived colors, custom backgrounds, fluid animation and audio response, and settings search; Appearance offers persisted UI scaling (macOS 11+), with display-aware limits and a minimum window size that follows the scale |
 | Diagnostics | Connectivity probes, live logs, file logs, crash reports and debug-report export |
 
 ### Platform capabilities

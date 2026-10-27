@@ -548,6 +548,7 @@ fn main() {
             lyrics_cmd::fetch_netease_romanized_lyric,
             lyrics_cmd::match_lyrics,
             settings_cmd::get_settings,
+            settings_cmd::ui_scale_supported,
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
             settings_cmd::import_background_image,

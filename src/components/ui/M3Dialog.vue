@@ -90,6 +90,9 @@ useEscapeClose(() => props.open, close)
 .m3-dialog {
   width: 360px;
   max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
   background: var(--md-surface-container-high);
   border-radius: 28px;
   padding: 24px;
@@ -100,6 +103,7 @@ useEscapeClose(() => props.open, close)
 
 .dialog-icon {
   display: flex;
+  flex-shrink: 0;
   justify-content: center;
   margin-bottom: 16px;
   color: var(--md-primary);
@@ -108,6 +112,7 @@ useEscapeClose(() => props.open, close)
 }
 
 .dialog-title {
+  flex-shrink: 0;
   font-size: 22px;
   font-weight: 600;
   color: var(--md-on-surface);
@@ -117,6 +122,8 @@ useEscapeClose(() => props.open, close)
 }
 
 .dialog-body {
+  min-height: 0;
+  overflow: auto;
   color: var(--md-on-surface-variant);
   font-size: 14px;
   line-height: 1.5;
@@ -125,6 +132,7 @@ useEscapeClose(() => props.open, close)
 
 .dialog-actions {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: 8px;
 }

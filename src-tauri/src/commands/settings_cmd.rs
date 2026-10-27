@@ -46,6 +46,18 @@ pub async fn get_settings(app: AppHandle) -> AppResult<SettingsLoadResult> {
 }
 
 #[tauri::command]
+pub fn ui_scale_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::available!(macos = 11.0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+#[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: AppSettings) -> AppResult<AppSettings> {
     let previous_cache_limit = store::load_settings(&app)
         .ok()

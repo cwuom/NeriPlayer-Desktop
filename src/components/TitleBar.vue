@@ -503,7 +503,7 @@ onUnmounted(() => {
 /* macOS 原生红绿灯安全区：trafficLightPosition x=20，按钮组宽 ~52px，
    右侧再留 ~20px 呼吸空间 -> 92px */
 .tb-traffic-safe-area {
-  width: 92px;
+  width: calc(92px / var(--app-ui-scale, 1));
   height: 100%;
   flex: 0 0 auto;
   pointer-events: auto;

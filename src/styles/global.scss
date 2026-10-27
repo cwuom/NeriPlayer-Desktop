@@ -74,7 +74,7 @@
 
 /* macOS：更高的标题栏承载垂直居中的红绿灯（trafficLightPosition 20/20） */
 html.platform-mac {
-  --titlebar-height: 52px;
+  --titlebar-height: max(52px, calc(52px / var(--app-ui-scale, 1)));
 }
 
 /* 原生全屏时红绿灯随系统栏隐藏，内容无需继续预留较高的安全区 */

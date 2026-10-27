@@ -68,6 +68,8 @@
     "test:escape-close": "node scripts/test-escape-close.mjs",
     "test:settings-integrity": "node scripts/test-settings-integrity.mjs",
     "test:font-settings": "node scripts/test-font-settings.mjs",
+    "test:ui-scale-settings": "node scripts/test-ui-scale-settings.mjs",
+    "test:ui-scale-runtime": "node scripts/test-ui-scale-runtime.mjs",
     "test:shortcut-settings": "node scripts/test-shortcut-settings.mjs",
     "test:playback-failure": "node scripts/test-playback-failure.mjs",
     "test:playback-ended": "node scripts/test-playback-ended.mjs",

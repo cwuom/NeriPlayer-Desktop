@@ -18,6 +18,10 @@ pub const MAX_MEDIA_CACHE_SIZE_MB: i32 = 512 * 1024;
 const SETTINGS_STORE_KEY: &str = "appSettings";
 const EQUALIZER_BAND_COUNT: usize = 5;
 const MAX_FONT_FAMILY_CHARS: usize = 64;
+const UI_SCALE_DEFAULT: i32 = 100;
+const UI_SCALE_MIN: i32 = 25;
+const UI_SCALE_MAX: i32 = 1000;
+const UI_SCALE_STEP: i32 = 5;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +36,8 @@ pub struct AppSettings {
     pub format_version: u32,
     pub dark_mode: String,
     pub theme_color: String,
+    #[serde(deserialize_with = "deserialize_ui_scale")]
+    pub ui_scale: i32,
     pub app_font_family: String,
     pub lyric_font_family: String,
     pub locale: String,
@@ -181,6 +187,22 @@ fn legacy_audio_effects_settings() -> AudioEffectsSettings {
     AudioEffectsSettings { version: 0, ..AudioEffectsSettings::default() }
 }
 
+fn deserialize_ui_scale<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(normalize_ui_scale(value.as_f64().unwrap_or(f64::from(UI_SCALE_DEFAULT))))
+}
+
+fn normalize_ui_scale(value: f64) -> i32 {
+    if !value.is_finite() {
+        return UI_SCALE_DEFAULT;
+    }
+    let clamped = value.clamp(f64::from(UI_SCALE_MIN), f64::from(UI_SCALE_MAX));
+    (clamped / f64::from(UI_SCALE_STEP)).round() as i32 * UI_SCALE_STEP
+}
+
 /// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
 fn lenient_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
@@ -214,6 +236,7 @@ impl Default for AppSettings {
             format_version: SETTINGS_FORMAT_VERSION,
             dark_mode: "dark".into(),
             theme_color: "purple".into(),
+            ui_scale: UI_SCALE_DEFAULT,
             app_font_family: String::new(),
             lyric_font_family: String::new(),
             locale: "zh-CN".into(),
@@ -328,6 +351,7 @@ impl AppSettings {
             "dark",
         );
         self.theme_color = normalize_theme_color(&self.theme_color);
+        self.ui_scale = normalize_ui_scale(f64::from(self.ui_scale));
         self.app_font_family = normalize_font_family(&self.app_font_family);
         self.lyric_font_family = normalize_font_family(&self.lyric_font_family);
         self.locale = normalize_choice(
@@ -924,6 +948,70 @@ mod tests {
     }
 
     use super::{AppSettings, MAX_MEDIA_CACHE_SIZE_MB, MIN_MEDIA_CACHE_SIZE_MB};
+
+    #[test]
+    fn ui_scale_defaults_for_old_snapshots_and_normalizes_raw_numbers() {
+        let old: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert_eq!(old.ui_scale, 100);
+        for (value, expected) in [
+            (-f64::MAX, 25), (-1.0, 25), (0.0, 25), (24.9, 25), (25.0, 25),
+            (27.49, 25), (27.5, 30), (74.9, 75), (75.0, 75),
+            (77.49, 75), (77.5, 80), (100.0, 100), (122.49, 120), (122.5, 125),
+            (127.4, 125), (127.5, 130), (197.49, 195), (197.5, 200),
+            (200.0, 200), (200.1, 200), (202.5, 205), (997.49, 995), (997.5, 1000),
+            (1000.0, 1000), (1000.1, 1000), (f64::MAX, 1000),
+            (f64::NAN, 100), (f64::INFINITY, 100), (f64::NEG_INFINITY, 100),
+        ] {
+            assert_eq!(super::normalize_ui_scale(value), expected, "{value}");
+        }
+        for value in (25..=1000).step_by(5) {
+            let mut settings = AppSettings { ui_scale: value, ..AppSettings::default() };
+            settings.normalize();
+            assert_eq!(settings.ui_scale, value);
+        }
+        let mut settings = AppSettings { ui_scale: 127, ..AppSettings::default() };
+        settings.normalize();
+        assert_eq!(settings.ui_scale, 125);
+    }
+
+    #[test]
+    fn ui_scale_deserialization_recovers_bad_types_without_resetting_other_settings() {
+        for value in [
+            serde_json::json!("150"), serde_json::json!(""), serde_json::Value::Null,
+            serde_json::json!(true), serde_json::json!(false), serde_json::json!([]),
+            serde_json::json!([150]), serde_json::json!({ "value": 150 }),
+        ] {
+            let settings: AppSettings = serde_json::from_value(serde_json::json!({
+                "uiScale": value, "locale": "ja", "lyricFontScale": 1.25,
+            })).expect("bad scale must not reject the whole settings payload");
+            assert_eq!(settings.ui_scale, 100);
+            assert_eq!(settings.locale, "ja");
+            assert_eq!(settings.lyric_font_scale, 1.25);
+        }
+    }
+
+    #[test]
+    fn ui_scale_survives_settings_save_and_config_export_round_trip() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Config {
+            #[serde(deserialize_with = "super::deserialize_app_settings")]
+            settings: AppSettings,
+        }
+        for (value, expected) in [(24.9, 25), (27.5, 30), (74.9, 75), (127.4, 125), (127.5, 130), (200.0, 200), (227.4, 225), (1001.0, 1000)] {
+            let config: Config = serde_json::from_value(serde_json::json!({
+                "settings": { "uiScale": value, "lyricFontScale": 1.25 },
+            })).expect("UI scale config");
+            let settings = config.settings.normalized();
+            assert_eq!(settings.ui_scale, expected);
+            let saved = serde_json::to_value(&settings).expect("saved settings");
+            assert_eq!(saved["uiScale"], expected);
+            let restored: AppSettings = serde_json::from_value(saved.clone()).expect("restored settings");
+            assert_eq!(serde_json::to_value(restored.normalized()).expect("restored JSON"), saved);
+            let exported = serde_json::to_value(Config { settings }).expect("exported config");
+            let imported: Config = serde_json::from_value(exported.clone()).expect("imported config");
+            assert_eq!(serde_json::to_value(imported).expect("imported JSON"), exported);
+        }
+    }
 
     #[test]
     fn font_settings_default_for_old_snapshots() {
