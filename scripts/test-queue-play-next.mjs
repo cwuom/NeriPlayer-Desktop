@@ -40,10 +40,12 @@ function fixture({
   const methods = new Function(
     ...Object.keys(context), 'initialBag', 'initialHistory', 'initialFuture', `
     let shuffleBag = [...initialBag], shuffleHistory = [...initialHistory], shuffleFuture = [...initialFuture]
+    let pendingReplayTrackId = null
     ${compiled}
     return {
       addToQueueNext,
       shuffleState() { return { bag: [...shuffleBag], history: [...shuffleHistory], future: [...shuffleFuture] } },
+      pendingReplay() { return pendingReplayTrackId },
     }
   `)(...Object.values(context), bag, history, future)
   return { ...methods, ...context, saved }
@@ -138,6 +140,14 @@ test('non-shuffle: adding a track before the cursor keeps the cursor on the same
   assert.deepEqual(state.queue.value.map(item => item.title), ['b', 'c', 'a', 'd', 'e'])
   assert.equal(state.queueIndex.value, 1)
   assert.equal(state.queue.value[state.queueIndex.value].title, 'c')
+})
+
+test('non-shuffle: a different Play Next request clears a pending current-track replay', () => {
+  const state = fixture({ shuffle: false })
+  state.addToQueueNext(track('c'))
+  assert.equal(state.pendingReplay(), 'c')
+  state.addToQueueNext(track('d'))
+  assert.equal(state.pendingReplay(), null, 'a later different request supersedes the replay')
 })
 
 console.log(`queue play-next tests: ${passed} passed, ${failed} failed`)

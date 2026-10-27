@@ -1482,8 +1482,9 @@ export const usePlayerStore = defineStore('player', () => {
       }
       return
     }
-    // Any explicit play supersedes a queued replay of the previous current track.
-    pendingReplayTrackId = null
+    // An internal reload of the same track keeps a queued replay; a different track
+    // supersedes it.
+    if (pendingReplayTrackId && track.id !== pendingReplayTrackId) pendingReplayTrackId = null
     if (startPositionMs <= 0 && allowRememberedPosition && !forceResolve && commandSource === 'local') {
       startPositionMs = rememberedLongFormStart(track)
     }
@@ -2476,13 +2477,16 @@ export const usePlayerStore = defineStore('player', () => {
 
     // 睡眠定时器；以下都是播放器自己的推进，不是用户操作
     const isLast = !shuffleEnabled.value && queueIndex.value >= queue.value.length - 1
+    // A queued replay of the current track is a valid reason to advance even at the
+    // physical end of the queue with repeat off.
+    const hasPendingReplay = !shuffleEnabled.value && pendingReplayIndex() >= 0
     if (sleepTimerMode.value === 'end_of_track') {
       await pause('local_safety')
       cancelSleepTimer()
       return
     }
     if (sleepTimerMode.value === 'end_of_queue') {
-      if (isLast && repeatMode.value !== 'all') {
+      if (isLast && !hasPendingReplay && repeatMode.value !== 'all') {
         await pause('local_safety')
         cancelSleepTimer()
         return
@@ -2499,7 +2503,7 @@ export const usePlayerStore = defineStore('player', () => {
       await next(true, 'local_safety')
     } else {
       // 顺序播放：还有下一首则推进，否则停止
-      if (shuffleEnabled.value || queueIndex.value < queue.value.length - 1) {
+      if (shuffleEnabled.value || queueIndex.value < queue.value.length - 1 || hasPendingReplay) {
         await next(false, 'local_safety')
       } else {
         // 停止播放但保留队列（对齐 Android stopPlaybackPreservingQueue）
@@ -2527,9 +2531,8 @@ export const usePlayerStore = defineStore('player', () => {
     }
 
     if (!shuffleEnabled.value && pendingReplayTrackId) {
-      const replayId = pendingReplayTrackId
+      const replayIndex = pendingReplayIndex()
       pendingReplayTrackId = null
-      const replayIndex = queue.value.findIndex(item => item.id === replayId)
       if (replayIndex >= 0) {
         await play(queue.value[replayIndex], commandSource, 0, false, false)
         return
@@ -3361,6 +3364,12 @@ export const usePlayerStore = defineStore('player', () => {
     play(shuffled[0])
   }
 
+  /** Index of the current-track replay queued by Play Next, or -1 if none/stale. */
+  function pendingReplayIndex(): number {
+    if (!pendingReplayTrackId) return -1
+    return queue.value.findIndex(item => item.id === pendingReplayTrackId)
+  }
+
   // Insert directly after the current track ("play next")
   function addToQueueNext(track: TrackInfo) {
     const existing = queue.value.findIndex(t => t.id === track.id)
@@ -3373,6 +3382,8 @@ export const usePlayerStore = defineStore('player', () => {
       savePlayerState()
       return
     }
+    // A different Play Next request supersedes a queued current-track replay.
+    pendingReplayTrackId = null
     if (existing !== -1) {
       if (shuffleEnabled.value) shiftShuffleIndicesForRemove(existing)
       queue.value.splice(existing, 1)

@@ -27,6 +27,7 @@ function runtime({ roomId = null, playing = true, loading = false, generation = 
   const context = {
     ...policy, currentTrack, currentBiliVideoSkipTarget, biliVideoSkipTracker: new policy.BiliVideoSkipTracker(),
     isPlaying: ref(playing), isLoadingAudio: ref(loading),
+    pendingReplayIndex: () => -1,
     useListenTogetherStore: () => state, useBiliVideoSkipStore: () => ({ rules: rules.value }),
     seekTo: async (ms, commandSource) => { calls.push({ ms, commandSource }) },
     handleTrackEnded: async () => { calls.push({ ended: true }) },
@@ -133,6 +134,7 @@ function tailLoopRuntime({ repeat = 'one' } = {}) {
   const context = {
     ...policy, calls, currentTrack, durationMs, currentBiliVideoSkipTarget: ref(null),
     biliVideoSkipTracker: new policy.BiliVideoSkipTracker(), isPlaying: ref(true), isLoadingAudio: ref(false),
+    pendingReplayIndex: () => -1,
     useListenTogetherStore: () => ({ roomId: null }),
     useBiliVideoSkipStore: () => ({ rules: [{ bvid: 'BVtest', cid: 101, intervals: [{ startMs: 1000, endMs: 1800000 }], modifiedAt: 100, isDeleted: false }] }),
     queue: ref([currentTrack.value, { id: 'netease:next' }]), queueIndex: ref(0),

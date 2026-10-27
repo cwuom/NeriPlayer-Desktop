@@ -221,6 +221,16 @@ const audioOutputOptions = computed(() => {
     value: device.name,
     label: audioOutputLabel(device),
   }))
+  // The same card can expose several PCMs with the same role (e.g. front and
+  // surround aliases). Keep the short label when unique, but disambiguate with
+  // the PCM name when two entries would otherwise be indistinguishable.
+  const labelCounts = new Map<string, number>()
+  for (const device of devices) {
+    labelCounts.set(device.label, (labelCounts.get(device.label) ?? 0) + 1)
+  }
+  for (const device of devices) {
+    if ((labelCounts.get(device.label) ?? 0) > 1) device.label = `${device.label} (${device.value})`
+  }
   if (audioOutputDevice.value && !devices.some(device => device.value === audioOutputDevice.value)) {
     devices.unshift({ value: audioOutputDevice.value, label: t('settings.audio_output_unavailable', { name: audioOutputDevice.value }) })
   }

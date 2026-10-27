@@ -116,4 +116,22 @@ assert.equal(
   'https://img.example/abc.jpg',
 )
 
+// original export removes only the suffix this app manages, on known hosts
+assert.equal(
+  getTrackCoverUrl({ coverUrl: 'https://lh3.googleusercontent.com/abc=w1200-h1200-l90-rj' }, 'original'),
+  'https://lh3.googleusercontent.com/abc',
+)
+assert.equal(
+  getTrackCoverUrl({ coverUrl: 'https://yt3.ggpht.com/avatar=s120' }, 'original'),
+  'https://yt3.ggpht.com/avatar',
+)
+assert.equal(
+  getTrackCoverUrl({ coverUrl: 'https://p1.music.126.net/abc.jpg?param=300y300&foo=1' }, 'original'),
+  'https://p1.music.126.net/abc.jpg?foo=1',
+)
+assert.equal(
+  getTrackCoverUrl({ coverUrl: 'https://img.example/abc.jpg?param=300y300' }, 'original'),
+  'https://img.example/abc.jpg?param=300y300',
+)
+
 console.log('track cover tests passed')

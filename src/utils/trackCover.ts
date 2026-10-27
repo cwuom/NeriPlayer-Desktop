@@ -86,6 +86,26 @@ export function upgradeYouTubeThumbnailUrl(url: string, size: CoverSize = 'list'
   return trimmed
 }
 
+/** Remove only the size suffix/param that this app added, and only on known hosts. */
+function stripOriginalCoverSize(url: string): string {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return url
+  }
+  if (NET_EASE_COVER_HOST.test(parsed.hostname)) {
+    const param = parsed.searchParams.get('param')
+    if (param && /^\d+y\d+$/i.test(param)) parsed.searchParams.delete('param')
+    return parsed.toString()
+  }
+  if (isGoogleImageHost(url)) {
+    parsed.pathname = parsed.pathname.replace(YOUTUBE_SIZE_PARAM_RE, '').replace(YOUTUBE_S_PARAM_RE, '')
+    return parsed.toString()
+  }
+  return url
+}
+
 /** Resolvable cover URL: thumbnails by default, pass `detail` on the player page */
 export function getTrackCoverUrl(
   track: TrackCoverSource | null | undefined,
@@ -106,7 +126,7 @@ export function getTrackCoverUrl(
   if (typeof value !== 'string') return ''
   // Synced NetEase tracks often carry http:// covers while the CSP allows https only
   const https = toHttpsImageUrl(value.trim())
-  if (size === 'original') return https
+  if (size === 'original') return stripOriginalCoverSize(https)
   return withCoverSize(
     upgradeYouTubeThumbnailUrl(https, size),
     size === 'detail' ? COVER_SIZE_DETAIL : COVER_SIZE_LIST,

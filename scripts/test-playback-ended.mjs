@@ -19,7 +19,7 @@ const compiled = ts.transpileModule(names.map(name => functions.get(name)).join(
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText
 
-function fixture({ inRoom = true, controller = false } = {}) {
+function fixture({ inRoom = true, controller = false, last = false, pendingReplay = -1 } = {}) {
   let releasePause
   const pauseAck = new Promise(resolve => { releasePause = resolve })
   const calls = [], reports = []
@@ -30,8 +30,9 @@ function fixture({ inRoom = true, controller = false } = {}) {
   }
   const context = {
     currentTrack, durationMs: ref(180000), isPlaying: ref(true), isLoadingAudio: ref(false),
-    hasPlaybackSession: ref(true), queue: ref([currentTrack.value, { id: 'netease:2' }]),
+    hasPlaybackSession: ref(true), queue: ref(last ? [currentTrack.value] : [currentTrack.value, { id: 'netease:2' }]),
     queueIndex: ref(0), shuffleEnabled: ref(false), repeatMode: ref('off'), sleepTimerMode: ref(null),
+    pendingReplayIndex: () => pendingReplay,
     useListenTogetherStore: () => lt,
     blockedByListenTogether: () => false, currentAudioFileMutation: () => null,
     markCommandSource() {}, freezeRenderedPosition() {}, persistCurrentLongFormProgress() {},
@@ -107,6 +108,12 @@ for (const config of [{ inRoom: false }, { controller: true }]) {
     assert.deepEqual(state.reports, [])
   })
 }
+
+await test('a pending replay advances a last track with repeat off', async () => {
+  const state = fixture({ inRoom: false, last: true, pendingReplay: 0 })
+  await state.handleTrackEnded()
+  assert.deepEqual(state.calls, ['next'], 'the queued replay must be consumed instead of stopping at the queue end')
+})
 
 console.log(`playback ended tests: ${passed} passed, ${failed} failed`)
 if (failed) process.exitCode = 1

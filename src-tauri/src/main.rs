@@ -60,14 +60,14 @@ fn main() {
         "--enable-gpu --enable-gpu-rasterization --enable-zero-copy --enable-features=CanvasOopRasterization");
 
     // Linux NVIDIA 私有驱动：在 GTK/WebKit 初始化前应用兼容设置，消除页面切换闪烁。
-    // 默认只限制在途帧数并关闭 explicit sync，不关闭 DMA-BUF/硬件加速；确需退回
-    // 共享内存合成时显式设置 WEBKIT_DISABLE_DMABUF_RENDERER=1，完全跳过用
+    // 默认关闭 DMA-BUF atlas 并强制 SHM 合成（DMA-BUF renderer 仍启用）；想保留硬件
+    // 合成用 NERI_WEBKIT_KEEP_DMABUF=1，完全跳过本兼容层用
     // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
     // Linux + NVIDIA proprietary: apply compatibility settings before GTK/WebKit init to
-    // stop page-switch flicker. By default this only caps in-flight frames and disables
-    // explicit sync; DMA-BUF/hardware acceleration stays on. Use
-    // set WEBKIT_DISABLE_DMABUF_RENDERER=1 explicitly for the slow fallback, or
-    // NERI_DISABLE_NVIDIA_QUIRK=1 to skip the layer. Explicit env vars always win.
+    // stop page-switch flicker. By default this disables the DMA-BUF atlas and forces SHM
+    // compositing (the DMA-BUF renderer itself stays enabled); use
+    // NERI_WEBKIT_KEEP_DMABUF=1 to keep hardware compositing, or
+    // NERI_DISABLE_NVIDIA_QUIRK=1 to skip this layer. Explicit env vars always win.
     #[cfg(target_os = "linux")]
     neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();
 

@@ -10,6 +10,10 @@ import { readText } from '@tauri-apps/plugin-clipboard-manager'
 
 type Editable = HTMLInputElement | HTMLTextAreaElement | HTMLElement
 
+type TextSelection =
+  | { kind: 'input'; start: number; end: number }
+  | { kind: 'range'; range: Range }
+
 /** Input types that support selectionStart/selectionEnd and are safe to edit. */
 const SELECTABLE_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'password'])
 
@@ -22,15 +26,48 @@ function editableTarget(target: EventTarget | null): Editable | null {
   return null
 }
 
-function insertPlainText(target: Editable, text: string): void {
+function captureSelection(target: Editable): TextSelection | null {
   if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-    const start = target.selectionStart ?? target.value.length
-    const end = target.selectionEnd ?? start
-    target.setRangeText(text, start, end, 'end')
+    const start = target.selectionStart
+    const end = target.selectionEnd
+    if (start === null || end === null) return null
+    return { kind: 'input', start, end }
+  }
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount !== 1) return null
+  const range = selection.getRangeAt(0)
+  if (!target.contains(range.commonAncestorContainer)) return null
+  return { kind: 'range', range: range.cloneRange() }
+}
+
+function selectionUnchanged(target: Editable, captured: TextSelection): boolean {
+  if (document.activeElement !== target) return false
+  if (captured.kind === 'input') {
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return false
+    return target.selectionStart === captured.start && target.selectionEnd === captured.end
+  }
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount !== 1) return false
+  const current = selection.getRangeAt(0)
+  const saved = captured.range
+  return current.startContainer === saved.startContainer
+    && current.startOffset === saved.startOffset
+    && current.endContainer === saved.endContainer
+    && current.endOffset === saved.endOffset
+}
+
+function insertPlainText(target: Editable, text: string, captured: TextSelection): void {
+  if (captured.kind === 'input') {
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return
+    target.setRangeText(text, captured.start, captured.end, 'end')
     target.dispatchEvent(new Event('input', { bubbles: true }))
     return
   }
   target.focus()
+  const selection = window.getSelection()
+  if (!selection) return
+  selection.removeAllRanges()
+  selection.addRange(captured.range)
   document.execCommand('insertText', false, text)
 }
 
@@ -46,10 +83,12 @@ export function installClipboardPasteGuard(): () => void {
     event.stopPropagation()
     const target = editableTarget(event.target)
     if (!target) return
+    const captured = captureSelection(target)
+    if (!captured) return
     void readText()
       .then((text) => {
-        if (!text || document.activeElement !== target) return
-        insertPlainText(target, text)
+        if (!text || !selectionUnchanged(target, captured)) return
+        insertPlainText(target, text, captured)
       })
       .catch(() => {
         // 没有剪贴板权限时保持原样，不插入任何内容
