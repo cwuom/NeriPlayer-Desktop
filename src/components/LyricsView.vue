@@ -975,6 +975,8 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
 :deep(.amll-lyric-player [class*="lyricMainLine"]) {
   font-weight: 850;
   font-variation-settings: 'wght' 850;
+  // 跟随字体度量，避免固定行高让词遮罩裁掉字母下伸部
+  line-height: normal;
   letter-spacing: -0.025em;
   overflow-wrap: anywhere;
 }
