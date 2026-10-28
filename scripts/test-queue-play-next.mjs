@@ -38,16 +38,16 @@ function fixture({
     savePlayerState() { saved.push(queue.value.map(item => item.title)) },
   }
   const methods = new Function(
-    ...Object.keys(context), 'initialBag', 'initialHistory', 'initialFuture', `
-    let shuffleBag = [...initialBag], shuffleHistory = [...initialHistory], shuffleFuture = [...initialFuture]
+    ...Object.keys(context), 'ref', 'initialBag', 'initialHistory', 'initialFuture', `
+    const shuffleBag = ref([...initialBag]), shuffleHistory = ref([...initialHistory]), shuffleFuture = ref([...initialFuture])
     let pendingReplayTrackId = null
     ${compiled}
     return {
       addToQueueNext,
-      shuffleState() { return { bag: [...shuffleBag], history: [...shuffleHistory], future: [...shuffleFuture] } },
+      shuffleState() { return { bag: [...shuffleBag.value], history: [...shuffleHistory.value], future: [...shuffleFuture.value] } },
       pendingReplay() { return pendingReplayTrackId },
     }
-  `)(...Object.values(context), bag, history, future)
+  `)(...Object.values(context), ref, bag, history, future)
   return { ...methods, ...context, saved }
 }
 

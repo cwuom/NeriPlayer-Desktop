@@ -86,14 +86,14 @@ function fixture({
     invoke() { throw new Error('reordering must not invoke native playback') },
     rebuildShuffleBag() { throw new Error('reordering must preserve the existing shuffle traversal') },
   }
-  methods = new Function(...Object.keys(context), 'initialBag', 'initialHistory', 'initialFuture', `
-    let shuffleBag = [...initialBag], shuffleHistory = [...initialHistory], shuffleFuture = [...initialFuture]
+  methods = new Function(...Object.keys(context), 'ref', 'initialBag', 'initialHistory', 'initialFuture', `
+    const shuffleBag = ref([...initialBag]), shuffleHistory = ref([...initialHistory]), shuffleFuture = ref([...initialFuture])
     ${compiled}
     return {
       moveQueueItem, persistedPlayerState,
-      shuffleState() { return { bag: [...shuffleBag], history: [...shuffleHistory], future: [...shuffleFuture] } },
+      shuffleState() { return { bag: [...shuffleBag.value], history: [...shuffleHistory.value], future: [...shuffleFuture.value] } },
     }
-  `)(...Object.values(context), bag, history, future)
+  `)(...Object.values(context), ref, bag, history, future)
   return { ...methods, ...context, calls, saved, reports }
 }
 

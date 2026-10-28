@@ -53,7 +53,7 @@ function fixture(count = 4) {
   }
   player.moveQueueItem = (from, to, snapshot) => { calls.push({ from, to, snapshot }); return true }
   const context = {
-    computed, ref, player, listenTogether, queueListRef: ref(list),
+    computed, ref, player, listenTogether, queueListRef: ref(list), isPlaybackOrderView: ref(false),
     window: {
       addEventListener: (type, fn) => listeners.set(type, fn),
       removeEventListener: type => listeners.delete(type),

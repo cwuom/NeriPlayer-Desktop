@@ -57,7 +57,7 @@ function fixture(results, platform = 'netease') {
   }
   const player = evaluate(declarations(playerSource, ['playAll'], true), {
     queue, queueIndex, play, resolvePlaybackQueueStartIndex,
-    shuffleEnabled: ref(false), shuffleBag: [], shuffleHistory: [], shuffleFuture: [],
+    shuffleEnabled: ref(false), shuffleBag: ref([]), shuffleHistory: ref([]), shuffleFuture: ref([]),
     rebuildShuffleBag() {}, setLocalPlaylistSource() {}, tracePlaybackUi() {},
   }, ['playAll'])
   player.play = play

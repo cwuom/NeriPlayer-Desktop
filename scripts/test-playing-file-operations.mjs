@@ -28,7 +28,7 @@ const compiled = ts.transpileModule([
     visit(parsed)
     assert.ok(play)
     // 一起听拦截判断 + 等待文件操作的两条语句
-    return `async function blockedPlay(track, commandSource = 'local', startPositionMs = 0, forceResolve = false, allowRememberedPosition = true) { ${play.body.statements.slice(0, 3).map(node => node.getText(parsed)).join('\n')} }`
+    return `async function blockedPlay(${play.parameters.map(node => node.getText(parsed)).join(', ')}) { ${play.body.statements.slice(0, 3).map(node => node.getText(parsed)).join('\n')} }`
   })(),
 ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
@@ -38,7 +38,7 @@ function runtime({ playing = true, releaseError = false, switching = false } = {
   const queue = ref([{ ...currentTrack.value }])
   const isPlaying = ref(playing), isLoadingAudio = ref(switching), isPlayingFromDownload = ref(true)
   const positionMs = ref(43000), audioInfo = ref({ format: 'FLAC' }), hasPlaybackSession = ref(true)
-  const release = deferred(), calls = [], mutations = new Map()
+  const release = deferred(), calls = [], playRequests = [], mutations = new Map()
   const context = {
     currentTrack, queue, isPlaying, isLoadingAudio, isPlayingFromDownload, positionMs, audioInfo, hasPlaybackSession,
     isPlayingFromCache: ref(false), audioFileMutations: mutations,
@@ -52,11 +52,16 @@ function runtime({ playing = true, releaseError = false, switching = false } = {
     markOptimisticSeek: pos => { positionMs.value = pos; return pos },
     useDownloadStore: () => ({ getDownloadedTrack: () => ({ filePath: switching ? 'C:/Music/next.flac' : path }) }),
     invoke: async command => { calls.push(command); if (command === 'release_audio_file') { await release.promise; if (releaseError) throw new Error('release failed'); return true } },
-    play: async (track, command, pos) => { calls.push({ resume: track.id, pos, url: track.audioUrl }); isPlaying.value = true },
+    play: async (...args) => {
+      playRequests.push(args)
+      const [track, , pos] = args
+      calls.push({ resume: track.id, pos, url: track.audioUrl })
+      isPlaying.value = true
+    },
   }
   const globals = `let playbackRequestToken = 7, loadedPlaybackRequestToken = ${switching ? 6 : 7}, _currentLoadedFromDownloadPath = "C:/Music/song.flac", _interpIsPlaying = true, _needsReload = false, lastUrlResolveTime = 99; let deferredPlaybackSeek = null, pendingSeek = null, seekGuardUntil = 0;`
   const methods = new Function(...Object.keys(context), `${globals}\n${compiled}\nreturn {withReleasedAudioFile, handleDownloadedFileRemoved, pause, seekTo, resume, togglePlayPause, blockedPlay, isInterpolating: () => _interpIsPlaying, interrupt: () => { playbackRequestToken++; currentTrack.value = {id:'netease:2'} }};`)(...Object.values(context))
-  return { ...methods, ...context, release, calls }
+  return { ...methods, ...context, release, calls, playRequests }
 }
 
 {
@@ -117,10 +122,11 @@ function runtime({ playing = true, releaseError = false, switching = false } = {
   const r = runtime()
   const operation = r.withReleasedAudioFile(path, async () => {})
   for (let i = 0; i < 6; i++) await Promise.resolve()
-  const request = r.blockedPlay({ id: 'local:1', audioUrl: path }, 'local', 60000)
+  const request = r.blockedPlay({ id: 'local:1', audioUrl: path }, 'local', 60000, false, true, 2)
   assert.ok(r.calls.every(call => typeof call === 'string'), 'a modified file must not be reopened before release/write ends')
   r.release.resolve(); await operation; await request
   assert.deepEqual(r.calls.at(-1), { resume: 'local:1', pos: 60000, url: path })
+  assert.equal(r.playRequests.at(-1)[5], 2, 'waiting for a file operation must preserve the explicitly selected queue slot')
   assert.equal(r.calls.filter(call => typeof call !== 'string').length, 1, 'new same-file play replaces old restoration')
 }
 {

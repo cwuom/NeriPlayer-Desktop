@@ -34,6 +34,8 @@
     "test:queue-play-next": "node scripts/test-queue-play-next.mjs",
     "test:frame-loop": "node scripts/test-frame-loop.mjs",
     "test:queue-panel-reorder": "node scripts/test-queue-panel-reorder.mjs",
+    "test:queue-panel-order": "node scripts/test-queue-panel-order.mjs",
+    "test:queue-order": "node scripts/test-queue-order.mjs",
     "test:playback-source": "node scripts/test-playback-source.mjs",
     "test:playback-fallback-resources": "node scripts/test-playback-fallback-resources.mjs",
     "test:playback-settings": "node scripts/test-playback-settings.mjs",

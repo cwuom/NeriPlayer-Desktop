@@ -293,12 +293,12 @@ async function harness(options = {}) {
   const scope = vue.effectScope()
   const store = scope.run(() => module.useListenTogetherStore())
   player.moveQueueItem = new Function(
-    'queue', 'queueIndex', 'markCommandSource', 'blockedByListenTogether',
+    'queue', 'queueIndex', 'markCommandSource', 'blockedByListenTogether', 'ref',
     'useListenTogetherStore', 'savePlayerState', 'maybePrefetchNext',
-    `let shuffleBag = [], shuffleHistory = [], shuffleFuture = [];
+    `const shuffleBag = ref([]), shuffleHistory = ref([]), shuffleFuture = ref([]);
     ${queueReorderCode}; return moveQueueItem`,
   )(vue.toRef(player, 'queue'), vue.toRef(player, 'queueIndex'), markSource,
-    () => !!store.localControlRestriction.value, () => store, () => {}, () => {})
+    () => !!store.localControlRestriction.value, vue.ref, () => store, () => {}, () => {})
   return {
     store, player, settings, playback, commands, timers, events, toasts, notices, logs, playGates, pauseGates, seekGates,
     emit,

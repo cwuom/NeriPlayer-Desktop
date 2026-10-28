@@ -53,6 +53,7 @@ const sourceText = await readFile(new URL('modules/playback/playbackSource.ts', 
 const policy = await load(await readFile(new URL('modules/playback/playbackPolicy.ts', root), 'utf8'))
 const request = await load(await readFile(new URL('modules/playback/playbackRequest.ts', root), 'utf8'))
 const queue = await load(await readFile(new URL('modules/playback/playbackQueue.ts', root), 'utf8'))
+const queueDisplayOrder = await load(await readFile(new URL('modules/playback/queueDisplayOrder.ts', root), 'utf8'))
 const state = await load(await readFile(new URL('modules/playback/playerState.ts', root), 'utf8'))
 const display = await load(await readFile(new URL('modules/playback/audioQualityDisplay.ts', root), 'utf8'))
 const metadataText = await readFile(new URL('modules/playback/playbackAudioInfo.ts', root), 'utf8')
@@ -141,6 +142,7 @@ async function runtime(options = {}) {
     },
     '@/modules/playback/playbackPolicy': { ...policy, PlaybackStartupWatchdog: class { cancel() {} schedule() {} } },
     '@/modules/playback/playbackQueue': queue,
+    '@/modules/playback/queueDisplayOrder': queueDisplayOrder,
     '@/modules/playback/longFormProgress': longForm,
     '@/stores/listenTogether/streamQuality': streamQuality,
     '@/modules/playback/playbackRequest': request,

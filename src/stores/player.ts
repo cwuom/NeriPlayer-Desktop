@@ -50,6 +50,7 @@ import {
   resolvePlaybackFailureAdvanceAction,
 } from '@/modules/playback/playbackPolicy'
 import { resolvePlaybackQueueStartIndex } from '@/modules/playback/playbackQueue'
+import { buildQueueDisplayOrder } from '@/modules/playback/queueDisplayOrder'
 import {
   biliShareQualityOrder,
   decorateLtStreamUrl,
@@ -387,10 +388,6 @@ let _isAutoSkipping = false
 let _stallRecovering = false
 let _lastStallRecovery: { key: string; at: number } | null = null
 
-// Shuffle 三栈模型
-let shuffleBag: number[] = []       // 未播放索引池
-let shuffleHistory: number[] = []   // 已播放栈 (previous 回溯)
-let shuffleFuture: number[] = []    // 预排队栈 (next 或 previous 回退)
 // “下一首播放”选中当前曲目、且未开 shuffle 时，不能移动队列游标；记下待重播的 id，
 // 让下一次 next() 消费。只在本次会话有效，不持久化。
 let pendingReplayTrackId: string | null = null
@@ -458,6 +455,15 @@ export const usePlayerStore = defineStore('player', () => {
   const queueIndex = ref(-1)
   const repeatMode = ref<RepeatMode>('off')
   const shuffleEnabled = ref(false)
+  const shuffleBag = ref<number[]>([])
+  const shuffleHistory = ref<number[]>([])
+  const shuffleFuture = ref<number[]>([])
+  const queueDisplayOrder = computed(() => buildQueueDisplayOrder(
+    queue.value.length, queueIndex.value, shuffleEnabled.value,
+    shuffleHistory.value, shuffleFuture.value, shuffleBag.value,
+  ))
+  const queueDisplayIndices = computed(() => queueDisplayOrder.value.indices)
+  const queueDisplayCurrentIndex = computed(() => queueDisplayOrder.value.currentIndex)
   const volume = ref(settings.volume)
   const lyrics = ref<LyricLine[]>([])
 
@@ -817,15 +823,15 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   // Shuffle 三栈辅助函数
-  /** Fisher-Yates 洗牌重建 shuffleBag，排除当前索引 */
+  /** Fisher-Yates 洗牌重建未播放池，排除当前索引 */
   function rebuildShuffleBag() {
-    shuffleBag = []
+    shuffleBag.value = []
     for (let i = 0; i < queue.value.length; i++) {
-      if (i !== queueIndex.value) shuffleBag.push(i)
+      if (i !== queueIndex.value) shuffleBag.value.push(i)
     }
-    for (let i = shuffleBag.length - 1; i > 0; i--) {
+    for (let i = shuffleBag.value.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [shuffleBag[i], shuffleBag[j]] = [shuffleBag[j], shuffleBag[i]]
+      [shuffleBag.value[i], shuffleBag.value[j]] = [shuffleBag.value[j], shuffleBag.value[i]]
     }
   }
 
@@ -837,17 +843,17 @@ export const usePlayerStore = defineStore('player', () => {
    * is shuffled to a random position and the insertion looks like it did nothing.
    */
   function shiftShuffleIndicesForPlayNext(insertIdx: number) {
-    shuffleBag = shuffleBag.map(i => i >= insertIdx ? i + 1 : i)
-    shuffleHistory = shuffleHistory.map(i => i >= insertIdx ? i + 1 : i)
-    shuffleFuture = shuffleFuture.map(i => i >= insertIdx ? i + 1 : i)
-    shuffleFuture.push(insertIdx)
+    shuffleBag.value = shuffleBag.value.map(i => i >= insertIdx ? i + 1 : i)
+    shuffleHistory.value = shuffleHistory.value.map(i => i >= insertIdx ? i + 1 : i)
+    shuffleFuture.value = shuffleFuture.value.map(i => i >= insertIdx ? i + 1 : i)
+    shuffleFuture.value.push(insertIdx)
   }
 
   /** 队列移除后更新 shuffle 索引 */
   function shiftShuffleIndicesForRemove(removeIdx: number) {
-    shuffleBag = shuffleBag.filter(i => i !== removeIdx).map(i => i > removeIdx ? i - 1 : i)
-    shuffleHistory = shuffleHistory.filter(i => i !== removeIdx).map(i => i > removeIdx ? i - 1 : i)
-    shuffleFuture = shuffleFuture.filter(i => i !== removeIdx).map(i => i > removeIdx ? i - 1 : i)
+    shuffleBag.value = shuffleBag.value.filter(i => i !== removeIdx).map(i => i > removeIdx ? i - 1 : i)
+    shuffleHistory.value = shuffleHistory.value.filter(i => i !== removeIdx).map(i => i > removeIdx ? i - 1 : i)
+    shuffleFuture.value = shuffleFuture.value.filter(i => i !== removeIdx).map(i => i > removeIdx ? i - 1 : i)
   }
 
   // URL 预热
@@ -878,8 +884,8 @@ export const usePlayerStore = defineStore('player', () => {
 
     const firstIndex = (() => {
       if (shuffleEnabled.value) {
-        if (shuffleFuture.length > 0) return shuffleFuture[shuffleFuture.length - 1]
-        if (shuffleBag.length > 0) return shuffleBag[0]
+        if (shuffleFuture.value.length > 0) return shuffleFuture.value[shuffleFuture.value.length - 1]
+        if (shuffleBag.value.length > 0) return shuffleBag.value[0]
         return -1
       }
       const nextIndex = queueIndex.value + 1
@@ -893,6 +899,12 @@ export const usePlayerStore = defineStore('player', () => {
     const maxWindow = getPlaybackSourceKindForPrefetch(queue.value[firstIndex]) === 'youtube'
       ? 2
       : 1
+    if (shuffleEnabled.value) {
+      return [...shuffleFuture.value].reverse().concat(shuffleBag.value)
+        .slice(0, maxWindow)
+        .map(index => queue.value[index])
+        .filter(track => !!track && isRemotePlaybackTrack(track))
+    }
     let index = firstIndex
     for (let count = 0; count < maxWindow; count += 1) {
       const track = queue.value[index]
@@ -1471,6 +1483,8 @@ export const usePlayerStore = defineStore('player', () => {
     startPositionMs = 0,
     forceResolve = false,
     allowRememberedPosition = true,
+    requestedQueueIndex?: number,
+    shuffleNavigation = false,
   ) {
     if (blockedByListenTogether(commandSource) || blocksLocalSongInRoom(track, commandSource)) return
     const fileMutation = !isRemotePlaybackTrack(track) && audioFileMutations.get(audioFilePathKey(track.audioUrl))
@@ -1483,7 +1497,7 @@ export const usePlayerStore = defineStore('player', () => {
       playbackStartupWatchdog.cancel()
       await fileMutation.finished
       if (waitingToken === playbackRequestToken && fileMutation.shouldResume) {
-        await play(track, commandSource, fileMutation.positionMs, forceResolve, allowRememberedPosition)
+        await play(track, commandSource, fileMutation.positionMs, forceResolve, allowRememberedPosition, requestedQueueIndex, shuffleNavigation)
       }
       return
     }
@@ -1617,12 +1631,23 @@ export const usePlayerStore = defineStore('player', () => {
 
     function commitTrack() {
       if (trackCommitted) return
+      const previousTrack = currentTrack.value
+      const matchesQueueIdentity = (item: TrackInfo | undefined, target: TrackInfo | null) => !!target
+        && item?.id === target.id && (item.playlistKey ?? '') === (target.playlistKey ?? '')
+      const previousQueueIndex = matchesQueueIdentity(queue.value[queueIndex.value], previousTrack)
+        ? queueIndex.value
+        : queue.value.findIndex(item => matchesQueueIdentity(item, previousTrack))
+      const nextQueueIndex = requestedQueueIndex !== undefined && matchesQueueIdentity(queue.value[requestedQueueIndex], track)
+        ? requestedQueueIndex
+        : matchesQueueIdentity(queue.value[previousQueueIndex], track)
+          ? previousQueueIndex
+          : resolvePlaybackQueueStartIndex(queue.value, track.id, track.playlistKey)
+      if (shuffleEnabled.value && !shuffleNavigation && nextQueueIndex !== previousQueueIndex) {
+        shuffleBag.value = shuffleBag.value.filter(index => index !== nextQueueIndex)
+        if (previousQueueIndex >= 0) shuffleHistory.value.push(previousQueueIndex)
+      }
       currentTrack.value = track
-      queueIndex.value = resolvePlaybackQueueStartIndex(
-        queue.value,
-        track.id,
-        track.playlistKey,
-      )
+      queueIndex.value = nextQueueIndex
       // 推送元数据到后端镜像, 供系统媒体会话(SMTC/MPRIS)展示标题/歌手/封面/时长（PB-01）
       void invoke('update_media_metadata', {
         id: track.id,
@@ -2154,8 +2179,8 @@ export const usePlayerStore = defineStore('player', () => {
         queueSize: queue.value.length,
         repeatAll: repeatMode.value === 'all',
         shuffle: shuffleEnabled.value,
-        shuffleFutureSize: shuffleFuture.length,
-        shuffleBagSize: shuffleBag.length,
+        shuffleFutureSize: shuffleFuture.value.length,
+        shuffleBagSize: shuffleBag.value.length,
       })
       if (
         consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES
@@ -2547,25 +2572,21 @@ export const usePlayerStore = defineStore('player', () => {
     let nextIdx: number
     if (shuffleEnabled.value) {
       // Shuffle 三栈模型
-      if (shuffleFuture.length > 0) {
+      if (shuffleFuture.value.length > 0) {
         // 优先从 future 栈弹出（previous 回退过的）
-        shuffleHistory.push(queueIndex.value)
-        nextIdx = shuffleFuture.pop()!
-      } else if (shuffleBag.length > 0) {
-        // 从未播放池随机取
-        shuffleHistory.push(queueIndex.value)
-        const bagIdx = Math.floor(Math.random() * shuffleBag.length)
-        nextIdx = shuffleBag[bagIdx]
-        shuffleBag.splice(bagIdx, 1)
+        shuffleHistory.value.push(queueIndex.value)
+        nextIdx = shuffleFuture.value.pop()!
+      } else if (shuffleBag.value.length > 0) {
+        // 未播放池在重建时已洗牌，按顺序消费才能与队列和预取一致
+        shuffleHistory.value.push(queueIndex.value)
+        nextIdx = shuffleBag.value.shift()!
       } else {
         // bag 已空
         if (force || repeatMode.value === 'all') {
           rebuildShuffleBag()
-          if (shuffleBag.length > 0) {
-            shuffleHistory.push(queueIndex.value)
-            const bagIdx = Math.floor(Math.random() * shuffleBag.length)
-            nextIdx = shuffleBag[bagIdx]
-            shuffleBag.splice(bagIdx, 1)
+          if (shuffleBag.value.length > 0) {
+            shuffleHistory.value.push(queueIndex.value)
+            nextIdx = shuffleBag.value.shift()!
           } else {
             return
           }
@@ -2585,7 +2606,7 @@ export const usePlayerStore = defineStore('player', () => {
         }
       }
     }
-    await play(queue.value[nextIdx], commandSource, 0, false, false)
+    await play(queue.value[nextIdx], commandSource, 0, false, false, nextIdx, true)
   }
 
   /**
@@ -2610,10 +2631,10 @@ export const usePlayerStore = defineStore('player', () => {
 
     if (shuffleEnabled.value) {
       // Shuffle：从 history 栈回溯
-      if (shuffleHistory.length > 0) {
-        shuffleFuture.push(queueIndex.value)
-        const prevIdx = shuffleHistory.pop()!
-        await play(queue.value[prevIdx], commandSource, 0, false, false)
+      if (shuffleHistory.value.length > 0) {
+        shuffleFuture.value.push(queueIndex.value)
+        const prevIdx = shuffleHistory.value.pop()!
+        await play(queue.value[prevIdx], commandSource, 0, false, false, prevIdx, true)
       } else {
         seekTo(0, commandSource) // 无历史，重新开始当前曲目
       }
@@ -2622,9 +2643,9 @@ export const usePlayerStore = defineStore('player', () => {
 
     // 非 shuffle 模式
     if (queueIndex.value > 0) {
-      await play(queue.value[queueIndex.value - 1], commandSource, 0, false, false)
+      await play(queue.value[queueIndex.value - 1], commandSource, 0, false, false, queueIndex.value - 1)
     } else if (repeatMode.value === 'all') {
-      await play(queue.value[queue.value.length - 1], commandSource, 0, false, false)
+      await play(queue.value[queue.value.length - 1], commandSource, 0, false, false, queue.value.length - 1)
     }
     // else: 已在开头且非列表循环，不动
   }
@@ -2647,12 +2668,12 @@ export const usePlayerStore = defineStore('player', () => {
     // Shuffle 三栈管理
     if (shuffleEnabled.value) {
       rebuildShuffleBag()
-      shuffleHistory = []
-      shuffleFuture = []
+      shuffleHistory.value = []
+      shuffleFuture.value = []
     } else {
-      shuffleBag = []
-      shuffleHistory = []
-      shuffleFuture = []
+      shuffleBag.value = []
+      shuffleHistory.value = []
+      shuffleFuture.value = []
     }
     log.info('shuffle ->', shuffleEnabled.value)
     savePlayerState()
@@ -2724,12 +2745,12 @@ export const usePlayerStore = defineStore('player', () => {
       shuffleEnabled.value = options.shuffleEnabled
       if (shuffleEnabled.value) {
         rebuildShuffleBag()
-        shuffleHistory = []
-        shuffleFuture = []
+        shuffleHistory.value = []
+        shuffleFuture.value = []
       } else {
-        shuffleBag = []
-        shuffleHistory = []
-        shuffleFuture = []
+        shuffleBag.value = []
+        shuffleHistory.value = []
+        shuffleFuture.value = []
       }
       changed = true
     }
@@ -3335,17 +3356,17 @@ export const usePlayerStore = defineStore('player', () => {
     )
     queue.value = [...tracks]
     queueIndex.value = startIndex
-    shuffleHistory = []
-    shuffleFuture = []
+    shuffleHistory.value = []
+    shuffleFuture.value = []
     setLocalPlaylistSource(tracks, localPlaylistId)
-    // 队列整体替换后 shuffleBag 必须按新队列重建（排除当前索引）；
+    // 队列整体替换后未播放池必须按新队列重建（排除当前索引）；
     // 否则曲目自然结束/手动 next 走 bag 空 -> 提前 return，自动切歌永久卡死
     if (shuffleEnabled.value) {
       rebuildShuffleBag()
     } else {
-      shuffleBag = []
+      shuffleBag.value = []
     }
-    void play(queue.value[startIndex])
+    void play(queue.value[startIndex], 'local', 0, false, true, startIndex, true)
   }
 
   // 洗牌后替换队列并播放
@@ -3359,14 +3380,21 @@ export const usePlayerStore = defineStore('player', () => {
     }
     queue.value = shuffled
     queueIndex.value = 0
-    shuffleHistory = []
-    shuffleFuture = []
+    shuffleHistory.value = []
+    shuffleFuture.value = []
     if (shuffleEnabled.value) {
       rebuildShuffleBag()
     } else {
-      shuffleBag = []
+      shuffleBag.value = []
     }
-    play(shuffled[0])
+    void play(shuffled[0], 'local', 0, false, true, 0, true)
+  }
+
+  async function playQueueItem(index: number, commandSource: PlaybackCommandSource = 'local') {
+    const track = queue.value[index]
+    if (!Number.isInteger(index) || !track || blockedByListenTogether(commandSource)
+      || blocksLocalSongInRoom(track, commandSource)) return
+    await play(track, commandSource, 0, false, true, index)
   }
 
   /** Index of the current-track replay queued by Play Next, or -1 if none/stale. */
@@ -3382,7 +3410,7 @@ export const usePlayerStore = defineStore('player', () => {
     // it only has to become the next track. The remove-then-insert path below would drag
     // queueIndex onto the previous track and desynchronize the queue highlight.
     if (existing !== -1 && existing === queueIndex.value) {
-      if (shuffleEnabled.value) shuffleFuture.push(existing)
+      if (shuffleEnabled.value) shuffleFuture.value.push(existing)
       else pendingReplayTrackId = queue.value[existing]?.id ?? null
       savePlayerState()
       return
@@ -3405,7 +3433,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (!queue.value.find(t => t.id === track.id)) {
       queue.value.push(track)
       if (shuffleEnabled.value) {
-        shuffleBag.push(queue.value.length - 1)
+        shuffleBag.value.push(queue.value.length - 1)
       }
     }
     savePlayerState()
@@ -3432,9 +3460,9 @@ export const usePlayerStore = defineStore('player', () => {
     const [moved] = nextQueue.splice(fromIndex, 1)
     nextQueue.splice(toIndex, 0, moved)
     queueIndex.value = remapIndex(queueIndex.value)
-    shuffleBag = shuffleBag.map(remapIndex)
-    shuffleHistory = shuffleHistory.map(remapIndex)
-    shuffleFuture = shuffleFuture.map(remapIndex)
+    shuffleBag.value = shuffleBag.value.map(remapIndex)
+    shuffleHistory.value = shuffleHistory.value.map(remapIndex)
+    shuffleFuture.value = shuffleFuture.value.map(remapIndex)
     queue.value = nextQueue
     useListenTogetherStore().reportQueueReorder()
     savePlayerState()
@@ -3453,9 +3481,9 @@ export const usePlayerStore = defineStore('player', () => {
     if (queue.value.length === 0) {
       queueIndex.value = -1
       currentTrack.value = null
-      shuffleBag = []
-      shuffleHistory = []
-      shuffleFuture = []
+      shuffleBag.value = []
+      shuffleHistory.value = []
+      shuffleFuture.value = []
       void pause('local_safety')
       savePlayerState()
       return
@@ -3467,6 +3495,7 @@ export const usePlayerStore = defineStore('player', () => {
       queueIndex.value = Math.min(queueIndex.value, queue.value.length - 1)
       // 同步 currentTrack 到新索引指向的曲目
       currentTrack.value = queue.value[queueIndex.value]
+      shuffleBag.value = shuffleBag.value.filter(slot => slot !== queueIndex.value)
     }
     savePlayerState()
   }
@@ -3475,9 +3504,9 @@ export const usePlayerStore = defineStore('player', () => {
   function clearQueue() {
     queue.value = []
     queueIndex.value = -1
-    shuffleBag = []
-    shuffleHistory = []
-    shuffleFuture = []
+    shuffleBag.value = []
+    shuffleHistory.value = []
+    shuffleFuture.value = []
     savePlayerState()
   }
 
@@ -3633,6 +3662,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   return {
     isPlaying, currentTrack, currentBiliVideoSkipTarget, positionMs, durationMs, queue, queueIndex,
+    queueDisplayIndices, queueDisplayCurrentIndex,
     repeatMode, shuffleEnabled, volume, lyrics, playError, isLoadingAudio, isLoadingAudioSlow,
     hasPlaybackSession, loadedPlaybackTrackKey,
     audioLevel, beatImpulse, audioInfo, isPlayingFromDownload, isPlayingFromCache,
@@ -3655,7 +3685,7 @@ export const usePlayerStore = defineStore('player', () => {
     setLoudnessGain, setEqualizer, setEqualizerPreset, resetAudioEffects,
     applyPersistedSettings, decoderCapabilities,
     startSleepTimer, startSleepTimerEndOfTrack, startSleepTimerEndOfQueue, cancelSleepTimer,
-    playAll, shufflePlay, addToQueueNext, addToQueueEnd, moveQueueItem, removeFromQueue, clearQueue,
+    playAll, shufflePlay, playQueueItem, addToQueueNext, addToQueueEnd, moveQueueItem, removeFromQueue, clearQueue,
     prefetchPlaybackTracks, prefetchIntent, upcomingTrack: () => nextPrefetchTracks()[0] ?? null,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
     handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
