@@ -83,7 +83,8 @@ async function locateCurrentTrack(behavior: ScrollBehavior = 'smooth') {
 
 onMounted(() => { void locateCurrentTrack('auto') })
 onUnmounted(() => { queuePanelUnmounted = true })
-watch([currentDisplayIndex, () => player.queue.length, isPlaybackOrderView], () => {
+// 随机历史变化时显示位置可能不变，仍需跟随新的当前槽位
+watch([currentDisplayIndex, () => player.queueIndex, () => player.queue.length, isPlaybackOrderView], () => {
   if (queueDragIndex.value < 0 && !queueContextMenuOpen.value) void locateCurrentTrack()
 }, { flush: 'post' })
 // The drag offset goes into a CSS variable on the dragged row instead of reactive state:

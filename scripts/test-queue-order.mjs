@@ -47,6 +47,7 @@ function fixture({ tracks = ['a', 'b', 'c', 'd', 'e'].map(id => track(id)), curr
   const context = {
     ref, computed, buildQueueDisplayOrder, queue, queueIndex, currentTrack,
     shuffleBag, shuffleHistory, shuffleFuture, shuffleEnabled: ref(shuffle), repeatMode: ref('off'),
+    queueSelectionNeedsPlayback: ref(false),
     positionMs: ref(0), log: { info() {} }, Math: Object.assign(Object.create(Math), { random: () => 0.99 }),
     blockedByListenTogether: () => blocked, blocksLocalSongInRoom: () => false, markCommandSource() {},
     isRemotePlaybackTrack: () => true, getPlaybackSourceKindForPrefetch: () => source,
@@ -291,14 +292,79 @@ await test('deletion remaps future and bag rows to their remaining physical slot
   assert.equal(state.currentTrack.value.id, 'd')
 })
 
-await test('deleting the current slot consumes the replacement slot from the unplayed bag', async () => {
+await test('deleting the current slot keeps the unheard replacement pending until playback starts', async () => {
   const state = fixture()
   state.removeFromQueue(0)
   assert.equal(state.currentTrack.value.id, 'b')
-  assert.deepEqual(state.queueDisplayIndices.value.map(index => state.queue.value[index].id), ['b', 'c', 'd', 'e'])
-  assert.equal(state.nextPrefetchTracks()[0].id, 'c')
+  assert.deepEqual(state.played, [], 'removing a row does not load its replacement into the audio backend')
+  assert.deepEqual(state.shuffleBag.value, [0, 1, 2, 3])
+  assert.deepEqual(state.queueDisplayIndices.value.map(index => state.queue.value[index].id), ['b', 'b', 'c', 'd', 'e'])
+  assert.equal(state.nextPrefetchTracks()[0].id, 'b')
+  await state.next()
+  assert.equal(state.currentTrack.value.id, 'b')
+  assert.deepEqual(state.shuffleBag.value, [1, 2, 3])
   await state.next()
   assert.equal(state.currentTrack.value.id, 'c')
+})
+
+await test('deleting the current row preserves all unheard tracks in their existing shuffled order', async () => {
+  const state = fixture({ bag: [3, 1, 4, 2] })
+  state.removeFromQueue(0)
+  assert.deepEqual(state.shuffleBag.value, [2, 0, 3, 1])
+  assert.deepEqual(state.played, [])
+  const following = []
+  for (let count = 0; count < 4; count++) {
+    await state.next()
+    following.push(state.currentTrack.value.id)
+  }
+  assert.deepEqual(following, ['d', 'b', 'e', 'c'])
+})
+
+await test('deleting the current row retains an explicitly queued replacement before the bag', async () => {
+  const state = fixture({ future: [1], bag: [2, 3, 4] })
+  state.removeFromQueue(0)
+  assert.deepEqual(state.shuffleFuture.value, [0])
+  assert.deepEqual(state.played, [])
+  assert.equal(state.nextPrefetchTracks()[0].id, 'b')
+  await state.next()
+  assert.equal(state.currentTrack.value.id, 'b')
+  assert.equal(state.nextPrefetchTracks()[0].id, 'c')
+})
+
+await test('playing the selected replacement consumes its pending bag visit exactly once', async () => {
+  for (const explicitQueueSelection of [false, true]) {
+    const state = fixture()
+    state.removeFromQueue(0)
+    if (explicitQueueSelection) await state.playQueueItem(0)
+    else await state.play(state.queue.value[0])
+    assert.deepEqual(state.shuffleBag.value, [1, 2, 3])
+    assert.deepEqual(state.shuffleHistory.value, [])
+    await state.next()
+    assert.deepEqual(state.played.map(item => item.track.id), ['b', 'c'])
+  }
+})
+
+await test('selecting another song after deletion does not record the unheard replacement as history', async () => {
+  const state = fixture()
+  state.removeFromQueue(0)
+  await state.playQueueItem(1)
+  assert.equal(state.currentTrack.value.id, 'c')
+  assert.deepEqual(state.shuffleHistory.value, [])
+  assert.deepEqual(state.shuffleBag.value, [0, 2, 3])
+  await state.next()
+  assert.equal(state.currentTrack.value.id, 'b')
+})
+
+await test('navigation after deletion does not add an unheard replacement to traversal history or future', async () => {
+  const state = fixture({ current: 1, history: [0], bag: [3, 2, 4] })
+  state.removeFromQueue(1)
+  await state.previous()
+  assert.equal(state.currentTrack.value.id, 'a')
+  assert.deepEqual(state.shuffleFuture.value, [])
+  assert.deepEqual(state.shuffleBag.value, [2, 1, 3])
+  await state.next()
+  assert.equal(state.currentTrack.value.id, 'd')
+  assert.deepEqual(state.shuffleHistory.value, [0])
 })
 
 await test('physical reordering preserves actual playback order and current position', () => {

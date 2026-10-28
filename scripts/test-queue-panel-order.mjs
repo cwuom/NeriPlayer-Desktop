@@ -147,6 +147,42 @@ await test('following a new current song expands the list but does not interrupt
   state.dispose()
 })
 
+await test('following a played shuffle slot expands the current row even when its display index stays unchanged', async () => {
+  const state = fixture({ shuffle: true, orderCurrent: 240 })
+  state.mount()
+  await settle()
+  assert.equal(state.scrolls.at(-1).index, 240)
+
+  state.player.queueIndex = 0
+  state.player.queueDisplayIndices = Array.from({ length: 300 }, (_, index) =>
+    index < 240 ? index + 1 : index === 240 ? 0 : index)
+  await settle()
+
+  assert.equal(state.currentDisplayIndex.value, 240)
+  assert.equal(state.displayQueue.value[0].queueIndex, 1)
+  assert.ok(state.incremental.visibleItems.value.length > 240, 'the changed first row must not hide the new current slot')
+  assert.equal(state.incremental.visibleItems.value[240].queueIndex, 0)
+  assert.equal(state.scrolls.length, 2, 'changing the current slot must follow it even at the same display index')
+  assert.deepEqual(state.calls, [])
+  state.dispose()
+})
+
+await test('following a different shuffle slot does not interrupt dragging or an open menu', async () => {
+  for (const guard of ['queueDragIndex', 'queueContextMenuOpen']) {
+    const state = fixture({ count: 4, current: 2, shuffle: true, orderCurrent: 2 })
+    state.mount()
+    await settle()
+    state[guard].value = guard === 'queueDragIndex' ? 1 : true
+    state.player.queueIndex = 0
+    state.player.queueDisplayIndices = [1, 2, 0, 3]
+    await settle()
+
+    assert.equal(state.currentDisplayIndex.value, 2)
+    assert.equal(state.scrolls.length, 1, `${guard} must suppress automatic following`)
+    state.dispose()
+  }
+})
+
 await test('updating current metadata preserves the expanded window and visible current row', async () => {
   const state = fixture()
   state.mount()

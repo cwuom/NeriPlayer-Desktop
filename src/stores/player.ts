@@ -453,6 +453,7 @@ export const usePlayerStore = defineStore('player', () => {
   const durationMs = ref(0)
   const queue = ref<TrackInfo[]>([])
   const queueIndex = ref(-1)
+  const queueSelectionNeedsPlayback = ref(false)
   const repeatMode = ref<RepeatMode>('off')
   const shuffleEnabled = ref(false)
   const shuffleBag = ref<number[]>([])
@@ -1642,10 +1643,15 @@ export const usePlayerStore = defineStore('player', () => {
         : matchesQueueIdentity(queue.value[previousQueueIndex], track)
           ? previousQueueIndex
           : resolvePlaybackQueueStartIndex(queue.value, track.id, track.playlistKey)
-      if (shuffleEnabled.value && !shuffleNavigation && nextQueueIndex !== previousQueueIndex) {
-        shuffleBag.value = shuffleBag.value.filter(index => index !== nextQueueIndex)
-        if (previousQueueIndex >= 0) shuffleHistory.value.push(previousQueueIndex)
+      if (shuffleEnabled.value && !shuffleNavigation) {
+        if (nextQueueIndex !== previousQueueIndex || queueSelectionNeedsPlayback.value) {
+          shuffleBag.value = shuffleBag.value.filter(index => index !== nextQueueIndex)
+        }
+        if (previousQueueIndex >= 0 && nextQueueIndex !== previousQueueIndex && !queueSelectionNeedsPlayback.value) {
+          shuffleHistory.value.push(previousQueueIndex)
+        }
       }
+      queueSelectionNeedsPlayback.value = false
       currentTrack.value = track
       queueIndex.value = nextQueueIndex
       // 推送元数据到后端镜像, 供系统媒体会话(SMTC/MPRIS)展示标题/歌手/封面/时长（PB-01）
@@ -2574,18 +2580,18 @@ export const usePlayerStore = defineStore('player', () => {
       // Shuffle 三栈模型
       if (shuffleFuture.value.length > 0) {
         // 优先从 future 栈弹出（previous 回退过的）
-        shuffleHistory.value.push(queueIndex.value)
+        if (!queueSelectionNeedsPlayback.value) shuffleHistory.value.push(queueIndex.value)
         nextIdx = shuffleFuture.value.pop()!
       } else if (shuffleBag.value.length > 0) {
         // 未播放池在重建时已洗牌，按顺序消费才能与队列和预取一致
-        shuffleHistory.value.push(queueIndex.value)
+        if (!queueSelectionNeedsPlayback.value) shuffleHistory.value.push(queueIndex.value)
         nextIdx = shuffleBag.value.shift()!
       } else {
         // bag 已空
         if (force || repeatMode.value === 'all') {
           rebuildShuffleBag()
           if (shuffleBag.value.length > 0) {
-            shuffleHistory.value.push(queueIndex.value)
+            if (!queueSelectionNeedsPlayback.value) shuffleHistory.value.push(queueIndex.value)
             nextIdx = shuffleBag.value.shift()!
           } else {
             return
@@ -2632,7 +2638,7 @@ export const usePlayerStore = defineStore('player', () => {
     if (shuffleEnabled.value) {
       // Shuffle：从 history 栈回溯
       if (shuffleHistory.value.length > 0) {
-        shuffleFuture.value.push(queueIndex.value)
+        if (!queueSelectionNeedsPlayback.value) shuffleFuture.value.push(queueIndex.value)
         const prevIdx = shuffleHistory.value.pop()!
         await play(queue.value[prevIdx], commandSource, 0, false, false, prevIdx, true)
       } else {
@@ -3480,6 +3486,7 @@ export const usePlayerStore = defineStore('player', () => {
     queue.value.splice(index, 1)
     if (queue.value.length === 0) {
       queueIndex.value = -1
+      queueSelectionNeedsPlayback.value = false
       currentTrack.value = null
       shuffleBag.value = []
       shuffleHistory.value = []
@@ -3493,9 +3500,9 @@ export const usePlayerStore = defineStore('player', () => {
     } else if (wasCurrentTrack) {
       // 被删除的是当前曲目，索引保持（指向下一首），但不超界
       queueIndex.value = Math.min(queueIndex.value, queue.value.length - 1)
-      // 同步 currentTrack 到新索引指向的曲目
+      // 这里只更新选中项，尚未加载替代歌曲，不能提前消费它的待播记录
+      queueSelectionNeedsPlayback.value = true
       currentTrack.value = queue.value[queueIndex.value]
-      shuffleBag.value = shuffleBag.value.filter(slot => slot !== queueIndex.value)
     }
     savePlayerState()
   }
@@ -3504,6 +3511,7 @@ export const usePlayerStore = defineStore('player', () => {
   function clearQueue() {
     queue.value = []
     queueIndex.value = -1
+    queueSelectionNeedsPlayback.value = false
     shuffleBag.value = []
     shuffleHistory.value = []
     shuffleFuture.value = []
