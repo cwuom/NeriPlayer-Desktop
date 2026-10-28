@@ -132,6 +132,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'downloads', title: 'settings.download_format' },
   { section: 'downloads', title: 'settings.download_dir', desc: 'settings.download_dir_desc' },
   { section: 'lyrics', title: 'settings.lyric_font_size' },
+  { section: 'lyrics', title: 'settings.lyric_translation_size', desc: 'settings.lyric_translation_size_desc', keywords: ['翻译', '翻譯', '字号', '字級', 'translation', 'font', 'size'] },
   { section: 'lyrics', title: 'settings.show_translation', desc: 'settings.show_translation_desc' },
   { section: 'lyrics', title: 'settings.show_romanization', desc: 'settings.show_romanization_desc' },
   { section: 'lyrics', title: 'settings.prefer_word_timed_lyrics', desc: 'settings.prefer_word_timed_lyrics_desc' },

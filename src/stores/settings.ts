@@ -46,6 +46,7 @@ export interface AppSettings {
   showAudioSampleRate: boolean
   showAudioBitDepth: boolean
   lyricFontScale: number
+  lyricTranslationScale: number
   crossfade: boolean
   normalizeVolume: boolean
   /** 多声道（AC-3/E-AC-3）音轨保留码流自带的动态范围压缩 */
@@ -164,6 +165,10 @@ export const UI_SCALE_STEP = 5
 export const LYRIC_FONT_SCALE_MIN = 0.5
 export const LYRIC_FONT_SCALE_MAX = 1.6
 export const LYRIC_FONT_SCALE_STEP = 0.05
+export const LYRIC_TRANSLATION_SCALE_DEFAULT = 1
+export const LYRIC_TRANSLATION_SCALE_MIN = 0.5
+export const LYRIC_TRANSLATION_SCALE_MAX = 2
+export const LYRIC_TRANSLATION_SCALE_STEP = 0.05
 // 封面模糊强度 × 30 = CSS 模糊半径（px），8 档上限即 240px
 export const COVER_BLUR_PX_PER_UNIT = 30
 export const MAX_COVER_BLUR_AMOUNT = 8
@@ -205,6 +210,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showAudioSampleRate: false,
   showAudioBitDepth: false,
   lyricFontScale: 1,
+  lyricTranslationScale: LYRIC_TRANSLATION_SCALE_DEFAULT,
   crossfade: false,
   normalizeVolume: false,
   multichannelDrc: false,
@@ -309,6 +315,7 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   showAudioSampleRate: 'audio_sample_rate',
   showAudioBitDepth: 'audio_bit_depth',
   lyricFontScale: 'lyric_font_scale',
+  lyricTranslationScale: 'lyric_translation_scale',
   crossfade: 'crossfade',
   normalizeVolume: 'normalize',
   fadeIn: 'fade_in',
@@ -501,6 +508,9 @@ function normalizeSnapshot(input: unknown): AppSettings {
 
   // 毫秒、MB 等字段在 Rust 端是整数，带小数会让整份设置保存失败
   result.lyricFontScale = clamp(result.lyricFontScale, LYRIC_FONT_SCALE_MIN, LYRIC_FONT_SCALE_MAX)
+  result.lyricTranslationScale = Number.isFinite(result.lyricTranslationScale)
+    ? clamp(result.lyricTranslationScale, LYRIC_TRANSLATION_SCALE_MIN, LYRIC_TRANSLATION_SCALE_MAX)
+    : LYRIC_TRANSLATION_SCALE_DEFAULT
   result.fadeInDuration = clampInteger(result.fadeInDuration, 0, 10000)
   result.fadeOutDuration = clampInteger(result.fadeOutDuration, 0, 10000)
   result.crossfadeInDuration = clampInteger(result.crossfadeInDuration, 0, 10000)
@@ -648,6 +658,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const showAudioSampleRate = ref(initial.showAudioSampleRate)
   const showAudioBitDepth = ref(initial.showAudioBitDepth)
   const lyricFontScale = ref(initial.lyricFontScale)
+  const lyricTranslationScale = ref(initial.lyricTranslationScale)
   const crossfade = ref(initial.crossfade)
   const normalizeVolume = ref(initial.normalizeVolume)
   const multichannelDrc = ref(initial.multichannelDrc)
@@ -735,7 +746,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const settingRefs: SettingRefs = {
     darkMode, themeColor, uiScale, appFontFamily, lyricFontFamily, locale, defaultScreen, closeToTray, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
-    showAudioSpec, lyricFontScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
+    showAudioSpec, lyricFontScale, lyricTranslationScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
@@ -833,7 +844,7 @@ export const useSettingsStore = defineStore('settings', () => {
     isHydrated, hydrate, snapshot, applySnapshot,
     darkMode, themeColor, uiScale, appFontFamily, lyricFontFamily, locale, coverStyle,
     defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
-    showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale,
+    showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale, lyricTranslationScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,

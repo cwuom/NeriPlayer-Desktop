@@ -71,6 +71,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
     currentLyricGroups = []
     lyricGroupSize = new WeakMap()
     times = []
+    layoutCalls = 0
     element = element('amll-player')
     constructor() { super(); players.push(this) }
     setLyricLines(lines, time) { this.lines = lines; this.initialTime = time }
@@ -82,7 +83,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
     setBlurAmount() {}
     setWordFadeWidth() {}
     update() {}
-    calcLayout() {}
+    calcLayout() { this.layoutCalls++ }
     resetScroll() {}
     resume() {}
     pause() {}
@@ -90,7 +91,8 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   }
   const settings = vue.reactive({
     advancedLyrics: true, showTranslation: false, showRomanization: false,
-    lyricBlur: true, lyricBlurAmount: 1, lyricFontScale: 1, lyricEmphasisThresholdMs: 1000,
+    lyricBlur: true, lyricBlurAmount: 1, lyricFontScale: 1, lyricTranslationScale: 1,
+    uiScale: 100, lyricEmphasisThresholdMs: 1000,
     ...settingOverrides,
   })
   const clipboardWrites = []
@@ -157,7 +159,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   }
   return {
     settings, player, props, clock, seekEvents, settle, button, findButton, findControls,
-    host, menu, clipboardWrites,
+    host, menu, clipboardWrites, find,
     async controlsContextMenu() {
       const controls = findControls()
       assert.ok(controls, 'available controls must exist before hiding')
@@ -261,6 +263,26 @@ async function test(name, run) {
   try { await run(); console.log(`PASS ${name}`) }
   catch (error) { failed++; console.error(`FAIL ${name}: ${error.stack}`) }
 }
+
+await test('translation sizing reflows paused lyrics independently and preserves the playback position', async () => {
+  const r = await mount({ settingOverrides: { showTranslation: true, showRomanization: true } })
+  try {
+    r.props.isPlaying = false
+    await r.settle()
+    const view = r.find(node => node.props?.class === 'lyrics-view')
+    assert.equal(view.props.style['--lyric-translation-scale'], 1)
+    const lines = r.player.lines
+    const layoutCalls = r.player.layoutCalls
+    r.settings.lyricTranslationScale = 2
+    await r.settle()
+    assert.equal(view.props.style['--lyric-translation-scale'], 2)
+    assert.equal(view.props.style['--lyric-font-scale'], 1, 'translation sizing must leave main text sizing unchanged')
+    assert.ok(r.player.layoutCalls > layoutCalls, 'paused lyrics must reflow when translation size changes')
+    assert.equal(r.player.lines, lines, 'sizing must not rebuild the lyric timeline')
+    assertAuxiliaryLyrics(r.player, 'Translated lyric', 'ge ci', ['ge', 'ci'])
+    r.assertPlaybackUnchanged()
+  } finally { r.stop() }
+})
 
 await test('display buttons independently toggle translation and line and word romanization', async () => {
   const r = await mount()

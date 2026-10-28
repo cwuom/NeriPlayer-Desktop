@@ -48,6 +48,9 @@ import {
   LYRIC_FONT_SCALE_MAX,
   LYRIC_FONT_SCALE_MIN,
   LYRIC_FONT_SCALE_STEP,
+  LYRIC_TRANSLATION_SCALE_MIN,
+  LYRIC_TRANSLATION_SCALE_MAX,
+  LYRIC_TRANSLATION_SCALE_STEP,
   normalizeLyricDefaultOffset,
   normalizeLyricEmphasisThresholdMs,
   MAX_COVER_BLUR_AMOUNT,
@@ -108,7 +111,7 @@ const toast = useToastStore()
 const {
   darkMode, themeColor: selectedColor, coverStyle, appFontFamily, lyricFontFamily, uiScale,
   defaultScreen, closeToTray, showMenuBarLyrics, showCoverBadge, showNowPlayingTitle, showToolbarDock,
-  showQualitySwitch, lyricFontScale,
+  showQualitySwitch, lyricFontScale, lyricTranslationScale,
   normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
@@ -2405,6 +2408,28 @@ useEscapeClose(
         <input type="range" class="m3-slider" v-model.number="lyricFontScale" :min="LYRIC_FONT_SCALE_MIN" :max="LYRIC_FONT_SCALE_MAX" :step="LYRIC_FONT_SCALE_STEP" />
       </div>
 
+
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">translate</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.lyric_translation_size') }}</div>
+        <div class="setting-desc">{{ t('settings.lyric_translation_size_desc') }}</div>
+        <EditableRangeValue
+          v-model="lyricTranslationScale"
+          class="setting-desc"
+          :min="LYRIC_TRANSLATION_SCALE_MIN"
+          :max="LYRIC_TRANSLATION_SCALE_MAX"
+          :step="LYRIC_TRANSLATION_SCALE_STEP"
+          :display-value="`${Math.round(lyricTranslationScale * 100)}%`"
+          :input-scale="100"
+          input-suffix="%"
+          :aria-label="t('settings.lyric_translation_size')"
+        />
+      </div>
+      <input type="range" class="m3-slider" v-model.number="lyricTranslationScale"
+        :min="LYRIC_TRANSLATION_SCALE_MIN" :max="LYRIC_TRANSLATION_SCALE_MAX" :step="LYRIC_TRANSLATION_SCALE_STEP"
+        :aria-label="t('settings.lyric_translation_size')" />
+    </div>
 
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">translate</span></div>

@@ -736,7 +736,12 @@ watch([() => settings.lyricBlur, () => settings.lyricBlurAmount], () => {
   syncLyricOptions()
 })
 
-watch([() => settings.lyricFontScale, () => settings.lyricFontFamily], () => {
+watch([
+  () => settings.lyricFontScale,
+  () => settings.lyricTranslationScale,
+  () => settings.lyricFontFamily,
+  () => settings.uiScale,
+], () => {
   scheduleLayoutSync(false, true)
 }, { flush: 'post' })
 
@@ -758,7 +763,10 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
 </script>
 
 <template>
-  <div class="lyrics-view" :style="{ '--lyric-font-scale': settings.lyricFontScale }">
+  <div class="lyrics-view" :style="{
+    '--lyric-font-scale': settings.lyricFontScale,
+    '--lyric-translation-scale': settings.lyricTranslationScale,
+  }">
     <div
       ref="hostRef"
       class="lyrics-scroll"
@@ -817,7 +825,8 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
 
 <style scoped lang="scss">
 .lyrics-view {
-  --amll-lp-font-size: calc(max(max(5vh, 2.5vw), 12px) * var(--lyric-font-scale, 1));
+  // 页面缩放会缩小 CSS 视口，补回比例以让歌词跟随整页一起缩放
+  --amll-lp-font-size: calc(max(5vh * var(--app-ui-scale, 1), 2.5vw * var(--app-ui-scale, 1), 12px) * var(--lyric-font-scale, 1));
   position: relative;
   width: 100%;
   height: 100%;
@@ -981,6 +990,11 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
   font-weight: 650;
   font-variation-settings: 'wght' 650;
   overflow-wrap: anywhere;
+}
+
+// AMLL 的第二个子节点固定是翻译，第三个音译节点保留原字号
+:deep(.amll-lyric-player [class*="lyricSubLine"]:nth-child(2)) {
+  font-size: calc(max(0.5em, 10px) * var(--lyric-translation-scale, 1));
 }
 
 </style>

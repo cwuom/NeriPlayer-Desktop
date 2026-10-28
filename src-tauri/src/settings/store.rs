@@ -56,6 +56,8 @@ pub struct AppSettings {
     pub show_audio_sample_rate: bool,
     pub show_audio_bit_depth: bool,
     pub lyric_font_scale: f32,
+    #[serde(deserialize_with = "deserialize_lyric_translation_scale")]
+    pub lyric_translation_scale: f32,
     /// 旧版「无缝切换」，已并入 crossfade_next；保留字段兼容旧配置，规整后恒为 false
     pub crossfade: bool,
     pub normalize_volume: bool,
@@ -203,6 +205,15 @@ fn normalize_ui_scale(value: f64) -> i32 {
     (clamped / f64::from(UI_SCALE_STEP)).round() as i32 * UI_SCALE_STEP
 }
 
+fn deserialize_lyric_translation_scale<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let scale = value.as_f64().unwrap_or(1.0);
+    Ok(if scale.is_finite() { scale.clamp(0.5, 2.0) as f32 } else { 1.0 })
+}
+
 /// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
 fn lenient_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
@@ -254,6 +265,7 @@ impl Default for AppSettings {
             show_audio_sample_rate: false,
             show_audio_bit_depth: false,
             lyric_font_scale: 1.0,
+            lyric_translation_scale: 1.0,
             crossfade: false,
             normalize_volume: false,
             multichannel_drc: false,
@@ -381,6 +393,7 @@ impl AppSettings {
         }
 
         self.lyric_font_scale = clamp_f32(self.lyric_font_scale, 0.5, 1.6, 1.0);
+        self.lyric_translation_scale = clamp_f32(self.lyric_translation_scale, 0.5, 2.0, 1.0);
         self.fade_in_duration = self.fade_in_duration.clamp(0, 10_000);
         self.fade_out_duration = self.fade_out_duration.clamp(0, 10_000);
         self.crossfade_in_duration = self.crossfade_in_duration.clamp(0, 10_000);
@@ -948,6 +961,64 @@ mod tests {
     }
 
     use super::{AppSettings, MAX_MEDIA_CACHE_SIZE_MB, MIN_MEDIA_CACHE_SIZE_MB};
+
+    #[test]
+    fn lyric_translation_scale_defaults_and_normalizes_independently() {
+        let old: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert_eq!(old.lyric_translation_scale, 1.0);
+        for (value, expected) in [
+            (-1.0, 0.5), (0.5, 0.5), (1.25, 1.25), (2.0, 2.0), (3.0, 2.0),
+            (f32::NAN, 1.0), (f32::INFINITY, 1.0), (f32::NEG_INFINITY, 1.0),
+        ] {
+            let mut settings = AppSettings {
+                lyric_translation_scale: value,
+                lyric_font_scale: 1.25,
+                show_romanization: true,
+                ..AppSettings::default()
+            };
+            settings.normalize();
+            assert_eq!(settings.lyric_translation_scale, expected, "{value}");
+            assert_eq!(settings.lyric_font_scale, 1.25);
+            assert!(settings.show_romanization);
+        }
+    }
+
+    #[test]
+    fn lyric_translation_scale_bad_types_keep_other_settings() {
+        for value in [
+            serde_json::json!("1.5"), serde_json::Value::Null,
+            serde_json::json!(true), serde_json::json!([]), serde_json::json!({}),
+        ] {
+            let settings: AppSettings = serde_json::from_value(serde_json::json!({
+                "lyricTranslationScale": value, "lyricFontScale": 1.25, "locale": "ja",
+            })).expect("invalid translation scale must not discard the settings payload");
+            assert_eq!(settings.lyric_translation_scale, 1.0);
+            assert_eq!(settings.lyric_font_scale, 1.25);
+            assert_eq!(settings.locale, "ja");
+        }
+    }
+
+    #[test]
+    fn lyric_translation_scale_survives_save_and_config_round_trip() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Config {
+            #[serde(deserialize_with = "super::deserialize_app_settings")]
+            settings: AppSettings,
+        }
+        for (value, expected) in [(-1.0, 0.5), (0.5, 0.5), (1.25, 1.25), (2.0, 2.0), (3.0, 2.0)] {
+            let config: Config = serde_json::from_value(serde_json::json!({
+                "settings": { "lyricTranslationScale": value, "lyricFontScale": 1.25 },
+            })).expect("translation scale config");
+            let settings = config.settings.normalized();
+            assert_eq!(settings.lyric_translation_scale, expected);
+            let saved = serde_json::to_value(&settings).expect("saved settings");
+            let restored: AppSettings = serde_json::from_value(saved.clone()).expect("restored settings");
+            assert_eq!(serde_json::to_value(restored.normalized()).expect("restored JSON"), saved);
+            let exported = serde_json::to_value(Config { settings }).expect("exported config");
+            let imported: Config = serde_json::from_value(exported.clone()).expect("imported config");
+            assert_eq!(serde_json::to_value(imported).expect("imported JSON"), exported);
+        }
+    }
 
     #[test]
     fn ui_scale_defaults_for_old_snapshots_and_normalizes_raw_numbers() {
