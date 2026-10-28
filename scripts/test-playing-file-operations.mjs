@@ -19,6 +19,7 @@ const compiled = ts.transpileModule([
   declaration('audioFilePathKey'), declaration('withReleasedAudioFile'), declaration('handleDownloadedFileRemoved'),
   declaration('pause'), declaration('seekTo'), declaration('resume'), declaration('togglePlayPause'),
   declaration('currentAudioFileMutation'),
+  declaration('downloadedTrackForPlayback'),
   (() => {
     let play
     const visit = node => {

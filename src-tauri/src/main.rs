@@ -534,6 +534,7 @@ fn main() {
             search_cmd::search,
             explore_cmd::explore_search,
             explore_cmd::resolve_share_link,
+            explore_cmd::get_bili_video_info,
             explore_cmd::resolve_youtube_creators,
             explore_cmd::resolve_bili_uploader,
             comment_cmd::get_comments,

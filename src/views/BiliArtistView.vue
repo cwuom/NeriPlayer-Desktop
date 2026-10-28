@@ -11,6 +11,7 @@ import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
 import { playlistDetailCacheKey, previewCachedDetail, writePlaylistDetailCache, type CachedDetailPreview } from '@/modules/library/playlistDetailCache'
 import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration } from '@/utils/timeFormat'
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 
 interface ArtistHeader { name: string; coverUrl: string; bannerUrl: string; description: string }
 interface ArtistDetail { header: ArtistHeader; tracks: TrackInfo[]; page: number; total: number; hasMore: boolean }
@@ -21,6 +22,7 @@ const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
 const player = usePlayerStore()
+const biliParts = useBiliVideoPartsStore()
 const toast = useToastStore()
 const mid = computed(() => String(route.params.mid || ''))
 const detail = ref<ArtistDetail | null>(null)
@@ -102,7 +104,9 @@ async function load(more = false) {
 async function toggleFollow() {
   try { await toggle() } catch (cause) { toast.error(String(cause)) }
 }
-function playTrack(track: TrackInfo) { player.playAll(activeTracks.value, track.id) }
+function playTrack(track: TrackInfo) {
+  void biliParts.request(track, () => player.playAll(activeTracks.value, track.id))
+}
 
 async function loadContents(more = false) {
   if (loadingContents.value) return

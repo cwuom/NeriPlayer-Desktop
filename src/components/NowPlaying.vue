@@ -76,7 +76,7 @@ import LyricsView from './LyricsView.vue'
 import QueuePanel from './QueuePanel.vue'
 import AddToPlaylistDialog from './AddToPlaylistDialog.vue'
 import BiliVideoSkipDialog from './BiliVideoSkipDialog.vue'
-import { resolveBiliVideoSkipBvid } from '@/modules/playback/biliVideoSkip'
+import { resolveBiliVideoSkipBvid, resolveBiliVideoSkipCid } from '@/modules/playback/biliVideoSkip'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
 import AudioEffectsPanel from './AudioEffectsPanel.vue'
@@ -1807,8 +1807,11 @@ async function shareSong() {
     const nid = track.id.replace('netease:', '')
     url = `https://music.163.com/song?id=${nid}`
   } else if (track.id.startsWith('bilibili:')) {
-    const bid = track.id.replace('bilibili:', '')
-    url = `https://www.bilibili.com/video/${bid}`
+    const bid = resolveBiliVideoSkipBvid(track)
+      || String(track.syncPayload?.audioId ?? track.syncPayload?.audio_id ?? track.id.replace(/^bilibili:/i, '')).split(':')[0]
+    const videoId = /^\d+$/.test(bid || '') ? `av${bid}` : bid
+    const cid = resolveBiliVideoSkipCid(track)
+    if (videoId) url = `https://www.bilibili.com/video/${videoId}${cid ? `?cid=${cid}` : ''}`
   } else if (track.id.startsWith('youtube:')) {
     const vid = track.id.replace('youtube:', '')
     url = `https://music.youtube.com/watch?v=${vid}`

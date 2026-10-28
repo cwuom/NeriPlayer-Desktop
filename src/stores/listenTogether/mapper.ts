@@ -166,7 +166,8 @@ export function trackInfoToLtTrack(
     audioId = payloadAudioId || track.id.replace(/^qq:/i, '')
   } else if (track.id.startsWith('bilibili:') || payloadChannel === LtChannels.BILIBILI) {
     channelId = LtChannels.BILIBILI
-    audioId = payloadAudioId || track.id.replace(/^bilibili:/i, '')
+    const localIdentity = track.id.replace(/^bilibili:/i, '').split(':')
+    audioId = payloadAudioId || localIdentity[0] || ''
     // 优先 syncPayload.subAudioId, 否则从 album 字段提取 cid
     subAudioId = payloadSubAudioId
     if (!subAudioId) {
@@ -254,11 +255,12 @@ export function ltTrackToTrackInfo(lt: ListenTogetherTrack, preferredQuality?: s
       source = 'qq'
       break
     case LtChannels.BILIBILI:
-      id = `bilibili:${lt.audioId}`
+      id = `bilibili:${lt.audioId}${lt.subAudioId ? `:${lt.subAudioId}` : ''}`
       source = 'bilibili'
       // 用 subAudioId 重建 album 中的 cid 信息
       if (lt.subAudioId) {
-        album = `Bilibili|${lt.subAudioId}`
+        const bvid = album.match(/^Bilibili\|[^|]+\|([^|]+)$/i)?.[1]
+        album = `Bilibili|${lt.subAudioId}${bvid ? `|${bvid}` : ''}`
       }
       break
     case LtChannels.YOUTUBE_MUSIC:

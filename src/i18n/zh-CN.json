@@ -679,6 +679,9 @@
     }
   },
   "player": {
+    "bili_parts_title": "选择分 P",
+    "bili_parts_hint": "共 {count} 个分 P，选择后整组加入队列，从所选分 P 开始播放",
+    "bili_parts_load_failed": "分 P 列表加载失败，请重试",
     "vinyl_effect": "唱片效果",
     "bili_skip_identity_missing": "无法识别视频来源，请重新加载曲目信息",
     "bili_skip_title": "跳过区间",

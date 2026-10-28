@@ -14,6 +14,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore, type HomeFeedItem, type PlaylistInfo } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
 import { useSearchHistoryStore } from '@/stores/searchHistory'
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 import { invoke } from '@tauri-apps/api/core'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import TrackContextMenu from '@/components/TrackContextMenu.vue'
@@ -30,6 +31,7 @@ const auth = useAuthStore()
 const recommend = useRecommendStore()
 const settings = useSettingsStore()
 const searchHistory = useSearchHistoryStore()
+const biliParts = useBiliVideoPartsStore()
 
 // 搜索
 const searchQuery = ref('')
@@ -263,7 +265,8 @@ function songToTrack(song: ExploreSong): TrackInfo {
 function openResult(item: ExploreItem) {
   if (item.kind === 'song') {
     rememberSearch()
-    player.playAll([songToTrack(item)], item.id)
+    const track = songToTrack(item)
+    void biliParts.request(track, () => player.playAll([track], track.id))
     return
   }
   if (item.kind === 'notice') return
@@ -359,7 +362,8 @@ function discoveryTrack(r: SearchResult): TrackInfo {
 
 function playResult(r: SearchResult) {
   rememberSearch()
-  player.play(discoveryTrack(r))
+  const track = discoveryTrack(r)
+  void biliParts.request(track, () => player.play(track))
 }
 
 const trackMenuRef = ref<InstanceType<typeof TrackContextMenu> | null>(null)
@@ -380,7 +384,7 @@ function openResultMenu(event: MouseEvent, item: ExploreItem) {
 function playFromMenu(track: TrackInfo) {
   const song = songResults.value.find(item => item.id === track.id)
   if (song) openResult(song)
-  else player.play(track)
+  else void biliParts.request(track, () => player.play(track))
 }
 
 function goToPlaylist(pl: PlaylistInfo) {

@@ -4,6 +4,7 @@ use serde_json::Value;
 use tauri::State;
 
 use super::search_cmd::{bili_search_rows, strip_bili_highlight, upgrade_youtube_thumbnail_url};
+use crate::api::bilibili::client::BiliVideoInfo;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -220,7 +221,7 @@ enum LinkTarget {
     NeteasePlaylist(u64),
     NeteaseArtist(u64),
     NeteaseShort,
-    BiliVideo { bvid: Option<String>, avid: Option<u64>, page: Option<u64> },
+    BiliVideo { bvid: Option<String>, avid: Option<u64>, page: Option<u64>, cid: Option<u64> },
     BiliShort,
     BiliFavorite(u64),
     BiliUploader(u64),
@@ -288,14 +289,14 @@ fn recognize(url: &url::Url) -> LinkTarget {
 
     let is_bili = host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv";
     if is_bili {
+        let page = query_param(url, "p").map(|value| value.parse().unwrap_or(0));
+        let cid = query_param(url, "cid").map(|value| value.parse().unwrap_or(0));
         if let Some(found) = bvid_re.find(raw) {
-            let page = query_param(url, "p").and_then(|value| value.parse().ok());
-            return LinkTarget::BiliVideo { bvid: Some(found.as_str().to_string()), avid: None, page };
+            return LinkTarget::BiliVideo { bvid: Some(found.as_str().to_string()), avid: None, page, cid };
         }
         if let Some(captures) = avid_re.captures(raw) {
             let avid = captures[1].parse().ok();
-            let page = query_param(url, "p").and_then(|value| value.parse().ok());
-            return LinkTarget::BiliVideo { bvid: None, avid, page };
+            return LinkTarget::BiliVideo { bvid: None, avid, page, cid };
         }
         if host == "b23.tv" {
             return LinkTarget::BiliShort;
@@ -378,6 +379,33 @@ fn notice(reason: &str) -> ExploreItem {
     ExploreItem::Notice { reason: reason.into() }
 }
 
+fn bili_video_explore_item(info: &BiliVideoInfo, page: Option<u64>, cid: Option<u64>) -> ExploreItem {
+    if info.bvid.is_empty() {
+        return notice("not_found");
+    }
+    let part = match (cid, page) {
+        (Some(cid), _) => info.pages.iter().find(|part| cid > 0 && part.cid == cid),
+        (None, Some(page)) => info.pages.iter().find(|part| page > 0 && part.page == page),
+        (None, None) => None,
+    };
+    if (cid.is_some() || page.is_some()) && part.is_none() {
+        return notice("not_found");
+    }
+    ExploreItem::Song {
+        id: part.map(|part| format!("bilibili:{}:{}", info.aid, part.cid))
+            .unwrap_or_else(|| format!("bilibili:{}", info.bvid)),
+        title: match part {
+            Some(part) if !part.part.is_empty() => format!("{} - {}", info.title, part.part),
+            _ => info.title.clone(),
+        },
+        artist: info.owner.clone(),
+        album: part.map(|part| format!("Bilibili|{}|{}", part.cid, info.bvid)).unwrap_or_default(),
+        duration_ms: part.map(|part| part.duration).unwrap_or(info.duration) * 1000,
+        source: "bilibili".into(),
+        cover_url: https(&info.cover),
+    }
+}
+
 async fn resolve_target(state: &AppState, target: LinkTarget) -> AppResult<ExploreItem> {
     match target {
         LinkTarget::NeteaseSong(id) => {
@@ -399,29 +427,14 @@ async fn resolve_target(state: &AppState, target: LinkTarget) -> AppResult<Explo
                 subtitle: String::new(),
             })
         }
-        LinkTarget::BiliVideo { bvid, avid, page } => {
+        LinkTarget::BiliVideo { bvid, avid, page, cid } => {
             let client = state.bilibili();
             let info = match (bvid, avid) {
                 (Some(bvid), _) => client.get_video_info(&bvid).await?,
                 (None, Some(avid)) => client.get_video_info_by_avid(avid).await?,
                 _ => return Ok(notice("not_found")),
             };
-            if info.bvid.is_empty() {
-                return Ok(notice("not_found"));
-            }
-            let part = page.filter(|page| *page > 1).and_then(|page| info.pages.iter().find(|item| item.page == page));
-            Ok(ExploreItem::Song {
-                id: format!("bilibili:{}", info.bvid),
-                title: match part {
-                    Some(part) if !part.part.is_empty() => format!("{} - {}", info.title, part.part),
-                    _ => info.title.clone(),
-                },
-                artist: info.owner.clone(),
-                album: part.map(|part| format!("Bilibili|{}", part.cid)).unwrap_or_default(),
-                duration_ms: part.map(|part| part.duration).unwrap_or(info.duration) * 1000,
-                source: "bilibili".into(),
-                cover_url: https(&info.cover),
-            })
+            Ok(bili_video_explore_item(&info, page, cid))
         }
         LinkTarget::BiliFavorite(media_id) => {
             let info = state.bilibili().get_fav_folder_info(media_id).await?;
@@ -494,6 +507,21 @@ pub async fn resolve_share_link(text: String, state: State<'_, AppState>) -> App
         target = recognize(&expanded);
     }
     resolve_target(&state, target).await
+}
+
+/// 获取视频及全部分 P，保留每个分 P 的 CID 和时长
+#[tauri::command]
+pub async fn get_bili_video_info(
+    bvid: Option<String>,
+    avid: Option<u64>,
+    state: State<'_, AppState>,
+) -> AppResult<BiliVideoInfo> {
+    let client = state.bilibili();
+    match (bvid.as_deref().map(str::trim).filter(|bvid| !bvid.is_empty()), avid.filter(|avid| *avid > 0)) {
+        (Some(bvid), _) => client.get_video_info(bvid).await,
+        (None, Some(avid)) => client.get_video_info_by_avid(avid).await,
+        _ => Err(AppError::Other("Bilibili video requires a BV or AV ID".into())),
+    }
 }
 
 // ---------- 创作者 / UP 主解析（播放页点歌手名） ----------
@@ -576,13 +604,35 @@ mod tests {
     fn recognizes_bilibili_videos_favorites_and_uploaders() {
         assert_eq!(
             target("https://www.bilibili.com/video/BV1xx411c7mD?p=2"),
-            LinkTarget::BiliVideo { bvid: Some("BV1xx411c7mD".into()), avid: None, page: Some(2) }
+            LinkTarget::BiliVideo { bvid: Some("BV1xx411c7mD".into()), avid: None, page: Some(2), cid: None }
         );
-        assert_eq!(target("https://www.bilibili.com/video/av170001"), LinkTarget::BiliVideo { bvid: None, avid: Some(170001), page: None });
+        assert_eq!(target("https://www.bilibili.com/video/av170001"), LinkTarget::BiliVideo { bvid: None, avid: Some(170001), page: None, cid: None });
         assert_eq!(target("https://b23.tv/xyz"), LinkTarget::BiliShort);
         assert_eq!(target("https://www.bilibili.com/medialist/detail/ml123"), LinkTarget::BiliFavorite(123));
         assert_eq!(target("https://space.bilibili.com/42/favlist?fid=ml99"), LinkTarget::BiliFavorite(99));
         assert_eq!(target("https://space.bilibili.com/42"), LinkTarget::BiliUploader(42));
+    }
+
+    #[test]
+    fn recognizes_bilibili_explicit_pages_and_cids() {
+        for (query, page, cid) in [
+            ("p=1", Some(1), None),
+            ("cid=1002", None, Some(1002)),
+            ("p=1&cid=1002", Some(1), Some(1002)),
+            ("p=bad", Some(0), None),
+            ("cid=bad", None, Some(0)),
+        ] {
+            assert_eq!(
+                target(&format!("https://www.bilibili.com/video/BV14Dn16tELC?{query}")),
+                LinkTarget::BiliVideo {
+                    bvid: Some("BV14Dn16tELC".into()), avid: None, page, cid
+                }
+            );
+        }
+        assert_eq!(
+            target("https://www.bilibili.com/video/av114?cid=1002"),
+            LinkTarget::BiliVideo { bvid: None, avid: Some(114), page: None, cid: Some(1002) }
+        );
     }
 
     #[test]
@@ -623,5 +673,72 @@ mod tests {
         assert_eq!(parse_clock_duration_ms("3:45"), 225_000);
         assert_eq!(parse_clock_duration_ms("1:02:03"), 3_723_000);
         assert_eq!(strip_bili_highlight("<em class=\"keyword\">浴室</em> &amp; 现场"), "浴室 & 现场");
+    }
+
+    fn multipart_bili_video() -> BiliVideoInfo {
+        serde_json::from_value(serde_json::json!({
+            "bvid": "BV14Dn16tELC", "aid": 114, "title": "世界纯音乐100首", "owner": "UP",
+            "cover": "http://i0.hdslb.com/cover.jpg", "cid": 1001, "duration": 600,
+            "pages": [
+                {"cid": 1001, "page": 1, "part": "第一首", "duration": 120},
+                {"cid": 1002, "page": 2, "part": "第二首", "duration": 480}
+            ]
+        })).unwrap()
+    }
+
+    #[test]
+    fn bilibili_share_first_page_keeps_its_identity_and_duration() {
+        assert!(matches!(
+            bili_video_explore_item(&multipart_bili_video(), Some(1), None),
+            ExploreItem::Song { id, album, duration_ms: 120_000, .. }
+                if id == "bilibili:114:1001" && album == "Bilibili|1001|BV14Dn16tELC"
+        ));
+    }
+
+    #[test]
+    fn bilibili_share_pages_have_distinct_ids() {
+        let info = multipart_bili_video();
+        let ExploreItem::Song { id: first_id, .. } = bili_video_explore_item(&info, Some(1), None) else {
+            panic!("first page should resolve");
+        };
+        assert!(matches!(
+            bili_video_explore_item(&info, Some(2), None),
+            ExploreItem::Song { id, album, duration_ms: 480_000, .. }
+                if id == "bilibili:114:1002" && id != first_id && album == "Bilibili|1002|BV14Dn16tELC"
+        ));
+    }
+
+    #[test]
+    fn bilibili_share_invalid_explicit_page_does_not_fall_back() {
+        let info = multipart_bili_video();
+        for page in [0, 3] {
+            assert_eq!(bili_video_explore_item(&info, Some(page), None), notice("not_found"));
+        }
+    }
+
+    #[test]
+    fn bilibili_share_without_page_remains_a_parent_video() {
+        assert!(matches!(
+            bili_video_explore_item(&multipart_bili_video(), None, None),
+            ExploreItem::Song { id, title, album, duration_ms: 600_000, .. }
+                if id == "bilibili:BV14Dn16tELC" && title == "世界纯音乐100首" && album.is_empty()
+        ));
+    }
+
+    #[test]
+    fn bilibili_share_cid_wins_over_page_number() {
+        assert!(matches!(
+            bili_video_explore_item(&multipart_bili_video(), Some(1), Some(1002)),
+            ExploreItem::Song { id, album, duration_ms: 480_000, .. }
+                if id == "bilibili:114:1002" && album == "Bilibili|1002|BV14Dn16tELC"
+        ));
+    }
+
+    #[test]
+    fn bilibili_share_invalid_explicit_cid_does_not_fall_back() {
+        let info = multipart_bili_video();
+        for cid in [0, 1003] {
+            assert_eq!(bili_video_explore_item(&info, Some(1), Some(cid)), notice("not_found"));
+        }
     }
 }

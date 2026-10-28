@@ -679,6 +679,9 @@
     }
   },
   "player": {
+    "bili_parts_title": "Choose a video part",
+    "bili_parts_hint": "{count} parts. All parts will be queued, starting from your selection.",
+    "bili_parts_load_failed": "Could not load video parts. Please retry.",
     "vinyl_effect": "Vinyl effect",
     "bili_skip_identity_missing": "Unable to identify the video. Please reload its track information.",
     "bili_skip_title": "Skip intervals",

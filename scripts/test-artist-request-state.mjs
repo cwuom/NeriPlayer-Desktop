@@ -32,6 +32,7 @@ async function mountPage(name, params, cached = null) {
   const dependencies = {
     computed, onUnmounted, ref, watch, useRoute: () => route, useRouter: () => ({ push() {}, back() {} }),
     useI18n: () => ({ t: key => key }), usePlayerStore: () => ({ playAll: (...args) => played.push(args) }),
+    useBiliVideoPartsStore: () => ({ request: (_track, play) => play() }),
     useToastStore: () => ({ error: message => errors.push(message) }), normalizeTrack: track => track,
     useArtistFavorite: () => ({ following: ref(false), changing: ref(false), toggle: async () => {} }),
     playlistDetailCacheKey: () => 'cache-key',

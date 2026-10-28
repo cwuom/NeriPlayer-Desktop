@@ -224,11 +224,12 @@ export function canonicalizePlaybackTrack(track: TrackInfo): TrackInfo {
   if (!sourceId) return track
 
   const cid = kind === 'bilibili' ? bilibiliCid(track) : undefined
+  const bvid = kind === 'bilibili' ? track.album?.match(/^Bilibili\|[^|]+\|([^|]+)$/i)?.[1] : undefined
   return {
     ...track,
-    id: `${kind}:${sourceId}`,
+    id: `${kind}:${sourceId}${cid ? `:${cid}` : ''}`,
     source: kind,
-    album: cid ? `Bilibili|${cid}` : track.album,
+    album: cid ? `Bilibili|${cid}${bvid ? `|${bvid}` : ''}` : track.album,
   }
 }
 
@@ -555,7 +556,7 @@ function neteaseQualityFallbacks(preferred: string): string[] {
 
 function trackValue(track: TrackInfo, kind: PlaybackSourceKind): string {
   const payloadAudioId = syncPayloadString(track, 'audioId', 'audio_id')
-  if (payloadAudioId) return payloadAudioId
+  if (payloadAudioId) return kind === 'bilibili' ? payloadAudioId.split(':')[0] || '' : payloadAudioId
   if (kind === 'youtube') {
     const mediaUri = syncPayloadString(track, 'mediaUri', 'media_uri')
     const videoId = mediaUri
@@ -563,8 +564,8 @@ function trackValue(track: TrackInfo, kind: PlaybackSourceKind): string {
     if (videoId) return videoId
   }
   const prefix = `${kind}:`
-  if (track.id.toLowerCase().startsWith(prefix)) return track.id.slice(prefix.length)
-  return track.id
+  const sourceId = track.id.toLowerCase().startsWith(prefix) ? track.id.slice(prefix.length) : track.id
+  return kind === 'bilibili' ? sourceId.split(':')[0] || '' : sourceId
 }
 
 function syncPayloadString(track: TrackInfo, ...keys: string[]): string | undefined {

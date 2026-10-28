@@ -239,6 +239,68 @@ await run('uses Android sync subAudioId as the Bilibili CID', async () => {
   assert.equal(cacheCandidate.cacheKey, resolved?.cacheKey)
 })
 
+await run('keeps Bilibili pages independent while resolving only the parent video ID', async () => {
+  const base = { ...track(99902), source: 'bilibili' }
+  for (const fixture of [
+    { id: 'bilibili:BV1pages:777', album: 'Bilibili|777|BV1pages', wantId: 'bilibili:BV1pages:777', bvid: 'BV1pages', avid: null, cid: 777 },
+    { id: 'bilibili:123456:888', album: 'Bilibili|888|BV1pages', wantId: 'bilibili:123456:888', bvid: '', avid: 123456, cid: 888 },
+    { id: 'bilibili:BV1legacy', album: 'Bilibili|999', wantId: 'bilibili:BV1legacy:999', bvid: 'BV1legacy', avid: null, cid: 999 },
+    { id: 'bilibili:BV1suffix:2', album: '', wantId: 'bilibili:BV1suffix', bvid: 'BV1suffix', avid: null, cid: null },
+    { id: 'bilibili:BV1parent', album: '', wantId: 'bilibili:BV1parent', bvid: 'BV1parent', avid: null, cid: null },
+  ]) {
+    const input = { ...base, id: fixture.id, album: fixture.album }
+    const canonical = canonicalizePlaybackTrack(input)
+    assert.equal(canonical.id, fixture.wantId)
+    if (fixture.album.includes('|BV')) assert.equal(canonical.album, fixture.album)
+    let received
+    globalThis.__playbackInvoke = async (_command, args) => {
+      received = args
+      return { url: 'https://a.bilivideo.com/part.m4a', bandwidth: 192_000, codecs: 'mp4a.40.2', candidates: [] }
+    }
+    await resolvePlaybackSource(canonical, settings)
+    assert.equal(received.bvid, fixture.bvid)
+    assert.equal(received.avid, fixture.avid)
+    assert.equal(received.cid, fixture.cid)
+  }
+})
+
+await run('keeps the authoritative room parent and part above local Bilibili identity', async () => {
+  const input = {
+    ...track(99903), id: 'bilibili:BV1local:111', source: 'bilibili', album: 'Bilibili|111|BV1local',
+    syncPayload: { channelId: 'bilibili', audioId: '123456', subAudioId: '222' },
+  }
+  const canonical = canonicalizePlaybackTrack(input)
+  assert.equal(canonical.id, 'bilibili:123456:222')
+  assert.deepEqual(canonical.syncPayload, input.syncPayload)
+  assert.equal(playbackCacheReadCandidates(canonical, settings)[0].cacheKey, 'bili-123456-222-high')
+})
+
+await run('resolving a local Bilibili page keeps its aid identity after normalization', async () => {
+  const page = {
+    ...track(99904), id: 'bilibili:123456:222', source: 'bilibili', album: 'Bilibili|222|BV1actual',
+    syncPayload: { channelId: 'bilibili', audioId: '123456', subAudioId: '222', bvid: 'BV1actual' },
+  }
+  const playerSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+  const parsed = ts.createSourceFile('player.ts', playerSource, ts.ScriptTarget.ES2022, true)
+  let apply
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'applyResolvedBiliVideoSkipTarget') apply = node
+    ts.forEachChild(node, visit)
+  }
+  visit(parsed)
+  assert.ok(apply)
+  const policy = await import(transpileUrl(await readFile(new URL('../src/modules/playback/biliVideoSkip.ts', import.meta.url), 'utf8')))
+  const compiledApply = ts.transpileModule(apply.getText(parsed), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const context = { ...policy, currentTrack: { value: page }, currentBiliVideoSkipTarget: { value: null },
+    biliVideoSkipTracker: { reset() {} }, useListenTogetherStore: () => ({ roomId: null }), savePlayerState() {},
+  }
+  const applyResolved = new Function(...Object.keys(context), `const playbackRequestToken=7, biliVideoSkipRequestToken=7;\n${compiledApply}\nreturn applyResolvedBiliVideoSkipTarget`)(...Object.values(context))
+  applyResolved(page, { bvid: 'BV1actual', cid: 222 }, 7)
+  assert.equal(page.syncPayload.audioId, '123456')
+  assert.equal(page.album, 'Bilibili|222|BV1actual')
+  assert.equal(canonicalizePlaybackTrack(page).id, 'bilibili:123456:222')
+})
+
 await run('restores a remote source from legacy local-playlist sync payload', async () => {
   const syncedTrack = {
     id: '-8837200123',

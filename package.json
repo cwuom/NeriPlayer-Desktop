@@ -6,6 +6,10 @@
   "packageManager": "pnpm@9.15.9",
   "type": "module",
   "scripts": {
+    "test:page-transition": "node scripts/test-page-transition.mjs",
+    "test:bili-video-parts": "node scripts/test-bili-video-parts.mjs",
+    "test:bili-share": "node scripts/test-bili-share.mjs",
+    "test:bili-downloaded-playback": "node scripts/test-bili-downloaded-playback.mjs",
     "test": "node scripts/test-frontend.mjs",
     "test:debug-log-viewer": "node scripts/test-debug-log-viewer.mjs",
     "test:cover-export": "node scripts/test-cover-export.mjs",

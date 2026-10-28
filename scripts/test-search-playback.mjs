@@ -67,6 +67,7 @@ function fixture(results, platform = 'netease') {
     player, songResults: ref(results), activeTab: ref(platform), searchQuery: ref('Song'),
     searchHistory: { record: query => recorded.push(query) },
     openCollection: item => routes.push(item),
+    biliParts: { request: (_track, play) => play() },
   }, ['openResult', 'playFromMenu', 'songToTrack'])
   return { ...handlers, player, queue, queueIndex, currentTrack, routes, recorded }
 }

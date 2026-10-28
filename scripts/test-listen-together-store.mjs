@@ -718,13 +718,14 @@ for (const role of ['controller', 'listener']) {
   await test(`${role} preserves the seek while sorting a pending remote pause continuation`, pauseThenReorder)
 }
 
-await test('same desktop id with a different Bilibili subaudio context reloads playback', async h => {
+await test('a legacy desktop id with a different Bilibili subaudio context reloads playback', async h => {
   await h.join()
   const make = sub => wireTrack('BV1TEST', { channelId: 'bilibili', audioId: 'BV1TEST', subAudioId: sub, stableKey: `bilibili:BV1TEST:${sub}` })
   await h.message({ type: 'welcome', state: room([make('11')]) })
+  h.player.currentTrack.id = 'bilibili:BV1TEST'
   await h.message({ type: 'room_state_updated', state: room([make('22')], { version: 2 }), causedBy: { type: 'SET_TRACK' } })
   assert.equal(h.playback.filter(entry => entry.type === 'play').length, 2)
-  assert.equal(h.player.currentTrack.id, 'bilibili:BV1TEST')
+  assert.equal(h.player.currentTrack.id, 'bilibili:BV1TEST:22')
   assert.equal(h.player.currentTrack.syncPayload.subAudioId, '22')
 })
 
@@ -936,7 +937,7 @@ for (const { name, audioId, album } of biliMetadataCases) {
         causedBy: { type: 'HEARTBEAT' } })
     }
     assert.equal(plays(), 1, 'runtime CID/BV enrichment must not create a new room playback identity')
-    assert.equal(h.player.currentTrack.id, `bilibili:${audioId}`)
+    assert.equal(h.player.currentTrack.id, track.subAudioId ? `bilibili:${audioId}:${track.subAudioId}` : `bilibili:${audioId}`)
     assert.equal(h.player.currentTrack.audioUrl, '')
     assert.ok(h.player.currentTrack.syncPayload)
     assert.equal(mapper.trackInfoToLtTrack(h.player.currentTrack).stableKey, track.stableKey)

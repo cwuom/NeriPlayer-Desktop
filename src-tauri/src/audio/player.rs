@@ -5447,6 +5447,63 @@ mod tests {
     }
 
     #[test]
+    fn end_seek_finishes_after_discard_exhausts_a_short_fragment() {
+        let bytes = [
+            include_bytes!("fixtures/hls-init.mp4").as_slice(),
+            include_bytes!("fixtures/hls-segment.m4s").as_slice(),
+        ].concat();
+        let duration_hint_ms = 250;
+        let source = AudioSource::Bytes(Arc::from(bytes), duration_hint_ms);
+        let mut decoder = make_decoder_for_position(&source, 0, false).unwrap();
+        assert_eq!(decoder.backend(), crate::audio::decoder::DecoderBackend::Symphonia);
+
+        // 分片实际只有 192ms，平台时长略大时丢弃阶段就会先读到 EOF
+        let started = std::time::Instant::now();
+        super::discard_until_target(decoder.as_mut(), 0, duration_hint_ms);
+        let shared = render_test_shared(1, 8);
+        shared.buffering.store(true, Ordering::Release);
+        shared.buffer_target_frames.store(
+            duration_to_frames(super::REMOTE_PREBUFFER, shared.sample_rate), Ordering::Release,
+        );
+        shared.clock.store_ms(duration_hint_ms);
+        let generation = Arc::new(AtomicU64::new(7));
+        let cancellation = crate::audio::remote::RemoteReadCancellation::new(
+            Arc::clone(&shared.cancelled), None,
+        );
+        let worker = super::spawn_decode_worker(
+            decoder, Arc::clone(&shared), crate::audio::analyzer::SharedAudioLevel::new(),
+            Arc::clone(&generation), 7, cancellation,
+        ).unwrap();
+        let deadline = started + Duration::from_secs(1);
+        while !shared.finished.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let finished_in_time = shared.finished.load(Ordering::Acquire);
+        if !finished_in_time {
+            shared.cancelled.store(true, Ordering::Release);
+            shared.wake.notify_all();
+        }
+        worker.join().unwrap();
+
+        assert!(finished_in_time, "an exhausted seek must finish without waiting for PCM");
+        assert!(!shared.buffering.load(Ordering::Acquire));
+        assert_eq!(shared.ring.readable_samples(), 0);
+        super::wait_until_ready(&shared, &generation, 7, None, &AtomicBool::new(false)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let counters = crate::audio::metrics::OutputMetrics::new();
+        let mut callback = CallbackState::new(&shared);
+        let mut output = [1.0f32; 16];
+        callback.render(&shared, &mut output, &counters);
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        assert_eq!(shared.clock.position_ms(), duration_hint_ms);
+        assert_eq!(shared.stretch_buffered.load(Ordering::Acquire), 0);
+        assert!(!shared.buffering.load(Ordering::Acquire));
+        let snapshot = counters.snapshot();
+        assert_eq!((snapshot.underruns, snapshot.rendered_frames), (0, 0));
+    }
+
+    #[test]
     fn virtual_body_start_keeps_audio_when_the_segment_start_is_implausible() {
         let (wav, expected) = sine_sections_wav(8_000, &[(0.5, 1)]);
         let source = AudioSource::Bytes(Arc::from(wav), 0);

@@ -187,7 +187,7 @@ assert.equal(isTrustedInboundStreamUrl('https://music.126.net.evil.test/a', 'net
   assert.equal(lt.subAudioId, '888')
   assert.equal(lt.stableKey, 'bilibili:BV1xx:888')
   const back = ltTrackToTrackInfo(lt)
-  assert.equal(back.id, 'bilibili:BV1xx')
+  assert.equal(back.id, 'bilibili:BV1xx:888')
   assert.equal(back.album, 'Bilibili|888')
 }
 
@@ -207,6 +207,28 @@ assert.equal(isTrustedInboundStreamUrl('https://music.126.net.evil.test/a', 'net
   assert.equal(numeric.audioId, '12345')
   assert.equal(numeric.stableKey, 'bilibili:12345:888')
   assert.notEqual(explicit.stableKey, legacy.stableKey, 'different Bilibili parts remain different room tracks')
+}
+
+// 桌面分 P 后缀只用于本地身份，协议仍发送父视频和独立 CID
+{
+  const base = { id: 'bilibili:BV1parts:111', title: 'P1', artist: 'UP', album: 'Bilibili|111|BV1parts', durationMs: 1000, coverUrl: '', audioUrl: '', source: 'bilibili' }
+  const legacy = trackInfoToLtTrack(base)
+  assert.equal(legacy.audioId, 'BV1parts')
+  assert.equal(legacy.subAudioId, '111')
+  const suffixOnly = trackInfoToLtTrack({ ...base, album: '' })
+  assert.equal(suffixOnly.audioId, 'BV1parts')
+  assert.equal(suffixOnly.subAudioId, undefined, 'legacy page-index suffixes cannot become CIDs')
+  const authoritative = trackInfoToLtTrack({ ...base, syncPayload: { channelId: 'bilibili', audioId: '123456', subAudioId: '222' } })
+  assert.equal(authoritative.audioId, '123456')
+  assert.equal(authoritative.subAudioId, '222')
+  const incoming = ltTrackToTrackInfo({ ...authoritative, album: 'Bilibili|222|BV1parts' })
+  assert.equal(incoming.id, 'bilibili:123456:222')
+  assert.equal(incoming.album, 'Bilibili|222|BV1parts')
+  assert.equal(incoming.syncPayload.audioId, '123456')
+  assert.equal(incoming.syncPayload.subAudioId, '222')
+  assert.equal(trackInfoToLtTrack(incoming).stableKey, 'bilibili:123456:222')
+  const another = ltTrackToTrackInfo({ ...authoritative, subAudioId: '333' })
+  assert.notEqual(another.id, incoming.id)
 }
 
 // YouTube: playlistContext 进入 stableKey, mediaUri 回填

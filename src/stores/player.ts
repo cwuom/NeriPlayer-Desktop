@@ -1308,11 +1308,17 @@ export const usePlayerStore = defineStore('player', () => {
     // 保存真正播放的分 P，缓存或下载播放时仍能恢复同一条区间规则
     track.album = `Bilibili|${normalized.cid}|${normalized.bvid}`
     if (track.syncPayload) {
+      const sourceAudioId = track.syncPayload.audioId ?? track.syncPayload.audio_id
+      const audioId = typeof sourceAudioId === 'string' && sourceAudioId.trim()
+        ? sourceAudioId.trim()
+        : typeof sourceAudioId === 'number' && Number.isSafeInteger(sourceAudioId) && sourceAudioId > 0
+          ? String(sourceAudioId) : normalized.bvid
       track.syncPayload = {
         ...track.syncPayload,
         channelId: 'bilibili',
-        audioId: normalized.bvid,
+        audioId,
         subAudioId: String(normalized.cid),
+        bvid: normalized.bvid,
         album: track.album,
       }
     }
@@ -1472,6 +1478,22 @@ export const usePlayerStore = defineStore('player', () => {
         audioInfo.value = { ...audioInfo.value, ...properties }
       },
     ).catch(error => log.warn('decoded audio properties unavailable:', error))
+  }
+
+  function downloadedTrackForPlayback(track: TrackInfo) {
+    const downloadStore = useDownloadStore()
+    const exact = downloadStore.getDownloadedTrack(track.id)
+    if (exact || !isBiliVideoSkipTrack(track)) return exact
+    const cid = resolveBiliVideoSkipCid(track)
+    if (!cid) return undefined
+    const parentId = track.id.match(/^bilibili:([^:]+):\d+$/i)?.[1]
+    if (!parentId) return undefined
+    const bvid = resolveBiliVideoSkipBvid(track)
+    for (const sourceId of new Set([parentId, bvid].filter((value): value is string => !!value))) {
+      const legacy = downloadStore.getDownloadedTrack(`bilibili:${sourceId}`)
+      if (legacy && resolveBiliVideoSkipCid(legacy) === cid) return legacy
+    }
+    return undefined
   }
 
   /**
@@ -1696,7 +1718,7 @@ export const usePlayerStore = defineStore('player', () => {
       isPlayingFromDownload.value = false
       isPlayingFromCache.value = false
 
-      const downloaded = useDownloadStore().getDownloadedTrack(track.id)
+      const downloaded = downloadedTrackForPlayback(track)
       if (downloaded?.filePath && !audioFileMutations.has(audioFilePathKey(downloaded.filePath)) && isRemotePlaybackTrack(track)) {
         try {
           const startPlan = currentLoadStartPlan()
@@ -3561,7 +3583,7 @@ export const usePlayerStore = defineStore('player', () => {
     const usesFile = !!track && (
       (!isLoadingAudio.value && loadedPlaybackRequestToken === playbackRequestToken && audioFilePathKey(_currentLoadedFromDownloadPath) === key)
       || audioFilePathKey(track.audioUrl) === key
-      || (isLoadingAudio.value && audioFilePathKey(useDownloadStore().getDownloadedTrack(track.id)?.filePath) === key)
+      || (isLoadingAudio.value && audioFilePathKey(downloadedTrackForPlayback(track)?.filePath) === key)
     )
     let finishMutation!: () => void
     const mutation = {

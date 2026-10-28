@@ -99,7 +99,8 @@ regression('leaving a room restores local metadata completion despite a retained
   r.state.roomId = null
   r.applyResolvedBiliVideoSkipTarget(r.currentTrack.value, { bvid: 'BVtest', cid: 102 }, 7)
   assert.equal(r.currentTrack.value.album, 'Bilibili|102|BVtest')
-  assert.equal(r.currentTrack.value.syncPayload.audioId, 'BVtest')
+  assert.equal(r.currentTrack.value.syncPayload.audioId, '12345')
+  assert.equal(r.currentTrack.value.syncPayload.bvid, 'BVtest')
   assert.equal(r.currentTrack.value.syncPayload.subAudioId, '102')
   assert.equal(r.currentTrack.value.syncPayload.originalName, 'Song')
 })

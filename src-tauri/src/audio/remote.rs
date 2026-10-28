@@ -317,8 +317,10 @@ impl RemoteSeekIndex {
         if self.entries.is_empty() {
             return (0, 0);
         }
+        // 最后一个锚点是媒体末端，不能拿它重建可播放的分片
+        let segments = &self.entries[..self.entries.len().saturating_sub(1)];
         let mut best_idx = 0usize;
-        for (idx, entry) in self.entries.iter().enumerate() {
+        for (idx, entry) in segments.iter().enumerate() {
             if entry.time_ms <= target_ms {
                 best_idx = idx;
             } else {
@@ -1434,7 +1436,7 @@ impl Read for RemoteAudioSource {
                 }
             }
             if read == 0 {
-                break;
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "remote range is not cached yet"));
             }
             self.pos = logical_pos.saturating_add(read as u64);
             total_read += read;
@@ -2395,6 +2397,36 @@ impl SourceAudioInfo {
     }
 }
 
+struct RemoteDecoderSource {
+    source: RemoteAudioSource,
+    reached_eof: Arc<AtomicBool>,
+}
+
+impl Read for RemoteDecoderSource {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        self.reached_eof.store(false, Ordering::Release);
+        let read = self.source.read(out)?;
+        self.reached_eof.store(read == 0 && self.source.pos >= self.source.logical_len(), Ordering::Release);
+        Ok(read)
+    }
+}
+
+impl Seek for RemoteDecoderSource {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let position = self.source.seek(pos)?;
+        self.reached_eof.store(false, Ordering::Release);
+        Ok(position)
+    }
+}
+
+impl MediaSource for RemoteDecoderSource {
+    fn is_seekable(&self) -> bool { self.source.is_seekable() }
+    fn byte_len(&self) -> Option<u64> { MediaSource::byte_len(&self.source) }
+}
+
 pub struct SymphoniaAudioDecoder {
     decoder: Box<dyn Decoder>,
     current_frame_offset: usize,
@@ -2404,6 +2436,8 @@ pub struct SymphoniaAudioDecoder {
     buffer: SampleBuffer<f32>,
     spec: SignalSpec,
     retry_virtual_body_edges: bool,
+    source_eof: Option<Arc<AtomicBool>>,
+    exhausted: bool,
 }
 
 impl SymphoniaAudioDecoder {
@@ -2521,14 +2555,17 @@ impl SymphoniaAudioDecoder {
         let options = MediaSourceStreamOptions {
             buffer_len: REMOTE_VIRTUAL_DECODER_BUFFER_BYTES,
         };
-        let mss = MediaSourceStream::new(Box::new(source), options);
+        let source_eof = Arc::new(AtomicBool::new(false));
+        let tracked = RemoteDecoderSource { source, reached_eof: Arc::clone(&source_eof) };
+        let mss = MediaSourceStream::new(Box::new(tracked), options);
         // 探测期间必须维持 demuxer_open_sequential：
         // is_seekable 一旦为真，try_new 会把整条逻辑流的顶层 atom 扫一遍去找
         // 全部 sidx，等于把刚省下的顺序读又加回来。顺序模式下它遇到第一个
         // moof 就 break，正好停在目标分片上。探测结束后由 init 清标志，
         // 之后的样本级 Seek 与 ignore_bytes 跳段才能生效。
-        let decoder = Self::init_remote_spliced(mss, Some(finish_handle))
+        let mut decoder = Self::init_remote_spliced(mss, Some(finish_handle))
             .map_err(|err| format!("Decode error: {}", err))?;
+        decoder.source_eof = Some(source_eof);
         log::info!(
             target: "remote-audio",
             "demuxer open finished sequential_cleared=true virtual_body=true lazy=true",
@@ -2609,6 +2646,8 @@ impl SymphoniaAudioDecoder {
             buffer,
             spec,
             retry_virtual_body_edges: false,
+            source_eof: None,
+            exhausted: false,
         })
     }
 
@@ -2711,6 +2750,8 @@ impl SymphoniaAudioDecoder {
             buffer,
             spec,
             retry_virtual_body_edges: enable_seek_after_probe.is_some(),
+            source_eof: None,
+            exhausted: false,
         })
     }
 
@@ -2837,6 +2878,8 @@ impl SymphoniaAudioDecoder {
             buffer,
             spec,
             retry_virtual_body_edges: true,
+            source_eof: None,
+            exhausted: false,
         })
     }
 
@@ -2922,6 +2965,9 @@ impl Iterator for SymphoniaAudioDecoder {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        if self.exhausted {
+            return None;
+        }
         if self.current_frame_offset >= self.buffer.len() {
             // 中段流允许跳过更多坏包；真 EOF 才返回 None
             let mut decode_errors = 0usize;
@@ -2939,11 +2985,9 @@ impl Iterator for SymphoniaAudioDecoder {
                     Err(SymphoniaError::IoError(err))
                         if self.retry_virtual_body_edges
                             && consecutive_io < MAX_VIRTUAL_BODY_SKIP_PACKETS
-                            // 主动取消使用永久 I/O 错误，只有短暂的预取边缘错误才重试
-                            && (err.kind() == std::io::ErrorKind::UnexpectedEof
-                                || err.kind() == std::io::ErrorKind::WouldBlock) =>
+                            && err.kind() == std::io::ErrorKind::WouldBlock =>
                     {
-                        // 预取窗口边缘瞬时 EOF / 被抢占：稍等再试，避免整段饿死
+                        // 网络重试由按需读取负责，这里只等待明确的暂不可读状态
                         consecutive_io += 1;
                         if consecutive_io <= 3 {
                             log::warn!(
@@ -2958,13 +3002,20 @@ impl Iterator for SymphoniaAudioDecoder {
                         continue;
                     }
                     Err(SymphoniaError::IoError(error))
-                        if error.kind() == io::ErrorKind::UnexpectedEof => return None,
+                        if error.kind() == io::ErrorKind::UnexpectedEof => {
+                            if self.retry_virtual_body_edges && !self.source_eof.as_ref().is_some_and(|eof| eof.load(Ordering::Acquire)) {
+                                log::warn!(target: "remote-audio", "virtual-body stream ended before source EOF: {error}");
+                            }
+                            self.exhausted = true;
+                            return None;
+                        }
                     Err(err) => {
                         log::warn!(
                             target: "remote-audio",
                             "virtual-body next_packet fatal: {}",
                             err,
                         );
+                        self.exhausted = true;
                         return None;
                     }
                 };
@@ -2998,6 +3049,7 @@ impl Iterator for SymphoniaAudioDecoder {
                             "virtual-body stream decode fatal: {}",
                             err,
                         );
+                        self.exhausted = true;
                         return None;
                     }
                 }
@@ -3007,7 +3059,10 @@ impl Iterator for SymphoniaAudioDecoder {
             self.current_frame_offset = 0;
         }
 
-        let sample = *self.buffer.samples().get(self.current_frame_offset)?;
+        let Some(sample) = self.buffer.samples().get(self.current_frame_offset).copied() else {
+            self.exhausted = true;
+            return None;
+        };
         self.current_frame_offset += 1;
         Some(sample)
     }
@@ -3043,6 +3098,7 @@ impl PcmSource for SymphoniaAudioDecoder {
         self.decoder.reset();
         self.refine_position(seek_res)?;
         self.current_frame_offset += channel_offset;
+        self.exhausted = false;
         Ok(())
     }
 }
@@ -6442,7 +6498,8 @@ mod tests {
         assert_eq!(index.estimate_segment_start(49_999), 1_000);
         assert_eq!(index.estimate_segment_start(50_000), 50_000);
         assert_eq!(index.estimate_segment_start(90_000), 50_000);
-        assert_eq!(index.estimate_segment_start(100_000), 100_000);
+        assert_eq!(index.estimate_segment_start(100_000), 50_000);
+        assert_eq!(index.estimate_segment_start(120_000), 50_000);
     }
 
     #[test]
@@ -6540,6 +6597,115 @@ mod tests {
         assert_eq!(index.entries[0].byte_offset, 0);
         assert_eq!(index.entries[1].byte_offset, 100);
         assert_eq!(index.entries[1].time_ms, 1000);
+    }
+
+    #[test]
+    fn segment_seek_excludes_the_terminal_anchor_at_and_after_duration() {
+        let atom = sidx_atom_two_segments();
+        let media_end = atom.len() as u64 + 2 * 1024 * 1024;
+        let index = super::parse_sidx_from_bytes(&atom, 0, 20_000, media_end + 256)
+            .expect("sidx index with trailing metadata");
+        let last_segment = (atom.len() as u64 + 1024 * 1024, 10_000);
+        assert_eq!(index.estimate_segment(0), (atom.len() as u64, 0));
+        assert_eq!(index.estimate_segment(9_999), (atom.len() as u64, 0));
+        assert_eq!(index.estimate_segment(10_000), last_segment);
+        assert_eq!(index.estimate_segment(19_999), last_segment);
+        assert_eq!(index.estimate_segment(20_000), last_segment);
+        assert_eq!(index.estimate_segment(25_000), last_segment);
+        assert_eq!(index.entries.last().expect("end anchor").byte_offset, media_end);
+    }
+
+    #[test]
+    fn virtual_body_seek_to_end_decodes_the_last_fragment_to_eof() {
+        let init = include_bytes!("fixtures/hls-init.mp4");
+        let segment = include_bytes!("fixtures/hls-segment.m4s");
+        let duration_ms = 200u64;
+        let mut sidx = Vec::new();
+        sidx.extend_from_slice(&44u32.to_be_bytes());
+        sidx.extend_from_slice(b"sidx");
+        sidx.extend_from_slice(&[0; 4]);
+        sidx.extend_from_slice(&1u32.to_be_bytes());
+        sidx.extend_from_slice(&1_000u32.to_be_bytes());
+        sidx.extend_from_slice(&0u32.to_be_bytes());
+        sidx.extend_from_slice(&0u32.to_be_bytes());
+        sidx.extend_from_slice(&0u16.to_be_bytes());
+        sidx.extend_from_slice(&1u16.to_be_bytes());
+        sidx.extend_from_slice(&(segment.len() as u32).to_be_bytes());
+        sidx.extend_from_slice(&(duration_ms as u32).to_be_bytes());
+        sidx.extend_from_slice(&0u32.to_be_bytes());
+        let bytes = [init.as_slice(), sidx.as_slice(), segment.as_slice()].concat();
+        let inner = forbidden_test_inner("http://127.0.0.1:1/end.m4s".into(), bytes.len() as u64);
+        let header_end = super::detect_mp4_header_end(&bytes).expect("fragment header");
+        inner.header_end.store(header_end, Ordering::Release);
+        inner.cache.lock().expect("cache lock").push(CachedSegment { start: 0, data: bytes });
+        assert!(super::build_seek_index_from_head(&inner, duration_ms));
+        let source = RemoteAudioSource {
+            inner, pos: 0, access_mode: RemoteAccessMode::StandardSeekable, read_cancellation: None,
+        };
+        assert_eq!(source.configure_virtual_body_for_time(duration_ms).expect("end seek"), Some(0));
+        let mut decoder = SymphoniaAudioDecoder::new_remote_virtual(source, true).expect("last fragment decoder");
+        let discard = duration_ms * u64::from(decoder.sample_rate()) / 1_000 * u64::from(decoder.channels());
+        let started = Instant::now();
+        assert_eq!(decoder.by_ref().take(discard as usize).count(), 9_216);
+        assert!(started.elapsed() < Duration::from_secs(1), "normal EOF must not wait through network retry backoff");
+        decoder.format = Box::new(ExhaustedFormat);
+        let exhausted = Instant::now();
+        for _ in 0..3 {
+            assert!(decoder.next().is_none(), "a decoder consumed to EOF must remain exhausted");
+        }
+        assert!(exhausted.elapsed() < Duration::from_secs(1), "the worker must not retry an EOF already reached while seeking");
+    }
+
+    struct ExhaustedFormat;
+
+    impl symphonia::core::formats::FormatReader for ExhaustedFormat {
+        fn try_new(_: symphonia::core::io::MediaSourceStream, _: &symphonia::core::formats::FormatOptions) -> symphonia::core::errors::Result<Self> {
+            unreachable!("only used after decoding has finished")
+        }
+        fn cues(&self) -> &[symphonia::core::formats::Cue] { &[] }
+        fn metadata(&mut self) -> symphonia::core::meta::Metadata<'_> { unreachable!("finished decoder metadata") }
+        fn seek(&mut self, _: symphonia::core::formats::SeekMode, _: symphonia::core::formats::SeekTo) -> symphonia::core::errors::Result<symphonia::core::formats::SeekedTo> {
+            unreachable!("finished decoder seek")
+        }
+        fn tracks(&self) -> &[symphonia::core::formats::Track] { &[] }
+        fn next_packet(&mut self) -> symphonia::core::errors::Result<symphonia::core::formats::Packet> {
+            panic!("a finished decoder must not poll its demuxer again")
+        }
+        fn into_inner(self: Box<Self>) -> symphonia::core::io::MediaSourceStream { unreachable!("finished decoder source") }
+    }
+
+    #[test]
+    fn remote_decoder_source_marks_only_an_actual_eof_and_clears_it_on_seek() {
+        use std::io::{Read, Seek, SeekFrom};
+        let inner = forbidden_test_inner("http://127.0.0.1:1/eof.bin".into(), 1);
+        inner.cache.lock().unwrap().push(CachedSegment { start: 0, data: vec![42] });
+        let eof = Arc::new(AtomicBool::new(false));
+        let source = RemoteAudioSource { inner, pos: 0, access_mode: RemoteAccessMode::StandardSeekable, read_cancellation: None };
+        let mut tracked = super::RemoteDecoderSource { source, reached_eof: Arc::clone(&eof) };
+        let mut out = [0; 2];
+        assert_eq!(tracked.read(&mut out).unwrap(), 1);
+        assert!(!eof.load(Ordering::Acquire), "read-ahead to the final byte is not EOF");
+        assert_eq!(tracked.read(&mut []).unwrap(), 0);
+        assert!(!eof.load(Ordering::Acquire), "an empty read cannot establish EOF");
+        assert_eq!(tracked.read(&mut out).unwrap(), 0);
+        assert!(eof.load(Ordering::Acquire));
+        tracked.seek(SeekFrom::Start(0)).unwrap();
+        assert!(!eof.load(Ordering::Acquire));
+        assert_eq!(tracked.read(&mut out).unwrap(), 1);
+        assert_eq!(tracked.read(&mut out).unwrap(), 0);
+        assert!(eof.load(Ordering::Acquire));
+        tracked.source.inner.playback_generation.store(2, Ordering::Release);
+        assert!(tracked.read(&mut out).is_err(), "cancellation remains an error at the end");
+        assert!(!eof.load(Ordering::Acquire), "cancellation cannot be mistaken for EOF");
+    }
+
+    #[test]
+    fn decoder_can_seek_back_after_it_has_been_exhausted() {
+        let mut decoder = SymphoniaAudioDecoder::new(Box::new(std::io::Cursor::new(pcm_wav(8))), Some("wav")).unwrap();
+        assert!(decoder.by_ref().count() > 0);
+        assert!(decoder.next().is_none());
+        decoder.try_seek(Duration::ZERO).unwrap();
+        assert!(decoder.next().is_some(), "a successful seek must reset the exhausted state");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -284,12 +285,14 @@ function shufflePlay() {
   player.shufflePlay(tracks.value)
 }
 
+const biliParts = useBiliVideoPartsStore()
+
 function playTrack(track: TrackInfo) {
   if (selectionMode.value) {
     toggleSelected(track.id)
     return
   }
-  player.playAll(filteredTracks.value, track.id)
+  void biliParts.request(track, () => player.playAll(filteredTracks.value, track.id))
 }
 
 function playSelected() {

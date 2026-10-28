@@ -30,6 +30,7 @@ import MiniPlayer from '@/components/MiniPlayer.vue'
 import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppToast from '@/components/AppToast.vue'
+import BiliVideoPartsDialog from '@/components/BiliVideoPartsDialog.vue'
 import TitleBar from '@/components/TitleBar.vue'
 import i18n, { setLocale } from '@/i18n'
 import { useToastStore } from '@/stores/toast'
@@ -717,6 +718,7 @@ onUnmounted(() => {
     </Transition>
 
     <AppToast />
+    <BiliVideoPartsDialog />
   </div>
 </template>
 
