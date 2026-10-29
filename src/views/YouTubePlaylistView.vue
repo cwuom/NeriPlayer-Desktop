@@ -13,6 +13,7 @@ import ContextMenu from '@/components/ui/ContextMenu.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import { useIncrementalList } from '@/composables/useIncrementalList'
 import {
@@ -32,6 +33,7 @@ import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const downloadStore = useDownloadStore()
 const { t } = useI18n()
 
@@ -411,12 +413,13 @@ onMounted(() => {
             class="track-item"
             :class="{ active: player.currentTrack?.id === track.id, selected: selectionMode && selectedIds.has(track.id), 'selection-mode': selectionMode }"
             :data-track-key="track.id"
-            @click="playTrack(track)"
+            @click="onTrackClick($event, () => playTrack(track), selectionMode)"
+            @dblclick="onTrackDoubleClick($event, () => playTrack(track), selectionMode)"
             @pointerenter="player.prefetchIntent(track)"
             @focusin="player.prefetchIntent(track)"
             @contextmenu.prevent.stop="openTrackContextMenu($event, track)"
           >
-            <button v-if="selectionMode" class="track-select" @click.stop="toggleSelected(track.id)">
+            <button v-if="selectionMode" class="track-select" @click.stop="onTrackClick($event, () => toggleSelected(track.id), true)">
               <span class="material-symbols-rounded filled">{{ selectedIds.has(track.id) ? 'check_circle' : 'radio_button_unchecked' }}</span>
             </button>
             <div v-else class="track-index">

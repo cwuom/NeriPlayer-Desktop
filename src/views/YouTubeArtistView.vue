@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import { useToastStore } from '@/stores/toast'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import TrackContextMenu from '@/components/TrackContextMenu.vue'
@@ -19,6 +20,7 @@ const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
 const player = usePlayerStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const toast = useToastStore()
 const browseId = computed(() => String(route.params.browseId || ''))
 const detail = ref<YouTubeArtistDetail | null>(null)
@@ -216,7 +218,7 @@ onUnmounted(() => { generation++ })
       <section v-for="section in detail?.sections || []" :key="sectionKey(section)" class="creator-section">
         <div class="creator-section-heading"><h2>{{ section.title }}</h2><button v-if="canLoadSection(section)" class="creator-more" :disabled="!!sectionLoading || queueLoading" @click="loadSection(section)">{{ t(sectionLoading === sectionKey(section) ? 'common.loading' : (sectionPages[sectionKey(section)] ? 'player.artist_load_more' : 'player.artist_section_more')) }}</button></div>
         <div v-if="section.items.some(item => item.videoId)" class="track-list">
-          <button v-for="(item, index) in filteredItems(section)" :key="item.videoId || item.browseId" class="track-item" :disabled="queueLoading" :class="{ active: player.currentTrack?.id === `youtube:${item.videoId}` }" @click="openItem(section, item)" @contextmenu="openTrackMenu($event, section, item)">
+          <button v-for="(item, index) in filteredItems(section)" :key="item.videoId || item.browseId" class="track-item" :disabled="queueLoading" :class="{ active: player.currentTrack?.id === `youtube:${item.videoId}` }" @click="onTrackClick($event, () => openItem(section, item))" @dblclick="onTrackDoubleClick($event, () => openItem(section, item))" @contextmenu="openTrackMenu($event, section, item)">
             <span class="track-index">{{ index + 1 }}</span><div class="track-cover"><BilibiliCoverImage :src="item.coverUrl" loading="lazy"><span class="material-symbols-rounded filled">music_note</span></BilibiliCoverImage></div><div class="track-info"><div class="track-title">{{ item.title }}</div><div class="track-meta">{{ item.subtitle || item.artist }}</div></div><span class="track-duration">{{ formatTrackDuration(item.durationMs) }}</span>
           </button>
         </div>

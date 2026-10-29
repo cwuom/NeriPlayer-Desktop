@@ -96,6 +96,51 @@ const RUST_INTEGER_KEYS = [...rustStruct.matchAll(/pub (\w+): (?:i32|u32),/g)]
   .map(match => camel(match[1]))
   .filter(key => key !== 'formatVersion')
 
+await regression('old settings preserve single-click playback and the default local library order', store => {
+  store.applySnapshot({})
+  assert.equal(store.doubleClickPlay, false)
+  assert.equal(store.localLibrarySortBy, 'default')
+  assert.equal(store.localLibrarySortDescending, false)
+})
+
+await regression('library interaction preferences normalize malformed snapshots', store => {
+  store.applySnapshot({ doubleClickPlay: 'true', localLibrarySortBy: 'invalid', localLibrarySortDescending: 1 })
+  assert.equal(store.doubleClickPlay, false)
+  assert.equal(store.localLibrarySortBy, 'default')
+  assert.equal(store.localLibrarySortDescending, false)
+  for (const mode of ['default', 'modified', 'title', 'artist', 'album', 'duration']) {
+    store.applySnapshot({ doubleClickPlay: true, localLibrarySortBy: mode, localLibrarySortDescending: true })
+    assert.equal(store.snapshot().doubleClickPlay, true)
+    assert.equal(store.snapshot().localLibrarySortBy, mode)
+    assert.equal(store.snapshot().localLibrarySortDescending, true)
+  }
+})
+
+await regression('library interaction preferences survive hydration, IPC save and legacy reload', async store => {
+  loadResult = { settings: { doubleClickPlay: true, localLibrarySortBy: 'modified', localLibrarySortDescending: true }, persisted: true }
+  await store.hydrate()
+  assert.equal(store.doubleClickPlay, true)
+  assert.equal(store.localLibrarySortBy, 'modified')
+  assert.equal(store.localLibrarySortDescending, true)
+  store.localLibrarySortBy = 'title'
+  await flushPersist()
+  assert.equal(saved.at(-1).doubleClickPlay, true)
+  assert.equal(saved.at(-1).localLibrarySortBy, 'title')
+  assert.equal(saved.at(-1).localLibrarySortDescending, true)
+  loadResult = { settings: {}, persisted: false }
+  const reloadedInstance = pinia.createPinia()
+  pinia.setActivePinia(reloadedInstance)
+  try {
+    const reloaded = settingsModule.useSettingsStore()
+    await reloaded.hydrate()
+    assert.equal(reloaded.doubleClickPlay, true)
+    assert.equal(reloaded.localLibrarySortBy, 'title')
+    assert.equal(reloaded.localLibrarySortDescending, true)
+  } finally {
+    pinia.disposePinia(reloadedInstance)
+  }
+})
+
 await regression('translation scale defaults preserve the existing size and independent lyric settings', store => {
   store.applySnapshot({ lyricFontScale: 1.25, showTranslation: false, showRomanization: true })
   assert.equal(store.lyricTranslationScale, 1)

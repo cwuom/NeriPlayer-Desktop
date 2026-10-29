@@ -53,10 +53,17 @@ pub struct FolderSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LocalLibraryTrack {
+    #[serde(flatten)]
+    track: TrackInfo,
+    file_modified_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalLibrarySnapshot {
     pub folders: Vec<FolderSummary>,
-    pub tracks: Vec<TrackInfo>,
+    pub tracks: Vec<LocalLibraryTrack>,
     pub scanning: bool,
     pub skipped: Vec<ScanSkipped>,
 }
@@ -177,7 +184,10 @@ fn snapshot_of(runtime: &Runtime) -> LocalLibrarySnapshot {
         // 嵌套添加的文件夹（父子都加了）同一文件只出现一次
         for entry in entries.into_iter().flatten() {
             if seen.insert(entry.track.url.clone()) {
-                tracks.push(entry.track.clone());
+                tracks.push(LocalLibraryTrack {
+                    track: entry.track.clone(),
+                    file_modified_ms: entry.stamp.modified_ms,
+                });
             }
         }
     }
@@ -543,6 +553,54 @@ pub fn update_track_tags(file_path: &str, title: &str, artist: &str, album: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_exposes_each_files_modification_time_without_changing_track_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().to_string_lossy().to_string();
+        let track = |name: &str| TrackInfo {
+            id: format!("local:{name}"),
+            title: name.into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            duration_ms: 1000,
+            source: crate::state::TrackSource::Local,
+            url: root.path().join(name).to_string_lossy().to_string(),
+            cover_url: None,
+            added_at: 7,
+            sync_payload: None,
+            playlist_key: None,
+        };
+        let runtime = Runtime {
+            library: Mutex::new(LocalLibrary {
+                index: IndexFile {
+                    version: INDEX_VERSION,
+                    folders: vec![LocalFolder { path: folder.clone(), added_at: 1 }],
+                    entries: HashMap::from([(folder, vec![
+                        IndexedTrack { track: track("a.flac"), stamp: scanner::FileStamp { size: 10, modified_ms: 1234 } },
+                        IndexedTrack { track: track("b.flac"), stamp: scanner::FileStamp { size: 20, modified_ms: 5678 } },
+                    ])]),
+                },
+                skipped: Vec::new(),
+                name_template: None,
+            }),
+            scanning: AtomicBool::new(false),
+            rescan_requested: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            watcher: Mutex::new(None),
+            pending: Mutex::new(PendingChanges::default()),
+            app: Mutex::new(None),
+        };
+
+        let snapshot = serde_json::to_value(snapshot_of(&runtime)).unwrap();
+        assert_eq!(snapshot["tracks"][0]["id"], "local:a.flac");
+        assert_eq!(snapshot["tracks"][0]["file_modified_ms"], 1234);
+        assert_eq!(snapshot["tracks"][1]["id"], "local:b.flac");
+        assert_eq!(snapshot["tracks"][1]["file_modified_ms"], 5678);
+        assert_eq!(snapshot["tracks"][0]["duration_ms"], 1000);
+        assert_eq!(snapshot["tracks"][0]["added_at"], 7);
+        assert!(snapshot["tracks"][0].get("track").is_none(), "track metadata stays flattened for existing clients");
+    }
 
     #[test]
     fn folder_prefix_requires_a_separator_boundary() {

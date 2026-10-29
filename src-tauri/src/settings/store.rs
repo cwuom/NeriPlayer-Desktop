@@ -79,6 +79,9 @@ pub struct AppSettings {
     /// 15 分钟以上内容记住播放位置并随同步续播（对齐 Android remember_long_form_playback_progress）
     pub remember_long_form_progress: bool,
     pub keep_playback_mode: bool,
+    pub double_click_play: bool,
+    pub local_library_sort_by: String,
+    pub local_library_sort_descending: bool,
     pub show_translation: bool,
     /// 罗马音等音译；与 Android 一样默认不显示
     pub show_romanization: bool,
@@ -279,6 +282,9 @@ impl Default for AppSettings {
             keep_progress: true,
             remember_long_form_progress: true,
             keep_playback_mode: true,
+            double_click_play: false,
+            local_library_sort_by: "default".into(),
+            local_library_sort_descending: false,
             show_translation: true,
             show_romanization: false,
             lyric_blur: true,
@@ -377,6 +383,11 @@ impl AppSettings {
             "home",
         );
         self.cover_style = normalize_choice(&self.cover_style, &["disc", "card"], "card");
+        self.local_library_sort_by = normalize_choice(
+            &self.local_library_sort_by,
+            &["default", "modified", "title", "artist", "album", "duration"],
+            "default",
+        );
         self.default_lyric_source = normalize_choice(
             &self.default_lyric_source,
             &["automatic", "cloud_music", "kugou", "qq_music", "lrclib", "amll_ttml"],
@@ -767,6 +778,46 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_interaction_preferences_default_for_old_settings() {
+        let settings: super::AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.double_click_play);
+        assert_eq!(settings.local_library_sort_by, "default");
+        assert!(!settings.local_library_sort_descending);
+    }
+
+    #[test]
+    fn library_interaction_preferences_survive_json_round_trip() {
+        for sort_by in ["default", "modified", "title", "artist", "album", "duration"] {
+            let settings: super::AppSettings = serde_json::from_value(serde_json::json!({
+                "doubleClickPlay": true,
+                "localLibrarySortBy": sort_by,
+                "localLibrarySortDescending": true,
+            })).unwrap();
+            let serialized = serde_json::to_value(settings.normalized()).unwrap();
+            assert_eq!(serialized["doubleClickPlay"], true);
+            assert_eq!(serialized["localLibrarySortBy"], sort_by);
+            assert_eq!(serialized["localLibrarySortDescending"], true);
+            let reloaded: super::AppSettings = serde_json::from_value(serialized).unwrap();
+            assert!(reloaded.double_click_play);
+            assert_eq!(reloaded.local_library_sort_by, sort_by);
+            assert!(reloaded.local_library_sort_descending);
+        }
+    }
+
+    #[test]
+    fn invalid_local_library_sort_falls_back_without_resetting_other_preferences() {
+        let settings: super::AppSettings = serde_json::from_value(serde_json::json!({
+            "doubleClickPlay": true,
+            "localLibrarySortBy": "unsupported",
+            "localLibrarySortDescending": true,
+        })).unwrap();
+        let normalized = settings.normalized();
+        assert_eq!(normalized.local_library_sort_by, "default");
+        assert!(normalized.double_click_play);
+        assert!(normalized.local_library_sort_descending);
+    }
+
     #[test]
     fn audio_effects_defaults_are_exported_as_typed_settings() {
         let value = serde_json::to_value(super::AppSettings::default()).unwrap();

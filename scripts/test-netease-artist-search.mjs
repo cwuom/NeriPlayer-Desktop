@@ -47,6 +47,14 @@ const matcher = {}
 new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/search/textMatcher.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(createRequire(import.meta.url), matcher)
+const activation = {}
+new Function('require', 'exports', ts.transpileModule(
+  await readFile(new URL('../src/composables/useTrackActivation.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+).outputText)(name => {
+  assert.equal(name, '@/stores/settings')
+  return { useSettingsStore: () => ({ doubleClickPlay: false }) }
+}, activation)
 const fixture = {
   songs: [
     ...Array.from({ length: 120 }, (_, index) => song(index + 1, `Song ${index + 1}`)),
@@ -65,6 +73,7 @@ async function mountArtist(data = fixture) {
   const played = [], opened = [], calls = []
   const imports = {
     ...matcher,
+    useTrackActivation: activation.useTrackActivation,
     useRoute: () => route,
     useRouter: () => ({ push: location => opened.push(location), back() {} }),
     useI18n: () => ({ t: key => key }),

@@ -10,6 +10,7 @@ import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
 import { useIncrementalList } from '@/composables/useIncrementalList'
 import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -23,6 +24,7 @@ const log = createLogger('favorite-playlist-view')
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const { t } = useI18n()
 
 const loading = ref(true)
@@ -193,7 +195,8 @@ onMounted(load)
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
           :data-track-key="track.id"
-          @click="playTrack(index)"
+          @click="onTrackClick($event, () => playTrack(index))"
+          @dblclick="onTrackDoubleClick($event, () => playTrack(index))"
           @pointerenter="player.prefetchIntent(track)"
           @focusin="player.prefetchIntent(track)"
           @contextmenu.prevent.stop="openTrackContextMenu($event, track)"

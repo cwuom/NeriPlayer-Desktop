@@ -5,15 +5,19 @@ import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { useI18n } from 'vue-i18n'
 import { useLibraryStore } from '@/stores/library'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { useTrackSelection } from '@/composables/useTrackSelection'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import { duplicateScanTrackIds, existingScanTrackIds, filterScanTracks } from '@/modules/library/localScanPreview'
+import { sortLocalTracks } from '@/modules/library/localTrackSort'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import M3Input from '@/components/ui/M3Input.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
+import CustomSelect from '@/components/ui/CustomSelect.vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createContextMenuItem, createContextMenuSeparator, type ContextMenuActionItem } from '@/utils/contextMenu'
 
@@ -21,6 +25,8 @@ const props = withDefaults(defineProps<{ embedded?: boolean; searchQuery?: strin
 const { t } = useI18n()
 const library = useLibraryStore()
 const player = usePlayerStore()
+const settings = useSettingsStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const toast = useToastStore()
 const { tracks } = storeToRefs(library)
 const localQuery = ref('')
@@ -79,7 +85,10 @@ async function handleFolderMenuClick(item: ContextMenuActionItem) {
 
 const existingIds = computed(() => existingScanTrackIds(tracks.value, library.playlistTracks))
 const duplicateIds = computed(() => duplicateScanTrackIds(tracks.value))
-const filteredTracks = computed(() => filterScanTracks(tracks.value, {
+const sortOptions = computed(() => (['default', 'modified', 'title', 'artist', 'album', 'duration'] as const)
+  .map(value => ({ value, label: t(`library.local_sort_${value}`) })))
+const sortedTracks = computed(() => sortLocalTracks(tracks.value, settings.localLibrarySortBy, settings.localLibrarySortDescending))
+const filteredTracks = computed(() => filterScanTracks(sortedTracks.value, {
   query: query.value, metadataOnly: metadataOnly.value,
   hideExisting: hideExisting.value && !library.playlistIndexError,
   hideDuplicates: hideDuplicates.value,
@@ -89,10 +98,20 @@ const displayedTracks = computed(() => filteredTracks.value.slice(0, visibleLimi
 const {
   selectedIds, selectedItems, visibleSelectedCount, allVisibleSelected,
   toggleSelected, toggleSelectAllVisible, invertSelectionVisible, leaveSelectionMode, pruneSelection,
-} = useTrackSelection(tracks, filteredTracks)
+} = useTrackSelection(sortedTracks, filteredTracks)
 
-// 标签保存、歌单索引刷新也会替换结果；只有筛选条件变化才收起「显示更多」
-watch([query, metadataOnly, hideExisting, hideDuplicates], () => {
+function changeSortBy(value: string) {
+  const option = sortOptions.value.find(option => option.value === value)
+  if (option) settings.localLibrarySortBy = option.value
+}
+
+function activateTrack(track: TrackInfo) {
+  if (selectedIds.value.size) toggleSelected(track.id)
+  else playTrack(track)
+}
+
+// 标签保存和索引刷新保留已展开的曲目数，筛选或排序变化时重新分页
+watch([query, metadataOnly, hideExisting, hideDuplicates, () => settings.localLibrarySortBy, () => settings.localLibrarySortDescending], () => {
   visibleLimit.value = 100
 })
 watch(filteredTracks, () => {
@@ -256,6 +275,15 @@ onMounted(() => {
         <label><input v-model="hideExisting" type="checkbox" :disabled="!!library.playlistIndexError" />{{ t('library.local_scan_hide_existing') }}</label>
         <label><input v-model="hideDuplicates" type="checkbox" />{{ t('library.local_scan_hide_duplicates') }}</label>
       </div>
+      <div class="scan-sort">
+        <CustomSelect :model-value="settings.localLibrarySortBy" :options="sortOptions" :label="t('library.local_sort')" @update:model-value="changeSortBy" />
+        <button
+          class="scan-icon-button outlined"
+          :title="t(settings.localLibrarySortDescending ? 'download.sort_ascending' : 'download.sort_descending')"
+          :aria-label="t(settings.localLibrarySortDescending ? 'download.sort_ascending' : 'download.sort_descending')"
+          @click="settings.localLibrarySortDescending = !settings.localLibrarySortDescending"
+        ><span class="material-symbols-rounded">{{ settings.localLibrarySortDescending ? 'south' : 'north' }}</span></button>
+      </div>
       <p v-if="library.playlistIndexError" class="scan-message">{{ t('library.local_scan_index_failed') }}</p>
       <p class="scan-summary">{{ t('library.local_scan_summary', { visible: filteredTracks.length, total: tracks.length, existing: existingIds.size, duplicates: duplicateIds.size }) }}</p>
       <TrackSelectionToolbar
@@ -269,7 +297,7 @@ onMounted(() => {
           v-for="track in displayedTracks"
           :key="track.id"
           class="scan-track"
-          :class="{ selected: selectedIds.has(track.id) }"
+          :class="{ selected: selectedIds.has(track.id), playing: player.currentTrack?.audioUrl === track.audioUrl }"
           @contextmenu="trackMenuRef?.open($event, track)"
         >
           <label class="scan-track-select">
@@ -279,7 +307,12 @@ onMounted(() => {
             <img v-if="track.coverUrl && !failedCovers.has(track.id)" :src="track.coverUrl" loading="lazy" alt="" @error="failedCovers.add(track.id)" />
             <span v-else class="material-symbols-rounded">music_note</span>
           </div>
-          <button class="scan-track-info" :class="{ playing: player.currentTrack?.audioUrl === track.audioUrl }" @click="selectedIds.size ? toggleSelected(track.id) : playTrack(track)">
+          <button
+            class="scan-track-info"
+            :class="{ playing: player.currentTrack?.audioUrl === track.audioUrl }"
+            @click="onTrackClick($event, () => activateTrack(track), selectedIds.size > 0)"
+            @dblclick="onTrackDoubleClick($event, () => playTrack(track), selectedIds.size > 0)"
+          >
             <strong>{{ track.title }}</strong>
             <span>{{ track.artist }}<template v-if="track.album"> · {{ track.album }}</template></span>
             <small :title="track.audioUrl">{{ track.audioUrl }}</small>
@@ -377,7 +410,15 @@ onMounted(() => {
     &:has(input:disabled) { cursor: default; color: var(--md-outline); }
   }
 }
-.scan-track { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 14px; &:hover, &.selected { background: var(--md-surface-container); } }
+.scan-sort { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.scan-track {
+  display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 14px;
+  &:hover, &.selected { background: var(--md-surface-container); }
+  &.playing {
+    background: color-mix(in srgb, var(--md-primary) 10%, var(--md-surface));
+    box-shadow: inset 0 0 0 1px var(--md-primary);
+  }
+}
 .scan-track-select {
   display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0;
   margin: 0 -4px 0 -8px; border-radius: var(--radius-full); cursor: pointer;

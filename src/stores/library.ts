@@ -20,6 +20,7 @@ interface BackendTrack {
   url: string
   source?: string
   added_at?: number
+  file_modified_ms?: number
   sync_payload?: Record<string, unknown>
 }
 
@@ -96,6 +97,7 @@ export const useLibraryStore = defineStore('library', () => {
       audioUrl: track.url,
       source: track.source,
       addedAt: track.added_at,
+      fileModifiedMs: track.file_modified_ms,
       syncPayload: track.sync_payload,
     }
   }
@@ -216,6 +218,7 @@ export const useLibraryStore = defineStore('library', () => {
         tracks.value = tracks.value.map(item => item.audioUrl === track.audioUrl ? { ...item, ...tags } : item)
         if (player.currentTrack?.audioUrl === track.audioUrl) player.updateCurrentTrackInfo(tags)
       })
+      await refresh()
     } finally {
       isSavingTags.value = false
     }

@@ -22,6 +22,7 @@ import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import { useLocateCurrentTrack } from '@/composables/useLocateCurrentTrack'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -37,6 +38,7 @@ const log = createLogger('local-playlist-view')
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const downloadStore = useDownloadStore()
 const toast = useToastStore()
 const { t } = useI18n()
@@ -962,12 +964,13 @@ onUnmounted(() => {
           }"
           :data-track-key="trackSelectionKey(track)"
           :style="trackDragStyle(track)"
-          @click="playTrack(track)"
+          @click="onTrackClick($event, () => playTrack(track), selectionMode)"
+          @dblclick="onTrackDoubleClick($event, () => playTrack(track), selectionMode)"
           @pointerenter="prefetchTrack(track)"
           @focusin="prefetchTrack(track)"
           @contextmenu.prevent.stop="openTrackContextMenu($event, track, index)"
         >
-          <button v-if="selectionMode" class="track-select" @click.stop="toggleSelected(trackSelectionKey(track))">
+          <button v-if="selectionMode" class="track-select" @click.stop="onTrackClick($event, () => toggleSelected(trackSelectionKey(track)), true)">
             <span class="material-symbols-rounded filled">{{ selectedIds.has(trackSelectionKey(track)) ? 'check_circle' : 'radio_button_unchecked' }}</span>
           </button>
           <div v-else class="track-index">

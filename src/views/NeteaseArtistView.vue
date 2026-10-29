@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
@@ -25,6 +26,7 @@ const log = createLogger('netease-artist-view')
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const { t } = useI18n()
 const toast = useToastStore()
 
@@ -330,7 +332,8 @@ onUnmounted(() => { generation++ })
           :key="track.id"
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id }"
-          @click="playTrack(track)"
+          @click="onTrackClick($event, () => playTrack(track))"
+          @dblclick="onTrackDoubleClick($event, () => playTrack(track))"
           @contextmenu="trackMenuRef?.open($event, track)"
           @pointerenter="player.prefetchIntent(track)"
           @focusin="player.prefetchIntent(track)"

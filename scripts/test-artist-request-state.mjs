@@ -5,6 +5,15 @@ import ts from 'typescript'
 import { computed, createRenderer, nextTick, onUnmounted, proxyRefs, reactive, ref, watch } from 'vue'
 import { parse } from 'vue/compiler-sfc'
 
+const activation = {}
+new Function('require', 'exports', ts.transpileModule(
+  await readFile(new URL('../src/composables/useTrackActivation.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
+).outputText)(name => {
+  assert.equal(name, '@/stores/settings')
+  return { useSettingsStore: () => ({ doubleClickPlay: false }) }
+}, activation)
+
 function deferred() {
   let resolve, reject
   const promise = new Promise((accept, fail) => { resolve = accept; reject = fail })
@@ -32,6 +41,7 @@ async function mountPage(name, params, cached = null) {
   const dependencies = {
     computed, onUnmounted, ref, watch, useRoute: () => route, useRouter: () => ({ push() {}, back() {} }),
     useI18n: () => ({ t: key => key }), usePlayerStore: () => ({ playAll: (...args) => played.push(args) }),
+    useTrackActivation: activation.useTrackActivation,
     useBiliVideoPartsStore: () => ({ request: (_track, play) => play() }),
     useToastStore: () => ({ error: message => errors.push(message) }), normalizeTrack: track => track,
     useArtistFavorite: () => ({ following: ref(false), changing: ref(false), toggle: async () => {} }),

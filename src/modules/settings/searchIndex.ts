@@ -112,6 +112,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'playback', title: 'settings.crossfade_in_duration' },
   { section: 'playback', title: 'settings.crossfade_out_duration' },
   { section: 'playback', title: 'settings.keep_progress', desc: 'settings.keep_progress_desc' },
+  { section: 'playback', title: 'settings.double_click_play', desc: 'settings.double_click_play_desc', keywords: ['单击', '双击', 'click', 'double click'] },
   { section: 'playback', title: 'settings.remember_long_form_progress', desc: 'settings.remember_long_form_progress_desc' },
   { section: 'playback', title: 'settings.keep_mode', desc: 'settings.keep_mode_desc' },
   { section: 'network', title: 'settings.bypass_proxy', desc: 'settings.bypass_proxy_desc' },

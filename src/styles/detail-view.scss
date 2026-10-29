@@ -258,7 +258,12 @@
     border-radius: var(--radius-md);
   }
   &:hover { background: var(--md-surface-container); }
-  &.active { background: color-mix(in srgb, var(--md-primary) 8%, transparent); }
+  &.active:not(.selected):not(.dragging):not(.landing) {
+    background: color-mix(in srgb, var(--md-primary) 12%, var(--md-surface));
+  }
+  &.active:not(.dragging):not(.landing) {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--md-primary) 45%, transparent);
+  }
   &.active .track-title { color: var(--md-primary); }
 }
 

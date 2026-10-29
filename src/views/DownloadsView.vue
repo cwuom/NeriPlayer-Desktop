@@ -18,6 +18,7 @@ import {
 } from '@/utils/contextMenu'
 import { createLogger } from '@/utils/logger'
 import { useSettingsStore } from '@/stores/settings'
+import { useTrackActivation } from '@/composables/useTrackActivation'
 import CustomSelect from '@/components/ui/CustomSelect.vue'
 import { displayAlbum } from '@/modules/library/albumDisplay'
 
@@ -28,6 +29,7 @@ const downloadStore = useDownloadStore()
 const player = usePlayerStore()
 const toast = useToastStore()
 const settings = useSettingsStore()
+const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const props = defineProps<{ embedded?: boolean; searchQuery?: string }>()
 
 const ownSearchQuery = ref('')
@@ -530,10 +532,11 @@ function progressWidth(task: ActiveDownloadTask) {
             selected: selectedIds.has(track.id),
             playing: player.currentTrack?.id === track.id,
           }"
-          @click="playDownloadedTrack(track)"
+          @click="onTrackClick($event, () => playDownloadedTrack(track), selectionMode)"
+          @dblclick="onTrackDoubleClick($event, () => playDownloadedTrack(track), selectionMode)"
           @contextmenu.prevent.stop="handleDownloadedRowContextMenu($event, track)"
         >
-          <button v-if="selectionMode" class="select-dot" @click.stop="toggleSelected(track.id)">
+          <button v-if="selectionMode" class="select-dot" @click.stop="onTrackClick($event, () => toggleSelected(track.id), true)">
             <span class="material-symbols-rounded filled">{{ selectedIds.has(track.id) ? 'check_circle' : 'radio_button_unchecked' }}</span>
           </button>
 
@@ -767,6 +770,12 @@ function progressWidth(task: ActiveDownloadTask) {
 
   &:hover { background: var(--md-surface-container); }
   &.selected { background: color-mix(in srgb, var(--md-primary) 13%, transparent); }
+  &.playing:not(.selected) {
+    background: color-mix(in srgb, var(--md-primary) 12%, var(--md-surface));
+  }
+  &.playing {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--md-primary) 45%, transparent);
+  }
   &.playing .track-title { color: var(--md-primary); }
 }
 

@@ -28,7 +28,7 @@ const deferred = () => {
   return { promise, resolve, reject }
 }
 async function flush() { for (let i = 0; i < 6; i++) await Promise.resolve() }
-const track = { id: 'local:C:/Music/a.wav', title: 'A', artist: 'Artist', album: 'Album', duration_ms: 1000, url: 'C:/Music/a.wav', cover_url: 'C:/Music/a.png', source: 'local', sync_payload: { sourceStableKey: 'online:1' } }
+const track = { id: 'local:C:/Music/a.wav', title: 'A', artist: 'Artist', album: 'Album', duration_ms: 1000, url: 'C:/Music/a.wav', cover_url: 'C:/Music/a.png', source: 'local', added_at: 5, file_modified_ms: 123456789, sync_payload: { sourceStableKey: 'online:1' } }
 globalThis.navigator ??= { platform: 'Win32' }
 
 async function runtime(options = {}) {
@@ -39,10 +39,10 @@ async function runtime(options = {}) {
     removeItem: key => storage.delete(key),
   }
   const events = new Map(), calls = []
-  const backend = { folders: options.folders ? [...options.folders] : [], scanning: false }
+  const backend = { folders: options.folders ? [...options.folders] : [], scanning: false, track: { ...track } }
   const snapshot = () => ({
     folders: backend.folders.map(path => ({ path, addedAt: 1, trackCount: 1, available: true })),
-    tracks: backend.folders.length ? [track] : [],
+    tracks: backend.folders.length ? [backend.track] : [],
     scanning: backend.scanning,
     skipped: [],
   })
@@ -63,7 +63,10 @@ async function runtime(options = {}) {
       }
       if (command === 'local_library_rescan') { backend.scanning = true; return snapshot() }
       if (command === 'get_local_playlist_tracks') return [track]
-      if (command === 'edit_local_file_tags' && options.editFailure) throw new Error('fixture write failure')
+      if (command === 'edit_local_file_tags') {
+        if (options.editFailure) throw new Error('fixture write failure')
+        backend.track = { ...backend.track, title: args.title, artist: args.artist, album: args.album, file_modified_ms: 987654321 }
+      }
     } },
     '@tauri-apps/api/event': { listen: async (name, callback) => {
       events.set(name, callback)
@@ -102,6 +105,8 @@ async function runtime(options = {}) {
   assert.equal(r.store.folders[0].path, 'C:/Music')
   assert.equal(r.storage.has('neri:last_scan_dir'), false)
   assert.equal(r.store.tracks[0].coverUrl, 'asset:C:/Music/a.png')
+  assert.equal(r.store.tracks[0].fileModifiedMs, 123456789, 'file modification time survives the native snapshot mapping')
+  assert.equal(r.store.tracks[0].addedAt, 5, 'download time stays separate from file modification time')
   assert.deepEqual(r.store.tracks[0].syncPayload, { sourceStableKey: 'online:1' })
   assert.ok(['local-library-changed', 'local-library-progress'].every(name => r.events.has(name)))
   assert.ok(r.calls.every(item => !/create_playlist|add.*playlist|remove.*playlist/.test(item.command)), 'indexing must never modify playlists')
@@ -147,6 +152,7 @@ async function runtime(options = {}) {
   await r.store.ensureStarted()
   await r.store.saveTrackTags(r.store.tracks[0], { title: 'New', artist: 'Artist', album: 'Album' })
   assert.equal(r.store.tracks[0].title, 'New')
+  assert.equal(r.store.tracks[0].fileModifiedMs, 987654321, 'saving tags refreshes the actual file modification time')
   assert.equal(r.calls.find(item => item.command === 'edit_local_file_tags').args.scanRoot, 'C:/Music')
   await assert.rejects(r.store.saveTrackTags({ ...r.store.tracks[0], audioUrl: 'D:/Elsewhere/a.wav' }, { title: 'New', artist: 'Artist', album: 'Album' }), /no longer/)
 }

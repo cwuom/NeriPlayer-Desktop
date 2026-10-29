@@ -133,6 +133,8 @@ Library → Local Files lets you add multiple music folders to a persistent libr
 
 Local playlists support creation, renaming, deletion, sorting, dragging and bulk actions. Local artist details support search, and playback after filtering uses the current filtered list. Title, artist and album can be written back to audio files; the write process checks existing lyrics, covers and other tags.
 
+Settings → Playback Settings → Double-click to play tracks switches library rows between single-click and double-click playback; single-click remains the default. The current track has a full-row highlight and outline, including while paused. Local files can be sorted in ascending or descending order by default order, file modification time, title, artist, album or duration. Sorting preferences are saved, and Play all and Play selected follow the displayed order.
+
 The Library title bar provides entries for playback stats and recent plays; Home's Recently Played entry also opens the history page. You can browse and delete records, and deletion markers participate in cloud sync.
 
 ### Downloads

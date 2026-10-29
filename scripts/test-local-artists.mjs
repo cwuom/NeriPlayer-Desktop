@@ -99,10 +99,20 @@ const withoutImports = ts.factory.updateSourceFile(viewScript, viewScript.statem
 const viewCompiled = ts.transpileModule(ts.createPrinter().printFile(withoutImports), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText
+const activationCompiled = ts.transpileModule(await readFile(new URL('../src/composables/useTrackActivation.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText
 
 async function mountArtist(data = artistTracks) {
   const played = [], shuffled = [], opened = []
+  const settings = Vue.reactive({ doubleClickPlay: false })
+  const activation = {}
+  new Function('require', 'exports', activationCompiled)(name => {
+    assert.equal(name, '@/stores/settings')
+    return { useSettingsStore: () => settings }
+  }, activation)
   const imports = {
+    useTrackActivation: activation.useTrackActivation,
     useRoute: () => ({ params: { name: '鹿乃' } }), useRouter: () => ({ back() {} }),
     useI18n: () => ({ t: key => key }),
     usePlayerStore: () => ({ currentTrack: null, isPlaying: false, playAll: (...args) => played.push(args), shufflePlay: queue => shuffled.push(queue) }),
@@ -134,7 +144,7 @@ async function mountArtist(data = artistTracks) {
   app.mount(root)
   await settle()
   return {
-    root, played, shuffled, opened,
+    root, played, shuffled, opened, settings,
     titles: () => byClass(root, 'track-title').map(textContent),
     async search(value) {
       const input = allNodes(root).find(node => node.type === 'input')
@@ -190,6 +200,26 @@ await test('filtered rows play the selected song while bulk actions retain the c
     byClass(page.root, 'secondary-action')[0].props.onClick()
     assert.equal(page.played[1][0].length, 123)
     assert.equal(page.shuffled[0].length, 123)
+  } finally { page.stop() }
+})
+await test('local artist rows honor double-click playback without changing explicit play actions', async () => {
+  const page = await mountArtist()
+  try {
+    page.settings.doubleClickPlay = true
+    const row = byClass(page.root, 'track-item')[0]
+    row.props.onClick({ detail: 1, currentTarget: row })
+    row.props.onClick({ detail: 2, currentTarget: row })
+    assert.equal(page.played.length, 0)
+    row.props.onDblclick({ detail: 2, currentTarget: row })
+    assert.equal(page.played.length, 1)
+    assert.equal(page.played[0][1], 'song-0')
+    byClass(page.root, 'primary-action')[0].props.onClick()
+    assert.equal(page.played.length, 2)
+    page.settings.doubleClickPlay = false
+    row.props.onClick({ detail: 1, currentTarget: row })
+    row.props.onClick({ detail: 2, currentTarget: row })
+    row.props.onDblclick({ detail: 2, currentTarget: row })
+    assert.equal(page.played.length, 3)
   } finally { page.stop() }
 })
 await test('unmatched search shows a search-empty state and clearing or Escape restores all songs', async () => {

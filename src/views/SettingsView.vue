@@ -115,7 +115,7 @@ const {
   normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-  keepProgress, rememberLongFormProgress, keepPlaybackMode,
+  keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
   showTranslation, showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
   advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
   lowPerformanceMode, coverBlurBg, coverBlurAmount, coverBlurDarken,
@@ -2081,6 +2081,15 @@ useEscapeClose(
           <input type="range" class="m3-slider" v-model.number="crossfadeOutDuration" min="0" max="3000" step="100" />
         </div>
       </template>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">ads_click</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.double_click_play') }}</div>
+          <div class="setting-desc">{{ t('settings.double_click_play_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="doubleClickPlay" /><span class="track"><span class="thumb"><span v-if="doubleClickPlay" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+      </div>
 
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">history</span></div>

@@ -11,6 +11,7 @@ const log = createLogger('settings')
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
 export type ColorMode = 'system' | 'default' | 'cover'
+export type LocalLibrarySortBy = 'default' | 'modified' | 'title' | 'artist' | 'album' | 'duration'
 
 export const YOUTUBE_PLAYBACK_SOURCES = [
   'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
@@ -61,6 +62,9 @@ export interface AppSettings {
   keepProgress: boolean
   rememberLongFormProgress: boolean
   keepPlaybackMode: boolean
+  doubleClickPlay: boolean
+  localLibrarySortBy: LocalLibrarySortBy
+  localLibrarySortDescending: boolean
   showTranslation: boolean
   showRomanization: boolean
   lyricBlur: boolean
@@ -224,6 +228,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   keepProgress: true,
   rememberLongFormProgress: true,
   keepPlaybackMode: true,
+  doubleClickPlay: false,
+  localLibrarySortBy: 'default',
+  localLibrarySortDescending: false,
   showTranslation: true,
   showRomanization: false,
   lyricBlur: true,
@@ -326,6 +333,9 @@ const LEGACY_KEYS: Partial<Record<SettingKey, string>> = {
   crossfadeOutDuration: 'crossfade_out_duration',
   keepProgress: 'keep_progress',
   keepPlaybackMode: 'keep_mode',
+  doubleClickPlay: 'double_click_play',
+  localLibrarySortBy: 'local_library_sort_by',
+  localLibrarySortDescending: 'local_library_sort_descending',
   showTranslation: 'show_translation',
   lyricBlur: 'lyric_blur',
   lyricBlurAmount: 'lyric_blur_amount',
@@ -476,6 +486,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
   if (!('colorMode' in source) && legacyDynamicColor === true) result.colorMode = 'cover'
   if (!['system', 'default', 'cover'].includes(result.colorMode)) result.colorMode = DEFAULT_SETTINGS.colorMode
   if (!['home', 'explore', 'library'].includes(result.defaultScreen)) result.defaultScreen = DEFAULT_SETTINGS.defaultScreen
+  if (!['default', 'modified', 'title', 'artist', 'album', 'duration'].includes(result.localLibrarySortBy)) result.localLibrarySortBy = DEFAULT_SETTINGS.localLibrarySortBy
   if (!['zh-CN', 'zh-TW', 'en', 'ja'].includes(result.locale)) result.locale = DEFAULT_SETTINGS.locale
   if (!['off', 'error', 'warn', 'info', 'debug', 'trace'].includes(result.logLevel)) result.logLevel = DEFAULT_SETTINGS.logLevel
   if (result.themeColor.startsWith('#')) result.themeColor = result.themeColor === '#6750A4' ? 'purple' : DEFAULT_SETTINGS.themeColor
@@ -672,6 +683,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const keepProgress = ref(initial.keepProgress)
   const rememberLongFormProgress = ref(initial.rememberLongFormProgress)
   const keepPlaybackMode = ref(initial.keepPlaybackMode)
+  const doubleClickPlay = ref(initial.doubleClickPlay)
+  const localLibrarySortBy = ref<LocalLibrarySortBy>(initial.localLibrarySortBy)
+  const localLibrarySortDescending = ref(initial.localLibrarySortDescending)
   const showTranslation = ref(initial.showTranslation)
   const showRomanization = ref(initial.showRomanization)
   const lyricBlur = ref(initial.lyricBlur)
@@ -749,7 +763,8 @@ export const useSettingsStore = defineStore('settings', () => {
     showAudioSpec, lyricFontScale, lyricTranslationScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
-    crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation,
+    crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
+    localLibrarySortBy, localLibrarySortDescending, showTranslation,
     showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, coverStyle,
     advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
@@ -848,7 +863,8 @@ export const useSettingsStore = defineStore('settings', () => {
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-    keepProgress, rememberLongFormProgress, keepPlaybackMode, showTranslation, showRomanization,
+    keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
+    localLibrarySortBy, localLibrarySortDescending, showTranslation, showRomanization,
     lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
     advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground,

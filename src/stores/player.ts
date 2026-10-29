@@ -137,6 +137,7 @@ export interface TrackInfo {
   audioUrl: string
   source?: string
   addedAt?: number
+  fileModifiedMs?: number
   syncPayload?: Record<string, unknown>
   playlistKey?: string
 }
