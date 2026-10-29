@@ -1,10 +1,16 @@
-# 🎧 FFmpeg 构建与运行时加载
+# FFmpeg 构建与运行时加载 / FFmpeg Runtime
 
-NeriPlayer Desktop 预览版使用 `neri_ffmpeg.cpp` 提供 C 接口，由 `src-tauri/build.rs` 通过 `cc` 编入程序。编译垫片只需要仓库头文件和 C++17 编译器，**不需要本机安装 FFmpeg 开发包**；实际解码在运行时加载共享库。它不是 `ffmpeg` 命令行程序，也不从系统 PATH 查找命令。
+本目录保存 FFmpeg C 接口垫片和编译所需的固定版本头文件。共享库由运行时加载，随包构建和资源合并由仓库脚本处理。
 
-Rust 入口为 [audio/ffmpeg.rs](../../src/audio/ffmpeg.rs)，解码选择见 [audio/decoder.rs](../../src/audio/decoder.rs)。缺库或版本不兼容会记录原因并尝试内置 Symphonia 后端，不能因此保证所有格式仍可播放。普通 `pnpm tauri build` 不会自动下载或加入这些库；正式分发流程需合并资源配置。
+## 集成边界 / Integration
 
-## 📂 共享库与搜索顺序
+[neri_ffmpeg.cpp](./neri_ffmpeg.cpp) 由 [src-tauri/build.rs](../../build.rs) 通过 `cc` 编入程序。编译垫片只需要仓库头文件和 C++17 编译器，**不要求本机安装 FFmpeg 开发包**。运行时加载的是共享库，不调用 `ffmpeg` 命令行，也不从系统 PATH 查找该命令。
+
+Rust 加载入口见 [audio/ffmpeg.rs](../../src/audio/ffmpeg.rs)，解码后端选择见 [audio/decoder.rs](../../src/audio/decoder.rs)。缺库或版本不兼容时会记录原因并尝试内置 Symphonia 后端，后备路径不保证覆盖所有格式。
+
+普通 `pnpm tauri build` 不会自动下载或加入 FFmpeg 共享库。交付安装包时，必须先准备匹配目标的库，再合并本文的资源配置。
+
+## 共享库与搜索顺序 / Libraries and Loading
 
 | 平台 | 需要同目录放置的共享库 |
 | --- | --- |
@@ -12,7 +18,7 @@ Rust 入口为 [audio/ffmpeg.rs](../../src/audio/ffmpeg.rs)，解码选择见 [a
 | Linux | `libavutil.so.61`、`libswresample.so.7`、`libavcodec.so.63`、`libavformat.so.63` |
 | macOS | `libavutil.61.dylib`、`libswresample.7.dylib`、`libavcodec.63.dylib`、`libavformat.63.dylib` |
 
-垫片直接加载 avutil、avcodec、avformat，swresample 是 avcodec / Opus 解码所需依赖，不能遗漏。动态库需与应用的操作系统、架构一致。当前头文件版本为 avutil 61.1.102、avcodec 63.1.102、avformat 63.1.102；运行时检查主版本相同、次版本不低于头文件版本。仅文件名相同并不足以证明 ABI 与组件兼容。
+垫片直接加载 avutil、avcodec、avformat；swresample 是 avcodec / Opus 解码依赖，分发时也需保留。库文件必须匹配应用的操作系统和架构。当前头文件版本为 avutil 61.1.102、avcodec 63.1.102、avformat 63.1.102；运行时要求主版本相同、次版本不低于头文件版本。文件名相同仍需满足 ABI、组件和依赖要求。
 
 依次尝试以下目录：
 
@@ -22,11 +28,11 @@ Rust 入口为 [audio/ffmpeg.rs](../../src/audio/ffmpeg.rs)，解码选择见 [a
 4. 仅 Debug：仓库 `.cache/ffmpeg-build/<os>-<arch>/`，再查 `.cache/ffmpeg/<os>-<arch>/bin`（Windows）或 `lib`（其它平台）。
 5. 仅 Linux，最后兜底：发行版的系统库目录 `/usr/lib/<多架构三元组>`、`/usr/local/lib`、`/usr/lib64`、`/usr/lib`、`/lib64`、`/lib`。
 
-匹配后使用第一份成功加载的库。结果在进程内缓存，调整目录或替换库后重启应用/测试进程。Release 不自动查开发缓存；在开发缓存里放库不能证明安装包已经包含它们。
+采用第一个成功加载的目录，结果在进程内缓存。调整目录或替换库后应重启应用或测试进程。Release 不自动搜索开发缓存；开发缓存中的库不会因此进入安装包。
 
-第 5 条排在随包目录之后，只是给「发行版已经装了同版本 FFmpeg」的机器兜底：Arch 的 `ffmpeg 9.0.2` 正好提供 avutil 61 / avcodec 63 / avformat 63，实测可直接解码 Opus、E-AC-3、FLAC。版本检查仍然生效——主版本不同或次版本低于头文件时该目录会被判为失败并记进原因，不会被误用，也不会与随包库混用（一次只加载同一个目录里的三个库）。
+Linux 系统目录排在随包目录之后，仅作为兜底。加载器对每个候选目录中的三个直接加载库执行版本检查，拒绝主版本不同或次版本不足的库，并记录失败原因。系统库是否可用取决于该机器实际安装的版本、组件和依赖，需通过原生解码测试确认。
 
-## 🏗️ 准备共享库
+## 准备共享库 / Building Libraries
 
 从仓库根目录运行 [build-ffmpeg.sh](../../../scripts/ffmpeg/build-ffmpeg.sh)：
 
@@ -34,7 +40,7 @@ Rust 入口为 [audio/ffmpeg.rs](../../src/audio/ffmpeg.rs)，解码选择见 [a
 bash scripts/ffmpeg/build-ffmpeg.sh <FFmpeg目标>
 ```
 
-脚本固定下载 FFmpeg **9.0.2** 源码并校验脚本中的 SHA-256；源码签名曾被核对的记录在脚本注释中，构建时执行的是哈希校验，不是重新在线验签。它只启用所列音频解码器、解封装器和 parser，不构建 CLI、网络、编码器或滤镜；不会加入 `--enable-gpl` / `--enable-nonfree`。
+脚本固定下载 FFmpeg **9.0.2**，按脚本中的 SHA-256 校验源码。脚本注释保留源码签名的历史核对记录；每次构建实际执行哈希校验，不会重新在线验签。组件清单仅启用所列音频解码器、解封装器和 parser，关闭 CLI、网络、编码器与滤镜，不加入 `--enable-gpl` / `--enable-nonfree`。
 
 | FFmpeg 目标 | 应用 Rust 目标 | 构建方式 |
 | --- | --- | --- |
@@ -64,11 +70,11 @@ CROSS_CC=x86_64-w64-mingw32-clang bash scripts/ffmpeg/build-ffmpeg.sh windows-x8
 - `.cache/ffmpeg-build/<目标>/`：四个共享库、LGPL `LICENSE.txt`、`BUILDINFO.txt`，后者记录源码地址、哈希、configure 参数及每个库的 SHA-256。
 - `.cache/ffmpeg-build/work/`：源码、构建和安装中间目录。
 
-脚本检查所有指定组件是否实际启用，缺组件会失败；Linux 校验 `$ORIGIN` RUNPATH，macOS 对 strip 后的 dylib 重新 ad-hoc 签名。脚本重建会替换自身的目标输出与中间目录，不要把用户文件放在那里。
+脚本会核对指定组件，缺组件即失败；Linux 检查 `$ORIGIN` RUNPATH，macOS 对 strip 后的 dylib 重新 ad-hoc 签名。重建会替换脚本管理的目标输出与中间目录，用户文件应放在这些目录之外。
 
 可选配置：第二个参数改变输出根目录，`FFMPEG_WORK_DIR` 改工作目录，`JOBS` 控制并发，`CROSS_PREFIX` / `CROSS_CC` 改 Windows 工具链，`MACOSX_DEPLOYMENT_TARGET` 改 macOS 下限。`FFMPEG_DISABLE_ASM=1` 可用于无 nasm 的本地检查，但会降低性能；分发构建应与工作流保持一致。多个目标同时构建时分配不同 `FFMPEG_WORK_DIR`，避免共享源码目录被相互删除。
 
-## 📦 合并安装包配置
+## 合并安装包配置 / Packaging
 
 [bundle-config.mjs](../../../scripts/ffmpeg/bundle-config.mjs) 根据 `BUILDINFO.txt` 逐个核对库文件和 SHA-256，输出 Tauri 合并配置。所有命令从仓库根目录运行。
 
@@ -105,9 +111,9 @@ node scripts/ffmpeg/bundle-config.mjs <目标> <输出根目录> <配置文件�
 pnpm tauri build --config <配置文件路径> -- --locked
 ```
 
-`NERI_FFMPEG_DIR` 只控制运行时查找，不会将库加入安装包。macOS 使用 ad-hoc 签名，非 Apple 公证；Release 工作流会核查随包 dylib 签名和架构。自行修改签名方式时，保持应用与共享库的签名及加载约束一致。
+`NERI_FFMPEG_DIR` 只控制运行时查找，不负责打包资源。macOS 当前采用 ad-hoc 签名；Release 工作流检查随包 dylib 的签名和架构，这不代表 Apple 公证。修改签名方式时，应同时核查应用与共享库的签名及加载约束。
 
-## 🧪 验证与诊断
+## 验证与诊断 / Verification
 
 配置生成逻辑检查：
 
@@ -135,11 +141,11 @@ NERI_FFMPEG_DIR="$PWD/.cache/ffmpeg-build/<目标>" NERI_REQUIRE_FFMPEG=1 \
   cargo test --manifest-path src-tauri/Cargo.toml --locked --lib audio::decoder
 ```
 
-未设 `NERI_REQUIRE_FFMPEG=1` 时，部分依赖 FFmpeg 的测试缺库会跳过。`build.yml` 使用随包构建产物和该变量，在 Windows x64、macOS arm64、Linux x64 上执行解码检查；macOS Intel 当前只有对应 Rust check 与构建流程，不能据此声称具有同样的解码测试覆盖。
+未设 `NERI_REQUIRE_FFMPEG=1` 时，部分 FFmpeg 测试遇到缺库会跳过。[build.yml](../../../.github/workflows/build.yml) 的解码 job 使用随包构建产物和该变量，矩阵包括 Windows x64、macOS arm64、Linux x64。macOS Intel 有 Rust check 与构建流程，尚未列入同一解码测试矩阵。
 
-遇到加载失败，检查目录、操作系统/架构、版本、swresample 依赖和库签名，并查 `audio-decoder` 日志。修改后以新进程重跑。验证交付包时还需检查解压后的资源、实际启动和播放/seek/切歌；仓库缓存中的解码测试不能代替安装包运行验证。
+加载失败时，检查搜索目录、操作系统与架构、库版本、swresample 依赖和签名，再查看 `audio-decoder` 日志。替换后以新进程重跑。交付包还需检查解压后的资源、应用启动和播放、seek、切歌行为；仓库缓存中的解码测试不能代替安装包运行验证。
 
-## ⚖️ 许可与升级
+## 来源、许可与升级 / Provenance and Updates
 
 共享库为未启用 GPL/nonfree 组件的 **LGPL-2.1-or-later** 构建；保留许可证、构建信息和完整对应源码。Release 工作流附源码包和构建脚本，不能仅分发 DLL/dylib/so 而丢弃这些资料。
 
@@ -150,4 +156,4 @@ NERI_FFMPEG_DIR="$PWD/.cache/ffmpeg-build/<目标>" NERI_REQUIRE_FFMPEG=1 \
 3. 同步检查结构体布局、函数签名与 Rust C 接口；主版本变化同步库名、版本说明、测试、构建脚本版本与源码哈希。
 4. 重新核查解码器/容器/parser 清单，执行随包库解码测试、配置检查和平台安装包验证。
 
-不要单独替换版本宏或仅为了通过校验修改 `BUILDINFO.txt`。主版本不匹配的系统 FFmpeg 不能替代当前随包库；主版本一致、次版本不低于头文件的系统库可以按上面的第 5 条兜底使用。
+版本宏应与实际头文件一致，`BUILDINFO.txt` 应准确记录分发库的来源和哈希，不应单独改写它们以绕过校验。主版本不匹配的系统 FFmpeg 不能替代当前随包库；主版本一致、次版本满足要求的系统库可进入 Linux 兜底加载流程，仍需验证实际解码。通用构建要求见根目录 [贡献指南](../../../CONTRIBUTING.md)。
