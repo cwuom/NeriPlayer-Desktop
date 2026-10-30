@@ -93,6 +93,7 @@ import { writeClipboardText } from '@/utils/clipboard'
 import { playbackSessionTrackKey } from '@/modules/playback/playbackRequest'
 import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
+import { readImageBytes, safeFileName, saveImageWithDialog } from '@/utils/imageTransfer'
 import { summarizeLogError } from '@/utils/logSanitizer'
 import { neteaseSongArtists } from '@/modules/library/artistNavigation'
 import { splitArtistNames } from '@/modules/library/localArtists'
@@ -1115,29 +1116,6 @@ function handleContextMenuClick(item: ContextMenuActionItem) {
   }
 }
 
-/** 网络封面走后端代理（带 Referer，绕开图床的跨域限制），本地封面直接读 asset 地址 */
-async function readCoverBytes(src: string): Promise<{ bytes: Uint8Array; extension: string }> {
-  let dataUrl = src.startsWith('data:') ? src : ''
-  if (!dataUrl && normalizeProxiedCoverUrl(src)) dataUrl = await resolveCoverImage(src)
-  const match = /^data:image\/([\w+.-]+);base64,(.*)$/is.exec(dataUrl)
-  if (match) {
-    const binary = atob(match[2])
-    const bytes = new Uint8Array(binary.length)
-    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
-    return { bytes, extension: imageExtension(match[1]) }
-  }
-  const response = await fetch(src)
-  if (!response.ok) throw new Error(`cover request failed: ${response.status}`)
-  const blob = await response.blob()
-  return { bytes: new Uint8Array(await blob.arrayBuffer()), extension: imageExtension(blob.type.replace(/^image\//, '')) }
-}
-
-function imageExtension(subtype: string): string {
-  const normalized = subtype.toLowerCase()
-  if (normalized === 'jpeg' || normalized === 'pjpeg') return 'jpg'
-  return /^(png|webp|gif|avif|bmp)$/.test(normalized) ? normalized : 'jpg'
-}
-
 async function saveCoverArt() {
   closeContextMenu()
   // Export the original artwork, not the detail-sized URL used for display.
@@ -1145,20 +1123,9 @@ async function saveCoverArt() {
   if (!src) return
 
   try {
-    const { bytes, extension } = await readCoverBytes(src)
-    const { save } = await import('@tauri-apps/plugin-dialog')
-    const baseName = (player.currentTrack?.title || 'cover').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'cover'
-    const filePath = await save({
-      defaultPath: `${baseName}.${extension}`,
-      filters: [{ name: 'Image', extensions: [extension] }],
-    })
-    if (!filePath) return
-
-    await invoke('save_file_bytes', {
-      path: filePath,
-      data: Array.from(bytes),
-    })
-    toast.success(t('player.cover_saved'))
+    const { bytes, extension } = await readImageBytes(src)
+    const baseName = safeFileName(player.currentTrack?.title || '', 'cover')
+    if (await saveImageWithDialog(bytes, baseName, extension)) toast.success(t('player.cover_saved'))
   } catch (e) {
     log.error('Save cover failed:', e)
     toast.error(t('player.cover_save_failed'))

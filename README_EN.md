@@ -223,6 +223,11 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
 - **Lyrics display and matching**: line/word sync, translations, romanization, fonts and sizes, lyric blur,
   local/embedded lyrics, and per-source/per-track offsets.
   Manually match lyrics from NetEase, QQ Music, Kugou, LRCLIB, and AMLL TTML.
+- **Lyric share poster**: right-click a lyric line, choose "Select lyrics", tick the lines, then either copy
+  the selected text or render a poster drawn locally: blurred cover background, brand mark, lyric block and
+  an info bar with the cover thumbnail. Layout counts wrapped visual lines (up to 24); the canvas is 1080
+  wide and grows between 1080 and 2400. Lyric text and the rendered image stay on this machine, and export
+  is a PNG file or a clipboard image.
 - **Independent desktop lyrics**: one/two/three lines, word or whole-line display, translations/romanization,
   fonts, gradients, outlines, shadows, opacity, backgrounds, saved position and size, locking, and click-through.
   On Windows, WebView2 disconnect error `0x80010108` during window creation triggers one retry
@@ -529,6 +534,9 @@ do not attach full configuration exports or databases.
   Metadata processing failures can also leave an already-transferred task marked as failed.
 - **Lyric matching**: word timing, translations, and phonetics depend on source data.
   Complete timing or translations cannot be generated when the corresponding content is absent.
+- **Clipboard images**: copying the poster relies on the system bitmap clipboard, available on Windows and
+  macOS. Wayland sessions have no standard bitmap clipboard protocol, so the copy may fail there; save the
+  PNG file instead.
 - **System integration**: tray behavior, click-through, global shortcuts, and media sessions depend on the OS and desktop environment.
   Shortcuts may conflict with other applications.
 - **Linux rendering**: the Linux build is a test environment and rendering depends on WebKitGTK; proprietary NVIDIA drivers additionally enable compatibility handling and reduced full-page transitions.
