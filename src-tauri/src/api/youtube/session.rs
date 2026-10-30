@@ -47,10 +47,15 @@ fn is_rotating_session_cookie(name: &str) -> bool {
         .any(|key| key.eq_ignore_ascii_case(name))
 }
 
-pub(crate) fn cookie_key_allowed(name: &str) -> bool {
+pub(crate) fn canonical_cookie_key(name: &str) -> Option<&'static str> {
     PERSISTED_COOKIE_KEYS
         .iter()
-        .any(|key| key.eq_ignore_ascii_case(name))
+        .copied()
+        .find(|key| key.eq_ignore_ascii_case(name))
+}
+
+pub(crate) fn cookie_key_allowed(name: &str) -> bool {
+    canonical_cookie_key(name).is_some()
         || name.starts_with("__Secure-")
         || name.starts_with("__Host-")
 }

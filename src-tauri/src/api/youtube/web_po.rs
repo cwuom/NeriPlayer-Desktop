@@ -186,7 +186,7 @@ pub(super) async fn mint(
     force_refresh: bool,
 ) -> AppResult<String> {
     let _access = ACCESS.lock().await;
-    if app.get_webview_window("youtube-login").is_some() {
+    if app.webview_windows().keys().any(|label| label == "youtube-login" || label.starts_with("youtube-login-")) {
         return Err(AppError::Api(
             "YouTube playback token waits for foreground login".into(),
         ));

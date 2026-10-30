@@ -623,12 +623,13 @@ fn map_android_auth(config: &AndroidConfigFile) -> Option<ImportedAuth> {
             } else {
                 android_cookie_entries(&auth.cookies, "youtube")
             };
-            (!cookies.is_empty()).then_some(YouTubeAuth {
+            let imported = YouTubeAuth {
                 cookies,
                 nickname: None,
                 avatar_url: None,
                 auth_user: crate::auth::state::youtube_auth_user(&auth.x_goog_auth_user).map(String::from),
-            })
+            };
+            imported.has_login().then_some(imported)
         });
     // 没有 Cookie 的授权头无法恢复桌面会话，只有明确空段落表示清除该平台
     let replace = [
@@ -2068,7 +2069,18 @@ pub async fn import_config(
     let settings = store::save_settings(&app, settings)?;
     state.rebuild_http(settings.bypass_proxy);
 
+    let mut changed_auth_platforms = Vec::new();
     if let Some(imported_auth) = imported.auth {
+        use crate::auth::coordination::AuthPlatform;
+        let mut auth_operations = state.auth_operations.lock();
+        for (platform, replace) in [AuthPlatform::Netease, AuthPlatform::Bilibili, AuthPlatform::Youtube]
+            .into_iter()
+            .zip(imported_auth.replace)
+        {
+            if replace {
+                auth_operations.begin(platform);
+            }
+        }
         let mut auth = state.auth.lock();
         let previous_auth = auth.clone();
         for (platform, replace) in ["netease", "bilibili", "youtube"]
@@ -2078,6 +2090,7 @@ pub async fn import_config(
             if !replace {
                 continue;
             }
+            changed_auth_platforms.push(platform);
             crate::auth::cookies::expire_platform_cookies(
                 &state.cookie_jar,
                 &previous_auth,
@@ -2145,6 +2158,7 @@ pub async fn import_config(
             .map(|listen_together| listen_together.user_uuid)
             .unwrap_or_default(),
         "platform": if android { "android" } else { "pc" },
+        "changedAuthPlatforms": changed_auth_platforms,
     }))
 }
 
@@ -3005,15 +3019,111 @@ mod tests {
             "bilibili": {"cookies": [], "mid": 456},
             "youtube": {"cookies": [], "nickname": "previous"},
         })).unwrap();
-        let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
-            "neteaseAuth": {"cookies": {}},
-        })).unwrap();
+        for (section, replaced) in [("neteaseAuth", 0), ("biliAuth", 1), ("youTubeAuth", 2)] {
+            for empty in [serde_json::json!({}), serde_json::json!({"cookies": {}})] {
+                let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+                    (section): empty,
+                })).unwrap();
+                let imported = super::map_android_auth(&config).unwrap();
+                let mut expected = [false; 3];
+                expected[replaced] = true;
+                assert_eq!(imported.replace, expected);
+                let merged = super::merge_imported_auth(&previous, imported);
+                assert_eq!(merged.netease.is_none(), replaced == 0);
+                assert_eq!(merged.bilibili.is_none(), replaced == 1);
+                assert_eq!(merged.youtube.is_none(), replaced == 2);
+                if let Some(bilibili) = merged.bilibili {
+                    assert_eq!(bilibili.mid, Some(456));
+                }
+                if let Some(youtube) = merged.youtube {
+                    assert_eq!(youtube.nickname.as_deref(), Some("previous"));
+                }
+            }
+        }
+        assert!(super::map_android_auth(&super::AndroidConfigFile::default()).is_none());
+    }
+
+    #[test]
+    fn android_cookie_name_aliases_restore_authenticated_platforms() {
+        for (netease, bilibili, youtube) in [
+            ("music_u", "sessdata", "sapisid"),
+            ("MuSiC_U", "SeSsDaTa", "__secure-1papisid"),
+            ("MUSIC_U", "SESSDATA", "__SECURE-3PAPISID"),
+        ] {
+            let config = super::AndroidConfigFile {
+                netease_auth: Some(super::AndroidCookieAuth {
+                    cookies: [(netease.into(), "fixture".into())].into_iter().collect(),
+                }),
+                bili_auth: Some(super::AndroidCookieAuth {
+                    cookies: [(bilibili.into(), "fixture".into())].into_iter().collect(),
+                }),
+                you_tube_auth: Some(super::AndroidYouTubeAuth {
+                    cookies: [(youtube.into(), "fixture".into())].into_iter().collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let imported = super::map_android_auth(&config).unwrap();
+            assert_eq!(imported.replace, [true; 3]);
+            assert!(imported.state.netease.unwrap().has_login(), "{netease}");
+            assert!(imported.state.bilibili.unwrap().has_login(), "{bilibili}");
+            assert!(imported.state.youtube.unwrap().has_login(), "{youtube}");
+        }
+        for name in ["sapisid", "__secure-1papisid", "__SECURE-3PAPISID"] {
+            let config = super::AndroidConfigFile {
+                you_tube_auth: Some(super::AndroidYouTubeAuth {
+                    cookie_header: format!("{name}=fixture"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let imported = super::map_android_auth(&config).unwrap();
+            assert!(imported.state.youtube.unwrap().has_login(), "header: {name}");
+        }
+    }
+
+    #[test]
+    fn android_youtube_visitor_cookies_do_not_replace_an_authenticated_session() {
+        let previous = AuthState {
+            youtube: Some(crate::auth::state::YouTubeAuth {
+                cookies: vec![crate::auth::state::CookieEntry {
+                    name: "SAPISID".into(), value: "existing".into(), domain: ".youtube.com".into(),
+                }],
+                nickname: Some("existing account".into()),
+                avatar_url: None,
+                auth_user: Some("2".into()),
+            }),
+            ..Default::default()
+        };
+        for name in ["SID", "VISITOR_INFO1_LIVE", "PREF", "unknown_cookie"] {
+            for header in [false, true] {
+                let youtube = if header {
+                    super::AndroidYouTubeAuth { cookie_header: format!("{name}=fixture"), ..Default::default() }
+                } else {
+                    super::AndroidYouTubeAuth { cookies: [(name.into(), "fixture".into())].into_iter().collect(), ..Default::default() }
+                };
+                let config = super::AndroidConfigFile {
+                    netease_auth: Some(super::AndroidCookieAuth { cookies: Default::default() }),
+                    you_tube_auth: Some(youtube),
+                    ..Default::default()
+                };
+                let imported = super::map_android_auth(&config).unwrap();
+                assert_eq!(imported.replace, [true, false, false], "{name}, header: {header}");
+                assert!(imported.state.youtube.is_none());
+                let merged = super::merge_imported_auth(&previous, imported);
+                let youtube = merged.youtube.unwrap();
+                assert!(youtube.has_login());
+                assert_eq!(youtube.get_sapisid(), Some("existing"));
+                assert_eq!(youtube.selected_auth_user(), Some("2"));
+            }
+        }
+        let config = super::AndroidConfigFile {
+            you_tube_auth: Some(super::AndroidYouTubeAuth::default()),
+            ..Default::default()
+        };
         let imported = super::map_android_auth(&config).unwrap();
-        assert_eq!(imported.replace, [true, false, false]);
-        let merged = super::merge_imported_auth(&previous, imported);
-        assert!(merged.netease.is_none());
-        assert_eq!(merged.bilibili.unwrap().mid, Some(456));
-        assert_eq!(merged.youtube.unwrap().nickname.as_deref(), Some("previous"));
+        assert_eq!(imported.replace, [false, false, true]);
+        assert!(super::merge_imported_auth(&previous, imported).youtube.is_none());
     }
 
     #[test]

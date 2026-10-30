@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::auth::state::{CookieEntry, YouTubeAuth};
 use crate::error::{AppError, AppResult};
@@ -76,7 +77,17 @@ static BOOTSTRAP_CACHE: std::sync::Mutex<Option<CachedBootstrap>> =
     std::sync::Mutex::new(None);
 
 fn bootstrap_account_key(auth: &YouTubeAuth) -> String {
-    format!("{}|{}", auth.get_sapisid().unwrap_or_default(), auth.selected_auth_user().unwrap_or("0"))
+    let mut hash = Sha256::new();
+    hash.update(auth.selected_auth_user().unwrap_or("0").as_bytes());
+    hash.update([0]);
+    // SID 和 LOGIN_INFO 等 Cookie 也会改变页面会话，缓存键与实际 Music 请求保持一致
+    for (name, value) in select_cookie_values(&auth.cookies, MUSIC_HOST) {
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update(value.as_bytes());
+        hash.update([0]);
+    }
+    hex::encode(hash.finalize())
 }
 
 /// 取一份可用的 bootstrap，命中缓存则直接返回
@@ -465,6 +476,43 @@ mod tests {
         let default = bootstrap_account_key(&auth);
         auth.auth_user = Some("2".into());
         assert_ne!(default, bootstrap_account_key(&auth));
+    }
+
+    #[test]
+    fn account_bootstrap_cache_tracks_music_identity_cookie_changes() {
+        let auth: YouTubeAuth = serde_json::from_value(json!({
+            "cookies": [
+                {"name":"SAPISID", "value":"fixture-sapisid", "domain":".youtube.com"},
+                {"name":"SID", "value":"fixture-sid", "domain":".youtube.com"},
+                {"name":"LOGIN_INFO", "value":"fixture-login", "domain":"music.youtube.com"},
+            ],
+            "auth_user": "2",
+        })).unwrap();
+        let original = bootstrap_account_key(&auth);
+        for name in ["SID", "LOGIN_INFO"] {
+            let mut updated = auth.clone();
+            updated.cookies.iter_mut().find(|cookie| cookie.name == name).unwrap().value = "changed".into();
+            assert_ne!(original, bootstrap_account_key(&updated), "Music cookie {name} changed");
+        }
+    }
+
+    #[test]
+    fn account_bootstrap_cache_ignores_unrelated_domains_and_cookie_order() {
+        let mut auth: YouTubeAuth = serde_json::from_value(json!({
+            "cookies": [
+                {"name":"SAPISID", "value":"fixture-sapisid", "domain":".youtube.com"},
+                {"name":"SID", "value":"fixture-music", "domain":"music.youtube.com"},
+                {"name":"SID", "value":"fixture-google", "domain":".google.com"},
+                {"name":"LOGIN_INFO", "value":"fixture-web", "domain":"www.youtube.com"},
+            ],
+            "auth_user": "2",
+        })).unwrap();
+        let original = bootstrap_account_key(&auth);
+        auth.cookies[2].value = "changed-google".into();
+        auth.cookies[3].value = "changed-web".into();
+        assert_eq!(original, bootstrap_account_key(&auth));
+        auth.cookies.reverse();
+        assert_eq!(original, bootstrap_account_key(&auth));
     }
 
     #[test]

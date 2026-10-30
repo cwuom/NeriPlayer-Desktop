@@ -837,16 +837,19 @@ export const useSyncStore = defineStore('sync', () => {
   }
 
   async function importConfig(options: ConfigImportOptions = {}) {
-    const generations = {
-      github: invalidateConfiguration('github'),
-      webdav: invalidateConfiguration('webdav'),
-    }
+    const generations = { ...configurationGeneration }
     const toast = useToastStore()
     const settings = useSettingsStore()
     const auth = useAuthStore()
     try {
       const result = await invoke<any>('import_config', { ...options })
       if (!result.success) return result
+      // 预检不取消配置请求，等待期间的新配置也不能被旧导入覆盖
+      for (const backend of ['github', 'webdav'] as const) {
+        if (isCurrentConfiguration(backend, generations[backend])) {
+          generations[backend] = invalidateConfiguration(backend)
+        }
+      }
       settings.applySnapshot(result.settings)
       if (result.listenTogetherUserUuid) {
         localStorage.setItem('neri:lt-uuid', result.listenTogetherUserUuid)
@@ -854,7 +857,7 @@ export const useSyncStore = defineStore('sync', () => {
         localStorage.removeItem('neri:lt-uuid')
       }
       if (result.settings?.locale) setLocale(result.settings.locale, false)
-      await auth.checkStatus()
+      await auth.checkStatus({ invalidatePending: result.changedAuthPlatforms ?? [] })
       for (const platform of ['netease', 'bilibili', 'youtube']) auth.notifyAuthChanged(platform)
       await loadConfigs(generations)
       toast.success(t('settings.import_config_success'))

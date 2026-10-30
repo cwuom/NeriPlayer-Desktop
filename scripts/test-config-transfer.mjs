@@ -8,6 +8,7 @@ const calls = []
 const notices = []
 const applied = []
 const accountChanges = []
+const accountChecks = []
 let response = { success: false, requiresPassword: true, filePath: 'fixture.json' }
 const storage = new Map()
 globalThis.localStorage = {
@@ -31,7 +32,7 @@ const mocks = {
   './lyricOffset': { useLyricOffsetStore: () => ({}) },
   './biliVideoSkip': { useBiliVideoSkipStore: () => ({}) },
   './settings': { useSettingsStore: () => ({ snapshot: () => ({ locale: 'en' }), applySnapshot: value => applied.push(value) }) },
-  './auth': { useAuthStore: () => ({ checkStatus: async () => accountChanges.push('check'), notifyAuthChanged: platform => accountChanges.push(platform) }) },
+  './auth': { useAuthStore: () => ({ checkStatus: async options => { accountChecks.push(options); accountChanges.push('check') }, notifyAuthChanged: platform => accountChanges.push(platform) }) },
   '@/i18n': { __esModule: true, default: { global: { t: key => key } }, setLocale() {} },
   '@/utils/logger': { createLogger: () => ({ error() {} }) },
 }
@@ -69,13 +70,18 @@ assert.equal(result.success, false)
 assert.equal(result.error, 'settings.config_decryption_failed')
 assert.equal(notices.at(-1), 'settings.config_decryption_failed')
 assert.deepEqual(applied, [])
-response = { success: true, settings: { locale: 'zh-CN' }, listenTogetherUserUuid: 'fixture-uuid', platform: 'android' }
+assert.deepEqual(accountChecks, [], 'preflight and failure must not cancel pending authentication')
+response = { success: true, settings: { locale: 'zh-CN' }, listenTogetherUserUuid: 'fixture-uuid', platform: 'android', changedAuthPlatforms: ['netease'] }
 await store.importConfig({ filePath: 'fixture.json', password: ' fixture password ', confirmedAndroid: true })
 assert.deepEqual(calls.findLast(call => call.command === 'import_config').args, {
   filePath: 'fixture.json', password: ' fixture password ', confirmedAndroid: true,
 })
 assert.deepEqual(applied, [{ locale: 'zh-CN' }])
 assert.deepEqual(accountChanges, ['check', 'netease', 'bilibili', 'youtube'], 'import must refresh IDs and invalidate old account caches')
+assert.deepEqual(accountChecks, [{ invalidatePending: ['netease'] }], 'only imported account platforms may cancel pending authentication')
 assert.equal(storage.get('neri:lt-uuid'), 'fixture-uuid')
 assert.equal(notices.at(-1), 'settings.import_config_success')
+response = { success: true, settings: {}, changedAuthPlatforms: [] }
+await store.importConfig()
+assert.deepEqual(accountChecks.at(-1), { invalidatePending: [] }, 'a settings-only import must preserve pending authentication')
 console.log('PASS configuration IPC options, password/Android preflight, failure safety, and account refresh')

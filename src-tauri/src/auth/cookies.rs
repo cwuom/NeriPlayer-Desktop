@@ -300,6 +300,16 @@ pub fn cookie_name_allowed(name: &str, platform: &str) -> bool {
     }
 }
 
+fn canonical_cookie_name<'a>(name: &'a str, platform: &str) -> &'a str {
+    let canonical = match platform {
+        "netease" => NETEASE_COOKIE_KEYS.iter().copied().find(|key| key.eq_ignore_ascii_case(name)),
+        "bilibili" => BILIBILI_COOKIE_KEYS.iter().copied().find(|key| key.eq_ignore_ascii_case(name)),
+        "youtube" => crate::api::youtube::session::canonical_cookie_key(name),
+        _ => None,
+    };
+    canonical.unwrap_or(name)
+}
+
 fn read_jar_cookies(jar: &Arc<Jar>, domain: &str) -> HashMap<String, String> {
     let Ok(url) = domain_to_url(domain).parse::<Url>() else {
         return HashMap::new();
@@ -417,6 +427,8 @@ pub fn parse_raw_cookie_text(raw: &str, platform: &str) -> Vec<CookieEntry> {
             {
                 continue;
             }
+            // 白名单兼容大小写输入，落盘和登录判定仍使用平台定义的标准名
+            let name = canonical_cookie_name(name, platform);
             if let Some(existing) = entries.iter_mut().find(|entry| entry.name == name) {
                 existing.value = value.to_string();
             } else {
@@ -459,6 +471,34 @@ fn domain_to_url(domain: &str) -> String {
 mod tests {
     use super::*;
     use crate::auth::state::{NeteaseAuth, YouTubeAuth};
+
+    #[test]
+    fn raw_cookie_parser_canonicalizes_allowlisted_names_and_deduplicates_aliases() {
+        for (platform, keys) in [
+            ("netease", NETEASE_COOKIE_KEYS),
+            ("bilibili", BILIBILI_COOKIE_KEYS),
+            ("youtube", &[
+                "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "SID",
+                "LOGIN_INFO", "VISITOR_INFO1_LIVE", "__Secure-1PSIDTS", "PREF",
+            ][..]),
+        ] {
+            for canonical in keys {
+                for alias in [canonical.to_ascii_lowercase(), canonical.to_ascii_uppercase()] {
+                    let entries = parse_raw_cookie_text(&format!("{alias}=fixture"), platform);
+                    assert!(entries.iter().any(|entry| entry.name == *canonical && entry.value == "fixture"), "{platform}: {alias}");
+                }
+            }
+        }
+        for (platform, raw, canonical) in [
+            ("netease", "music_u=first; MuSiC_U=last", "MUSIC_U"),
+            ("bilibili", "sessdata=first; SeSsDaTa=last", "SESSDATA"),
+            ("youtube", "sapisid=first; SaPiSiD=last", "SAPISID"),
+        ] {
+            let entries = parse_raw_cookie_text(raw, platform);
+            assert!(entries.iter().filter(|entry| entry.name == canonical).all(|entry| entry.value == "last"));
+            assert_eq!(entries.iter().filter(|entry| entry.name == canonical && entry.domain != ".google.com").count(), 1);
+        }
+    }
 
     #[test]
     fn raw_cookie_parser_accepts_all_supported_separators() {

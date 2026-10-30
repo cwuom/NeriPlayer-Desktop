@@ -311,6 +311,34 @@ await regression('stale upgrade approval does not start sync for a disconnected 
   assert.ok(!calls.slice(before).some(call => call.command === 'sync_github'))
 })
 
+for (const [phase, result] of [
+  ['password prompt', { success: false, requiresPassword: true, filePath: 'fixture.json' }],
+  ['Android confirmation', { success: false, requiresConfirmation: true, filePath: 'fixture.json' }],
+  ['cancelled picker', { success: false, reason: 'cancelled' }],
+  ['rejected file', null],
+]) {
+  for (const provider of ['github', 'webdav']) {
+    await regression(`${phase} preserves the pending ${provider} configuration`, async current => {
+      const configuring = delayInvoke(provider === 'github' ? 'configure_github_sync' : 'configure_webdav_sync')
+      const pending = provider === 'github'
+        ? current.configureGitHub('fixture', 'preserved')
+        : current.configureWebDav('https://preserved.test', 'fixture', 'fixture')
+      const importing = delayInvoke('import_config')
+      const outcome = current.importConfig()
+      errorsExpected = !result
+      try {
+        if (result) importing.resolve(result)
+        else importing.reject('CONFIG_FILE_INVALID')
+        assert.equal((await outcome).success, false)
+      } finally { errorsExpected = false }
+      configuring.resolve(provider === 'github' ? { owner: 'fixture', repo: 'preserved' } : {})
+      assert.equal(await pending, true, 'preflight must not supersede configuration requests')
+      assert.equal(provider === 'github' ? current.github.repo : current.webdav.serverUrl,
+        provider === 'github' ? 'preserved' : 'https://preserved.test')
+    })
+  }
+}
+
 await regression('import invalidates old configuration responses for both providers', async current => {
   const gh = delayInvoke('configure_github_sync')
   const ghPending = current.configureGitHub('fixture', 'old')

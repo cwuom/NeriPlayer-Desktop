@@ -75,6 +75,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Rust for configuration interoperability tests
+        uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+
       - name: Type-check and build frontend
         run: pnpm test && pnpm build
 
@@ -124,6 +127,12 @@ jobs:
       - name: Check Rust backend
         working-directory: src-tauri
         run: cargo check --locked --target ${{ matrix.target }}
+
+      - name: Test native configuration backups and authentication
+        if: ${{ (runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')) }}
+        working-directory: src-tauri
+        run: |
+          cargo test --locked --target ${{ matrix.target }} --lib -- config_backup::tests auth:: commands::auth_cmd::tests commands::sync_cmd::tests api::youtube::account::tests api::youtube::session::tests --test-threads=1
 
   ffmpeg:
     name: FFmpeg

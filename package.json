@@ -9,6 +9,7 @@
     "test:cookie-auth": "node scripts/test-cookie-auth.mjs",
     "test:cookie-login-dialog": "node scripts/test-cookie-login-dialog.mjs",
     "test:config-transfer": "node scripts/test-config-transfer.mjs",
+    "test:config-backup-codec": "node scripts/test-config-backup-codec.mjs",
     "test:config-transfer-dialog": "node scripts/test-config-transfer-dialog.mjs",
     "test:m3-input": "node scripts/test-m3-input.mjs",
     "test:page-transition": "node scripts/test-page-transition.mjs",

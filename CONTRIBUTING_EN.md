@@ -467,7 +467,10 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --locked
 
 `pnpm test` uses `scripts/test-frontend.mjs` to enumerate and sequentially run every `test:*` in `package.json`.
 These scripts cover pure logic, stores, component / IPC mocks, and source constraints;
-they are not browser end-to-end tests. Register new regressions in `package.json` using nearby test patterns.
+they are not browser end-to-end tests. `test:config-backup-codec` also runs the actual Rust configuration
+codec and independent Node interoperability checks using the pinned Rust toolchain, so `pnpm test`
+requires Rust. Its working directory is under ignored `docs/tmp/` and is removed when the test exits.
+Register new regressions in `package.json` using nearby test patterns.
 Examples of targeted checks:
 
 | Area | Example commands |

@@ -132,7 +132,7 @@ async function clearDebugCookies() {
   clearingDebugCookies.value = true
   try {
     await invoke('clear_debug_cookie_storage')
-    await authStore.checkStatus()
+    await authStore.checkStatus({ invalidatePending: ['netease', 'bilibili', 'youtube'] })
     await loadDebugCookieStorageStatus()
     toast.success(t('settings.debug_cookie_clear_success'))
   } catch (error) {

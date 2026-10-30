@@ -426,6 +426,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --locked
 
 `pnpm test` 通过 `scripts/test-frontend.mjs` 枚举并串行运行 `package.json` 的全部 `test:*`。
 这些脚本覆盖纯逻辑、store、组件 / IPC mock 与源码约束，不是浏览器端到端测试。
+其中 `test:config-backup-codec` 使用项目固定 Rust 工具链运行实际配置编解码器与 Node 加密互通检查，
+因此 `pnpm test` 也需要 Rust。测试工作目录位于被忽略的 `docs/tmp/`，结束后自动清理。
 新增回归在 `package.json` 注册并沿用相邻测试模式。针对性入口示例：
 
 | 变更领域 | 示例命令 |
