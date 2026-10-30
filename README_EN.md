@@ -101,7 +101,7 @@ The current scope:
   are stored on the device by default. Importing local files does not require a platform login or cloud sync.
 - **Native audio**: Rust decodes audio and sends it to `cpal` for output.
   The Now Playing WebView handles the interface, word-synced lyrics, and animated backgrounds.
-- **Accounts and content permissions**: sign in to a source platform as needed to access content available to that account.
+- **Accounts and content permissions**: sign in to a source platform as needed to access content available to that account. Settings supports web and cookie login for NetEase, Bilibili, and YouTube.
   QQ Music currently offers limited guest APIs and lyrics/metadata capabilities.
 - **Optional sync**: save metadata to your own GitHub repository or WebDAV target.
   Manual and automatic sync use three-way merging to retain edits from each device.
@@ -353,8 +353,7 @@ check live performances, covers, and edited versions manually.
 - Legacy JSON and localStorage migrate by data domain; old JSON backups go in `legacy-json-backup/`.
 - Release builds use application-encrypted credential files; Debug builds use plaintext files at randomized paths.
   This is not system hardware-backed key protection and does not promise protection from other processes running as the same user on the same machine.
-- Full configuration exports are plaintext JSON and may contain platform authorization and sync passwords.
-  They are not suitable as publicly shared attachments.
+- Full configuration exports support optional password encryption, disabled by default. Login state is also excluded by default; only enabling it shows a sensitive-data warning and adds platform cookies and sync credentials. Do not share these backups publicly.
 
 ### Downloads, local import, and backups
 
@@ -367,6 +366,9 @@ check live performances, covers, and edited versions manually.
   Cancellation and retry do not provide byte-range resume.
 - Playlist JSON migrates playlists; full configuration exports migrate settings and authorization.
   Neither includes complete audio files or a full database backup.
+- Configuration import accepts Android plaintext and password-encrypted backups. Android imports warn that some settings may not transfer before applying supported settings and any included login state. Android-only features and device paths may not transfer.
+- Backup encryption uses the same PBKDF2-HMAC-SHA256 / AES-256-GCM envelope as Android. Passwords are not stored with the file and cannot be recovered. Desktop versions that only support plaintext must be updated before opening encrypted backups.
+- Imported cookies remain subject to platform expiry, network access, and risk controls. YouTube cookie import checks local format and does not guarantee valid account authorization. Android backups containing only an Authorization header without cookies require signing in again.
 
 See [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md) for implementation paths, extension points, and validation commands.
 
@@ -551,7 +553,7 @@ do not attach full configuration exports or databases.
   You can change the server and disable URL sharing in Settings.
 - Release builds use application-encrypted files for platform authorization and sync credentials.
   Debug builds use plaintext credential files; the two have different security boundaries.
-- Full configuration exports are plaintext JSON that may contain cookies, tokens, and passwords.
+- Full configuration exports support password encryption. Including login state may add cookies, tokens, and sync passwords.
   Store them securely and avoid sharing them publicly.
   Local databases, logs, and crash reports may also contain personal library details and paths.
 - Third-party platforms and sync services control their own access logs, retention policies, and risk-control rules.

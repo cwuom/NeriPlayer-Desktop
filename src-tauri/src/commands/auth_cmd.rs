@@ -17,6 +17,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 const BILIBILI_LOGIN_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+const AUTH_PROFILE_REFRESH_TIMEOUT: Duration = Duration::from_secs(12);
 
 // 登录检测机制：
 // 打开 WebviewWindow 加载平台登录页
@@ -209,6 +210,20 @@ fn youtube_auth_matches(left: &YouTubeAuth, right: &YouTubeAuth) -> bool {
     left.get_sapisid()
         .zip(right.get_sapisid())
         .is_some_and(|(left, right)| left == right)
+        && left.selected_auth_user().unwrap_or("0") == right.selected_auth_user().unwrap_or("0")
+}
+
+fn netease_verified_account_id(account: &serde_json::Value) -> Option<u64> {
+    if account["code"].as_i64() != Some(200) {
+        return None;
+    }
+    [&account["profile"]["userId"], &account["account"]["id"]]
+        .into_iter()
+        .find_map(|value| {
+            value.as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+                .filter(|id| *id > 0)
+        })
 }
 
 fn bili_verified_nav_mid(info: &serde_json::Value, entries: &[CookieEntry]) -> Option<u64> {
@@ -227,6 +242,7 @@ fn bili_verified_nav_mid(info: &serde_json::Value, entries: &[CookieEntry]) -> O
 mod tests {
     use super::{
         bili_verified_nav_mid, cookie_domain_matches_urls, has_completed_login, has_new_completed_login,
+        netease_verified_account_id,
     };
     use crate::auth::state::CookieEntry;
 
@@ -235,6 +251,25 @@ mod tests {
         "https://passport.bilibili.com",
         "https://api.bilibili.com",
     ];
+
+    #[test]
+    fn netease_cookie_validation_requires_success_and_a_positive_server_identity() {
+        for account in [
+            serde_json::json!({"code": 200, "profile": {"userId": 123}}),
+            serde_json::json!({"code": 200, "profile": {"userId": "123"}}),
+            serde_json::json!({"code": 200, "account": {"id": 123}}),
+        ] {
+            assert_eq!(netease_verified_account_id(&account), Some(123));
+        }
+        for account in [
+            serde_json::json!({"code": 200, "profile": null}),
+            serde_json::json!({"code": 200, "profile": {"userId": 0}}),
+            serde_json::json!({"code": 301, "profile": {"userId": 123}}),
+            serde_json::json!({"code": 200, "profile": {"userId": -1}}),
+        ] {
+            assert_eq!(netease_verified_account_id(&account), None);
+        }
+    }
 
     #[test]
     fn bilibili_imported_session_resolves_verified_nav_identity_without_dedeuserid_cookie() {
@@ -639,6 +674,7 @@ pub async fn login_youtube(app: AppHandle, state: State<'_, AppState>) -> AppRes
         cookies: entries,
         nickname: None,
         avatar_url: None,
+        auth_user: None,
     };
     apply_youtube_profile_best_effort(&state, &mut auth).await;
     {
@@ -700,8 +736,16 @@ pub async fn login_with_cookies(
             let (user_id, nickname, avatar_url) = match client.get_user_account().await {
                 Ok(account) => {
                     let profile = &account["profile"];
+                    let Some(user_id) = netease_verified_account_id(&account) else {
+                        return rollback_cookie_login(
+                            &state.cookie_jar,
+                            &entries,
+                            previous_entries.as_deref(),
+                            AppError::Other("Cookie 验证失败：网易云未返回有效登录身份".into()),
+                        );
+                    };
                     (
-                        profile["userId"].as_u64(),
+                        Some(user_id),
                         profile["nickname"].as_str().map(String::from),
                         profile["avatarUrl"].as_str().map(String::from),
                     )
@@ -761,20 +805,28 @@ pub async fn login_with_cookies(
             Ok(AuthInfo { platform: "bilibili".into(), logged_in: true, nickname, avatar_url })
         }
         "youtube" => {
-            if !entries.iter().any(|c| c.name == "SAPISID" && !c.value.is_empty()) {
-                return rollback_cookie_login(
-                    &state.cookie_jar,
-                    &entries,
-                    previous_entries.as_deref(),
-                    AppError::Other("Missing required cookie: SAPISID".into()),
-                );
-            }
-
+            let auth_user = raw_cookies.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if !name.trim().eq_ignore_ascii_case("x-goog-authuser") {
+                    return None;
+                }
+                crate::auth::state::youtube_auth_user(value).map(String::from)
+            });
             let mut auth = YouTubeAuth {
                 cookies: entries,
                 nickname: None,
                 avatar_url: None,
+                auth_user,
             };
+            if !auth.has_login() {
+                return rollback_cookie_login(
+                    &state.cookie_jar,
+                    &auth.cookies,
+                    previous_entries.as_deref(),
+                    AppError::Other("Missing required cookie: SAPISID / __Secure-1PAPISID / __Secure-3PAPISID".into()),
+                );
+            }
+
             apply_youtube_profile_best_effort(&state, &mut auth).await;
             {
                 let mut auth_state = state.auth.lock();
@@ -856,7 +908,7 @@ fn apply_youtube_session_update(
         return false;
     };
     // 仅当仍是同一账号且未登出时才落盘, 避免刷新期间账号切换被旧 cookie 覆盖
-    if !saved.has_login() || saved.get_sapisid() != current.get_sapisid() {
+    if !saved.has_login() || !youtube_auth_matches(saved, current) {
         return false;
     }
 
@@ -952,9 +1004,73 @@ pub async fn maybe_refresh_youtube_session(app: &AppHandle, state: &AppState, fo
     }
 }
 
-/// 查询所有平台登录状态
+async fn refresh_missing_account_profiles(app: &AppHandle, state: &AppState) {
+    let (netease, bilibili) = {
+        let auth = state.auth.lock();
+        (
+            auth.netease.clone().filter(|auth| auth.has_login() && auth.user_id.is_none()),
+            auth.bilibili.clone().filter(|auth| auth.has_login() && auth.mid.is_none()),
+        )
+    };
+    let netease_refresh = async {
+        let previous = netease?;
+        let client = state.netease();
+        let account = match tokio::time::timeout(AUTH_PROFILE_REFRESH_TIMEOUT, client.get_user_account()).await {
+            Ok(Ok(account)) => account,
+            _ => {
+                log::warn!(target: "auth", "网易云登录资料刷新失败，保留已保存凭据");
+                return None;
+            }
+        };
+        let user_id = netease_verified_account_id(&account)?;
+        let mut updated = previous.clone();
+        updated.user_id = Some(user_id);
+        updated.nickname = account["profile"]["nickname"].as_str().map(String::from);
+        updated.avatar_url = account["profile"]["avatarUrl"].as_str().map(String::from);
+        Some((previous, updated))
+    };
+    let bilibili_refresh = async {
+        let previous = bilibili?;
+        let client = state.bilibili();
+        let info = match tokio::time::timeout(AUTH_PROFILE_REFRESH_TIMEOUT, client.get_user_info()).await {
+            Ok(Ok(info)) => info,
+            _ => {
+                log::warn!(target: "auth", "B站登录资料刷新失败，保留已保存凭据");
+                return None;
+            }
+        };
+        let mid = bili_verified_nav_mid(&info, &previous.cookies)?;
+        let mut updated = previous.clone();
+        updated.mid = Some(mid);
+        updated.nickname = info["data"]["uname"].as_str().map(String::from);
+        updated.avatar_url = info["data"]["face"].as_str().map(String::from);
+        Some((previous, updated))
+    };
+    let (netease, bilibili) = futures_util::future::join(netease_refresh, bilibili_refresh).await;
+    let mut auth = state.auth.lock();
+    let mut changed = false;
+    // 导入后的资料请求不能覆盖刷新期间发生的退出或换号
+    if let Some((previous, updated)) = netease {
+        if auth.netease.as_ref().is_some_and(|saved| saved.cookies == previous.cookies) {
+            auth.netease = Some(updated);
+            changed = true;
+        }
+    }
+    if let Some((previous, updated)) = bilibili {
+        if auth.bilibili.as_ref().is_some_and(|saved| saved.cookies == previous.cookies) {
+            auth.bilibili = Some(updated);
+            changed = true;
+        }
+    }
+    if changed {
+        cookies::save_auth(app, &auth);
+    }
+}
+
+/// 查询所有平台登录状态，并补齐 Android 备份没有携带的账号 ID
 #[tauri::command]
-pub async fn check_auth_status(state: State<'_, AppState>) -> AppResult<AuthStatusResponse> {
+pub async fn check_auth_status(app: AppHandle, state: State<'_, AppState>) -> AppResult<AuthStatusResponse> {
+    refresh_missing_account_profiles(&app, &state).await;
     let auth = state.auth.lock();
     Ok(auth.to_status_response())
 }

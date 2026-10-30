@@ -33,10 +33,12 @@ pub struct YouTubeAuth {
     pub cookies: Vec<CookieEntry>,
     pub nickname: Option<String>,
     pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub auth_user: Option<String>,
 }
 
 /// 持久化的单条 Cookie
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookieEntry {
     pub name: String,
     pub value: String,
@@ -58,20 +60,40 @@ impl BiliAuth {
 }
 
 impl YouTubeAuth {
-    /// 检查是否有 SAPISID 或 __Secure-3PAPISID
-    pub fn has_login(&self) -> bool {
-        self.cookies.iter().any(|c| {
-            (c.name == "SAPISID" || c.name == "__Secure-3PAPISID") && !c.value.is_empty()
-        })
+    pub fn selected_auth_user(&self) -> Option<&str> {
+        self.auth_user.as_deref().and_then(youtube_auth_user)
     }
 
-    /// 获取 SAPISID 值（优先 SAPISID，fallback __Secure-3PAPISID）
-    pub fn get_sapisid(&self) -> Option<&str> {
-        self.cookies.iter()
-            .find(|c| c.name == "SAPISID")
-            .or_else(|| self.cookies.iter().find(|c| c.name == "__Secure-3PAPISID"))
-            .map(|c| c.value.as_str())
+    /// Google 账号域的 Cookie 不能单独代表 YouTube 登录
+    pub fn has_login(&self) -> bool {
+        self.get_sapisid().is_some()
     }
+
+    /// 优先 SAPISID，再使用 Android 支持的两个安全别名
+    pub fn get_sapisid(&self) -> Option<&str> {
+        ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"]
+            .into_iter()
+            .find_map(|name| {
+                self.cookies.iter()
+                    .filter(|cookie| {
+                        let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
+                        cookie.name == name && !cookie.value.is_empty()
+                            && (domain == "youtube.com" || domain.ends_with(".youtube.com"))
+                    })
+                    .max_by_key(|cookie| match cookie.domain.trim_start_matches('.').to_ascii_lowercase().as_str() {
+                        "music.youtube.com" => 3,
+                        "youtube.com" => 2,
+                        _ => 1,
+                    })
+                    .map(|cookie| cookie.value.as_str())
+            })
+    }
+}
+
+pub fn youtube_auth_user(raw: &str) -> Option<&str> {
+    let value = raw.trim();
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<u32>().is_ok())
+        .then_some(value)
 }
 
 /// 前端友好的登录状态摘要
@@ -138,5 +160,64 @@ impl AuthState {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CookieEntry, YouTubeAuth};
+
+    #[test]
+    fn youtube_account_index_is_optional_and_rejects_header_injection() {
+        for value in ["", "-1", "account", "1\r\nOther: value", "4294967296"] {
+            assert_eq!(super::youtube_auth_user(value), None);
+        }
+        assert_eq!(super::youtube_auth_user(" 2 "), Some("2"));
+        let legacy: YouTubeAuth = serde_json::from_str(r#"{"cookies":[]}"#).unwrap();
+        assert_eq!(legacy.selected_auth_user(), None);
+    }
+
+    #[test]
+    fn youtube_web_host_cookie_is_a_valid_identity_for_web_playback() {
+        let auth = YouTubeAuth {
+            cookies: vec![CookieEntry { name: "SAPISID".into(), value: "web".into(), domain: "www.youtube.com".into() }],
+            nickname: None,
+            avatar_url: None,
+            auth_user: None,
+        };
+        assert!(auth.has_login());
+        assert_eq!(auth.get_sapisid(), Some("web"));
+    }
+
+    #[test]
+    fn youtube_login_accepts_nonempty_music_scope_sapisid_aliases() {
+        for name in ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"] {
+            let auth = YouTubeAuth {
+                cookies: vec![CookieEntry { name: name.into(), value: "fixture".into(), domain: ".youtube.com".into() }],
+                nickname: None,
+                avatar_url: None,
+                auth_user: None,
+            };
+            assert!(auth.has_login(), "{name}");
+            assert_eq!(auth.get_sapisid(), Some("fixture"));
+        }
+    }
+
+    #[test]
+    fn youtube_empty_or_unrelated_identity_does_not_hide_valid_alias() {
+        let mut auth = YouTubeAuth {
+            cookies: vec![
+                CookieEntry { name: "SAPISID".into(), value: String::new(), domain: ".youtube.com".into() },
+                CookieEntry { name: "SAPISID".into(), value: "google-only".into(), domain: ".google.com".into() },
+                CookieEntry { name: "__Secure-3PAPISID".into(), value: "music".into(), domain: "music.youtube.com".into() },
+            ],
+            nickname: None,
+            avatar_url: None,
+            auth_user: None,
+        };
+        assert_eq!(auth.get_sapisid(), Some("music"));
+        auth.cookies.pop();
+        assert!(!auth.has_login());
+        assert_eq!(auth.get_sapisid(), None);
     }
 }

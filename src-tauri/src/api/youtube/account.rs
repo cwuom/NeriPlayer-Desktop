@@ -63,7 +63,7 @@ impl YouTubeBootstrap {
 /// bootstrap 缓存
 ///
 /// 每次库请求都去抓一遍 music.youtube.com 的 HTML 太贵；但也不能永久缓存，
-/// clientVersion / visitorData 会过期。按账号（SAPISID）分键，切号自动失效。
+/// clientVersion / visitorData 会过期，同一 Cookie 下的账号索引也要分开缓存
 const BOOTSTRAP_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 struct CachedBootstrap {
@@ -75,12 +75,16 @@ struct CachedBootstrap {
 static BOOTSTRAP_CACHE: std::sync::Mutex<Option<CachedBootstrap>> =
     std::sync::Mutex::new(None);
 
+fn bootstrap_account_key(auth: &YouTubeAuth) -> String {
+    format!("{}|{}", auth.get_sapisid().unwrap_or_default(), auth.selected_auth_user().unwrap_or("0"))
+}
+
 /// 取一份可用的 bootstrap，命中缓存则直接返回
 pub(super) async fn cached_bootstrap(
     http: &FallbackHttp,
     auth: &YouTubeAuth,
 ) -> AppResult<YouTubeBootstrap> {
-    let account_key = auth.get_sapisid().unwrap_or_default().to_string();
+    let account_key = bootstrap_account_key(auth);
     if let Ok(guard) = BOOTSTRAP_CACHE.lock() {
         if let Some(cached) = guard.as_ref() {
             if cached.account_key == account_key && cached.fetched_at.elapsed() < BOOTSTRAP_TTL {
@@ -95,7 +99,7 @@ pub(super) async fn cached_bootstrap(
             "YouTube login is incomplete, please sign in again".into(),
         ));
     }
-    let bootstrap = fetch_bootstrap(http, &build_cookie_header(&cookie_values)).await?;
+    let bootstrap = fetch_bootstrap(http, &build_cookie_header(&cookie_values), auth.selected_auth_user()).await?;
     log::info!(
         target: "youtube",
         "bootstrap ready: clientVersion={}, sessionIndex={}",
@@ -132,7 +136,7 @@ pub async fn get_account_profile(
     }
 
     let cookie_header = build_cookie_header(&cookie_values);
-    let bootstrap = fetch_bootstrap(http, &cookie_header).await?;
+    let bootstrap = fetch_bootstrap(http, &cookie_header, auth.selected_auth_user()).await?;
     let response = fetch_account_menu(http, &cookie_values, &cookie_header, &bootstrap).await?;
     parse_account_profile(&response)
         .filter(YouTubeAccountProfile::has_profile)
@@ -142,19 +146,34 @@ pub async fn get_account_profile(
 pub(super) async fn fetch_bootstrap(
     http: &FallbackHttp,
     cookie_header: &str,
+    auth_user: Option<&str>,
 ) -> AppResult<YouTubeBootstrap> {
     let response = http
-        .send(|client| {
-            client
-                .get(format!("{MUSIC_ORIGIN}/"))
-                .header("User-Agent", USER_AGENT)
-                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-                .header("Cookie", cookie_header)
-        })
+        .send(|client| build_bootstrap_request(client, cookie_header, auth_user))
         .await?
         .error_for_status()?;
     let html = response.text().await?;
-    parse_bootstrap(&html)
+    let mut bootstrap = parse_bootstrap(&html)?;
+    if let Some(auth_user) = auth_user.and_then(crate::auth::state::youtube_auth_user) {
+        bootstrap.session_index = auth_user.to_string();
+    }
+    Ok(bootstrap)
+}
+
+fn build_bootstrap_request(client: &reqwest::Client, cookie_header: &str, auth_user: Option<&str>) -> reqwest::RequestBuilder {
+    let request = client
+        .get(format!("{MUSIC_ORIGIN}/"))
+        .header("User-Agent", USER_AGENT)
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Cookie", cookie_header);
+    apply_auth_user(request, auth_user)
+}
+
+pub(super) fn apply_auth_user(request: reqwest::RequestBuilder, auth_user: Option<&str>) -> reqwest::RequestBuilder {
+    match auth_user.and_then(crate::auth::state::youtube_auth_user) {
+        Some(auth_user) => request.query(&[("authuser", auth_user)]).header("X-Goog-AuthUser", auth_user),
+        None => request,
+    }
 }
 
 async fn fetch_account_menu(
@@ -426,6 +445,27 @@ fn normalize_thumbnail_url(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_request_preserves_explicit_account_selection() {
+        let client = reqwest::Client::new();
+        let request = build_bootstrap_request(&client, "SAPISID=fixture", Some("2")).build().unwrap();
+        assert_eq!(request.headers()["X-Goog-AuthUser"], "2");
+        assert!(request.url().query_pairs().any(|(key, value)| key == "authuser" && value == "2"));
+        let request = build_bootstrap_request(&client, "SAPISID=fixture", None).build().unwrap();
+        assert!(!request.headers().contains_key("X-Goog-AuthUser"));
+        assert!(request.url().query().is_none());
+    }
+
+    #[test]
+    fn account_bootstrap_cache_distinguishes_accounts_sharing_cookies() {
+        let mut auth: YouTubeAuth = serde_json::from_value(json!({
+            "cookies": [{"name":"SAPISID", "value":"fixture", "domain":".youtube.com"}],
+        })).unwrap();
+        let default = bootstrap_account_key(&auth);
+        auth.auth_user = Some("2".into());
+        assert_ne!(default, bootstrap_account_key(&auth));
+    }
 
     #[test]
     fn parses_current_music_bootstrap_fields() {

@@ -24,6 +24,33 @@ export interface SyncConfig {
   lastSyncTime: number
 }
 
+export interface ConfigExportOptions {
+  password?: string
+  includeLoginState?: boolean
+}
+
+export interface ConfigImportOptions {
+  filePath?: string
+  password?: string
+  confirmedAndroid?: boolean
+}
+
+function configTransferError(error: unknown, fallback: string): string {
+  const message = String(error)
+  for (const [code, key] of [
+    ['CONFIG_DECRYPTION_FAILED', 'config_decryption_failed'],
+    ['CONFIG_ENCRYPTION_INVALID', 'config_encryption_invalid'],
+    ['CONFIG_PASSWORD_INVALID', 'config_password_invalid'],
+    ['CONFIG_FILE_TOO_LARGE', 'config_file_too_large'],
+    ['CONFIG_FILE_READ_FAILED', 'config_file_read_failed'],
+    ['CONFIG_FILE_UNSUPPORTED', 'config_file_invalid'],
+    ['CONFIG_FILE_INVALID', 'config_file_invalid'],
+  ] as const) {
+    if (message.includes(code)) return t(`settings.${key}`)
+  }
+  return t(fallback)
+}
+
 export type SyncFrequency =
   | 'immediate'
   | 'every_10_minutes'
@@ -788,25 +815,28 @@ export const useSyncStore = defineStore('sync', () => {
     }
   }
 
-  async function exportConfig() {
+  async function exportConfig(options: ConfigExportOptions = {}) {
     const toast = useToastStore()
     const settings = useSettingsStore()
     try {
       const result = await invoke<any>('export_config', {
         settings: settings.snapshot(),
         listenTogetherUserUuid: localStorage.getItem('neri:lt-uuid') || '',
+        password: options.password,
+        includeLoginState: options.includeLoginState ?? false,
       })
       if (result.success) {
         toast.success(t('settings.export_config_success'))
       }
       return result
     } catch (e: any) {
-      toast.error(e?.toString() || t('settings.export_config_failed'))
-      return { success: false }
+      const error = configTransferError(e, 'settings.export_config_failed')
+      toast.error(error)
+      return { success: false, error }
     }
   }
 
-  async function importConfig() {
+  async function importConfig(options: ConfigImportOptions = {}) {
     const generations = {
       github: invalidateConfiguration('github'),
       webdav: invalidateConfiguration('webdav'),
@@ -815,7 +845,7 @@ export const useSyncStore = defineStore('sync', () => {
     const settings = useSettingsStore()
     const auth = useAuthStore()
     try {
-      const result = await invoke<any>('import_config')
+      const result = await invoke<any>('import_config', { ...options })
       if (!result.success) return result
       settings.applySnapshot(result.settings)
       if (result.listenTogetherUserUuid) {
@@ -825,12 +855,14 @@ export const useSyncStore = defineStore('sync', () => {
       }
       if (result.settings?.locale) setLocale(result.settings.locale, false)
       await auth.checkStatus()
+      for (const platform of ['netease', 'bilibili', 'youtube']) auth.notifyAuthChanged(platform)
       await loadConfigs(generations)
       toast.success(t('settings.import_config_success'))
       return result
     } catch (e: any) {
-      toast.error(e?.toString() || t('settings.import_config_failed'))
-      return { success: false }
+      const error = configTransferError(e, 'settings.import_config_failed')
+      toast.error(error)
+      return { success: false, error }
     }
   }
 

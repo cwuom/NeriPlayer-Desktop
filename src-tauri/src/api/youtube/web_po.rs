@@ -327,9 +327,13 @@ async fn mint_on_page(
             })?;
         }
     }
+    let mut page_url: url::Url = page_url.parse().expect("static URL");
+    if let Some(auth_user) = auth.and_then(YouTubeAuth::selected_auth_user) {
+        page_url.query_pairs_mut().append_pair("authuser", auth_user);
+    }
     guard
         .0
-        .navigate(page_url.parse().expect("static URL"))
+        .navigate(page_url)
         .map_err(|_| AppError::Api("YouTube token page unavailable".into()))?;
     let result = tokio::time::timeout(Duration::from_secs(25), result_rx)
         .await

@@ -98,6 +98,8 @@ import { useEscapeClose } from '@/composables/useEscapeClose'
 import { createLogger } from '@/utils/logger'
 import { isLinuxDesktop } from '@/utils/linuxNotice'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
+import CookieLoginDialog from '@/components/settings/CookieLoginDialog.vue'
+import ConfigTransferDialogs from '@/components/settings/ConfigTransferDialogs.vue'
 
 const log = createLogger('settings-view')
 
@@ -935,17 +937,10 @@ function handleLtNicknameChange(event: Event) {
   input.value = value
 }
 
-const showConfigExportWarning = ref(false)
-
-async function confirmConfigExport() {
-  showConfigExportWarning.value = false
-  await syncStore.exportConfig()
-}
+const configTransferMode = ref<'export' | 'import' | null>(null)
 
 // 导入只写回了设置值：主题、强调色和播放引擎（均衡器、响度、倍速等）要按新值重新应用
-async function importConfig() {
-  const result = await syncStore.importConfig()
-  if (!result?.success) return
+async function applyImportedConfig() {
   applyTheme(darkMode.value, false)
   // 三态取色：仅「默认取色」需要按预设主题色重刷，system/cover 由动态取色路径接管
   if (colorMode.value === 'default') applyThemeColor(selectedColor.value, undefined, false)
@@ -1456,12 +1451,14 @@ const platformAccounts = computed(() => [
   { key: 'netease', label: t('settings.netease_account'), iconSvg: '/icons/ic_netease.svg', auth: auth.netease, login: auth.loginNetease },
   { key: 'bilibili', label: t('settings.bilibili_account'), iconSvg: '/icons/ic_bilibili.svg', auth: auth.bilibili, login: auth.loginBilibili },
   { key: 'youtube', label: t('settings.youtube_account'), iconSvg: '/icons/ic_youtube.svg', auth: auth.youtube, login: auth.loginYoutube },
-])
+] as const)
 
 // 退出登录确认对话框
 const showLogoutConfirm = ref(false)
 const logoutTargetKey = ref('')
 const logoutTargetLabel = ref('')
+const showCookieLogin = ref(false)
+const cookieLoginPlatform = ref<'netease' | 'bilibili' | 'youtube'>('netease')
 
 function requestLogout(key: string, label: string) {
   logoutTargetKey.value = key
@@ -1495,7 +1492,6 @@ for (const dialog of [
   showLogoutConfirm,
   showClearGitHubConfirm,
   showResetLtIdentityConfirm,
-  showConfigExportWarning,
   showDownloadTemplateDialog,
 ]) {
   useEscapeClose(() => dialog.value, () => { dialog.value = false })
@@ -1647,6 +1643,11 @@ useEscapeClose(
           <span v-else>{{ t('settings.sign_in') }}</span>
         </button>
       </template>
+      <button
+        class="account-login-btn"
+        :disabled="auth.loggingIn !== null"
+        @click="cookieLoginPlatform = account.key; showCookieLogin = true"
+      >{{ t('settings.cookie_login') }}</button>
     </div>
         </div>
 
@@ -3286,7 +3287,7 @@ useEscapeClose(
         <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">chevron_right</span>
       </div>
 
-      <div class="setting-card" style="cursor: pointer" @click="showConfigExportWarning = true">
+      <div class="setting-card" style="cursor: pointer" @click="configTransferMode = 'export'">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">settings_backup_restore</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.export_config') }}</div>
@@ -3295,7 +3296,7 @@ useEscapeClose(
         <span class="material-symbols-rounded" style="font-size: 20px; opacity: 0.3">chevron_right</span>
       </div>
 
-      <div class="setting-card" style="cursor: pointer" @click="importConfig">
+      <div class="setting-card" style="cursor: pointer" @click="configTransferMode = 'import'">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">restore</span></div>
         <div class="setting-info">
           <div class="setting-title">{{ t('settings.import_config') }}</div>
@@ -3598,29 +3599,8 @@ useEscapeClose(
       </Transition>
     </Teleport>
 
-    <!-- 配置导出敏感信息确认 -->
-    <Teleport to="body">
-      <Transition name="settings-dialog">
-      <div v-if="showConfigExportWarning" class="dialog-overlay" @click.self="showConfigExportWarning = false">
-        <div class="dialog-card config-warning-dialog">
-          <div class="dialog-icon danger">
-            <span class="material-symbols-rounded">warning</span>
-          </div>
-          <h3 class="dialog-title">{{ t('settings.export_config_warning_title') }}</h3>
-          <p class="dialog-desc">{{ t('settings.export_config_warning_desc') }}</p>
-          <div class="warning-list">
-            <div><span class="material-symbols-rounded">key</span>{{ t('settings.export_config_warning_credentials') }}</div>
-            <div><span class="material-symbols-rounded">cloud_sync</span>{{ t('settings.export_config_warning_sync') }}</div>
-            <div><span class="material-symbols-rounded">lock</span>{{ t('settings.export_config_warning_private') }}</div>
-          </div>
-          <div class="dialog-actions">
-            <button class="dialog-btn" @click="showConfigExportWarning = false">{{ t('settings.cancel') }}</button>
-            <button class="dialog-btn danger" @click="confirmConfigExport">{{ t('settings.export_config_warning_confirm') }}</button>
-          </div>
-        </div>
-      </div>
-      </Transition>
-    </Teleport>
+    <CookieLoginDialog v-model:open="showCookieLogin" :platform="cookieLoginPlatform" />
+    <ConfigTransferDialogs v-model:mode="configTransferMode" @imported="applyImportedConfig" />
 
     <!-- 下载文件名格式编辑对话框 -->
     <Teleport to="body">

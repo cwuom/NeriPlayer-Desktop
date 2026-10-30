@@ -413,7 +413,8 @@ pub async fn get_youtube_playlist_detail(
     if let Some(updated) = refreshed_auth {
         let mut auth_state = state.auth.lock();
         if let Some(saved) = auth_state.youtube.as_mut() {
-            let same_account = saved.get_sapisid() == yt_auth.get_sapisid();
+            let same_account = saved.get_sapisid() == yt_auth.get_sapisid()
+                && saved.selected_auth_user().unwrap_or("0") == yt_auth.selected_auth_user().unwrap_or("0");
             if saved.has_login() && same_account {
                 *saved = updated;
                 let refreshed_cookies = saved.cookies.clone();

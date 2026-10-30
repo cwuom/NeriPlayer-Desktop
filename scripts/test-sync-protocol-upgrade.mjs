@@ -75,7 +75,7 @@ const mocks = {
   './lyricOffset': { useLyricOffsetStore: () => ({ replaceFromSync: map => lyricOffsetReplacements.push(map) }) },
   './biliVideoSkip': { useBiliVideoSkipStore: () => ({ replaceFromSync: rules => biliSkipReplacements.push(rules) }) },
   './settings': { useSettingsStore: () => ({ applySnapshot() {} }) },
-  './auth': { useAuthStore: () => ({ async checkStatus() {} }) },
+  './auth': { useAuthStore: () => ({ async checkStatus() {}, notifyAuthChanged() {} }) },
   '@/i18n': { __esModule: true, default: { global: { t: key => key } }, setLocale() {} },
   '@/utils/logger': { createLogger: () => ({ error() {} }) },
 }

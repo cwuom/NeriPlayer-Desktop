@@ -286,13 +286,16 @@ fn refresh_platform_auth_entries(
 }
 
 fn persisted_cookie_allowed(platform: &str, name: &str) -> bool {
+    cookie_name_allowed(name, platform)
+        && (platform != "youtube" || !is_rotating_session_cookie(name))
+}
+
+/// 配置导入和平台会话回收共用凭据白名单
+pub fn cookie_name_allowed(name: &str, platform: &str) -> bool {
     match platform {
         "netease" => NETEASE_COOKIE_KEYS.iter().any(|key| key.eq_ignore_ascii_case(name)),
         "bilibili" => BILIBILI_COOKIE_KEYS.iter().any(|key| key.eq_ignore_ascii_case(name)),
-        "youtube" => {
-            crate::api::youtube::session::cookie_key_allowed(name)
-                && !is_rotating_session_cookie(name)
-        }
+        "youtube" => crate::api::youtube::session::cookie_key_allowed(name),
         _ => false,
     }
 }
@@ -391,21 +394,41 @@ pub fn parse_raw_cookie_text(raw: &str, platform: &str) -> Vec<CookieEntry> {
         "netease" => "music.163.com",
         "bilibili" => ".bilibili.com",
         "youtube" => ".youtube.com",
-        _ => "unknown",
+        _ => return Vec::new(),
     };
 
-    let mut entries = Vec::new();
-    // 按 ; \r \n 分割
+    let raw = raw.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim().eq_ignore_ascii_case("cookie").then_some(value)
+    }).unwrap_or(raw);
+    let mut entries: Vec<CookieEntry> = Vec::new();
     for segment in raw.split([';', '\r', '\n']) {
         let segment = segment.trim();
         if segment.is_empty() {
             continue;
         }
         if let Some((name, value)) = segment.split_once('=') {
-            let name = name.trim().to_string();
-            let value = value.trim().to_string();
-            if !name.is_empty() {
-                entries.push(CookieEntry { name, value, domain: domain.to_string() });
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty()
+                || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&byte))
+                || value.chars().any(char::is_control)
+                || (platform == "youtube" && !cookie_name_allowed(name, platform))
+            {
+                continue;
+            }
+            if let Some(existing) = entries.iter_mut().find(|entry| entry.name == name) {
+                existing.value = value.to_string();
+            } else {
+                entries.push(CookieEntry { name: name.to_string(), value: value.to_string(), domain: domain.to_string() });
+            }
+        }
+    }
+
+    if platform == "netease" && !entries.is_empty() {
+        for (name, value) in [("os", "pc"), ("appver", "8.10.35")] {
+            if !entries.iter().any(|entry| entry.name == name) {
+                entries.push(CookieEntry { name: name.into(), value: value.into(), domain: domain.into() });
             }
         }
     }
@@ -442,7 +465,46 @@ mod tests {
         let entries = parse_raw_cookie_text("first=1;second=2\rthird=3\nfourth=4", "netease");
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
 
-        assert_eq!(names, ["first", "second", "third", "fourth"]);
+        assert_eq!(&names[..4], ["first", "second", "third", "fourth"]);
+    }
+
+    #[test]
+    fn raw_cookie_parser_uses_last_nonempty_value_and_rejects_invalid_pairs() {
+        let entries = parse_raw_cookie_text(
+            "SESSDATA=first; SESSDATA=last=part; empty=; bad key=value; injected=bad\u{7f}",
+            "bilibili",
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "SESSDATA");
+        assert_eq!(entries[0].value, "last=part");
+    }
+
+    #[test]
+    fn raw_cookie_header_prefix_is_accepted_for_each_platform() {
+        for (platform, name) in [("netease", "MUSIC_U"), ("bilibili", "SESSDATA"), ("youtube", "SAPISID")] {
+            let entries = parse_raw_cookie_text(&format!("Cookie: {name}=fixture"), platform);
+            assert!(entries.iter().any(|entry| entry.name == name && entry.value == "fixture"), "{platform}");
+        }
+    }
+
+    #[test]
+    fn raw_cookie_parser_applies_netease_defaults_without_overwriting_explicit_values() {
+        let entries = parse_raw_cookie_text("MUSIC_U=fixture; os=android", "netease");
+        assert!(entries.iter().any(|entry| entry.name == "os" && entry.value == "android"));
+        assert!(entries.iter().any(|entry| entry.name == "appver" && entry.value == "8.10.35"));
+        assert!(parse_raw_cookie_text("empty=; bad key=value", "netease").is_empty());
+    }
+
+    #[test]
+    fn youtube_raw_headers_only_import_allowlisted_cookies() {
+        let entries = parse_raw_cookie_text(
+            "Cookie: SAPISID=fixture; account_secret=private; __Secure-1PAPISID=alias\nAuthorization: SAPISIDHASH unused\nX-Goog-AuthUser: 1",
+            "youtube",
+        );
+        assert!(entries.iter().any(|entry| entry.name == "SAPISID" && entry.domain == ".youtube.com"));
+        assert!(entries.iter().any(|entry| entry.name == "__Secure-1PAPISID"));
+        assert!(!entries.iter().any(|entry| entry.name == "account_secret"));
+        assert!(parse_raw_cookie_text("Authorization: SAPISIDHASH unused", "youtube").is_empty());
     }
 
     #[test]
@@ -566,6 +628,7 @@ mod tests {
                 ],
                 nickname: None,
                 avatar_url: None,
+                auth_user: None,
             }),
             ..Default::default()
         };

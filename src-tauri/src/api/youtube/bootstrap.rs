@@ -56,6 +56,9 @@ struct Cached {
 
 pub(super) fn auth_fingerprint(auth: Option<&YouTubeAuth>) -> String {
     let mut hash = Sha256::new();
+    hash.update(b"authuser\0");
+    hash.update(auth.and_then(YouTubeAuth::selected_auth_user).unwrap_or("0").as_bytes());
+    hash.update([0]);
     // Music 和 Web/TV 的可见 Cookie 都影响会话，域外登录 Cookie 不参与取流身份
     for host in ["music.youtube.com", "www.youtube.com"] {
         let values = auth
@@ -393,8 +396,9 @@ async fn fetch_live(
     music_context: bool,
 ) -> AppResult<PlaybackBootstrap> {
     let authenticated = auth.is_some_and(YouTubeAuth::has_login);
+    let auth_user = auth.and_then(YouTubeAuth::selected_auth_user);
     let cookie_values = auth
-        .map(|auth| super::account::select_cookie_values(&auth.cookies, "music.youtube.com"))
+        .map(|auth| super::account::select_cookie_values(&auth.cookies, if music_context { "music.youtube.com" } else { "www.youtube.com" }))
         .unwrap_or_default();
     let cookie_header = cookie_values
         .iter()
@@ -415,6 +419,7 @@ async fn fetch_live(
                     "Accept-Language",
                     format!("{},en;q=0.8", super::innertube_locale().0),
                 );
+            let request = super::account::apply_auth_user(request, auth_user);
             if cookie_header.is_empty() {
                 request
             } else {
@@ -450,6 +455,9 @@ async fn fetch_live(
     let html = String::from_utf8(bytes)
         .map_err(|_| AppError::Api("YouTube bootstrap is not UTF-8".into()))?;
     let mut bootstrap = parse(&html)?;
+    if let Some(auth_user) = auth_user {
+        bootstrap.session_index = auth_user.to_string();
+    }
     if authenticated && !bootstrap.logged_in {
         return Err(AppError::Api(
             "YouTube playback bootstrap rejected login session".into(),
@@ -482,6 +490,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn playback_bootstrap_fingerprint_distinguishes_selected_accounts() {
+        let mut auth: YouTubeAuth = serde_json::from_value(serde_json::json!({
+            "cookies": [{"name":"SAPISID", "value":"fixture", "domain":".youtube.com"}],
+        })).unwrap();
+        let default = auth_fingerprint(Some(&auth));
+        auth.auth_user = Some("2".into());
+        assert_ne!(default, auth_fingerprint(Some(&auth)));
+    }
+
+    #[test]
     fn parses_dynamic_bootstrap_with_json_escapes_and_account_context() {
         let value = parse(r#"{"INNERTUBE_API_KEY":"key","VISITOR_DATA":"visit\u006fr","INNERTUBE_CLIENT_VERSION":"1.20260403.09.00","PLAYER_JS_URL":"\/s\/player\/abc\/base.js","STS":1234,"SESSION_INDEX":2,"LOGGED_IN":true,"DATASYNC_ID":"page||session"}"#).unwrap();
         assert_eq!(value.visitor_data, "visitor");
@@ -506,6 +524,7 @@ mod tests {
             }],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
         let first = auth_fingerprint(Some(&auth));
         assert!(!first.contains("test-session"));
@@ -535,6 +554,7 @@ mod tests {
             ],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
         let initial = auth_fingerprint(Some(&auth));
         auth.cookies[1].value = "web-rotated".into();
@@ -601,6 +621,7 @@ mod tests {
             cookies: value.cookies.clone(),
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
         assert_eq!(
             load_snapshot(&path, "account-one", Some(&auth), 101)

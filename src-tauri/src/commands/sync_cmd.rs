@@ -1,9 +1,11 @@
 // 同步相关命令
 use std::collections::HashMap;
+use std::io::Read;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use crate::auth::state::{AuthState, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth};
+use crate::config_backup::{self, ConfigBackupError};
 use crate::error::{AppError, AppResult};
 use crate::settings::store::{self, AppSettings};
 use crate::state::AppState;
@@ -475,12 +477,22 @@ struct AndroidCookieAuth {
     cookies: HashMap<String, String>,
 }
 
-/// YouTube 的 Cookie 快照（YouTubeAuthConfigSnapshot，只取 cookies）
+/// YouTube 的登录快照，桌面恢复可持久化的 Cookie 和账号索引
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AndroidYouTubeAuth {
     #[serde(default)]
     cookies: HashMap<String, String>,
+    #[serde(default)]
+    cookie_header: String,
+    #[serde(default)]
+    authorization: String,
+    #[serde(default)]
+    x_goog_auth_user: String,
+    #[serde(default)]
+    origin: String,
+    #[serde(default)]
+    user_agent: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -553,24 +565,35 @@ struct AndroidConfigFile {
 /// Android 与 PC 配置的判别：Android 的 settings 是类型分组
 /// （booleans/floats/...），PC 是扁平 AppSettings，无 "booleans" 键
 fn is_android_config(root: &Value) -> bool {
-    root.get("settings")
-        .and_then(|settings| settings.get("booleans"))
-        .is_some()
+    root.get("platform").and_then(Value::as_str) != Some("pc")
+        && root.get("settings").is_some_and(|settings| {
+            ["booleans", "floats", "ints", "longs", "strings", "stringSets"]
+                .iter()
+                .any(|group| settings.get(group).is_some_and(Value::is_object))
+        })
 }
 
 /// Android 只导出 name→value，域名按桌面手动粘贴 Cookie 的规则补齐（YouTube 还要补 google.com 的会话 Cookie）
 fn android_cookie_entries(cookies: &HashMap<String, String>, platform: &str) -> Vec<CookieEntry> {
     let raw = cookies
         .iter()
-        .filter(|(name, value)| !name.is_empty() && !value.is_empty())
+        .filter(|(name, value)| {
+            crate::auth::cookies::cookie_name_allowed(name, platform)
+                && !value.is_empty()
+                && !value.contains(';')
+                && !value.chars().any(char::is_control)
+        })
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>()
         .join("; ");
     crate::auth::cookies::parse_raw_cookie_text(&raw, platform)
+        .into_iter()
+        .filter(|cookie| crate::auth::cookies::cookie_name_allowed(&cookie.name, platform))
+        .collect()
 }
 
 /// Android 三平台 Cookie 快照 → 桌面 AuthState（不包含用户资料字段）
-fn map_android_auth(config: &AndroidConfigFile) -> Option<AuthState> {
+fn map_android_auth(config: &AndroidConfigFile) -> Option<ImportedAuth> {
     let netease = config
         .netease_auth
         .as_ref()
@@ -594,25 +617,44 @@ fn map_android_auth(config: &AndroidConfigFile) -> Option<AuthState> {
     let youtube = config
         .you_tube_auth
         .as_ref()
-        .filter(|auth| !auth.cookies.is_empty())
-        .map(|auth| YouTubeAuth {
-            cookies: android_cookie_entries(&auth.cookies, "youtube"),
-            nickname: None,
-            avatar_url: None,
+        .and_then(|auth| {
+            let cookies = if auth.cookies.is_empty() {
+                crate::auth::cookies::parse_raw_cookie_text(&auth.cookie_header, "youtube")
+            } else {
+                android_cookie_entries(&auth.cookies, "youtube")
+            };
+            (!cookies.is_empty()).then_some(YouTubeAuth {
+                cookies,
+                nickname: None,
+                avatar_url: None,
+                auth_user: crate::auth::state::youtube_auth_user(&auth.x_goog_auth_user).map(String::from),
+            })
         });
-    if netease.is_none() && bilibili.is_none() && youtube.is_none() {
+    // 没有 Cookie 的授权头无法恢复桌面会话，只有明确空段落表示清除该平台
+    let replace = [
+        config.netease_auth.is_some(),
+        config.bili_auth.is_some(),
+        config.you_tube_auth.as_ref().is_some_and(|auth| {
+            youtube.is_some()
+                || (auth.cookies.is_empty()
+                    && auth.cookie_header.is_empty()
+                    && auth.authorization.is_empty()
+                    && auth.x_goog_auth_user.is_empty()
+                    && auth.origin.is_empty()
+                    && auth.user_agent.is_empty())
+        }),
+    ];
+    if !replace.iter().any(|replace| *replace) {
         None
     } else {
-        Some(AuthState {
-            netease,
-            bilibili,
-            youtube,
+        Some(ImportedAuth {
+            state: AuthState { netease, bilibili, youtube },
+            replace,
         })
     }
 }
 
-/// Android 导出总带全部分组；空段落不覆盖桌面已有配置（避免误清凭据）。
-/// 以下映射函数在有实际内容时才返回 Some。
+/// Android 的非登录空分组不覆盖桌面配置，保留当前平台可用的设置
 fn map_android_language(language: Option<ConfigLanguage>) -> Option<ConfigLanguage> {
     language.filter(|language| !language.code.is_empty()).map(|mut language| {
         // Android 语言码是 zh/en/ja，桌面端是 zh-CN/zh-TW/en/ja
@@ -686,54 +728,71 @@ struct ImportedConfig {
     settings: AppSettings,
     listen_together: Option<ConfigListenTogether>,
     language: Option<ConfigLanguage>,
-    auth: Option<AuthState>,
-    /// Android 备份只带有 Cookie 的平台，按平台合并；桌面配置是完整快照，整体替换
-    merge_auth: bool,
+    auth: Option<ImportedAuth>,
     github_sync: Option<ConfigGitHubSync>,
     webdav_sync: Option<ConfigWebDavSync>,
     sync_preferences: Option<ConfigSyncPreferences>,
 }
 
-fn merge_imported_auth(previous: &AuthState, imported: AuthState) -> AuthState {
+struct ImportedAuth {
+    state: AuthState,
+    replace: [bool; 3],
+}
+
+fn merge_imported_auth(previous: &AuthState, imported: ImportedAuth) -> AuthState {
     AuthState {
-        netease: imported.netease.or_else(|| previous.netease.clone()),
-        bilibili: imported.bilibili.or_else(|| previous.bilibili.clone()),
-        youtube: imported.youtube.or_else(|| previous.youtube.clone()),
+        netease: if imported.replace[0] {
+            imported.state.netease
+        } else {
+            previous.netease.clone()
+        },
+        bilibili: if imported.replace[1] {
+            imported.state.bilibili
+        } else {
+            previous.bilibili.clone()
+        },
+        youtube: if imported.replace[2] {
+            imported.state.youtube
+        } else {
+            previous.youtube.clone()
+        },
     }
 }
 
 /// 解析桌面端导出的配置文件
 fn parse_pc_config(root: Value) -> AppResult<ImportedConfig> {
     let payload: DesktopConfigFile = serde_json::from_value(root)
-        .map_err(|e| AppError::Other(format!("Parse config failed: {}", e)))?;
+        .map_err(|_| AppError::Other("CONFIG_FILE_INVALID".into()))?;
     if payload.kind != CONFIG_FILE_KIND
         || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
         || payload.platform != "pc"
     {
-        return Err(AppError::Other("Unsupported config file".into()));
+        return Err(AppError::Other("CONFIG_FILE_UNSUPPORTED".into()));
     }
     Ok(ImportedConfig {
         settings: payload.settings,
         listen_together: payload.listen_together,
         language: payload.language,
-        auth: payload.auth,
-        merge_auth: false,
+        auth: payload.auth.map(|state| ImportedAuth { state, replace: [true; 3] }),
         github_sync: payload.github_sync,
         webdav_sync: payload.webdav_sync,
         sync_preferences: payload.sync_preferences,
     })
 }
 
-/// 解析 Android 端导出的配置备份，偏好叠加到桌面当前设置上
-fn parse_android_config(app: &AppHandle, root: Value) -> AppResult<ImportedConfig> {
+fn deserialize_android_config(root: Value) -> AppResult<AndroidConfigFile> {
     let payload: AndroidConfigFile = serde_json::from_value(root)
-        .map_err(|e| AppError::Other(format!("Parse android config failed: {}", e)))?;
+        .map_err(|_| AppError::Other("CONFIG_FILE_INVALID".into()))?;
     if payload.kind != CONFIG_FILE_KIND
         || (payload.format_version != 0 && payload.format_version > CONFIG_FILE_VERSION)
     {
-        return Err(AppError::Other("Unsupported config file".into()));
+        return Err(AppError::Other("CONFIG_FILE_UNSUPPORTED".into()));
     }
+    Ok(payload)
+}
 
+/// 解析 Android 端导出的配置备份，偏好叠加到桌面当前设置上
+fn parse_android_config(app: &AppHandle, payload: AndroidConfigFile) -> AppResult<ImportedConfig> {
     let mut settings = store::load_settings(app)?.settings;
     payload.settings.apply_to(&mut settings);
 
@@ -743,7 +802,6 @@ fn parse_android_config(app: &AppHandle, root: Value) -> AppResult<ImportedConfi
         listen_together: map_android_listen_together(payload.listen_together),
         language: map_android_language(payload.language),
         auth,
-        merge_auth: true,
         github_sync: map_android_github(payload.git_hub_sync),
         webdav_sync: map_android_webdav(payload.web_dav_sync),
         sync_preferences: map_android_sync_preferences(payload.sync_preferences),
@@ -769,11 +827,11 @@ struct DesktopConfigFile {
     listen_together: Option<ConfigListenTogether>,
     #[serde(default)]
     language: Option<ConfigLanguage>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     auth: Option<AuthState>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     github_sync: Option<ConfigGitHubSync>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     webdav_sync: Option<ConfigWebDavSync>,
     #[serde(default)]
     sync_preferences: Option<ConfigSyncPreferences>,
@@ -1851,19 +1909,25 @@ pub async fn import_playlists(app: AppHandle) -> AppResult<Value> {
     }
 }
 
-/// 导出 PC 配置文件，配置中包含登录凭据和同步密钥
+/// 按用户选择导出登录凭据，并使用与 Android 相同的加密信封
 #[tauri::command]
 pub async fn export_config(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: AppSettings,
     listen_together_user_uuid: String,
+    password: Option<String>,
+    include_login_state: Option<bool>,
 ) -> AppResult<Value> {
-    let auth = state.auth.lock().clone();
+    let include_login_state = include_login_state.unwrap_or(false);
+    let auth = include_login_state.then(|| state.auth.lock().clone());
     let preferences = load_sync_preferences(&app);
-    let mut github = load_github_config(&app);
-    github.history_update_mode = preferences.history_update_mode.clone();
-    let webdav = load_webdav_config(&app);
+    let github = include_login_state.then(|| {
+        let mut github = load_github_config(&app);
+        github.history_update_mode = preferences.history_update_mode.clone();
+        ConfigGitHubSync::from(&github)
+    });
+    let webdav = include_login_state.then(|| ConfigWebDavSync::from(&load_webdav_config(&app)));
     let config = DesktopConfigFile {
         kind: CONFIG_FILE_KIND.into(),
         format_version: CONFIG_FILE_VERSION,
@@ -1880,13 +1944,19 @@ pub async fn export_config(
         }),
         language: Some(ConfigLanguage { code: settings.locale.clone() }),
         settings,
-        auth: Some(auth),
-        github_sync: Some(ConfigGitHubSync::from(&github)),
-        webdav_sync: Some(ConfigWebDavSync::from(&webdav)),
+        auth,
+        github_sync: github,
+        webdav_sync: webdav,
         sync_preferences: Some(ConfigSyncPreferences::from(&preferences)),
     };
-    let content = serde_json::to_string_pretty(&config)
-        .map_err(|e| AppError::Other(format!("Serialize config failed: {}", e)))?;
+    let config = serde_json::to_value(config)
+        .map_err(|_| AppError::Other("CONFIG_FILE_INVALID".into()))?;
+    let content = tauri::async_runtime::spawn_blocking(move || {
+        config_backup::encode(&config, password.as_deref())
+    })
+    .await
+    .map_err(|_| AppError::Other("CONFIG_ENCRYPTION_INVALID".into()))?
+    .map_err(|error| AppError::Other(error.to_string()))?;
     let file_name = format!(
         "neriplayer-desktop-config-{}.json",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
@@ -1907,9 +1977,60 @@ pub async fn export_config(
     }
 }
 
-/// 导入 PC 配置文件并恢复设置、登录状态和同步配置
+/// 先解密并确认 Android 兼容性，再恢复设置、登录状态和同步配置
 #[tauri::command]
-pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppResult<Value> {
+pub async fn import_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    password: Option<String>,
+    confirmed_android: Option<bool>,
+    file_path: Option<String>,
+) -> AppResult<Value> {
+    let file_path = if let Some(path) = file_path {
+        std::path::PathBuf::from(path)
+    } else {
+        let Some(path) = pick_file_path(&app, None).await? else {
+            return Ok(dialog_cancelled());
+        };
+        path
+    };
+    let selected_path = file_path.to_string_lossy().into_owned();
+    let decoded = tauri::async_runtime::spawn_blocking(move || {
+        let file = std::fs::File::open(&file_path)
+            .map_err(|_| AppError::Other("CONFIG_FILE_READ_FAILED".into()))?;
+        let mut content = Vec::new();
+        file.take(config_backup::MAX_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut content)
+            .map_err(|_| AppError::Other("CONFIG_FILE_READ_FAILED".into()))?;
+        Ok::<_, AppError>(config_backup::decode(&content, password.as_deref()))
+    })
+    .await
+    .map_err(|_| AppError::Other("CONFIG_FILE_READ_FAILED".into()))??;
+    let root = match decoded {
+        Ok(root) => root,
+        Err(ConfigBackupError::PasswordRequired) => return Ok(serde_json::json!({
+            "success": false,
+            "requiresPassword": true,
+            "filePath": selected_path,
+        })),
+        Err(error) => return Err(AppError::Other(error.to_string())),
+    };
+    let android = is_android_config(&root);
+    let imported = if android {
+        let payload = deserialize_android_config(root)?;
+        if !confirmed_android.unwrap_or(false) {
+            return Ok(serde_json::json!({
+                "success": false,
+                "requiresConfirmation": true,
+                "filePath": selected_path,
+                "platform": "android",
+            }));
+        }
+        parse_android_config(&app, payload)?
+    } else {
+        parse_pc_config(root)?
+    };
+    // 对话框、密码和格式预检都通过后才使在途同步配置请求失效
     let (
         github_request,
         webdav_request,
@@ -1926,27 +2047,6 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
             generations.sync_preferences_revision,
         ))
     })?;
-    let Some(file_path) = pick_file_path(&app, None).await? else {
-        return Ok(dialog_cancelled());
-    };
-    let file_path = file_path.as_path();
-    let metadata = std::fs::metadata(file_path)
-        .map_err(|e| AppError::Other(format!("Read config metadata failed: {}", e)))?;
-    if metadata.len() > 2 * 1024 * 1024 {
-        return Err(AppError::Other("Config file is too large".into()));
-    }
-    let content = std::fs::read_to_string(file_path)
-        .map_err(|e| AppError::Other(format!("Read config failed: {}", e)))?;
-    let root: Value = serde_json::from_str(&content)
-        .map_err(|e| AppError::Other(format!("Parse config failed: {}", e)))?;
-
-    // 归一化 PC 与 Android 两种导出格式（parse_pc_config 内部做 kind/platform 校验）
-    let imported = if is_android_config(&root) {
-        parse_android_config(&app, root)?
-    } else {
-        parse_pc_config(root)?
-    };
-
     let imported_listen_together = imported.listen_together;
     let imported_language = imported.language;
     let mut settings = imported.settings;
@@ -1971,19 +2071,28 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
     if let Some(imported_auth) = imported.auth {
         let mut auth = state.auth.lock();
         let previous_auth = auth.clone();
-        for platform in ["netease", "bilibili", "youtube"] {
+        for (platform, replace) in ["netease", "bilibili", "youtube"]
+            .into_iter()
+            .zip(imported_auth.replace)
+        {
+            if !replace {
+                continue;
+            }
             crate::auth::cookies::expire_platform_cookies(
                 &state.cookie_jar,
                 &previous_auth,
                 platform,
             );
+            let cookies = match platform {
+                "netease" => imported_auth.state.netease.as_ref().map(|auth| &auth.cookies),
+                "bilibili" => imported_auth.state.bilibili.as_ref().map(|auth| &auth.cookies),
+                _ => imported_auth.state.youtube.as_ref().map(|auth| &auth.cookies),
+            };
+            if let Some(cookies) = cookies {
+                crate::auth::cookies::inject_cookies(&state.cookie_jar, cookies);
+            }
         }
-        *auth = if imported.merge_auth {
-            merge_imported_auth(&previous_auth, imported_auth)
-        } else {
-            imported_auth
-        };
-        crate::auth::cookies::inject_all(&state.cookie_jar, &auth);
+        *auth = merge_imported_auth(&previous_auth, imported_auth);
         crate::auth::cookies::save_auth(&app, &auth);
     }
     let legacy_history_mode = imported
@@ -2035,7 +2144,7 @@ pub async fn import_config(app: AppHandle, state: State<'_, AppState>) -> AppRes
         "listenTogetherUserUuid": imported_listen_together
             .map(|listen_together| listen_together.user_uuid)
             .unwrap_or_default(),
-        "platform": "pc",
+        "platform": if android { "android" } else { "pc" },
     }))
 }
 
@@ -2814,7 +2923,7 @@ mod tests {
             "language": { "code": "zh" },
             "neteaseAuth": { "cookies": { "MUSIC_U": "v1", "__csrf": "" }, "savedAt": 1 },
             "biliAuth": { "cookies": {}, "savedAt": 0 },
-            "youTubeAuth": { "cookies": { "SAPISID": "s1" }, "authorization": "SAPISIDHASH x", "savedAt": 1 },
+            "youTubeAuth": { "cookies": { "SAPISID": "s1" }, "authorization": "SAPISIDHASH x", "xGoogAuthUser": "2", "savedAt": 1 },
             "gitHubSync": { "token": "", "repoOwner": "", "repoName": "", "autoSyncEnabled": true, "playHistoryUpdateMode": "", "dataSaverMode": true },
             "webDavSync": { "serverUrl": "https://dav.example", "basePath": "", "username": "u", "password": "p", "autoSyncEnabled": true },
             "syncPreferences": { "playHistoryUpdateMode": "IMMEDIATE" }
@@ -2839,13 +2948,19 @@ mod tests {
         assert_eq!(lt.server_url, "https://lt.example");
         assert_eq!(lt.user_uuid, "abc");
 
-        let auth = map_android_auth(&config).unwrap();
+        let mapped = map_android_auth(&config).unwrap();
+        assert_eq!(mapped.replace, [true; 3]);
+        let auth = mapped.state;
         assert!(auth.netease.is_some());
         assert!(auth.bilibili.is_none());
         assert!(auth.youtube.is_some());
-        // 空值 Cookie 被过滤
-        assert_eq!(auth.netease.as_ref().unwrap().cookies.len(), 1);
-        assert_eq!(auth.netease.as_ref().unwrap().cookies[0].domain, "music.163.com");
+        // 空值 Cookie 被过滤，Android 默认客户端参数需要保留
+        let netease = &auth.netease.as_ref().unwrap().cookies;
+        assert_eq!(netease.len(), 3);
+        for (name, value) in [("MUSIC_U", "v1"), ("os", "pc"), ("appver", "8.10.35")] {
+            assert!(netease.iter().any(|cookie| cookie.name == name && cookie.value == value && cookie.domain == "music.163.com"));
+        }
+        assert_eq!(auth.youtube.as_ref().unwrap().auth_user.as_deref(), Some("2"));
         // YouTube 会话 Cookie 要同时落在 youtube.com 与 google.com 上，播放和账号接口才都认
         let youtube = &auth.youtube.as_ref().unwrap().cookies;
         assert!(youtube.iter().any(|c| c.name == "SAPISID" && c.domain == ".youtube.com"));
@@ -2876,11 +2991,123 @@ mod tests {
             bilibili: Some(BiliAuth { cookies: vec![cookie("new")], mid: None, nickname: None, avatar_url: None }),
             youtube: None,
         };
-        let merged = merge_imported_auth(&previous, imported);
+        let merged = merge_imported_auth(&previous, super::ImportedAuth { state: imported, replace: [false, true, false] });
         // 备份里没有的平台保留原登录，有的平台用备份覆盖
         assert_eq!(merged.netease.unwrap().user_id, Some(1));
         assert_eq!(merged.bilibili.unwrap().cookies[0].value, "new");
         assert!(merged.youtube.is_none());
+    }
+
+    #[test]
+    fn android_empty_auth_clears_only_the_present_platform() {
+        let previous: AuthState = serde_json::from_value(serde_json::json!({
+            "netease": {"cookies": [], "user_id": 123},
+            "bilibili": {"cookies": [], "mid": 456},
+            "youtube": {"cookies": [], "nickname": "previous"},
+        })).unwrap();
+        let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+            "neteaseAuth": {"cookies": {}},
+        })).unwrap();
+        let imported = super::map_android_auth(&config).unwrap();
+        assert_eq!(imported.replace, [true, false, false]);
+        let merged = super::merge_imported_auth(&previous, imported);
+        assert!(merged.netease.is_none());
+        assert_eq!(merged.bilibili.unwrap().mid, Some(456));
+        assert_eq!(merged.youtube.unwrap().nickname.as_deref(), Some("previous"));
+    }
+
+    #[test]
+    fn android_youtube_cookie_header_is_a_fallback_and_unknown_cookies_are_not_saved() {
+        let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+            "neteaseAuth": {"cookies": {"MUSIC_U": "synthetic", "unknown_secret": "ignore"}},
+            "biliAuth": {"cookies": {"SESSDATA": "synthetic", "unknown_secret": "ignore"}},
+            "youTubeAuth": {"cookies": {}, "cookieHeader": "SAPISID=synthetic; unknown_secret=ignore"},
+        })).unwrap();
+        let imported = super::map_android_auth(&config).unwrap();
+        assert_eq!(imported.replace, [true; 3]);
+        for cookies in [
+            &imported.state.netease.unwrap().cookies,
+            &imported.state.bilibili.unwrap().cookies,
+            &imported.state.youtube.unwrap().cookies,
+        ] {
+            assert!(!cookies.is_empty());
+            assert!(!cookies.iter().any(|cookie| cookie.name == "unknown_secret"));
+        }
+
+        let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+            "youTubeAuth": {"cookies": {"SAPISID": "map-value"}, "cookieHeader": "SAPISID=header-value"},
+        })).unwrap();
+        assert!(super::map_android_auth(&config).unwrap().state.youtube.unwrap().cookies.iter().all(|cookie| cookie.value == "map-value"));
+
+        let cookies = [("MUSIC_U".into(), "synthetic; MUSIC_A=injected".into())]
+            .into_iter()
+            .collect();
+        assert!(super::android_cookie_entries(&cookies, "netease").is_empty());
+    }
+
+    #[test]
+    fn android_youtube_account_index_is_validated_without_discarding_cookies() {
+        for (value, expected) in [("2", Some("2")), (" 1 ", Some("1")), ("-1", None), ("1\r\nInjected: value", None)] {
+            let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+                "youTubeAuth": {"cookies": {"SAPISID": "fixture"}, "xGoogAuthUser": value},
+            })).unwrap();
+            let auth = super::map_android_auth(&config).unwrap().state.youtube.unwrap();
+            assert!(auth.has_login());
+            assert_eq!(auth.selected_auth_user(), expected);
+        }
+    }
+
+    #[test]
+    fn android_unsupported_youtube_headers_do_not_fabricate_or_clear_login() {
+        for (field, value) in [
+            ("authorization", "SAPISIDHASH synthetic"),
+            ("xGoogAuthUser", "2"),
+            ("origin", "https://music.youtube.com"),
+            ("userAgent", "Browser/1.0"),
+        ] {
+            let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+                "youTubeAuth": {(field): value},
+            })).unwrap();
+            assert!(super::map_android_auth(&config).is_none(), "{field}");
+        }
+        let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({"youTubeAuth": {}})).unwrap();
+        let imported = super::map_android_auth(&config).unwrap();
+        assert_eq!(imported.replace, [false, false, true]);
+        assert!(imported.state.youtube.is_none());
+    }
+
+    #[test]
+    fn android_partial_settings_are_identified_without_booleans() {
+        assert!(super::is_android_config(&serde_json::json!({
+            "kind": CONFIG_FILE_KIND, "settings": {"strings": {"audio_quality": "lossless"}},
+        })));
+        assert!(!super::is_android_config(&serde_json::json!({
+            "kind": CONFIG_FILE_KIND, "platform": "pc", "settings": {},
+        })));
+    }
+
+    #[test]
+    fn desktop_config_omits_login_and_sync_credentials_unless_requested() {
+        let config = super::DesktopConfigFile {
+            kind: CONFIG_FILE_KIND.into(),
+            format_version: CONFIG_FILE_VERSION,
+            platform: "pc".into(),
+            platform_name: "NeriPlayer Desktop".into(),
+            exported_at: 1,
+            settings: AppSettings::default(),
+            listen_together: None,
+            language: None,
+            auth: None,
+            github_sync: None,
+            webdav_sync: None,
+            sync_preferences: Some(ConfigSyncPreferences::default()),
+        };
+        let value = serde_json::to_value(config).unwrap();
+        for section in ["auth", "githubSync", "webdavSync"] {
+            assert!(value.get(section).is_none(), "{section}");
+        }
+        assert!(value.get("settings").is_some());
+        assert!(value.get("syncPreferences").is_some());
     }
 
     #[test]

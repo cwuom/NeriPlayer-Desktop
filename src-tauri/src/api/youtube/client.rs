@@ -785,6 +785,7 @@ mod tests {
             ],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
 
         let selected = YouTubeClient::music_cookies(&auth);

@@ -122,6 +122,10 @@ export const useAuthStore = defineStore('auth', () => {
     playbackPrefetchManager.clear()
     useRecommendStore().invalidatePlatform(platform)
     window.dispatchEvent(new CustomEvent(AUTH_CHANGED_EVENT, { detail: { platform } }))
+    if (platform === 'youtube' && needsYoutubeProfileRefresh(youtube.value)) {
+      youtubeProfileRefreshAttempted.value = false
+      void refreshYoutubeProfile()
+    }
   }
 
   /** 通用登录流程 */
@@ -190,13 +194,15 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /** Cookie 粘贴登录（对齐 Android 端） */
-  async function loginWithCookies(platform: string, rawCookies: string) {
+  async function loginWithCookies(platform: string, rawCookies: string): Promise<boolean> {
+    if (!['netease', 'bilibili', 'youtube'].includes(platform)) return false
     const toast = useToastStore()
     const target = platform === 'netease' ? netease : platform === 'bilibili' ? bilibili : youtube
     loggingIn.value = platform
     try {
       const info = await invoke<any>('login_with_cookies', { platform, rawCookies })
       const mapped = mapAuth(info)
+      if (!mapped.loggedIn) return false
       target.value = mapped
       if (platform === 'youtube') {
         youtubeProfileRefreshAttempted.value = false
@@ -206,9 +212,11 @@ export const useAuthStore = defineStore('auth', () => {
         notifyAuthChanged(platform)
         toast.success(t('settings.login_success', { platform: platformLabel(platform) }))
       }
+      return true
     } catch (e: any) {
       toast.error(String(e))
       log.error(`${platform} cookie login failed:`, e)
+      return false
     } finally {
       loggingIn.value = null
     }
@@ -216,6 +224,6 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     netease, bilibili, youtube, loggingIn, statusChecked, isAnyLoggedIn,
-    checkStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, logout,
+    checkStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, notifyAuthChanged, logout,
   }
 })
