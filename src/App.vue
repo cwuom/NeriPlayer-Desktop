@@ -16,6 +16,9 @@ import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
 import { useSettingsStore } from '@/stores/settings'
+import { claimFirstRunLinuxNotice } from '@/utils/linuxNotice'
+import M3Dialog from '@/components/ui/M3Dialog.vue'
+import { useI18n } from 'vue-i18n'
 import { applyFontSettings } from '@/modules/settings/fonts'
 import { LOW_PERFORMANCE_INTERVAL_MS, setFrameInterval } from '@/utils/frameLoop'
 import { HISTORY_CHANGED_EVENT } from '@/stores/history'
@@ -92,6 +95,8 @@ const nowPlayingMotionState = ref<'opening' | 'closing' | null>(null)
 // NVIDIA + WebKitGTK: sliding the full-screen layer repaints a huge area and
 // flickers, so switch instantly instead.
 const nvidiaCompat = ref(false)
+const linuxNoticeOpen = ref(false)
+const { t } = useI18n()
 const lastCoverSnapshot = ref<{ trackId: string; src: string } | null>(null)
 
 const hasMiniPlayer = computed(() => hasVisiblePlaybackSession(
@@ -457,6 +462,19 @@ onMounted(async () => {
         }
       })
       .catch(() => { /* 旧后端或非 Linux：保持默认过渡 */ })
+
+    // Linux 端整条渲染栈都建立在 WebKitGTK 上（2.54 起还整体换过合成器）：页面切换可能
+    // 闪一下、性能也可能明显差，动态背景的闪烁更是光敏性癫痫风险。首次运行给一次总
+    // 提示，并把动态背景默认关掉——它不是“体验问题”，是安全默认。
+    // The whole Linux rendering stack sits on WebKitGTK (which swapped its compositor in
+    // 2.54): page switches can flash, performance can be poor, and the dynamic
+    // background's flicker is a photosensitivity risk. The first run shows one notice and
+    // starts with the background off — a safety default, not a cosmetic one.
+    void claimFirstRunLinuxNotice().then((firstRun) => {
+      if (!firstRun) return
+      settingsStore.dynamicBackground = false
+      linuxNoticeOpen.value = true
+    })
   }
   uninstallDesktopLyrics = installDesktopLyricsBridge({
     openSettings: () => {
@@ -716,6 +734,16 @@ onUnmounted(() => {
         <img :src="flipOverlay.src" class="flip-cover-img" referrerpolicy="no-referrer" />
       </div>
     </Transition>
+
+    <M3Dialog
+      :open="linuxNoticeOpen"
+      icon="info"
+      :title="t('settings.linux_test_notice_title')"
+      :cancel-text="t('common.close')"
+      :confirm-text="t('settings.linux_test_notice_ack')"
+      @cancel="linuxNoticeOpen = false"
+      @confirm="linuxNoticeOpen = false"
+    >{{ t('settings.linux_test_notice_body') }}</M3Dialog>
 
     <AppToast />
     <BiliVideoPartsDialog />

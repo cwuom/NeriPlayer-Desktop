@@ -573,6 +573,7 @@ pub struct BuildInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinuxGraphicsCompat {
+    /// 兼容层是否生效 / whether the workaround layer actually ran
     pub nvidia: bool,
     pub dmabuf_atlas_disabled: bool,
     pub dmabuf_shm_forced: bool,
@@ -590,14 +591,55 @@ pub fn get_linux_graphics_compat() -> LinuxGraphicsCompat {
         software_compositing: false,
     };
     #[cfg(target_os = "linux")]
-    if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
-        compat.nvidia = true;
-        compat.dmabuf_atlas_disabled = quirk.dmabuf_atlas_disabled;
-        compat.dmabuf_shm_forced = quirk.dmabuf_shm_forced;
-        compat.dmabuf_disabled = quirk.dmabuf_disabled;
-        compat.software_compositing = quirk.software_compositing;
+    {
+        if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
+            compat.nvidia = true;
+            compat.dmabuf_atlas_disabled = quirk.dmabuf_atlas_disabled;
+            compat.dmabuf_shm_forced = quirk.dmabuf_shm_forced;
+            compat.dmabuf_disabled = quirk.dmabuf_disabled;
+            compat.software_compositing = quirk.software_compositing;
+        }
     }
     compat
+}
+
+/// “Linux 首次运行提示已展示过”的标记文件，放在应用数据目录。
+/// Marker file in the app data directory recording that the Linux first-run notice was
+/// already shown.
+const LINUX_FIRST_RUN_NOTICE_FILE: &str = "linux-first-run-notice-shown";
+
+/// 认领“Linux 首次运行总提示”：第一次调用创建标记并返回 `true`，之后一直 `false`。
+///
+/// 启动流程用它弹一次总提示并把动态背景默认关掉（WebKitGTK 下渲染不稳，动态背景的
+/// 闪烁是光敏性癫痫风险），用户之后仍可在设置里手动打开，那时会弹严重警告。用空文件
+/// 而不是设置字段，是为了完全不碰设置快照与它的同步信封；`create_new` 保证同时调用时
+/// 只有一个能认领成功。
+/// Claim the one-and-only Linux first-run notice: the first call creates the marker and
+/// returns `true`, every later call returns `false`. Startup uses it to show one notice
+/// and disable the dynamic background (WebKitGTK rendering is unstable here and the
+/// background's flicker is a photosensitivity risk); the user can still enable it by hand
+/// in Settings, where a severe warning appears. An empty file instead of a settings field
+/// keeps the settings snapshot and its sync envelope untouched, and `create_new` makes the
+/// claim atomic when calls overlap.
+#[tauri::command]
+pub fn claim_linux_first_run_notice(app: AppHandle) -> AppResult<bool> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::Other(error.to_string()))?;
+    std::fs::create_dir_all(&dir)?;
+    // 旧版本的标记文件（只有 NVIDIA 时用过）顺手清掉，免得在数据目录里留垃圾喵
+    // Drop the marker the NVIDIA-only build used, so no orphan file is left behind.
+    let _ = std::fs::remove_file(dir.join("shader-flicker-notice-shown"));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(LINUX_FIRST_RUN_NOTICE_FILE))
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[tauri::command]

@@ -22,12 +22,27 @@
 //! - `NERI_NVIDIA_FRAMES_ALLOWED=N`：覆盖在途帧上限（0 = 不设置）/ override the frame cap.
 //! - `NERI_NVIDIA_NO_VSYNC=1`：额外关闭垂直同步（可能撕裂，默认关闭）/
 //!   additionally disable vsync (may tear; off by default).
-//! - `NERI_WEBKIT_KEEP_DMABUF=1`：保留 DMA-BUF 硬件合成（默认强制走共享内存）/
-//!   keep DMA-BUF hardware compositing (shared memory is the default).
-//! - `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1`：保留 DMA-BUF atlas（默认关闭以消除闪烁）/
-//!   keep the DMA-BUF atlas (disabled by default to remove flicker).
+//! - `NERI_WEBKIT_KEEP_DMABUF_ATLAS=1`：保留 DMA-BUF atlas（默认关闭）。注意这等于
+//!   撤掉闪烁修复的一半：atlas 复用正是闪烁成因之一，此时若仍闪烁请配合
+//!   `NERI_WEBKIT_FORCE_SHM=1` / keep the DMA-BUF atlas (disabled by default). This
+//!   also removes half of the flicker fix, since atlas reuse is one of the causes; pair
+//!   it with `NERI_WEBKIT_FORCE_SHM=1` if flicker returns.
+//! - `NERI_WEBKIT_KEEP_NATIVE_VBLANK=1`：改用驱动原生 vblank（默认用定时 vblank）/
+//!   use the driver's native vblank (timer-based vblank is the default).
+//! - `NERI_WEBKIT_FORCE_SHM=1`：强制共享内存合成（默认关闭）/ force shared-memory
+//!   compositing (off by default). 仍然闪烁时才打开：它会让每帧多一次 GPU→CPU 回读，
+//!   混合显卡机器上还会把 Web 进程挑到独显再回读上屏 / turn this on only if flicker
+//!   persists: it adds a GPU→CPU readback per frame and, on hybrid laptops, moves the
+//!   Web process onto the discrete GPU before reading back for scanout. 注意它与
+//!   `NERI_WEBKIT_KEEP_DMABUF=1` 冲突时后者优先 / note `NERI_WEBKIT_KEEP_DMABUF`
+//!   takes precedence over it.
+//! - `NERI_WEBKIT_KEEP_DMABUF=1`：保留 DMA-BUF 硬件合成（与默认一致），但它会否决
+//!   `NERI_WEBKIT_FORCE_SHM=1`：两者同时设置时不会强制 SHM，可用它把旧配置里的这一项
+//!   关掉 / keep DMA-BUF hardware compositing (same as the default), and it vetoes
+//!   `NERI_WEBKIT_FORCE_SHM=1`: with both set, SHM is not forced.
 //! - `NERI_WEBKIT_DMABUF_NO_GBM=1`：绕过 NVIDIA 的 GBM 分配路径 / avoid NVIDIA GBM allocation.
-//! - `NERI_WEBKIT_FORCE_VBLANK_TIMER=1`：改用定时 vblank / use the timer-based vblank.
+//! - `NERI_WEBKIT_FORCE_VBLANK_TIMER=1`：兼容开关，定时 vblank 现在是默认值 /
+//!   compatibility switch; timer-based vblank is now the default.
 //! - `NERI_WEBKIT_SOFTWARE_COMPOSITING=1`：完全关闭加速合成（最慢）/
 //!   disable accelerated compositing entirely (slowest).
 //!
@@ -43,6 +58,7 @@ pub struct AppliedNvidiaQuirk {
     pub frames_allowed: Option<u32>,
     pub vsync_disabled: bool,
     pub dmabuf_atlas_disabled: bool,
+    pub vblank_timer_forced: bool,
     pub dmabuf_shm_forced: bool,
     pub dmabuf_disabled: bool,
     pub software_compositing: bool,
@@ -128,11 +144,13 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
 
         // DMA-BUF atlas：WebKit 会复用/缓存 GPU 缓冲区；NVIDIA 下复用中的缓冲区
         // 可能被再次呈现，正好对应“切换界面时只闪、不卡”。关掉 atlas 仍走 DMA-BUF
-        // 硬件合成，代价远小于关闭整个 renderer。
+        // 硬件合成，代价只是每层各占一份 GPU 缓冲，远小于强制 SHM（后者会让每帧多一次
+        // GPU→CPU 回读，在混合显卡机器上还会把 Web 进程推去独显）。
         // DMA-BUF atlas: WebKit caches/reuses GPU buffers. On NVIDIA a buffer still
         // being presented can be reused, which matches "flicker without slowness".
-        // Disabling the atlas keeps the DMA-BUF hardware path; far cheaper than
-        // disabling the whole renderer.
+        // Disabling it keeps the DMA-BUF hardware path; the only cost is one GPU buffer
+        // per layer, far below forced SHM (a GPU→CPU readback per frame that also moves
+        // the Web process onto the discrete GPU on hybrid machines).
         let dmabuf_atlas_disabled = if std::env::var_os("WEBKIT_DISABLE_DMABUF_ATLAS").is_some()
             || env_truthy("NERI_WEBKIT_KEEP_DMABUF_ATLAS")
         {
@@ -142,19 +160,32 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
             true
         };
 
-        // 备选路径：NVIDIA 的 GBM 分配与定时 vblank 也可能导致闪烁，默认不动，
+        // 定时 vblank：实测“关 atlas + 定时 vblank”才是 NVIDIA 下 WebGL 背景与转场闪烁的
+        // 真正解，而且仍然走 DMA-BUF，不需要强制 SHM。默认开启；想用驱动原生 vblank 可设
+        // `NERI_WEBKIT_KEEP_NATIVE_VBLANK=1`（`NERI_WEBKIT_FORCE_VBLANK_TIMER` 保留为
+        // 兼容开关，默认已开启）。
+        // Timer-based vblank: measured to be the other half of the actual fix for WebGL
+        // background and transition flicker on NVIDIA, while still using DMA-BUF, so no
+        // forced SHM is needed. On by default; `NERI_WEBKIT_KEEP_NATIVE_VBLANK=1` opts
+        // out (`NERI_WEBKIT_FORCE_VBLANK_TIMER` is kept as a compatibility switch, now a
+        // no-op because the timer is already the default).
+        let vblank_timer_forced = if std::env::var_os("WEBKIT_FORCE_VBLANK_TIMER").is_some()
+            || env_truthy("NERI_WEBKIT_KEEP_NATIVE_VBLANK")
+        {
+            false
+        } else {
+            std::env::set_var("WEBKIT_FORCE_VBLANK_TIMER", "1");
+            true
+        };
+
+        // 备选路径：NVIDIA 的 GBM 分配也可能导致闪烁，默认不动，
         // 仅在用户显式要求时切换，便于逐项定位。
-        // Optional paths: NVIDIA's GBM allocation and vblank timer can also flicker;
-        // leave them alone by default so users can bisect one knob at a time.
+        // Optional path: NVIDIA's GBM allocation can also flicker; left alone by default
+        // so users can bisect one knob at a time.
         if env_truthy("NERI_WEBKIT_DMABUF_NO_GBM")
             && std::env::var_os("WEBKIT_DMABUF_RENDERER_DISABLE_GBM").is_none()
         {
             std::env::set_var("WEBKIT_DMABUF_RENDERER_DISABLE_GBM", "1");
-        }
-        if env_truthy("NERI_WEBKIT_FORCE_VBLANK_TIMER")
-            && std::env::var_os("WEBKIT_FORCE_VBLANK_TIMER").is_none()
-        {
-            std::env::set_var("WEBKIT_FORCE_VBLANK_TIMER", "1");
         }
         // 用户显式关闭 DMA-BUF renderer 时，不要再叠加 FORCE_SHM：WebKit 会先走
         // disable 分支，两者同时设置会落到没有有效 backing store 的崩溃路径。
@@ -164,15 +195,22 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
         let dmabuf_disabled = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some();
 
         // DMA-BUF 共享内存合成：WebKitGTK 在 NVIDIA 下用 GPU 缓冲区直接合成时，
-        // 切换页面/播放页仍会闪；强制 SHM 后实测稳定，代价是少量合成开销。
+        // 切换页面/播放页仍会闪；强制 SHM 后实测稳定，代价是每帧一次 GPU→CPU 回读。
+        // 代价不止合成开销：实测只要强制 SHM，Web 进程就会在混合显卡机器上被挑到
+        // 独显渲染，再回读到核显上屏（跨 GPU 三跳），CPU、显存与功耗一起上去，
+        // 所以默认关闭，只在用户显式要求或逐项定位闪烁时打开。
         // 想保留硬件合成可用 NERI_WEBKIT_KEEP_DMABUF=1，显式设置的环境变量优先。
         // Shared-memory DMA-BUF compositing: direct GPU-buffer compositing still
-        // flickers on NVIDIA when switching pages/now-playing; SHM is stable in
-        // testing at a small compositing cost. Set NERI_WEBKIT_KEEP_DMABUF=1 to keep
-        // hardware compositing; explicit environment variables win.
+        // flickers on NVIDIA when switching pages/now-playing; SHM was stable in
+        // testing, at the cost of one GPU→CPU readback per frame. That cost is not only
+        // compositing: measured on a hybrid laptop, forcing SHM also moves the Web
+        // process onto the discrete GPU and reads back to the integrated one for
+        // scanout, so CPU, VRAM and power all rise. Off by default; enable only when
+        // explicitly requested while bisecting flicker.
         let dmabuf_shm_forced = if dmabuf_disabled
             || std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_some()
             || std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some()
+            || !env_truthy("NERI_WEBKIT_FORCE_SHM")
             || env_truthy("NERI_WEBKIT_KEEP_DMABUF")
             || env_truthy("NERI_WEBKIT_SOFTWARE_COMPOSITING")
         {
@@ -197,7 +235,8 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
         eprintln!(
             "neri: NVIDIA proprietary driver detected; explicit_sync_disabled={explicit_sync_disabled} \
              frames_allowed={frames_allowed:?} vsync_disabled={vsync_disabled} \
-             dmabuf_atlas_disabled={dmabuf_atlas_disabled} dmabuf_shm_forced={dmabuf_shm_forced} \
+             dmabuf_atlas_disabled={dmabuf_atlas_disabled} vblank_timer_forced={vblank_timer_forced} \
+             dmabuf_shm_forced={dmabuf_shm_forced} \
              dmabuf_disabled={dmabuf_disabled} software_compositing={software_compositing}"
         );
         Some(AppliedNvidiaQuirk {
@@ -205,6 +244,7 @@ pub fn apply_nvidia_webkit_workarounds() -> Option<AppliedNvidiaQuirk> {
             frames_allowed,
             vsync_disabled,
             dmabuf_atlas_disabled,
+            vblank_timer_forced,
             dmabuf_shm_forced,
             dmabuf_disabled,
             software_compositing,

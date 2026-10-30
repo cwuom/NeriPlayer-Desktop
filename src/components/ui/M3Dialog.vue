@@ -128,6 +128,8 @@ useEscapeClose(() => props.open, close)
   font-size: 14px;
   line-height: 1.5;
   margin-bottom: 24px;
+  /* 文案里的空行要真的断成段落（目前只有光敏提示用了多段）喵 */
+  white-space: pre-line;
 }
 
 .dialog-actions {

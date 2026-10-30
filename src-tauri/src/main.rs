@@ -60,13 +60,13 @@ fn main() {
         "--enable-gpu --enable-gpu-rasterization --enable-zero-copy --enable-features=CanvasOopRasterization");
 
     // Linux NVIDIA 私有驱动：在 GTK/WebKit 初始化前应用兼容设置，消除页面切换闪烁。
-    // 默认关闭 DMA-BUF atlas 并强制 SHM 合成（DMA-BUF renderer 仍启用）；想保留硬件
-    // 合成用 NERI_WEBKIT_KEEP_DMABUF=1，完全跳过本兼容层用
+    // 默认关闭 DMA-BUF atlas 并改用定时 vblank（仍走 DMA-BUF 硬件合成，不强制 SHM）；
+    // 仍闪烁时用 NERI_WEBKIT_FORCE_SHM=1 退到共享内存合成，完全跳过本兼容层用
     // NERI_DISABLE_NVIDIA_QUIRK=1。显式设置的环境变量始终优先。
     // Linux + NVIDIA proprietary: apply compatibility settings before GTK/WebKit init to
-    // stop page-switch flicker. By default this disables the DMA-BUF atlas and forces SHM
-    // compositing (the DMA-BUF renderer itself stays enabled); use
-    // NERI_WEBKIT_KEEP_DMABUF=1 to keep hardware compositing, or
+    // stop page-switch flicker. By default this disables the DMA-BUF atlas and switches to
+    // the timer-based vblank (DMA-BUF hardware compositing stays on; SHM is not forced);
+    // set NERI_WEBKIT_FORCE_SHM=1 to fall back to shared-memory compositing, or
     // NERI_DISABLE_NVIDIA_QUIRK=1 to skip this layer. Explicit env vars always win.
     #[cfg(target_os = "linux")]
     neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();
@@ -101,10 +101,10 @@ fn main() {
             if let Some(quirk) = neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds() {
                 log::info!(
                     target: "linux-graphics",
-                    "NVIDIA WebKitGTK workaround active: explicit_sync_disabled={}, frames_allowed={:?}, vsync_disabled={}, dmabuf_atlas_disabled={}, dmabuf_shm_forced={}, dmabuf_disabled={}, software_compositing={}",
+                    "NVIDIA WebKitGTK workaround active: explicit_sync_disabled={}, frames_allowed={:?}, vsync_disabled={}, dmabuf_atlas_disabled={}, vblank_timer_forced={}, dmabuf_shm_forced={}, dmabuf_disabled={}, software_compositing={}",
                     quirk.explicit_sync_disabled, quirk.frames_allowed, quirk.vsync_disabled,
-                    quirk.dmabuf_atlas_disabled, quirk.dmabuf_shm_forced, quirk.dmabuf_disabled,
-                    quirk.software_compositing,
+                    quirk.dmabuf_atlas_disabled, quirk.vblank_timer_forced, quirk.dmabuf_shm_forced,
+                    quirk.dmabuf_disabled, quirk.software_compositing,
                 );
             }
 
@@ -563,6 +563,7 @@ fn main() {
             settings_cmd::set_bypass_proxy,
             settings_cmd::get_build_info,
             settings_cmd::get_linux_graphics_compat,
+            settings_cmd::claim_linux_first_run_notice,
             settings_cmd::get_system_accent_color,
             settings_cmd::probe_platform_connectivity,
             debug_cmd::get_recent_logs,
