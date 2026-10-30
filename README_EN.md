@@ -225,6 +225,8 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
   Manually match lyrics from NetEase, QQ Music, Kugou, LRCLIB, and AMLL TTML.
 - **Independent desktop lyrics**: one/two/three lines, word or whole-line display, translations/romanization,
   fonts, gradients, outlines, shadows, opacity, backgrounds, saved position and size, locking, and click-through.
+  On Windows, WebView2 disconnect error `0x80010108` during window creation triggers one retry
+  with a dedicated browser data directory; the recovery result is logged.
 - **Local files**: multiple library folders, incremental scans, scan previews and cancellation,
   search and multi-selection, local artist grouping, direct playback, playlist import,
   and editing of title, artist, and album tags.

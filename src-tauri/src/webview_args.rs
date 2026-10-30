@@ -1,4 +1,4 @@
-//! 所有窗口共用一个 WebView2 环境（同一个用户数据目录），附加浏览器参数必须与主窗口完全一致，
+//! 共享用户数据目录的窗口会连接同一组 WebView2 浏览器进程，附加浏览器参数必须与主窗口一致，
 //! 否则之后创建的窗口会因环境参数不同而创建失败。参数只在 tauri.conf.json 的主窗口里写一份
 use tauri::{Manager, Runtime, WebviewWindowBuilder};
 

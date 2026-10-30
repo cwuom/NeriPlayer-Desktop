@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { ref } from 'vue'
+import { parse } from 'vue/compiler-sfc'
+import { createI18n } from 'vue-i18n'
 import ts from 'typescript'
 
 async function loadModule(path, dependencies) {
@@ -58,6 +61,9 @@ assert.equal(frame(0, 0, { rate: 0 }).rate, 1, '无效倍速按 1')
 assert.equal(frame(0, 0, { accent: '#ABCDEF' }).accent, '#abcdef')
 assert.equal(frame(0, 0, { accent: 'red; x: y' }).accent, '', '主题色只收 #rrggbb')
 assert.equal(frame(0, 0, { style: { layout: 'double', fontSize: 999 } }).style.fontSize, 96, '外观在发帧前规整')
+assert.equal(frame(0, 0, { locale: 'ja' }).locale, 'ja', '语言随帧传递到独立的歌词窗口')
+assert.equal(frame(0, 0, { track: null, locale: 'zh-TW' }).locale, 'zh-TW', '没有播放曲目时仍同步语言')
+assert.equal(frame(0).locale, undefined, '旧调用未传语言时保留可选字段兼容')
 const many = Array.from({ length: 20 }, (_, index) => ({ startMs: index * 1000, durationMs: 1000, text: `L${index}`, words: [] }))
 const windowed = buildDesktopLyricsFrame({ track, lines: many, positionMs: 10_500, lyricOffsetMs: 0, isPlaying: true, rate: 1, now: 0, accent: null, style })
 assert.equal(windowed.firstIndex, 9)
@@ -91,7 +97,7 @@ const player = {
   next: async () => { playerCalls.push('next') },
   previous: async () => { playerCalls.push('previous') },
 }
-const settings = { preferWordTimedLyrics: false, defaultLyricSource: 'automatic', desktopLyrics: undefined }
+const settings = { locale: 'ja', preferWordTimedLyrics: false, defaultLyricSource: 'automatic', desktopLyrics: undefined }
 const watchers = []
 const intervals = new Map()
 const invocations = []
@@ -165,6 +171,7 @@ try {
   assert.equal(currentLyrics.consumers, 1, '打开后与正在播放页共用当前歌词')
   const firstFrame = invocations.filter(([command]) => command === 'publish_desktop_lyrics').at(-1)[1].frame
   assert.equal(firstFrame.lines[0].text, '第一行', '发出去的是共用的那份歌词')
+  assert.equal(firstFrame.locale, 'ja', '首次发布使用主窗口选择的语言')
   const opened = invocations.find(([command]) => command === 'open_desktop_lyrics')[1]
   assert.equal(opened.bounds, null, '第一次打开没有保存的位置，由后端放到屏幕底部居中')
   assert.deepEqual(invocations.find(([command]) => command === 'set_desktop_lyrics_lock')[1].locked, false, '打开后同步锁定状态')
@@ -177,6 +184,15 @@ try {
   await Promise.resolve()
   assert.equal(invocations.filter(([command]) => command === 'publish_desktop_lyrics').length, frameCount + 1, 'seek 后位置对不上锚点，马上发新帧')
   player.livePositionMs = () => 1000
+  for (const tick of intervals.values()) tick()
+  await flushMicrotasks()
+  const beforeLocaleChange = invocations.filter(([command]) => command === 'publish_desktop_lyrics').length
+  settings.locale = 'zh-TW'
+  for (const tick of intervals.values()) tick()
+  await flushMicrotasks()
+  const localizedFrames = invocations.filter(([command]) => command === 'publish_desktop_lyrics')
+  assert.equal(localizedFrames.length, beforeLocaleChange + 1, '仅语言变化也会及时发布，不等待锚点刷新')
+  assert.equal(localizedFrames.at(-1)[1].frame.locale, 'zh-TW')
 
   // 工具栏操作在主窗口执行
   listeners['desktop-lyrics:action']({ payload: { action: 'font-larger' } })
@@ -269,4 +285,39 @@ try {
   globalThis.clearInterval = originalClearInterval
 }
 
-console.log('desktop lyrics frame and bridge lifecycle tests passed')
+const viewSource = await readFile(new URL('../src/views/DesktopLyricsView.vue', import.meta.url), 'utf8')
+const viewScript = parse(viewSource).descriptor.scriptSetup.content
+const viewParsed = ts.createSourceFile('DesktopLyricsView.ts', viewScript, ts.ScriptTarget.ES2022, true)
+const acceptFrame = viewParsed.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'accept')
+assert.ok(acceptFrame, 'exercise the real desktop lyrics frame receiver')
+const i18nSource = await readFile(new URL('../src/i18n/index.ts', import.meta.url), 'utf8')
+const i18nParsed = ts.createSourceFile('i18n.ts', i18nSource, ts.ScriptTarget.ES2022, true)
+const localeDefinitions = i18nParsed.statements.filter(statement => (
+  ts.isFunctionDeclaration(statement) && statement.name?.text === 'setLocale'
+) || (
+  ts.isVariableStatement(statement) && statement.declarationList.declarations.some(declaration => declaration.name.getText(i18nParsed) === 'SUPPORTED_LOCALES')
+)).map(statement => statement.getText(i18nParsed).replace(/^export\s+/, ''))
+assert.equal(localeDefinitions.length, 2, 'use the real locale setter and supported locales')
+const receiverCompiled = ts.transpileModule([...localeDefinitions, acceptFrame.getText(viewParsed)].join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText
+for (const storedLocale of [null, 'zh-CN']) {
+  const i18n = createI18n({ legacy: false, locale: storedLocale ?? 'en', messages: { 'zh-CN': {}, 'zh-TW': {}, en: {}, ja: {} } })
+  const document = { documentElement: { lang: i18n.global.locale.value } }
+  const writes = []
+  const receive = new Function('i18n', 'document', 'localStorage', 'frame', 'lockedByEvent', 'emptyDesktopLyricsFrame', 'normalizeDesktopLyricsStyle', `${receiverCompiled}\nreturn accept`)(
+    i18n, document, { setItem: (...args) => writes.push(args) }, ref(frameModule.emptyDesktopLyricsFrame()), ref(null), frameModule.emptyDesktopLyricsFrame, styleModule.normalizeDesktopLyricsStyle,
+  )
+  receive(frame(0))
+  assert.equal(i18n.global.locale.value, storedLocale ?? 'en', '旧帧缺失语言时保留窗口原来的语言')
+  for (const locale of ['ja', 'zh-TW', 'en', 'zh-CN']) {
+    receive(frame(0, 0, { locale }))
+    assert.equal(i18n.global.locale.value, locale, '共享目录或独立目录的歌词窗口都跟随主窗口语言')
+    assert.equal(document.documentElement.lang, locale)
+  }
+  receive({ ...frame(0), locale: 'unsupported' })
+  assert.equal(i18n.global.locale.value, 'zh-CN', '未知语言不能覆盖已选语言')
+  assert.deepEqual(writes, [], '帧同步只更新当前窗口，不写独立目录的 localStorage')
+}
+
+console.log('desktop lyrics frame, locale and bridge lifecycle tests passed')
