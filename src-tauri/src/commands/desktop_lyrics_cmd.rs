@@ -77,6 +77,8 @@ pub struct DesktopLyricsFrame {
     track_id: String,
     title: String,
     artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locale: Option<String>,
     is_playing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     clock_running: Option<bool>,
@@ -97,6 +99,9 @@ fn invalid(message: &str) -> AppError {
 
 impl DesktopLyricsFrame {
     fn validate(&self) -> AppResult<()> {
+        if self.locale.as_deref().is_some_and(|locale| !["zh-CN", "zh-TW", "en", "ja"].contains(&locale)) {
+            return Err(invalid("has an invalid locale"));
+        }
         for (value, maximum) in [
             (&self.track_id, 512),
             (&self.title, MAX_TEXT_BYTES),
@@ -359,6 +364,55 @@ fn report_bounds_when_settled(app: &AppHandle) {
     });
 }
 
+fn create_lyrics_window_with_recovery<T>(
+    mut create: impl FnMut(bool) -> AppResult<T>,
+    recover_disconnect: bool,
+) -> AppResult<T> {
+    match create(false) {
+        Err(error) if recover_disconnect && error.to_string().to_ascii_lowercase().contains("0x80010108") => {
+            // 同目录的新环境仍会连接原浏览器进程，断连时改用固定的专用目录恢复一次
+            log::warn!(target: "desktop-lyrics", "WebView2 disconnected; retrying with isolated browser data: {error}");
+            let window = create(true)?;
+            log::info!(target: "desktop-lyrics", "window creation recovered with isolated browser data");
+            Ok(window)
+        }
+        result => result,
+    }
+}
+
+fn build_lyrics_window(app: &AppHandle, place: LogicalBounds) -> AppResult<WebviewWindow> {
+    create_lyrics_window_with_recovery(
+        |isolated| {
+            let builder = WebviewWindowBuilder::new(
+                app,
+                WINDOW_LABEL,
+                WebviewUrl::App("index.html?window=desktop-lyrics".into()),
+            )
+            .title("NeriPlayer")
+            .inner_size(place.width, place.height)
+            .position(place.x, place.y)
+            .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
+            .max_inner_size(MAX_WIDTH, MAX_HEIGHT)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .visible(false);
+            let builder = if isolated {
+                let directory = app.path().app_local_data_dir()
+                    .map_err(|error| AppError::Other(error.to_string()))?;
+                builder.data_directory(directory.join("desktop-lyrics-webview2"))
+            } else {
+                builder
+            };
+            builder.main_browser_args(app).build().map_err(|error| AppError::Other(error.to_string()))
+        },
+        cfg!(windows),
+    )
+}
+
 #[tauri::command]
 pub async fn open_desktop_lyrics(
     app: AppHandle,
@@ -390,26 +444,10 @@ pub async fn open_desktop_lyrics(
         state.adopt(session_id);
         state.window_instance = instance.clone();
     }
-    let builder = WebviewWindowBuilder::new(
-        &app,
-        WINDOW_LABEL,
-        WebviewUrl::App("index.html?window=desktop-lyrics".into()),
-    )
-    .title("NeriPlayer")
-    .inner_size(place.width, place.height)
-    .position(place.x, place.y)
-    .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
-    .max_inner_size(MAX_WIDTH, MAX_HEIGHT)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .visible(false);
-    let lyrics_window = builder.main_browser_args(&app).build().map_err(|error| {
+    let lyrics_window = build_lyrics_window(&app, place).map_err(|error| {
         snapshot().lock().retire(&instance);
-        AppError::Other(error.to_string())
+        log::error!(target: "desktop-lyrics", "window creation failed: {error}");
+        error
     })?;
     let event_app = app.clone();
     lyrics_window.on_window_event(move |event| match event {
@@ -626,6 +664,86 @@ pub fn desktop_lyrics_action(app: AppHandle, window: WebviewWindow, action: Stri
 mod tests {
     use super::*;
 
+    const DISCONNECTED_WEBVIEW: &str = "runtime error: failed to create webview: WebView2 error: WindowsError(Error { code: HRESULT(0x80010108), message: disconnected })";
+
+    #[test]
+    fn successful_window_creation_keeps_the_shared_browser_process() {
+        let mut attempts = Vec::new();
+        let result = create_lyrics_window_with_recovery(
+            |isolated| {
+                attempts.push(isolated);
+                Ok("lyrics-window")
+            },
+            true,
+        );
+        assert_eq!(result.unwrap(), "lyrics-window");
+        assert_eq!(attempts, [false]);
+    }
+
+    #[test]
+    fn disconnected_webview_creation_retries_with_an_isolated_browser_process() {
+        let mut attempts = Vec::new();
+        let result = create_lyrics_window_with_recovery(
+            |isolated| {
+                attempts.push(isolated);
+                if isolated {
+                    Ok("recovered-lyrics-window")
+                } else {
+                    Err(AppError::Other(DISCONNECTED_WEBVIEW.into()))
+                }
+            },
+            true,
+        );
+        assert_eq!(result.unwrap(), "recovered-lyrics-window");
+        assert_eq!(attempts, [false, true]);
+    }
+
+    #[test]
+    fn unrelated_window_errors_are_returned_without_recovery() {
+        let mut attempts = Vec::new();
+        let result = create_lyrics_window_with_recovery::<()>(
+            |isolated| {
+                attempts.push(isolated);
+                Err(AppError::Other("HRESULT(0x80070005)".into()))
+            },
+            true,
+        );
+        assert_eq!(result.unwrap_err().to_string(), "HRESULT(0x80070005)");
+        assert_eq!(attempts, [false]);
+    }
+
+    #[test]
+    fn failed_webview_recovery_stops_after_one_retry_and_returns_the_last_error() {
+        let mut attempts = Vec::new();
+        let result = create_lyrics_window_with_recovery::<()>(
+            |isolated| {
+                attempts.push(isolated);
+                Err(AppError::Other(if isolated {
+                    "isolated browser creation failed".into()
+                } else {
+                    DISCONNECTED_WEBVIEW.into()
+                }))
+            },
+            true,
+        );
+        assert_eq!(result.unwrap_err().to_string(), "isolated browser creation failed");
+        assert_eq!(attempts, [false, true]);
+    }
+
+    #[test]
+    fn disconnected_webviews_are_not_retried_when_platform_recovery_is_disabled() {
+        let mut attempts = Vec::new();
+        let result = create_lyrics_window_with_recovery::<()>(
+            |isolated| {
+                attempts.push(isolated);
+                Err(AppError::Other(DISCONNECTED_WEBVIEW.into()))
+            },
+            false,
+        );
+        assert_eq!(result.unwrap_err().to_string(), DISCONNECTED_WEBVIEW);
+        assert_eq!(attempts, [false]);
+    }
+
     #[test]
     fn old_sessions_and_old_native_destroy_events_cannot_retire_a_new_window() {
         let mut state = DesktopLyricsState {
@@ -734,6 +852,23 @@ mod tests {
 
         value["clockRunning"] = serde_json::json!("false");
         assert!(serde_json::from_value::<DesktopLyricsFrame>(value).is_err());
+    }
+
+    #[test]
+    fn frame_transfers_supported_locales_without_requiring_them_in_older_frames() {
+        let original = serde_json::to_value(frame_with_line(DesktopLyricsLine::default())).unwrap();
+        assert!(original.get("locale").is_none());
+        for locale in ["zh-CN", "zh-TW", "en", "ja"] {
+            let mut value = original.clone();
+            value["locale"] = serde_json::json!(locale);
+            let frame: DesktopLyricsFrame = serde_json::from_value(value.clone()).unwrap();
+            assert!(frame.validate().is_ok());
+            assert_eq!(serde_json::to_value(frame).unwrap(), value);
+        }
+        let mut invalid = original;
+        invalid["locale"] = serde_json::json!("unsupported");
+        let frame: DesktopLyricsFrame = serde_json::from_value(invalid).unwrap();
+        assert!(frame.validate().is_err());
     }
 
     #[test]

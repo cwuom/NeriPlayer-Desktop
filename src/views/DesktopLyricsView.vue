@@ -10,6 +10,7 @@ import DesktopLyricsStage from '@/components/desktopLyrics/DesktopLyricsStage.vu
 import { emptyDesktopLyricsFrame, type DesktopLyricsFrame } from '@/modules/desktopLyrics/frame'
 import { normalizeDesktopLyricsStyle } from '@/modules/desktopLyrics/style'
 import { anchoredPositionMs } from '@/modules/desktopLyrics/timeline'
+import { setLocale, SUPPORTED_LOCALES } from '@/i18n'
 
 const { t } = useI18n()
 const frame = ref<DesktopLyricsFrame>(emptyDesktopLyricsFrame())
@@ -42,6 +43,8 @@ function clock(): number {
 }
 
 function accept(payload: DesktopLyricsFrame) {
+  const locale = payload.locale
+  if (locale && SUPPORTED_LOCALES.some(option => option.code === locale)) setLocale(locale, false)
   frame.value = {
     ...emptyDesktopLyricsFrame(),
     ...payload,
