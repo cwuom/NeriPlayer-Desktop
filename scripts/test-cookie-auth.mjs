@@ -16,6 +16,7 @@ function runtime() {
   const requests = [], notifications = [], invalidated = [], events = []
   const profileListeners = new Map()
   let subscriptions = 0
+  let failedSubscriptions = 0
   let invokeHandler = null
   let resolved = { platform: 'netease', logged_in: true, nickname: 'Fixture', avatar_url: null }
   let rejected = null
@@ -34,6 +35,10 @@ function runtime() {
     } },
     '@tauri-apps/api/event': { listen: async (name, callback) => {
       subscriptions++
+      if (failedSubscriptions > 0) {
+        failedSubscriptions--
+        throw new Error('Event registration unavailable')
+      }
       profileListeners.set(name, callback)
       return () => profileListeners.delete(name)
     } },
@@ -61,6 +66,7 @@ function runtime() {
     reject: value => { rejected = value },
     handle: callback => { invokeHandler = callback },
     subscriptions: () => subscriptions,
+    failSubscriptions: count => { failedSubscriptions = count },
     profileListeners,
     emitProfile: platform => profileListeners.get('auth-profile-updated')?.({ payload: platform }),
     cleared: () => cleared,
@@ -236,6 +242,23 @@ try {
     await Promise.resolve()
     await vue.nextTick()
     assert.equal(current.store.youtube.nickname, 'YouTube profile')
+  })
+
+  await regression('failed profile registration retries on a later status check and keeps concurrent retries shared', async current => {
+    current.resolve({ netease: { logged_in: true }, bilibili: {}, youtube: {} })
+    current.failSubscriptions(1)
+    await current.store.checkStatus()
+    assert.equal(current.store.statusChecked, true)
+    assert.equal(current.store.netease.loggedIn, true, 'listener failure must not block the saved status')
+    assert.equal(current.subscriptions(), 1)
+    assert.equal(current.profileListeners.size, 0)
+    await Promise.all([current.store.checkStatus(), current.store.checkStatus()])
+    assert.equal(current.subscriptions(), 2, 'the next status checks must share one new registration')
+    await current.emitProfile('netease')
+    assert.deepEqual(current.invalidated, ['netease'], 'recovered listeners must notify account consumers')
+    assert.equal(current.subscriptions(), 2, 'successful registration must remain shared')
+    current.dispose()
+    assert.equal(current.profileListeners.size, 0)
   })
 
   await regression('background ID completion refreshes consumers once without duplicate listeners', async current => {

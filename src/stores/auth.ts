@@ -74,7 +74,10 @@ export const useAuthStore = defineStore('auth', () => {
       }).then(unlisten => {
         if (disposed) unlisten()
         else unlistenProfile = unlisten
-      }).catch(error => log.warn('Failed to listen for account profile updates:', error))
+      }).catch(error => {
+        profileListener = null
+        log.warn('Failed to listen for account profile updates:', error)
+      })
     }
     return profileListener
   }

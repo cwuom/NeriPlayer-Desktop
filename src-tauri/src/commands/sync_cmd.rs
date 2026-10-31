@@ -3149,6 +3149,11 @@ mod tests {
         })).unwrap();
         assert!(super::map_android_auth(&config).unwrap().state.youtube.unwrap().cookies.iter().all(|cookie| cookie.value == "map-value"));
 
+        let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
+            "youTubeAuth": {"cookies": {"SID": "visitor-map"}, "cookieHeader": "SAPISID=header-session"},
+        })).unwrap();
+        assert!(super::map_android_auth(&config).is_none(), "a non-empty map must not fall back to a different header session");
+
         let cookies = [("MUSIC_U".into(), "synthetic; MUSIC_A=injected".into())]
             .into_iter()
             .collect();
