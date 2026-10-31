@@ -441,6 +441,11 @@ mod tests {
         })).unwrap();
         let shared = super::isolated_cookie_jar(&[]);
         super::cookies::inject_all(&shared, &auth);
+        super::cookies::inject_cookies(&shared, &[CookieEntry {
+            name: "__csrf".into(), value: "jar-only-old".into(), domain: "music.163.com".into(),
+        }]);
+        let netease_url = "https://music.163.com".parse().unwrap();
+        assert!(shared.cookies(&netease_url).unwrap().to_str().unwrap().contains("__csrf=jar-only-old"));
         let info = super::commit_login_state(&operations, &mut auth, &shared, operation, candidate).unwrap();
         assert!(info.logged_in);
         assert_eq!(info.nickname.as_deref(), Some("new account"));
@@ -448,6 +453,91 @@ mod tests {
         assert_eq!(auth.bilibili.unwrap().cookies[0].value, "other");
         for (url, expected) in [("https://music.163.com", "MUSIC_U=new"), ("https://api.bilibili.com", "SESSDATA=other")] {
             assert!(shared.cookies(&url.parse().unwrap()).unwrap().to_str().unwrap().contains(expected));
+        }
+        assert!(!shared.cookies(&netease_url).unwrap().to_str().unwrap().contains("__csrf="));
+    }
+
+    fn youtube_refresh_fixture() -> super::YouTubeAuth {
+        serde_json::from_value(serde_json::json!({
+            "cookies": [
+                {"name": "SAPISID", "value": "identity", "domain": ".youtube.com"},
+                {"name": "SID", "value": "sid", "domain": ".youtube.com"},
+                {"name": "__Secure-1PSIDTS", "value": "first-old", "domain": ".google.com"},
+                {"name": "__Secure-3PSIDTS", "value": "third-old", "domain": ".google.com"},
+            ],
+            "nickname": "saved account", "avatar_url": "saved.png", "auth_user": "2",
+        })).unwrap()
+    }
+
+    #[test]
+    fn stale_youtube_page_refresh_cannot_overwrite_rotated_session() {
+        use crate::api::youtube::session::{merge_rotated_youtube_cookies, merge_youtube_auth_cookies};
+        for name in ["__Secure-1PSIDTS", "__Secure-3PSIDTS"] {
+            for previously_present in [false, true] {
+                let mut snapshot = youtube_refresh_fixture();
+                if !previously_present { snapshot.cookies.retain(|cookie| cookie.name != name); }
+                let page_result = merge_youtube_auth_cookies(&snapshot, &[CookieEntry {
+                    name: "SIDCC".into(), value: "page-update".into(), domain: ".youtube.com".into(),
+                }]);
+                let mut saved = merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                    name: name.into(), value: "rotation-update".into(), domain: ".google.com".into(),
+                }]);
+                let before = serde_json::to_value(&saved).unwrap();
+                assert!(!super::merge_youtube_session_update_state(
+                    &mut saved, &snapshot, page_result, super::YouTubeSessionUpdateSource::PageRefresh,
+                ), "{name}, previous token present: {previously_present}");
+                assert_eq!(serde_json::to_value(&saved).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn youtube_page_refresh_updates_unrotated_session() {
+        let snapshot = youtube_refresh_fixture();
+        let mut saved = snapshot.clone();
+        saved.cookies.reverse();
+        for cookie in &mut saved.cookies {
+            if cookie.name.ends_with("PSIDTS") { cookie.domain = "GOOGLE.COM".into(); }
+        }
+        let mut page_result = crate::api::youtube::session::merge_youtube_auth_cookies(&snapshot, &[CookieEntry {
+            name: "SIDCC".into(), value: "page-update".into(), domain: ".youtube.com".into(),
+        }]);
+        page_result.nickname = None;
+        page_result.avatar_url = None;
+        assert!(super::merge_youtube_session_update_state(
+            &mut saved, &snapshot, page_result, super::YouTubeSessionUpdateSource::PageRefresh,
+        ));
+        assert!(saved.cookies.iter().any(|cookie| cookie.name == "SIDCC" && cookie.value == "page-update"));
+        assert_eq!(saved.nickname.as_deref(), Some("saved account"));
+        assert_eq!(saved.avatar_url.as_deref(), Some("saved.png"));
+        assert_eq!(saved.selected_auth_user(), Some("2"));
+    }
+
+    #[test]
+    fn youtube_page_refresh_rejects_a_changed_rotating_cookie_domain() {
+        let snapshot = youtube_refresh_fixture();
+        let mut saved = snapshot.clone();
+        saved.cookies.iter_mut().find(|cookie| cookie.name == "__Secure-1PSIDTS").unwrap().domain = "accounts.google.com".into();
+        let before = serde_json::to_value(&saved).unwrap();
+        assert!(!super::merge_youtube_session_update_state(
+            &mut saved, &snapshot, snapshot.clone(), super::YouTubeSessionUpdateSource::PageRefresh,
+        ));
+        assert_eq!(serde_json::to_value(&saved).unwrap(), before);
+    }
+
+    #[test]
+    fn youtube_cookie_rotation_can_update_rotating_session_tokens() {
+        let snapshot = youtube_refresh_fixture();
+        let mut saved = snapshot.clone();
+        let updated = crate::api::youtube::session::merge_rotated_youtube_cookies(&snapshot, &[
+            CookieEntry { name: "__Secure-1PSIDTS".into(), value: "first-new".into(), domain: ".google.com".into() },
+            CookieEntry { name: "__Secure-3PSIDTS".into(), value: "third-new".into(), domain: ".google.com".into() },
+        ]);
+        assert!(super::merge_youtube_session_update_state(
+            &mut saved, &snapshot, updated, super::YouTubeSessionUpdateSource::CookieRotation,
+        ));
+        for (name, value) in [("__Secure-1PSIDTS", "first-new"), ("__Secure-3PSIDTS", "third-new")] {
+            assert!(saved.cookies.iter().any(|cookie| cookie.name == name && cookie.value == value));
         }
     }
 
@@ -1096,6 +1186,12 @@ pub async fn refresh_youtube_profile(
     Ok(youtube_auth_info(&updated_auth))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YouTubeSessionUpdateSource {
+    PageRefresh,
+    CookieRotation,
+}
+
 /// 机会式/强制保鲜 YouTube 登录会话(受冷却 + 熔断闸门约束)
 /// 成功回收轮换 cookie 后持久化并注入共享 Jar; 失败仅计数熔断, 绝不清除本地登录
 fn apply_youtube_session_update(
@@ -1104,7 +1200,7 @@ fn apply_youtube_session_update(
     operation: AuthOperation,
     current: &YouTubeAuth,
     updated: YouTubeAuth,
-    reason: &str,
+    source: YouTubeSessionUpdateSource,
 ) -> bool {
     let operations = state.auth_operations.lock();
     if !operations.is_current(operation) { return false; }
@@ -1112,8 +1208,44 @@ fn apply_youtube_session_update(
     let Some(saved) = auth_state.youtube.as_mut() else {
         return false;
     };
+    if !merge_youtube_session_update_state(saved, current, updated, source) { return false; }
+    let refreshed_cookies = saved.cookies.clone();
+    cookies::save_auth(app, &auth_state);
+    crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
+    let reason = match source {
+        YouTubeSessionUpdateSource::PageRefresh => "page refresh",
+        YouTubeSessionUpdateSource::CookieRotation => "RotateCookies",
+    };
+    log::info!(target: "youtube-refresh", "YouTube session cookies updated: {reason}");
+    true
+}
+
+fn youtube_rotating_cookies_match(left: &YouTubeAuth, right: &YouTubeAuth) -> bool {
+    ["__Secure-1PSIDTS", "__Secure-3PSIDTS"].into_iter().all(|name| {
+        let left_values: std::collections::BTreeSet<_> = left.cookies.iter()
+            .filter(|cookie| cookie.name.eq_ignore_ascii_case(name))
+            .map(|cookie| (cookie.domain.trim_start_matches('.').to_ascii_lowercase(), cookie.value.as_str()))
+            .collect();
+        let right_values: std::collections::BTreeSet<_> = right.cookies.iter()
+            .filter(|cookie| cookie.name.eq_ignore_ascii_case(name))
+            .map(|cookie| (cookie.domain.trim_start_matches('.').to_ascii_lowercase(), cookie.value.as_str()))
+            .collect();
+        left_values == right_values
+    })
+}
+
+fn merge_youtube_session_update_state(
+    saved: &mut YouTubeAuth,
+    current: &YouTubeAuth,
+    updated: YouTubeAuth,
+    source: YouTubeSessionUpdateSource,
+) -> bool {
     // 仅当仍是同一账号且未登出时才落盘, 避免刷新期间账号切换被旧 cookie 覆盖
     if !saved.has_login() || !youtube_auth_matches(saved, current) {
+        return false;
+    }
+    // 页面结果携带请求时的旧令牌，不能覆盖并发 RotateCookies 已提交的新会话
+    if source == YouTubeSessionUpdateSource::PageRefresh && !youtube_rotating_cookies_match(saved, current) {
         return false;
     }
 
@@ -1125,11 +1257,6 @@ fn apply_youtube_session_update(
         merged.avatar_url = saved.avatar_url.clone();
     }
     *saved = merged;
-    // 先克隆再落盘, 避免 saved 的可变借用跨越 save_auth 的不可变借用
-    let refreshed_cookies = saved.cookies.clone();
-    cookies::save_auth(app, &auth_state);
-    crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
-    log::info!(target: "youtube-refresh", "YouTube session cookies updated: {reason}");
     true
 }
 
@@ -1181,7 +1308,7 @@ pub async fn maybe_refresh_youtube_session(app: &AppHandle, state: &AppState, fo
                     state.youtube_cookie_rotation.lock().record_success(result.next_interval_ms);
                 }).is_none() { return; }
                 if let Some(updated) = result.updated_auth {
-                    if apply_youtube_session_update(app, state, operation, &current, updated, "RotateCookies")
+                    if apply_youtube_session_update(app, state, operation, &current, updated, YouTubeSessionUpdateSource::CookieRotation)
                     {
                         return;
                     }
@@ -1206,7 +1333,7 @@ pub async fn maybe_refresh_youtube_session(app: &AppHandle, state: &AppState, fo
                 state.youtube_refresh.lock().record_success(refresh::now_ms());
             }).is_none() { return; }
             if let Some(new_auth) = updated {
-                apply_youtube_session_update(app, state, operation, &current, new_auth, "page refresh");
+                apply_youtube_session_update(app, state, operation, &current, new_auth, YouTubeSessionUpdateSource::PageRefresh);
             }
         }
         Err(e) => {

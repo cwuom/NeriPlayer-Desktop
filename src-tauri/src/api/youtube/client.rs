@@ -241,6 +241,14 @@ impl YouTubeClient {
         super::account::select_cookie_values(&auth.cookies, super::account::MUSIC_HOST)
     }
 
+    fn has_music_login(auth: &crate::auth::state::YouTubeAuth) -> bool {
+        // 登录状态允许仅有 WWW 会话，Music 浏览只使用该域实际发送的 SAPISID 家族
+        let cookies = Self::music_cookies(auth);
+        ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"]
+            .into_iter()
+            .any(|name| cookies.get(name).is_some_and(|value| !value.is_empty()))
+    }
+
     fn authorization_header(
         auth: &crate::auth::state::YouTubeAuth,
         user_session_id: &str,
@@ -376,7 +384,7 @@ impl YouTubeClient {
                 body["params"] = json!(params);
             }
         }
-        if let Some(auth) = auth.filter(|auth| auth.has_login()) {
+        if let Some(auth) = auth.filter(|auth| Self::has_music_login(auth)) {
             self.innertube_post_auth("browse", &body, auth).await
         } else {
             self.innertube_post("browse", &body).await
@@ -748,6 +756,43 @@ mod tests {
             name: name.into(),
             value: value.into(),
             domain: domain.into(),
+        }
+    }
+
+    #[test]
+    fn creator_browse_keeps_www_sessions_for_web_playback_but_does_not_use_them_for_music() {
+        for name in ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"] {
+            for visitor in [false, true] {
+                let mut cookies = vec![cookie(name, "web-session", "www.youtube.com")];
+                if visitor { cookies.push(cookie("SID", "visitor", "music.youtube.com")); }
+                let auth = YouTubeAuth { cookies, nickname: None, avatar_url: None, auth_user: None };
+                assert!(auth.has_login(), "WEB playback must keep accepting {name}");
+                assert!(!YouTubeClient::has_music_login(&auth), "WWW-only {name}, visitor: {visitor}");
+            }
+        }
+    }
+
+    #[test]
+    fn creator_browse_authenticates_only_nonempty_music_visible_sapisid_family_cookies() {
+        for name in ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"] {
+            for domain in ["music.youtube.com", ".youtube.com", ".YouTube.com"] {
+                let auth = YouTubeAuth {
+                    cookies: vec![cookie("SAPISID", "google-session", ".google.com"), cookie(name, "music-session", domain)],
+                    nickname: None, avatar_url: None, auth_user: Some("2".into()),
+                };
+                assert!(YouTubeClient::has_music_login(&auth), "{name}: {domain}");
+                assert!(YouTubeClient::authorization_header(&auth, "session").is_ok(), "eligible cookies must sign the actual Music request");
+            }
+        }
+        for cookies in [
+            vec![cookie("SAPISID", "google-only", ".google.com")],
+            vec![cookie("SID", "visitor", "music.youtube.com")],
+            vec![cookie("APISID", "visitor", "music.youtube.com")],
+            vec![cookie("SAPISID", "", "music.youtube.com")],
+            vec![cookie("SAPISID", "web-session", "www.youtube.com"), cookie("SAPISID", "", "music.youtube.com")],
+        ] {
+            let auth = YouTubeAuth { cookies, nickname: None, avatar_url: None, auth_user: None };
+            assert!(!YouTubeClient::has_music_login(&auth), "visitor, empty, or domain-invisible cookies must browse anonymously");
         }
     }
 

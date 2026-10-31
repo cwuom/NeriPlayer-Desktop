@@ -3149,6 +3149,7 @@ mod tests {
         })).unwrap();
         assert!(super::map_android_auth(&config).unwrap().state.youtube.unwrap().cookies.iter().all(|cookie| cookie.value == "map-value"));
 
+        // Android 从非空 Cookie 表重新生成请求头，导入沿用同一优先级
         let config: super::AndroidConfigFile = serde_json::from_value(serde_json::json!({
             "youTubeAuth": {"cookies": {"SID": "visitor-map"}, "cookieHeader": "SAPISID=header-session"},
         })).unwrap();

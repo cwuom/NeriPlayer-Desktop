@@ -132,7 +132,7 @@ jobs:
         if: ${{ (runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')) }}
         working-directory: src-tauri
         run: |
-          cargo test --locked --target ${{ matrix.target }} --lib -- config_backup::tests auth:: commands::auth_cmd::tests commands::sync_cmd::tests api::youtube::account::tests api::youtube::session::tests --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --lib -- config_backup::tests auth:: commands::auth_cmd::tests commands::sync_cmd::tests api::youtube::account::tests api::youtube::client::tests api::youtube::session::tests --test-threads=1
 
   ffmpeg:
     name: FFmpeg
