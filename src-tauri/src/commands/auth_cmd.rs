@@ -317,7 +317,7 @@ fn with_current_youtube_session<T>(
     if !operations.is_current(operation) { return None; }
     let auth = auth.lock();
     let saved = auth.youtube.as_ref().filter(|saved| saved.has_login())?;
-    if !youtube_auth_matches(saved, previous) { return None; }
+    if !youtube_auth_matches(saved, previous) || !youtube_rotating_cookies_match(saved, previous) { return None; }
     Some(update())
 }
 
@@ -430,31 +430,52 @@ mod tests {
     fn current_login_commit_replaces_only_its_platform_state_and_cookies() {
         use crate::auth::coordination::{AuthOperations, AuthPlatform};
         use reqwest::cookie::CookieStore;
-        let mut operations = AuthOperations::default();
-        let operation = operations.begin_login(AuthPlatform::Netease);
-        let mut auth: super::AuthState = serde_json::from_value(serde_json::json!({
-            "netease": {"cookies": [{"name": "MUSIC_U", "value": "old", "domain": "music.163.com"}]},
-            "bilibili": {"cookies": [{"name": "SESSDATA", "value": "other", "domain": ".bilibili.com"}]},
-        })).unwrap();
-        let candidate: super::AuthState = serde_json::from_value(serde_json::json!({
-            "netease": {"cookies": [{"name": "MUSIC_U", "value": "new", "domain": "music.163.com"}], "nickname": "new account"},
-        })).unwrap();
-        let shared = super::isolated_cookie_jar(&[]);
-        super::cookies::inject_all(&shared, &auth);
-        super::cookies::inject_cookies(&shared, &[CookieEntry {
-            name: "__csrf".into(), value: "jar-only-old".into(), domain: "music.163.com".into(),
-        }]);
-        let netease_url = "https://music.163.com".parse().unwrap();
-        assert!(shared.cookies(&netease_url).unwrap().to_str().unwrap().contains("__csrf=jar-only-old"));
-        let info = super::commit_login_state(&operations, &mut auth, &shared, operation, candidate).unwrap();
-        assert!(info.logged_in);
-        assert_eq!(info.nickname.as_deref(), Some("new account"));
-        assert_eq!(auth.netease.unwrap().cookies[0].value, "new");
-        assert_eq!(auth.bilibili.unwrap().cookies[0].value, "other");
-        for (url, expected) in [("https://music.163.com", "MUSIC_U=new"), ("https://api.bilibili.com", "SESSDATA=other")] {
-            assert!(shared.cookies(&url.parse().unwrap()).unwrap().to_str().unwrap().contains(expected));
+        let cases = [
+            (AuthPlatform::Netease, "MUSIC_U", "music.163.com", "https://music.163.com", "__csrf"),
+            (AuthPlatform::Bilibili, "SESSDATA", ".bilibili.com", "https://api.bilibili.com", "bili_jct"),
+            (AuthPlatform::Youtube, "SAPISID", ".youtube.com", "https://music.youtube.com", "SIDCC"),
+        ];
+        for (platform, sentinel, domain, url, jar_only_name) in cases {
+            let mut operations = AuthOperations::default();
+            let operation = operations.begin_login(platform);
+            let mut auth: super::AuthState = serde_json::from_value(serde_json::json!({
+                "netease": {"cookies": [{"name": "MUSIC_U", "value": "old", "domain": "music.163.com"}]},
+                "bilibili": {"cookies": [{"name": "SESSDATA", "value": "old", "domain": ".bilibili.com"}]},
+                "youtube": {"cookies": [{"name": "SAPISID", "value": "old", "domain": ".youtube.com"}]},
+            })).unwrap();
+            let candidate: super::AuthState = serde_json::from_value(serde_json::json!({
+                (platform.as_str()): {"cookies": [{"name": sentinel, "value": "new", "domain": domain}], "nickname": "new account"},
+            })).unwrap();
+            let shared = super::isolated_cookie_jar(&[]);
+            super::cookies::inject_all(&shared, &auth);
+            super::cookies::inject_cookies(&shared, &[CookieEntry {
+                name: jar_only_name.into(), value: "jar-only-old".into(), domain: domain.into(),
+            }]);
+            if platform == AuthPlatform::Youtube {
+                super::cookies::inject_cookies(&shared, &[
+                    CookieEntry { name: "__Secure-1PSIDTS".into(), value: "first-jar-only".into(), domain: "music.youtube.com".into() },
+                    CookieEntry { name: "__Secure-3PSIDTS".into(), value: "third-jar-only".into(), domain: "music.youtube.com".into() },
+                ]);
+            }
+            let current_url = url.parse().unwrap();
+            assert!(shared.cookies(&current_url).unwrap().to_str().unwrap().contains(&format!("{jar_only_name}=jar-only-old")));
+            let info = super::commit_login_state(&operations, &mut auth, &shared, operation, candidate).unwrap();
+            assert!(info.logged_in);
+            assert_eq!(info.nickname.as_deref(), Some("new account"));
+            let saved = serde_json::to_value(&auth).unwrap();
+            for (other, other_sentinel, _, other_url, _) in cases {
+                let expected = if other == platform { "new" } else { "old" };
+                assert_eq!(saved[other.as_str()]["cookies"][0]["value"], expected);
+                assert!(shared.cookies(&other_url.parse().unwrap()).unwrap().to_str().unwrap().contains(&format!("{other_sentinel}={expected}")));
+            }
+            let current_cookies = shared.cookies(&current_url).unwrap();
+            let current_cookies = current_cookies.to_str().unwrap();
+            assert!(!current_cookies.contains(&format!("{jar_only_name}=")), "{platform:?}");
+            if platform == AuthPlatform::Youtube {
+                assert!(current_cookies.contains("__Secure-1PSIDTS=first-jar-only"));
+                assert!(current_cookies.contains("__Secure-3PSIDTS=third-jar-only"));
+            }
         }
-        assert!(!shared.cookies(&netease_url).unwrap().to_str().unwrap().contains("__csrf="));
     }
 
     fn youtube_refresh_fixture() -> super::YouTubeAuth {
@@ -484,7 +505,7 @@ mod tests {
                 }]);
                 let before = serde_json::to_value(&saved).unwrap();
                 assert!(!super::merge_youtube_session_update_state(
-                    &mut saved, &snapshot, page_result, super::YouTubeSessionUpdateSource::PageRefresh,
+                    &mut saved, &snapshot, page_result,
                 ), "{name}, previous token present: {previously_present}");
                 assert_eq!(serde_json::to_value(&saved).unwrap(), before);
             }
@@ -505,7 +526,7 @@ mod tests {
         page_result.nickname = None;
         page_result.avatar_url = None;
         assert!(super::merge_youtube_session_update_state(
-            &mut saved, &snapshot, page_result, super::YouTubeSessionUpdateSource::PageRefresh,
+            &mut saved, &snapshot, page_result,
         ));
         assert!(saved.cookies.iter().any(|cookie| cookie.name == "SIDCC" && cookie.value == "page-update"));
         assert_eq!(saved.nickname.as_deref(), Some("saved account"));
@@ -520,7 +541,7 @@ mod tests {
         saved.cookies.iter_mut().find(|cookie| cookie.name == "__Secure-1PSIDTS").unwrap().domain = "accounts.google.com".into();
         let before = serde_json::to_value(&saved).unwrap();
         assert!(!super::merge_youtube_session_update_state(
-            &mut saved, &snapshot, snapshot.clone(), super::YouTubeSessionUpdateSource::PageRefresh,
+            &mut saved, &snapshot, snapshot.clone(),
         ));
         assert_eq!(serde_json::to_value(&saved).unwrap(), before);
     }
@@ -534,10 +555,57 @@ mod tests {
             CookieEntry { name: "__Secure-3PSIDTS".into(), value: "third-new".into(), domain: ".google.com".into() },
         ]);
         assert!(super::merge_youtube_session_update_state(
-            &mut saved, &snapshot, updated, super::YouTubeSessionUpdateSource::CookieRotation,
+            &mut saved, &snapshot, updated,
         ));
         for (name, value) in [("__Secure-1PSIDTS", "first-new"), ("__Secure-3PSIDTS", "third-new")] {
             assert!(saved.cookies.iter().any(|cookie| cookie.name == name && cookie.value == value));
+        }
+    }
+
+    #[test]
+    fn overlapping_youtube_cookie_rotations_cannot_restore_an_older_snapshot() {
+        use crate::api::youtube::session::merge_rotated_youtube_cookies;
+        for name in ["__Secure-1PSIDTS", "__Secure-3PSIDTS"] {
+            let snapshot = youtube_refresh_fixture();
+            let first_result = merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                name: name.into(), value: "committed-rotation".into(), domain: ".google.com".into(),
+            }]);
+            let delayed_result = merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                name: name.into(), value: "late-rotation".into(), domain: ".google.com".into(),
+            }]);
+            let mut saved = snapshot.clone();
+            assert!(super::merge_youtube_session_update_state(
+                &mut saved, &snapshot, first_result,
+            ));
+            let committed = serde_json::to_value(&saved).unwrap();
+            assert!(!super::merge_youtube_session_update_state(
+                &mut saved, &snapshot, delayed_result,
+            ), "{name}");
+            assert_eq!(serde_json::to_value(&saved).unwrap(), committed);
+        }
+    }
+
+    #[test]
+    fn stale_youtube_rotating_snapshot_cannot_change_gate_success_or_failure() {
+        use crate::api::youtube::refresh::{YouTubeCookieRotationGate, ROTATION_DEFAULT_INTERVAL_MS};
+        use crate::auth::coordination::{AuthOperations, AuthPlatform};
+        for success in [false, true] {
+            let operations = parking_lot::Mutex::new(AuthOperations::default());
+            let operation = operations.lock().begin(AuthPlatform::Youtube);
+            let snapshot = youtube_refresh_fixture();
+            let current = crate::api::youtube::session::merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                name: "__Secure-1PSIDTS".into(), value: "committed-rotation".into(), domain: ".google.com".into(),
+            }]);
+            let auth = parking_lot::Mutex::new(super::AuthState { youtube: Some(current), ..Default::default() });
+            let mut gate = YouTubeCookieRotationGate::default();
+            gate.record_attempt(0);
+            let applied = super::with_current_youtube_session(&operations, &auth, operation, &snapshot, || {
+                if success { gate.record_success(60_000); }
+                else { for _ in 0..3 { gate.record_failure(); } }
+            });
+            assert!(applied.is_none(), "success: {success}");
+            assert!(!gate.should_attempt(60_000, false, true));
+            assert!(gate.should_attempt(ROTATION_DEFAULT_INTERVAL_MS, false, true));
         }
     }
 
@@ -1187,14 +1255,14 @@ pub async fn refresh_youtube_profile(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum YouTubeSessionUpdateSource {
+pub(crate) enum YouTubeSessionUpdateSource {
     PageRefresh,
     CookieRotation,
 }
 
 /// 机会式/强制保鲜 YouTube 登录会话(受冷却 + 熔断闸门约束)
 /// 成功回收轮换 cookie 后持久化并注入共享 Jar; 失败仅计数熔断, 绝不清除本地登录
-fn apply_youtube_session_update(
+pub(crate) fn apply_youtube_session_update(
     app: &AppHandle,
     state: &AppState,
     operation: AuthOperation,
@@ -1208,7 +1276,7 @@ fn apply_youtube_session_update(
     let Some(saved) = auth_state.youtube.as_mut() else {
         return false;
     };
-    if !merge_youtube_session_update_state(saved, current, updated, source) { return false; }
+    if !merge_youtube_session_update_state(saved, current, updated) { return false; }
     let refreshed_cookies = saved.cookies.clone();
     cookies::save_auth(app, &auth_state);
     crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
@@ -1238,14 +1306,13 @@ fn merge_youtube_session_update_state(
     saved: &mut YouTubeAuth,
     current: &YouTubeAuth,
     updated: YouTubeAuth,
-    source: YouTubeSessionUpdateSource,
 ) -> bool {
     // 仅当仍是同一账号且未登出时才落盘, 避免刷新期间账号切换被旧 cookie 覆盖
     if !saved.has_login() || !youtube_auth_matches(saved, current) {
         return false;
     }
-    // 页面结果携带请求时的旧令牌，不能覆盖并发 RotateCookies 已提交的新会话
-    if source == YouTubeSessionUpdateSource::PageRefresh && !youtube_rotating_cookies_match(saved, current) {
+    // 会话已更新时丢弃旧请求结果，避免并发响应回退轮换令牌
+    if !youtube_rotating_cookies_match(saved, current) {
         return false;
     }
 

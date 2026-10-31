@@ -391,11 +391,13 @@ pub async fn get_youtube_playlist_detail(
 ) -> AppResult<Value> {
     // 加载前机会式保鲜 YouTube 会话(冷却/熔断内会自动跳过)
     crate::commands::auth_cmd::maybe_refresh_youtube_session(&app, state.inner(), false).await;
-    let yt_auth = {
+    let (operation, yt_auth) = {
+        let operations = state.auth_operations.lock();
         let auth = state.auth.lock();
-        auth.youtube.as_ref()
+        let yt_auth = auth.youtube.as_ref()
             .ok_or_else(|| AppError::Api("YouTube not logged in".into()))?
-            .clone()
+            .clone();
+        (operations.current(crate::auth::coordination::AuthPlatform::Youtube), yt_auth)
     };
     let browse_id = crate::api::youtube::playlist::ensure_browse_id(&browse_id)?;
     let client = state.youtube();
@@ -407,21 +409,16 @@ pub async fn get_youtube_playlist_detail(
     )
     .await?;
 
-    // 会话保鲜: 落盘 + 注入共享 jar, 与 maybe_refresh_youtube_session 一致
-    // 展开分页耗时可达数十秒, 期间用户可能登出/换号: 仅当仍是同一账号且未登出时才落盘,
-    // 否则旧账号的刷新 cookie 会整体覆盖新登录（AU-09）
+    // 分页结果复用会话提交入口，拒绝加载期间已换号或轮换的旧快照
     if let Some(updated) = refreshed_auth {
-        let mut auth_state = state.auth.lock();
-        if let Some(saved) = auth_state.youtube.as_mut() {
-            let same_account = saved.get_sapisid() == yt_auth.get_sapisid()
-                && saved.selected_auth_user().unwrap_or("0") == yt_auth.selected_auth_user().unwrap_or("0");
-            if saved.has_login() && same_account {
-                *saved = updated;
-                let refreshed_cookies = saved.cookies.clone();
-                crate::auth::cookies::save_auth(&app, &auth_state);
-                crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
-            }
-        }
+        crate::commands::auth_cmd::apply_youtube_session_update(
+            &app,
+            state.inner(),
+            operation,
+            &yt_auth,
+            updated,
+            crate::commands::auth_cmd::YouTubeSessionUpdateSource::PageRefresh,
+        );
     }
 
     Ok(detail)

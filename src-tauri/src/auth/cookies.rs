@@ -355,14 +355,15 @@ pub fn expire_platform_cookies(jar: &Arc<Jar>, auth: &AuthState, platform: &str)
         expire_cookie_entries(jar, entries);
     }
 
-    let domains = match platform {
-        "netease" => NETEASE_COOKIE_DOMAINS,
-        "bilibili" => BILIBILI_COOKIE_DOMAINS,
-        "youtube" => YOUTUBE_COOKIE_DOMAINS,
+    // 请求头没有原始 Domain，补查平台父域才能过期只存在 Jar 中的会话 Cookie
+    let (domains, parent_domains): (&[&str], &[&str]) = match platform {
+        "netease" => (NETEASE_COOKIE_DOMAINS, &["163.com"]),
+        "bilibili" => (BILIBILI_COOKIE_DOMAINS, &["bilibili.com"]),
+        "youtube" => (YOUTUBE_COOKIE_DOMAINS, &["youtube.com", "google.com"]),
         _ => return,
     };
     let mut discovered = Vec::new();
-    for domain in domains {
+    for domain in domains.iter().chain(parent_domains) {
         for (name, value) in read_jar_cookies(jar, domain) {
             if persisted_cookie_allowed(platform, &name) && !value.is_empty() {
                 discovered.push(CookieEntry {
@@ -643,6 +644,51 @@ mod tests {
         expire_platform_cookies(&jar, &auth, "netease");
 
         assert!(!read_jar_cookies(&jar, "music.163.com").contains_key("__csrf"));
+    }
+
+    #[test]
+    fn logout_expiry_removes_jar_only_cookies_at_parent_and_request_domains() {
+        for (platform, name, domain, host) in [
+            ("netease", "__csrf", ".163.com", "music.163.com"),
+            ("netease", "__csrf", "music.163.com", "music.163.com"),
+            ("netease", "__csrf", "interface.music.163.com", "interface.music.163.com"),
+            ("bilibili", "bili_jct", ".bilibili.com", "api.bilibili.com"),
+            ("bilibili", "bili_jct", "api.bilibili.com", "api.bilibili.com"),
+            ("bilibili", "bili_jct", "www.bilibili.com", "www.bilibili.com"),
+            ("youtube", "SIDCC", ".youtube.com", "music.youtube.com"),
+            ("youtube", "SIDCC", "music.youtube.com", "music.youtube.com"),
+            ("youtube", "SIDCC", ".google.com", "accounts.google.com"),
+            ("youtube", "SIDCC", "accounts.google.com", "accounts.google.com"),
+        ] {
+            let jar = Arc::new(Jar::default());
+            inject_cookies(&jar, &[
+                CookieEntry { name: name.into(), value: "runtime".into(), domain: domain.into() },
+                CookieEntry { name: "unrelated_cookie".into(), value: "preserved".into(), domain: domain.into() },
+            ]);
+            assert_eq!(read_jar_cookies(&jar, host).get(name).map(String::as_str), Some("runtime"));
+            expire_platform_cookies(&jar, &AuthState::default(), platform);
+            let remaining = read_jar_cookies(&jar, host);
+            assert!(!remaining.contains_key(name), "{platform}: {name} at {domain}");
+            assert_eq!(remaining.get("unrelated_cookie").map(String::as_str), Some("preserved"));
+        }
+    }
+
+    #[test]
+    fn logout_discovery_preserves_jar_only_youtube_rotation_tokens() {
+        for domain in ["music.youtube.com", ".youtube.com", "accounts.google.com", ".google.com"] {
+            let jar = Arc::new(Jar::default());
+            let tokens: Vec<_> = ["__Secure-1PSIDTS", "__Secure-3PSIDTS"].into_iter().map(|name| CookieEntry {
+                name: name.into(), value: "jar-only".into(), domain: domain.into(),
+            }).collect();
+            inject_cookies(&jar, &tokens);
+            let host = domain.trim_start_matches('.');
+            assert_eq!(read_jar_cookies(&jar, host).len(), 2);
+            expire_platform_cookies(&jar, &AuthState::default(), "youtube");
+            let remaining = read_jar_cookies(&jar, host);
+            for token in tokens {
+                assert_eq!(remaining.get(&token.name).map(String::as_str), Some("jar-only"), "{} at {domain}", token.name);
+            }
+        }
     }
 
     #[test]
