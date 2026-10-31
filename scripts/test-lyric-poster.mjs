@@ -151,6 +151,24 @@ check('整词比整行还宽时按字符拆行，不留超宽行', () => {
   assert.equal(wrapped.join(''), word, '拆行只能断行，不能吞字')
 })
 
+check('超宽词跟在前面的词后面时同样拆行', () => {
+  // 只补"行首"那条路径是不够的：`Oh ` 之后的长词会整块被推到新行，宽度从不复测
+  const text = `Oh ${'Supercalifragilisticexpialidocious'.repeat(3)}`
+  const wrapped = wrapText(text, CONTENT_WIDTH, 112, 700, measure)
+  for (const line of wrapped) {
+    assert.ok(measure(line, 112, 700) <= CONTENT_WIDTH,
+      `仍然超宽：${line.slice(0, 24)}… → ${Math.round(measure(line, 112, 700))}`)
+  }
+  const kept = wrapped.join('').replace(/\s+/g, '').length
+  assert.equal(kept, text.replace(/\s+/g, '').length, '换行只能断开，不能吞字')
+})
+
+check('整首存成一句时回报的需求行数超限', () => {
+  // 这种输入会被"全选"和默认预选拒绝：它一句就占超过 24 视觉行
+  assert.ok(posterVisualLines(['歌'.repeat(500)], measure) > MAX_POSTER_VISUAL_LINES,
+    `单句 500 字必须超预算，实际 ${posterVisualLines(['歌'.repeat(500)], measure)}`)
+})
+
 check('行首禁则推回后上一行仍在内容宽内', () => {
   // 8 个全角在 112px 下正好 896，再收下「，」就变 1008 > 904：这种情况宁可让标点留在行首
   const wrapped = wrapText(`${'歌'.repeat(8)}，`, CONTENT_WIDTH, 112, 700, measure)

@@ -322,6 +322,11 @@ export async function renderPoster(source: PosterSource, logo: HTMLImageElement 
   const barTop = plan.bar.rect.y
 
   if (cover) {
+    // 封面可能是带透明通道的 PNG：alpha 会穿过模糊和半透明蒙层留在成图上，
+    // 预览有 CSS 黑底看不出来，但保存/复制出去的 PNG 在浅色背景上会漏白、白字对比也会掉。
+    // 先铺一层不透明底（与预览同色），对不透明封面零影响
+    ctx.fillStyle = toCss(BLACK)
+    ctx.fillRect(0, 0, plan.width, plan.height)
     ctx.drawImage(blurredCoverBackground(cover, plan.width, plan.height), 0, 0)
   } else {
     const paint = diagonalGradient(ctx, plan.height)

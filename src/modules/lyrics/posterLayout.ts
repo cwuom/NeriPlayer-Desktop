@@ -144,19 +144,22 @@ export function wrapText(
 ): string[] {
   const tokens = tokenize(text)
   if (!tokens.length) return ['']
+  /** 整词比整行还宽（无空格的超长拉丁词）时按字符切成不超宽的段，否则超出画布的部分直接被裁掉 */
+  const splitOverwide = (token: string): string[] => {
+    const pieces: string[] = []
+    let piece = ''
+    for (const character of [...token]) {
+      if (piece && measure(piece + character, fontSize, weight) > maxWidth) { pieces.push(piece); piece = character }
+      else piece += character
+    }
+    if (piece) pieces.push(piece)
+    return pieces
+  }
   const lines: string[] = ['']
   for (let index = 0; index < tokens.length; index++) {
     let token = tokens[index]
     if (!lines[lines.length - 1] && token.length > 1 && measure(token, fontSize, weight) > maxWidth) {
-      // 空行也塞不下的整块（无空格的超长拉丁词）：按字符切成若干不超宽的段，
-      // 否则整词占一行，超出画布的部分直接被裁掉
-      const pieces: string[] = []
-      let piece = ''
-      for (const character of [...token]) {
-        if (piece && measure(piece + character, fontSize, weight) > maxWidth) { pieces.push(piece); piece = character }
-        else piece += character
-      }
-      if (piece) pieces.push(piece)
+      const pieces = splitOverwide(token)
       tokens.splice(index, 1, ...pieces)
       token = pieces[0]
     }
@@ -165,6 +168,12 @@ export function wrapText(
       if (/\s/.test(token)) {
         // 行尾不留空格
         continue
+      }
+      if (token.length > 1 && measure(token, fontSize, weight) > maxWidth) {
+        // 跟在别的词后面也一样：整块推到新行仍然超宽，必须先拆
+        const pieces = splitOverwide(token)
+        tokens.splice(index, 1, ...pieces)
+        token = pieces[0]
       }
       lines.push(token)
       const previous = lines[lines.length - 2]

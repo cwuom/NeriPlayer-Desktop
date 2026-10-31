@@ -73,7 +73,7 @@ function textsOf(indices: Set<number>): string[] {
   return props.lines.filter(line => indices.has(line.index)).map(line => line.text)
 }
 
-watch(() => props.open, open => {
+watch(() => props.open, async open => {
   if (!open) return
   stage.value = 'select'
   poster.value = null
@@ -82,6 +82,11 @@ watch(() => props.open, open => {
   // 否则新会话要等那张已经作废的海报画完才能点"生成海报"，看起来就像按钮坏了
   busy.value = false
   renderGeneration++
+  selected.value = new Set()
+  // 字体没就绪时 measureText 量的是后备字体宽度，默认预选会按错的行数算出图来
+  await document.fonts.ready
+  // 期间被关掉、切到预览、或用户已经自己勾了句子（那就尊重他的选择，不再覆盖）
+  if (!props.open || stage.value !== 'select' || selected.value.size) return
   // 默认从右键那一句往后共 5 行：歌词是往前写的，往前选不符合"分享正在唱的这段"的直觉
   const anchor = props.initialIndex >= 0 ? props.initialIndex : 0
   const picked: string[] = []
@@ -98,6 +103,7 @@ watch(() => props.open, open => {
     rejectedAdd.value = true
   }
   selected.value = new Set(initial)
+  void scrollToAnchor()
 })
 
 /** 滚动定位的锚点：已选中的第一句，清空选择时退回右键那一句 */
@@ -127,7 +133,7 @@ function close() {
 
 useEscapeClose(() => props.open, close)
 
-function toggleLine(index: number) {
+function toggleLine(index: number, event?: Event) {
   const next = new Set(selected.value)
   if (next.has(index)) {
     next.delete(index)
@@ -139,9 +145,14 @@ function toggleLine(index: number) {
     proposed.add(index)
     if (!fitsBudget(textsOf(proposed))) {
       rejectedAdd.value = true
+      // 浏览器在 change 之前就把勾选框翻上了，这里必须按模型退回，
+      // 否则会出现"框勾着、行没高亮、选择里也没有"的脱钩
+      const input = event?.target as HTMLInputElement | null
+      if (input) input.checked = selected.value.has(index)
       return
     }
     next.add(index)
+    rejectedAdd.value = false
   }
   selected.value = next
   poster.value = null
@@ -153,7 +164,8 @@ function selectAll() {
   const next = new Set<number>()
   for (const line of props.lines) {
     if (!line.text.trim()) continue
-    if (picked.length && !fitsBudget([...picked, line.text])) break
+    // 第一句也要试算：整首歌词被存成一句超长文本时，短路会让它直接被选进去、出图又被截断
+    if (!fitsBudget([...picked, line.text])) break
     picked.push(line.text)
     next.add(line.index)
   }
@@ -184,6 +196,13 @@ async function generatePoster() {
   if (!selectedLines.value.length || busy.value) return
   busy.value = true
   const generation = ++renderGeneration
+  // 出图内容在点击这一刻定稿：封面取图要 await，期间切歌或改勾选都不能把
+  // 新曲目的歌名歌手拼到旧歌词上，也不能让成图和按钮提交时的选择不一致
+  const snapshot = {
+    lines: selectedLines.value.slice(),
+    title: title.value,
+    artist: artist.value,
+  }
   let coverSource: string | null = coverUrl.value
   let objectUrl = ''
   try {
@@ -201,7 +220,7 @@ async function generatePoster() {
     }
     if (generation !== renderGeneration) return
     const rendered = await renderPoster(
-      { coverUrl: coverSource, lines: selectedLines.value, title: title.value, artist: artist.value },
+      { coverUrl: coverSource, lines: snapshot.lines, title: snapshot.title, artist: snapshot.artist },
       await loadPosterLogo(),
     )
     // 期间弹窗被关掉又重开过（或又点了一次生成）：这一版结果属于旧会话，整张丢掉
@@ -307,9 +326,8 @@ async function copyPosterImage() {
                   type="checkbox"
                   class="lsd-check"
                   :checked="selected.has(line.index)"
-                  :disabled="!line.text.trim() || (atLimit && !selected.has(line.index))"
-                  :title="atLimit && !selected.has(line.index) ? t('lyrics.line_limit_hint', { max: MAX_POSTER_VISUAL_LINES }) : undefined"
-                  @change="toggleLine(line.index)"
+                  :disabled="!line.text.trim() || busy"
+                  @change="toggleLine(line.index, $event)"
                 />
                 <span class="lsd-text">{{ line.text }}</span>
               </label>
