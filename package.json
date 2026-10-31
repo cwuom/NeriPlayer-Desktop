@@ -31,6 +31,7 @@
     "test:lyrics-foreground": "node scripts/test-lyrics-foreground.mjs",
     "test:lyrics-display-controls": "node scripts/test-lyrics-display-controls.mjs",
     "test:lyric-animation": "node scripts/test-lyric-animation.mjs",
+    "test:lyric-poster": "node scripts/test-lyric-poster.mjs",
     "test:desktop-lyrics": "node scripts/test-desktop-lyrics.mjs",
     "test:desktop-lyrics-seek": "node scripts/test-desktop-lyrics-seek.mjs",
     "test:current-lyrics": "node scripts/test-current-lyrics.mjs",
