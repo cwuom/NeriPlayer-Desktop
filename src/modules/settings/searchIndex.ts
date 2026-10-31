@@ -11,7 +11,7 @@ export interface SettingsSearchEntry {
 }
 
 export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
-  { section: 'accounts', title: 'settings.accounts', desc: 'settings.accounts_desc', keywords: ['NetEase', '网易云', 'Bilibili', 'B站', '哔哩哔哩', 'YouTube', 'login', '登录'] },
+  { section: 'accounts', title: 'settings.accounts', desc: 'settings.accounts_desc', keywords: ['NetEase', '网易云', 'Bilibili', 'B站', '哔哩哔哩', 'YouTube', 'login', '登录', 'Cookie'] },
   { section: 'general', title: 'settings.default_screen' },
   { section: 'general', title: 'settings.close_to_tray', desc: 'settings.close_to_tray_desc' },
   { section: 'general', title: 'settings.internationalization' },
@@ -190,8 +190,8 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'backup', title: 'settings.webdav_sync' },
   { section: 'backup', title: 'settings.export_playlist', desc: 'settings.export_playlist_desc' },
   { section: 'backup', title: 'settings.import_playlist', desc: 'settings.import_playlist_desc' },
-  { section: 'backup', title: 'settings.export_config', desc: 'settings.export_config_desc' },
-  { section: 'backup', title: 'settings.import_config', desc: 'settings.import_config_desc' },
+  { section: 'backup', title: 'settings.export_config', desc: 'settings.export_config_desc', keywords: ['加密', '密码', 'encrypt', 'password', 'Cookie'] },
+  { section: 'backup', title: 'settings.import_config', desc: 'settings.import_config_desc', keywords: ['Android', '安卓', '解密', 'decrypt'] },
   { section: 'language', title: 'settings.language', desc: 'settings.language_desc' },
   { section: 'about', title: 'settings.build_uuid' },
   { section: 'about', title: 'settings.build_time' },

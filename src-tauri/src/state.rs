@@ -67,6 +67,7 @@ pub struct AppState {
     pub cookie_jar: Arc<reqwest::cookie::Jar>,
     /// 三平台登录状态
     pub auth: Mutex<AuthState>,
+    pub auth_operations: Mutex<crate::auth::coordination::AuthOperations>,
     /// 一起听会话
     pub lt_session: Mutex<LtSession>,
     /// 后台下载任务
@@ -123,6 +124,7 @@ impl AppState {
             bypass_system_proxy: AtomicBool::new(true),
             cookie_jar: jar,
             auth: Mutex::new(AuthState::default()),
+            auth_operations: Mutex::new(crate::auth::coordination::AuthOperations::default()),
             lt_session: Mutex::new(LtSession::new()),
             download_tasks: Mutex::new(HashMap::new()),
             youtube_refresh: Mutex::new(crate::api::youtube::refresh::YouTubeRefreshGate::default()),
@@ -203,6 +205,16 @@ impl AppState {
             &self.alt_http(),
             target,
         )
+    }
+
+    pub fn auth_http_clients(&self, jar: Arc<reqwest::cookie::Jar>) -> crate::error::AppResult<(reqwest::Client, reqwest::Client)> {
+        let bypass_proxy = self.bypasses_system_proxy();
+        let build = |bypass_proxy: bool| {
+            let mut builder = api_client_builder(jar.clone());
+            if bypass_proxy { builder = builder.no_proxy(); }
+            builder.build()
+        };
+        Ok((build(bypass_proxy)?, build(!bypass_proxy)?))
     }
 
     pub fn netease(&self) -> crate::api::netease::client::NeteaseClient {

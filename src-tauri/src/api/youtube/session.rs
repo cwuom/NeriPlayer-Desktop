@@ -47,10 +47,15 @@ fn is_rotating_session_cookie(name: &str) -> bool {
         .any(|key| key.eq_ignore_ascii_case(name))
 }
 
-pub(crate) fn cookie_key_allowed(name: &str) -> bool {
+pub(crate) fn canonical_cookie_key(name: &str) -> Option<&'static str> {
     PERSISTED_COOKIE_KEYS
         .iter()
-        .any(|key| key.eq_ignore_ascii_case(name))
+        .copied()
+        .find(|key| key.eq_ignore_ascii_case(name))
+}
+
+pub(crate) fn cookie_key_allowed(name: &str) -> bool {
+    canonical_cookie_key(name).is_some()
         || name.starts_with("__Secure-")
         || name.starts_with("__Host-")
 }
@@ -185,6 +190,7 @@ pub fn merge_youtube_auth_cookies(
         cookies,
         nickname: base.nickname.clone(),
         avatar_url: base.avatar_url.clone(),
+        auth_user: base.auth_user.clone(),
     }
 }
 
@@ -212,6 +218,7 @@ pub fn merge_rotated_youtube_cookies(
         cookies,
         nickname: base.nickname.clone(),
         avatar_url: base.avatar_url.clone(),
+        auth_user: base.auth_user.clone(),
     }
 }
 
@@ -226,7 +233,7 @@ pub fn youtube_auth_changed(previous: &YouTubeAuth, current: &YouTubeAuth) -> bo
         .iter()
         .map(|c| (c.name.as_str(), c.value.as_str(), c.domain.as_str()))
         .collect();
-    left != right
+    left != right || previous.selected_auth_user() != current.selected_auth_user()
 }
 
 #[cfg(test)]
@@ -262,6 +269,7 @@ mod tests {
             ],
             nickname: Some("n".into()),
             avatar_url: None,
+            auth_user: Some("2".into()),
         };
         let observed = vec![CookieEntry {
             name: "SAPISID".into(),
@@ -269,6 +277,7 @@ mod tests {
             domain: ".youtube.com".into(),
         }];
         let merged = merge_youtube_auth_cookies(&base, &observed);
+        assert_eq!(merged.selected_auth_user(), Some("2"));
         assert!(merged.cookies.iter().any(|c| c.name == "SID" && c.value == "sid-old"));
         assert!(merged
             .cookies
@@ -293,6 +302,7 @@ mod tests {
             ],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
         let observed = vec![
             CookieEntry {
@@ -330,6 +340,7 @@ mod tests {
             }],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
         let observed = vec![CookieEntry {
             name: "__Secure-1PSIDTS".into(),
@@ -355,6 +366,7 @@ mod tests {
             }],
             nickname: Some("name".into()),
             avatar_url: None,
+            auth_user: None,
         };
         let rotated = vec![CookieEntry {
             name: "__Secure-3PSIDTS".into(),

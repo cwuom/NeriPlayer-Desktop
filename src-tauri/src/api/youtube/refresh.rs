@@ -544,6 +544,7 @@ mod tests {
             }],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
         assert!(!has_rotation_prerequisites(&auth));
     }
@@ -587,6 +588,7 @@ mod tests {
             ],
             nickname: None,
             avatar_url: None,
+            auth_user: None,
         };
 
         let (rotated, interval_ms) = request_rotated_cookies_at(&transport, &auth, &endpoint)

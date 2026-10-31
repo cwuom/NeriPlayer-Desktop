@@ -1203,6 +1203,7 @@ pub async fn resolve_audio_streams_with_source(
                     cookies: bootstrap.cookies.clone(),
                     nickname: None,
                     avatar_url: None,
+                    auth_user: auth.and_then(YouTubeAuth::selected_auth_user).map(String::from),
                 };
                 let fingerprint = super::bootstrap::auth_fingerprint(Some(&session_auth));
                 if super::web_po::cached_token(&fingerprint, &bootstrap.remote_host, video_id)
@@ -1256,6 +1257,7 @@ pub async fn resolve_audio_streams_with_source(
                 cookies: bootstrap.cookies.clone(),
                 nickname: None,
                 avatar_url: None,
+                auth_user: auth.and_then(YouTubeAuth::selected_auth_user).map(String::from),
             };
             let video_id = video_id.to_owned();
             let visitor_data = bootstrap.visitor_data.clone();

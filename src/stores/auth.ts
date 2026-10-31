@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, onScopeDispose } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useToastStore } from './toast'
 import { useRecommendStore } from './recommend'
 import i18n from '@/i18n'
@@ -26,6 +27,11 @@ export interface AuthStatusResponse {
 }
 
 const emptyAuth = (): PlatformAuth => ({ loggedIn: false, nickname: null, avatarUrl: null })
+type AuthPlatform = 'netease' | 'bilibili' | 'youtube'
+
+function isAuthPlatform(platform: string): platform is AuthPlatform {
+  return platform === 'netease' || platform === 'bilibili' || platform === 'youtube'
+}
 
 function sameAuth(a: PlatformAuth, b: PlatformAuth): boolean {
   return a.loggedIn === b.loggedIn && a.nickname === b.nickname && a.avatarUrl === b.avatarUrl
@@ -51,17 +57,59 @@ export const useAuthStore = defineStore('auth', () => {
   const statusChecked = ref(false)
   const youtubeProfileRefreshAttempted = ref(false)
   const youtubeProfileRefreshing = ref(false)
+  const authRevisions: Record<AuthPlatform, number> = { netease: 0, bilibili: 0, youtube: 0 }
+  let loginSequence = 0
+  let statusSequence = 0
+  let profileListener: Promise<void> | null = null
+  let unlistenProfile: UnlistenFn | null = null
+  let disposed = false
+
+  function ensureProfileListener() {
+    if (!profileListener) {
+      profileListener = listen<string>('auth-profile-updated', async event => {
+        if (disposed || !isAuthPlatform(event.payload)) return
+        await checkStatus()
+        // 账号 ID 不在界面摘要中，补齐后仍需让曲库重拉一次
+        if (!disposed) notifyAuthChanged(event.payload)
+      }).then(unlisten => {
+        if (disposed) unlisten()
+        else unlistenProfile = unlisten
+      }).catch(error => {
+        profileListener = null
+        log.warn('Failed to listen for account profile updates:', error)
+      })
+    }
+    return profileListener
+  }
+
+  onScopeDispose(() => {
+    disposed = true
+    unlistenProfile?.()
+  })
 
   const isAnyLoggedIn = computed(() =>
     netease.value.loggedIn || bilibili.value.loggedIn || youtube.value.loggedIn
   )
 
   /** 启动时检查所有平台登录状态 */
-  async function checkStatus() {
+  async function checkStatus(options: { invalidatePending?: readonly string[] } = {}) {
+    for (const platform of options.invalidatePending ?? []) {
+      if (!isAuthPlatform(platform)) continue
+      authRevisions[platform]++
+      if (loggingIn.value === platform) {
+        loginSequence++
+        loggingIn.value = null
+      }
+    }
+    const request = ++statusSequence
+    const revisions = { ...authRevisions }
     try {
+      await ensureProfileListener()
       const status = await invoke<any>('check_auth_status')
+      if (request !== statusSequence || disposed) return
       // 账号没变就保留原对象：页面按对象身份判断换号，设置页、同步后的例行检查不能让首页整页重载
-      for (const [target, raw] of [[netease, status.netease], [bilibili, status.bilibili], [youtube, status.youtube]] as const) {
+      for (const [platform, target, raw] of [['netease', netease, status.netease], ['bilibili', bilibili, status.bilibili], ['youtube', youtube, status.youtube]] as const) {
+        if (revisions[platform] !== authRevisions[platform]) continue
         const next = mapAuth(raw)
         if (!sameAuth(target.value, next)) target.value = next
       }
@@ -88,8 +136,10 @@ export const useAuthStore = defineStore('auth', () => {
 
     youtubeProfileRefreshing.value = true
     youtubeProfileRefreshAttempted.value = true
+    const revision = authRevisions.youtube
     try {
       const info = await invoke<any>('refresh_youtube_profile')
+      if (revision !== authRevisions.youtube) return
       const mapped = mapAuth(info)
       if (mapped.loggedIn && !sameAuth(youtube.value, mapped)) {
         youtube.value = mapped
@@ -98,6 +148,10 @@ export const useAuthStore = defineStore('auth', () => {
       log.warn('Failed to refresh YouTube profile:', e)
     } finally {
       youtubeProfileRefreshing.value = false
+      if (revision !== authRevisions.youtube && needsYoutubeProfileRefresh(youtube.value)) {
+        youtubeProfileRefreshAttempted.value = false
+        void refreshYoutubeProfile()
+      }
     }
   }
 
@@ -122,19 +176,27 @@ export const useAuthStore = defineStore('auth', () => {
     playbackPrefetchManager.clear()
     useRecommendStore().invalidatePlatform(platform)
     window.dispatchEvent(new CustomEvent(AUTH_CHANGED_EVENT, { detail: { platform } }))
+    if (platform === 'youtube' && needsYoutubeProfileRefresh(youtube.value)) {
+      youtubeProfileRefreshAttempted.value = false
+      void refreshYoutubeProfile()
+    }
   }
 
   /** 通用登录流程 */
   async function doLogin(
-    key: string,
+    key: AuthPlatform,
     command: string,
     target: typeof netease,
   ) {
     const toast = useToastStore()
+    const revision = ++authRevisions[key]
+    const request = ++loginSequence
     loggingIn.value = key
     try {
       const info = await invoke<any>(command)
+      if (revision !== authRevisions[key]) return
       const mapped = mapAuth(info)
+      authRevisions[key]++
       target.value = mapped
       if (key === 'youtube') {
         youtubeProfileRefreshAttempted.value = false
@@ -145,6 +207,7 @@ export const useAuthStore = defineStore('auth', () => {
         toast.success(t('settings.login_success', { platform: platformLabel(key) }))
       }
     } catch (e: any) {
+      if (revision !== authRevisions[key] || String(e).includes('Authentication superseded')) return
       const msg = String(e)
       if (msg.includes('cancelled') || msg.includes('cancel')) {
         toast.show(t('settings.login_cancelled'), 'info')
@@ -153,7 +216,7 @@ export const useAuthStore = defineStore('auth', () => {
       }
       log.error(`${key} login failed:`, e)
     } finally {
-      loggingIn.value = null
+      if (request === loginSequence) loggingIn.value = null
     }
   }
 
@@ -174,9 +237,17 @@ export const useAuthStore = defineStore('auth', () => {
 
   /** 登出指定平台 */
   async function logout(platform: string) {
+    if (!isAuthPlatform(platform)) return
+    const revision = ++authRevisions[platform]
+    if (loggingIn.value === platform) {
+      loginSequence++
+      loggingIn.value = null
+    }
     const toast = useToastStore()
     try {
       await invoke('logout', { platform })
+      if (revision !== authRevisions[platform]) return
+      authRevisions[platform]++
       switch (platform) {
         case 'netease': netease.value = emptyAuth(); break
         case 'bilibili': bilibili.value = emptyAuth(); break
@@ -190,13 +261,19 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /** Cookie 粘贴登录（对齐 Android 端） */
-  async function loginWithCookies(platform: string, rawCookies: string) {
+  async function loginWithCookies(platform: string, rawCookies: string): Promise<boolean> {
+    if (!isAuthPlatform(platform)) return false
     const toast = useToastStore()
     const target = platform === 'netease' ? netease : platform === 'bilibili' ? bilibili : youtube
+    const revision = ++authRevisions[platform]
+    const request = ++loginSequence
     loggingIn.value = platform
     try {
       const info = await invoke<any>('login_with_cookies', { platform, rawCookies })
+      if (revision !== authRevisions[platform]) return false
       const mapped = mapAuth(info)
+      if (!mapped.loggedIn) return false
+      authRevisions[platform]++
       target.value = mapped
       if (platform === 'youtube') {
         youtubeProfileRefreshAttempted.value = false
@@ -206,16 +283,19 @@ export const useAuthStore = defineStore('auth', () => {
         notifyAuthChanged(platform)
         toast.success(t('settings.login_success', { platform: platformLabel(platform) }))
       }
+      return true
     } catch (e: any) {
+      if (revision !== authRevisions[platform] || String(e).includes('Authentication superseded')) return false
       toast.error(String(e))
       log.error(`${platform} cookie login failed:`, e)
+      return false
     } finally {
-      loggingIn.value = null
+      if (request === loginSequence) loggingIn.value = null
     }
   }
 
   return {
     netease, bilibili, youtube, loggingIn, statusChecked, isAnyLoggedIn,
-    checkStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, logout,
+    checkStatus, refreshYoutubeProfile, loginNetease, loginBilibili, loginYoutube, loginWithCookies, notifyAuthChanged, logout,
   }
 })

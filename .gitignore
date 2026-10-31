@@ -41,6 +41,11 @@ AGENTS.md
 CLAUDE.md
 docs-private/
 
+# agent 生成的临时文档统一放在 docs/tmp，不纳入版本控制
+/docs/tmp/
+/docs/superpowers/
+/.superpowers/
+
 # TypeScript incremental build info
 *.tsbuildinfo
 

@@ -6,30 +6,37 @@ const props = withDefaults(defineProps<{
   label?: string
   placeholder?: string
   maxlength?: number
-}>(), {})
+  type?: 'text' | 'password'
+  disabled?: boolean
+  autocomplete?: string
+}>(), { type: 'text', disabled: false })
 
 const isFocused = ref(false)
 const inputRef = ref<HTMLInputElement>()
 const emit = defineEmits<{ enter: [] }>()
 
 function focus() {
-  inputRef.value?.focus()
+  if (!props.disabled) inputRef.value?.focus()
 }
 
 defineExpose({ focus })
 </script>
 
 <template>
-  <div class="m3-input" :class="{ focused: isFocused, filled: !!model }" @click="focus">
+  <div class="m3-input" :class="{ focused: isFocused, filled: !!model, disabled }" @click="focus">
     <label v-if="label" class="input-label">{{ label }}</label>
     <input
       ref="inputRef"
       v-model="model"
+      :type="type"
+      :disabled="disabled"
+      :autocomplete="autocomplete"
+      :aria-label="label"
       :placeholder="placeholder"
       :maxlength="maxlength"
       @focus="isFocused = true"
       @blur="isFocused = false"
-      @keydown.enter="emit('enter')"
+      @keydown.enter="!disabled && emit('enter')"
     />
     <div class="input-underline" />
   </div>
@@ -39,6 +46,8 @@ defineExpose({ focus })
 .m3-input {
   position: relative;
   padding: 8px 0 0;
+
+  &.disabled { opacity: 0.38; }
 }
 
 .input-label {

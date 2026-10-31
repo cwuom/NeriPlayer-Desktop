@@ -4,19 +4,45 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 // 三平台登录/登出命令
 use crate::api::youtube::client::YouTubeAccountProfile;
 use crate::webview_args::MainBrowserArgs;
 use crate::auth::cookies;
+use crate::auth::coordination::{AuthOperation, AuthOperations, AuthPlatform};
 use crate::auth::state::{
-    AuthInfo, AuthStatusResponse, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth,
+    AuthInfo, AuthState, AuthStatusResponse, BiliAuth, CookieEntry, NeteaseAuth, YouTubeAuth,
 };
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 const BILIBILI_LOGIN_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+const AUTH_PROFILE_REFRESH_TIMEOUT: Duration = Duration::from_secs(12);
+
+struct PendingLogin<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+    operation: AuthOperation,
+}
+
+impl<'a> PendingLogin<'a> {
+    fn new(app: &'a AppHandle, state: &'a AppState, platform: AuthPlatform) -> Self {
+        let operation = state.auth_operations.lock().begin_login(platform);
+        Self { app, state, operation }
+    }
+}
+
+impl Drop for PendingLogin<'_> {
+    fn drop(&mut self) {
+        self.state.auth_operations.lock().finish_login(self.operation);
+        schedule_missing_account_profiles(self.app, self.state);
+    }
+}
+
+fn login_window_label(operation: AuthOperation) -> String {
+    format!("{}-login-{}", operation.platform.as_str(), operation.generation())
+}
 
 // 登录检测机制：
 // 打开 WebviewWindow 加载平台登录页
@@ -117,12 +143,13 @@ fn read_webview_cookies<R: tauri::Runtime>(
 }
 
 fn has_login_cookie(entries: &[CookieEntry], sentinel_cookie: &str) -> bool {
-    entries
-        .iter()
-        .any(|entry| entry.name == sentinel_cookie && !entry.value.is_empty())
+    login_sentinel_value(entries, sentinel_cookie).is_some()
 }
 
 fn login_sentinel_value(entries: &[CookieEntry], sentinel_cookie: &str) -> Option<String> {
+    if sentinel_cookie == "SAPISID" {
+        return crate::auth::state::youtube_sapisid(entries).map(String::from);
+    }
     entries
         .iter()
         .find(|entry| entry.name == sentinel_cookie && !entry.value.is_empty())
@@ -176,8 +203,75 @@ async fn fetch_youtube_profile(
     state: &AppState,
     auth: &YouTubeAuth,
 ) -> AppResult<YouTubeAccountProfile> {
-    let client = state.youtube();
+    let jar = isolated_cookie_jar(&auth.cookies);
+    let (http, alternate) = state.auth_http_clients(jar)?;
+    let client = crate::api::youtube::client::YouTubeClient::with_transport(
+        crate::api::transport::FallbackHttp::with_fallback(&http, &alternate, "youtube-auth"),
+    );
     client.get_account_profile(auth).await
+}
+
+fn isolated_cookie_jar(entries: &[CookieEntry]) -> Arc<reqwest::cookie::Jar> {
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    cookies::inject_cookies(&jar, entries);
+    jar
+}
+
+fn filter_youtube_login_cookies(entries: &mut Vec<CookieEntry>) {
+    entries.retain(|entry| crate::api::youtube::session::canonical_cookie_key(&entry.name).is_some());
+}
+
+fn netease_auth_client(state: &AppState, jar: &Arc<reqwest::cookie::Jar>) -> AppResult<crate::api::netease::client::NeteaseClient> {
+    let (http, alternate) = state.auth_http_clients(jar.clone())?;
+    Ok(crate::api::netease::client::NeteaseClient::with_fallback(&http, &alternate)
+        .with_cookie_jar(jar.clone()))
+}
+
+fn bilibili_auth_client(state: &AppState, jar: &Arc<reqwest::cookie::Jar>) -> AppResult<crate::api::bilibili::client::BiliClient> {
+    let (http, alternate) = state.auth_http_clients(jar.clone())?;
+    Ok(crate::api::bilibili::client::BiliClient::with_transport(
+        crate::api::transport::FallbackHttp::with_fallback(&http, &alternate, "bilibili-auth"),
+    ).with_cookie_jar(jar.clone()))
+}
+
+fn commit_login(
+    app: &AppHandle,
+    state: &AppState,
+    operation: AuthOperation,
+    mut candidate: AuthState,
+    jar: &Arc<reqwest::cookie::Jar>,
+) -> AppResult<AuthInfo> {
+    cookies::sync_auth_from_jar(jar, &mut candidate);
+    let operations = state.auth_operations.lock();
+    let mut auth = state.auth.lock();
+    let info = commit_login_state(&operations, &mut auth, &state.cookie_jar, operation, candidate)?;
+    cookies::save_auth(app, &auth);
+    Ok(info)
+}
+
+fn commit_login_state(
+    operations: &AuthOperations,
+    auth: &mut AuthState,
+    shared_jar: &Arc<reqwest::cookie::Jar>,
+    operation: AuthOperation,
+    candidate: AuthState,
+) -> AppResult<AuthInfo> {
+    if !operations.is_current(operation) {
+        return Err(AppError::Other("Authentication superseded by a newer operation".into()));
+    }
+    cookies::expire_platform_cookies(shared_jar, auth, operation.platform.as_str());
+    cookies::inject_all(shared_jar, &candidate);
+    match operation.platform {
+        AuthPlatform::Netease => auth.netease = candidate.netease,
+        AuthPlatform::Bilibili => auth.bilibili = candidate.bilibili,
+        AuthPlatform::Youtube => auth.youtube = candidate.youtube,
+    }
+    let status = auth.to_status_response();
+    Ok(match operation.platform {
+        AuthPlatform::Netease => status.netease,
+        AuthPlatform::Bilibili => status.bilibili,
+        AuthPlatform::Youtube => status.youtube,
+    })
 }
 
 fn apply_youtube_profile(auth: &mut YouTubeAuth, profile: YouTubeAccountProfile) {
@@ -209,6 +303,35 @@ fn youtube_auth_matches(left: &YouTubeAuth, right: &YouTubeAuth) -> bool {
     left.get_sapisid()
         .zip(right.get_sapisid())
         .is_some_and(|(left, right)| left == right)
+        && left.selected_auth_user().unwrap_or("0") == right.selected_auth_user().unwrap_or("0")
+}
+
+fn with_current_youtube_session<T>(
+    operations: &parking_lot::Mutex<AuthOperations>,
+    auth: &parking_lot::Mutex<AuthState>,
+    operation: AuthOperation,
+    previous: &YouTubeAuth,
+    update: impl FnOnce() -> T,
+) -> Option<T> {
+    let operations = operations.lock();
+    if !operations.is_current(operation) { return None; }
+    let auth = auth.lock();
+    let saved = auth.youtube.as_ref().filter(|saved| saved.has_login())?;
+    if !youtube_auth_matches(saved, previous) || !youtube_rotating_cookies_match(saved, previous) { return None; }
+    Some(update())
+}
+
+fn netease_verified_account_id(account: &serde_json::Value) -> Option<u64> {
+    if account["code"].as_i64() != Some(200) {
+        return None;
+    }
+    [&account["profile"]["userId"], &account["account"]["id"]]
+        .into_iter()
+        .find_map(|value| {
+            value.as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+                .filter(|id| *id > 0)
+        })
 }
 
 fn bili_verified_nav_mid(info: &serde_json::Value, entries: &[CookieEntry]) -> Option<u64> {
@@ -227,14 +350,364 @@ fn bili_verified_nav_mid(info: &serde_json::Value, entries: &[CookieEntry]) -> O
 mod tests {
     use super::{
         bili_verified_nav_mid, cookie_domain_matches_urls, has_completed_login, has_new_completed_login,
+        netease_verified_account_id,
     };
     use crate::auth::state::CookieEntry;
+
+    #[test]
+    fn new_web_login_has_its_own_window_while_the_previous_poll_is_still_running() {
+        let mut operations = crate::auth::coordination::AuthOperations::default();
+        for platform in crate::auth::coordination::AuthPlatform::ALL {
+            let old = operations.begin_login(platform);
+            let current = operations.begin_login(platform);
+            let old_label = super::login_window_label(old);
+            let current_label = super::login_window_label(current);
+            assert_ne!(old_label, current_label);
+            assert!(current_label.starts_with(&format!("{}-login-", platform.as_str())));
+            assert!(!operations.is_current(old));
+        }
+    }
+
+    #[test]
+    fn rejected_candidate_cookies_cannot_replace_a_new_login_or_restore_a_logout() {
+        use reqwest::cookie::CookieStore;
+        let entry = |value: &str| CookieEntry { name: "MUSIC_U".into(), value: value.into(), domain: "music.163.com".into() };
+        let url = "https://music.163.com".parse().unwrap();
+        for current in [Some("new-login"), None] {
+            let shared = super::isolated_cookie_jar(&current.map(|value| vec![entry(value)]).unwrap_or_default());
+            let candidate = super::isolated_cookie_jar(&[entry("candidate")]);
+            super::cookies::inject_cookies(&candidate, &[entry("candidate-server-response")]);
+            drop(candidate);
+            let saved = shared.cookies(&url).map(|value| value.to_str().unwrap().to_string());
+            match current {
+                Some(_) => assert!(saved.unwrap().contains("MUSIC_U=new-login")),
+                None => assert!(saved.is_none()),
+            }
+        }
+    }
+
+    #[test]
+    fn superseded_login_commit_keeps_auth_state_and_shared_cookies_unchanged() {
+        use crate::auth::coordination::{AuthOperations, AuthPlatform};
+        use reqwest::cookie::CookieStore;
+        for platform in AuthPlatform::ALL {
+            for logged_out in [false, true] {
+                let mut operations = AuthOperations::default();
+                let stale = operations.begin_login(platform);
+                operations.begin(platform);
+                let fixture = serde_json::json!({
+                    "netease": {"cookies": [{"name": "MUSIC_U", "value": "current", "domain": "music.163.com"}]},
+                    "bilibili": {"cookies": [{"name": "SESSDATA", "value": "current", "domain": ".bilibili.com"}]},
+                    "youtube": {"cookies": [{"name": "SAPISID", "value": "current", "domain": ".youtube.com"}]},
+                });
+                let mut auth: super::AuthState = serde_json::from_value(fixture.clone()).unwrap();
+                if logged_out {
+                    match platform {
+                        AuthPlatform::Netease => auth.netease = None,
+                        AuthPlatform::Bilibili => auth.bilibili = None,
+                        AuthPlatform::Youtube => auth.youtube = None,
+                    }
+                }
+                let shared = super::isolated_cookie_jar(&[]);
+                super::cookies::inject_all(&shared, &auth);
+                let urls = ["https://music.163.com", "https://api.bilibili.com", "https://music.youtube.com"];
+                let before_cookies: Vec<_> = urls.iter().map(|url| shared.cookies(&url.parse().unwrap())).collect();
+                let before_auth = serde_json::to_value(&auth).unwrap();
+                let mut candidate: super::AuthState = serde_json::from_value(fixture).unwrap();
+                candidate.netease.as_mut().unwrap().cookies[0].value = "stale".into();
+                candidate.bilibili.as_mut().unwrap().cookies[0].value = "stale".into();
+                candidate.youtube.as_mut().unwrap().cookies[0].value = "stale".into();
+                let result = super::commit_login_state(&operations, &mut auth, &shared, stale, candidate);
+                assert!(result.unwrap_err().to_string().contains("Authentication superseded"));
+                assert_eq!(serde_json::to_value(&auth).unwrap(), before_auth);
+                let after_cookies: Vec<_> = urls.iter().map(|url| shared.cookies(&url.parse().unwrap())).collect();
+                assert_eq!(after_cookies, before_cookies, "{platform:?}, logged out: {logged_out}");
+            }
+        }
+    }
+
+    #[test]
+    fn current_login_commit_replaces_only_its_platform_state_and_cookies() {
+        use crate::auth::coordination::{AuthOperations, AuthPlatform};
+        use reqwest::cookie::CookieStore;
+        let cases = [
+            (AuthPlatform::Netease, "MUSIC_U", "music.163.com", "https://music.163.com", "__csrf"),
+            (AuthPlatform::Bilibili, "SESSDATA", ".bilibili.com", "https://api.bilibili.com", "bili_jct"),
+            (AuthPlatform::Youtube, "SAPISID", ".youtube.com", "https://music.youtube.com", "SIDCC"),
+        ];
+        for (platform, sentinel, domain, url, jar_only_name) in cases {
+            let mut operations = AuthOperations::default();
+            let operation = operations.begin_login(platform);
+            let mut auth: super::AuthState = serde_json::from_value(serde_json::json!({
+                "netease": {"cookies": [{"name": "MUSIC_U", "value": "old", "domain": "music.163.com"}]},
+                "bilibili": {"cookies": [{"name": "SESSDATA", "value": "old", "domain": ".bilibili.com"}]},
+                "youtube": {"cookies": [{"name": "SAPISID", "value": "old", "domain": ".youtube.com"}]},
+            })).unwrap();
+            let candidate: super::AuthState = serde_json::from_value(serde_json::json!({
+                (platform.as_str()): {"cookies": [{"name": sentinel, "value": "new", "domain": domain}], "nickname": "new account"},
+            })).unwrap();
+            let shared = super::isolated_cookie_jar(&[]);
+            super::cookies::inject_all(&shared, &auth);
+            super::cookies::inject_cookies(&shared, &[CookieEntry {
+                name: jar_only_name.into(), value: "jar-only-old".into(), domain: domain.into(),
+            }]);
+            if platform == AuthPlatform::Youtube {
+                super::cookies::inject_cookies(&shared, &[
+                    CookieEntry { name: "__Secure-1PSIDTS".into(), value: "first-jar-only".into(), domain: "music.youtube.com".into() },
+                    CookieEntry { name: "__Secure-3PSIDTS".into(), value: "third-jar-only".into(), domain: "music.youtube.com".into() },
+                ]);
+            }
+            let current_url = url.parse().unwrap();
+            assert!(shared.cookies(&current_url).unwrap().to_str().unwrap().contains(&format!("{jar_only_name}=jar-only-old")));
+            let info = super::commit_login_state(&operations, &mut auth, &shared, operation, candidate).unwrap();
+            assert!(info.logged_in);
+            assert_eq!(info.nickname.as_deref(), Some("new account"));
+            let saved = serde_json::to_value(&auth).unwrap();
+            for (other, other_sentinel, _, other_url, _) in cases {
+                let expected = if other == platform { "new" } else { "old" };
+                assert_eq!(saved[other.as_str()]["cookies"][0]["value"], expected);
+                assert!(shared.cookies(&other_url.parse().unwrap()).unwrap().to_str().unwrap().contains(&format!("{other_sentinel}={expected}")));
+            }
+            let current_cookies = shared.cookies(&current_url).unwrap();
+            let current_cookies = current_cookies.to_str().unwrap();
+            assert!(!current_cookies.contains(&format!("{jar_only_name}=")), "{platform:?}");
+            if platform == AuthPlatform::Youtube {
+                assert!(current_cookies.contains("__Secure-1PSIDTS=first-jar-only"));
+                assert!(current_cookies.contains("__Secure-3PSIDTS=third-jar-only"));
+            }
+        }
+    }
+
+    fn youtube_refresh_fixture() -> super::YouTubeAuth {
+        serde_json::from_value(serde_json::json!({
+            "cookies": [
+                {"name": "SAPISID", "value": "identity", "domain": ".youtube.com"},
+                {"name": "SID", "value": "sid", "domain": ".youtube.com"},
+                {"name": "__Secure-1PSIDTS", "value": "first-old", "domain": ".google.com"},
+                {"name": "__Secure-3PSIDTS", "value": "third-old", "domain": ".google.com"},
+            ],
+            "nickname": "saved account", "avatar_url": "saved.png", "auth_user": "2",
+        })).unwrap()
+    }
+
+    #[test]
+    fn stale_youtube_page_refresh_cannot_overwrite_rotated_session() {
+        use crate::api::youtube::session::{merge_rotated_youtube_cookies, merge_youtube_auth_cookies};
+        for name in ["__Secure-1PSIDTS", "__Secure-3PSIDTS"] {
+            for previously_present in [false, true] {
+                let mut snapshot = youtube_refresh_fixture();
+                if !previously_present { snapshot.cookies.retain(|cookie| cookie.name != name); }
+                let page_result = merge_youtube_auth_cookies(&snapshot, &[CookieEntry {
+                    name: "SIDCC".into(), value: "page-update".into(), domain: ".youtube.com".into(),
+                }]);
+                let mut saved = merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                    name: name.into(), value: "rotation-update".into(), domain: ".google.com".into(),
+                }]);
+                let before = serde_json::to_value(&saved).unwrap();
+                assert!(!super::merge_youtube_session_update_state(
+                    &mut saved, &snapshot, page_result,
+                ), "{name}, previous token present: {previously_present}");
+                assert_eq!(serde_json::to_value(&saved).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn youtube_page_refresh_updates_unrotated_session() {
+        let snapshot = youtube_refresh_fixture();
+        let mut saved = snapshot.clone();
+        saved.cookies.reverse();
+        for cookie in &mut saved.cookies {
+            if cookie.name.ends_with("PSIDTS") { cookie.domain = "GOOGLE.COM".into(); }
+        }
+        let mut page_result = crate::api::youtube::session::merge_youtube_auth_cookies(&snapshot, &[CookieEntry {
+            name: "SIDCC".into(), value: "page-update".into(), domain: ".youtube.com".into(),
+        }]);
+        page_result.nickname = None;
+        page_result.avatar_url = None;
+        assert!(super::merge_youtube_session_update_state(
+            &mut saved, &snapshot, page_result,
+        ));
+        assert!(saved.cookies.iter().any(|cookie| cookie.name == "SIDCC" && cookie.value == "page-update"));
+        assert_eq!(saved.nickname.as_deref(), Some("saved account"));
+        assert_eq!(saved.avatar_url.as_deref(), Some("saved.png"));
+        assert_eq!(saved.selected_auth_user(), Some("2"));
+    }
+
+    #[test]
+    fn youtube_page_refresh_rejects_a_changed_rotating_cookie_domain() {
+        let snapshot = youtube_refresh_fixture();
+        let mut saved = snapshot.clone();
+        saved.cookies.iter_mut().find(|cookie| cookie.name == "__Secure-1PSIDTS").unwrap().domain = "accounts.google.com".into();
+        let before = serde_json::to_value(&saved).unwrap();
+        assert!(!super::merge_youtube_session_update_state(
+            &mut saved, &snapshot, snapshot.clone(),
+        ));
+        assert_eq!(serde_json::to_value(&saved).unwrap(), before);
+    }
+
+    #[test]
+    fn youtube_cookie_rotation_can_update_rotating_session_tokens() {
+        let snapshot = youtube_refresh_fixture();
+        let mut saved = snapshot.clone();
+        let updated = crate::api::youtube::session::merge_rotated_youtube_cookies(&snapshot, &[
+            CookieEntry { name: "__Secure-1PSIDTS".into(), value: "first-new".into(), domain: ".google.com".into() },
+            CookieEntry { name: "__Secure-3PSIDTS".into(), value: "third-new".into(), domain: ".google.com".into() },
+        ]);
+        assert!(super::merge_youtube_session_update_state(
+            &mut saved, &snapshot, updated,
+        ));
+        for (name, value) in [("__Secure-1PSIDTS", "first-new"), ("__Secure-3PSIDTS", "third-new")] {
+            assert!(saved.cookies.iter().any(|cookie| cookie.name == name && cookie.value == value));
+        }
+    }
+
+    #[test]
+    fn overlapping_youtube_cookie_rotations_cannot_restore_an_older_snapshot() {
+        use crate::api::youtube::session::merge_rotated_youtube_cookies;
+        for name in ["__Secure-1PSIDTS", "__Secure-3PSIDTS"] {
+            let snapshot = youtube_refresh_fixture();
+            let first_result = merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                name: name.into(), value: "committed-rotation".into(), domain: ".google.com".into(),
+            }]);
+            let delayed_result = merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                name: name.into(), value: "late-rotation".into(), domain: ".google.com".into(),
+            }]);
+            let mut saved = snapshot.clone();
+            assert!(super::merge_youtube_session_update_state(
+                &mut saved, &snapshot, first_result,
+            ));
+            let committed = serde_json::to_value(&saved).unwrap();
+            assert!(!super::merge_youtube_session_update_state(
+                &mut saved, &snapshot, delayed_result,
+            ), "{name}");
+            assert_eq!(serde_json::to_value(&saved).unwrap(), committed);
+        }
+    }
+
+    #[test]
+    fn stale_youtube_rotating_snapshot_cannot_change_gate_success_or_failure() {
+        use crate::api::youtube::refresh::{YouTubeCookieRotationGate, ROTATION_DEFAULT_INTERVAL_MS};
+        use crate::auth::coordination::{AuthOperations, AuthPlatform};
+        for success in [false, true] {
+            let operations = parking_lot::Mutex::new(AuthOperations::default());
+            let operation = operations.lock().begin(AuthPlatform::Youtube);
+            let snapshot = youtube_refresh_fixture();
+            let current = crate::api::youtube::session::merge_rotated_youtube_cookies(&snapshot, &[CookieEntry {
+                name: "__Secure-1PSIDTS".into(), value: "committed-rotation".into(), domain: ".google.com".into(),
+            }]);
+            let auth = parking_lot::Mutex::new(super::AuthState { youtube: Some(current), ..Default::default() });
+            let mut gate = YouTubeCookieRotationGate::default();
+            gate.record_attempt(0);
+            let applied = super::with_current_youtube_session(&operations, &auth, operation, &snapshot, || {
+                if success { gate.record_success(60_000); }
+                else { for _ in 0..3 { gate.record_failure(); } }
+            });
+            assert!(applied.is_none(), "success: {success}");
+            assert!(!gate.should_attempt(60_000, false, true));
+            assert!(gate.should_attempt(ROTATION_DEFAULT_INTERVAL_MS, false, true));
+        }
+    }
+
+    #[test]
+    fn stale_youtube_rotation_responses_cannot_change_the_current_gate() {
+        use crate::api::youtube::refresh::{YouTubeCookieRotationGate, ROTATION_DEFAULT_INTERVAL_MS};
+        use crate::auth::coordination::{AuthOperations, AuthPlatform};
+        for changed_generation in [false, true] {
+            let operations = parking_lot::Mutex::new(AuthOperations::default());
+            let operation = operations.lock().begin(AuthPlatform::Youtube);
+            let previous: super::YouTubeAuth = serde_json::from_value(serde_json::json!({
+                "cookies": [{"name": "SAPISID", "value": "old", "domain": ".youtube.com"}],
+            })).unwrap();
+            let mut current = previous.clone();
+            if !changed_generation { current.cookies[0].value = "new".into(); }
+            let auth = parking_lot::Mutex::new(super::AuthState { youtube: Some(current), ..Default::default() });
+            if changed_generation { operations.lock().begin(AuthPlatform::Youtube); }
+            let mut gate = YouTubeCookieRotationGate::default();
+            gate.record_attempt(0);
+            let applied = super::with_current_youtube_session(&operations, &auth, operation, &previous, || gate.record_success(60_000));
+            assert!(applied.is_none(), "generation changed: {changed_generation}");
+            assert!(!gate.should_attempt(60_000, false, true));
+            assert!(gate.should_attempt(ROTATION_DEFAULT_INTERVAL_MS, false, true));
+        }
+    }
+
+    #[test]
+    fn current_youtube_rotation_response_updates_the_gate() {
+        use crate::api::youtube::refresh::YouTubeCookieRotationGate;
+        use crate::auth::coordination::{AuthOperations, AuthPlatform};
+        let operations = parking_lot::Mutex::new(AuthOperations::default());
+        let operation = operations.lock().begin(AuthPlatform::Youtube);
+        let current: super::YouTubeAuth = serde_json::from_value(serde_json::json!({
+            "cookies": [{"name": "SAPISID", "value": "current", "domain": ".youtube.com"}],
+            "auth_user": "2",
+        })).unwrap();
+        let auth = parking_lot::Mutex::new(super::AuthState { youtube: Some(current.clone()), ..Default::default() });
+        let mut gate = YouTubeCookieRotationGate::default();
+        gate.record_attempt(0);
+        assert!(super::with_current_youtube_session(&operations, &auth, operation, &current, || gate.record_success(60_000)).is_some());
+        assert!(gate.should_attempt(60_000, false, true));
+    }
+
+    #[test]
+    fn youtube_login_persists_known_session_cookies_without_unrelated_prefixed_keys() {
+        let required = ["SAPISID", "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID", "__Secure-1PSIDTS", "__Secure-3PSIDTS", "__Secure-1PSIDCC", "__Secure-3PSIDCC"];
+        let mut entries: Vec<_> = required.into_iter().chain(["__Secure-unrelated", "__Host-unrelated"]).map(|name| CookieEntry {
+            name: name.into(), value: "fixture".into(), domain: ".google.com".into(),
+        }).collect();
+        super::filter_youtube_login_cookies(&mut entries);
+        assert_eq!(entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), required);
+    }
+
+    #[test]
+    fn youtube_login_accepts_secure_sapisid_aliases_after_music_landing() {
+        let initial_url = url::Url::parse("https://accounts.google.com/ServiceLogin").unwrap();
+        let music_url = url::Url::parse("https://music.youtube.com/").unwrap();
+        for name in ["__Secure-1PAPISID", "__Secure-3PAPISID"] {
+            let entries = [CookieEntry { name: name.into(), value: "alias-session".into(), domain: ".youtube.com".into() }];
+            assert_eq!(super::login_sentinel_value(&entries, "SAPISID").as_deref(), Some("alias-session"));
+            assert!(!has_completed_login(&entries, "SAPISID", Some(&initial_url), Some("music.youtube.com")));
+            assert!(has_completed_login(&entries, "SAPISID", Some(&music_url), Some("music.youtube.com")));
+            assert!(!has_new_completed_login(&entries, "SAPISID", Some("alias-session"), Some(&music_url), Some(&music_url), Some("music.youtube.com")));
+            assert!(has_new_completed_login(&entries, "SAPISID", Some("alias-session"), Some(&initial_url), Some(&music_url), Some("music.youtube.com")));
+            assert!(has_new_completed_login(&entries, "SAPISID", Some("older-session"), Some(&music_url), Some(&music_url), Some("music.youtube.com")));
+        }
+    }
+
+    #[test]
+    fn youtube_login_rejects_google_only_sapisid_even_after_music_landing() {
+        let music_url = url::Url::parse("https://music.youtube.com/").unwrap();
+        for name in ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"] {
+            let entries = [CookieEntry { name: name.into(), value: "google-only".into(), domain: ".google.com".into() }];
+            assert!(super::login_sentinel_value(&entries, "SAPISID").is_none());
+            assert!(!has_completed_login(&entries, "SAPISID", Some(&music_url), Some("music.youtube.com")));
+        }
+    }
 
     const BILIBILI_URLS: &[&str] = &[
         "https://www.bilibili.com",
         "https://passport.bilibili.com",
         "https://api.bilibili.com",
     ];
+
+    #[test]
+    fn netease_cookie_validation_requires_success_and_a_positive_server_identity() {
+        for account in [
+            serde_json::json!({"code": 200, "profile": {"userId": 123}}),
+            serde_json::json!({"code": 200, "profile": {"userId": "123"}}),
+            serde_json::json!({"code": 200, "account": {"id": 123}}),
+        ] {
+            assert_eq!(netease_verified_account_id(&account), Some(123));
+        }
+        for account in [
+            serde_json::json!({"code": 200, "profile": null}),
+            serde_json::json!({"code": 200, "profile": {"userId": 0}}),
+            serde_json::json!({"code": 301, "profile": {"userId": 123}}),
+            serde_json::json!({"code": 200, "profile": {"userId": -1}}),
+        ] {
+            assert_eq!(netease_verified_account_id(&account), None);
+        }
+    }
 
     #[test]
     fn bilibili_imported_session_resolves_verified_nav_identity_without_dedeuserid_cookie() {
@@ -297,7 +770,7 @@ mod tests {
         let entries = vec![CookieEntry {
             name: "SAPISID".into(),
             value: "google-session".into(),
-            domain: "google.com".into(),
+            domain: ".youtube.com".into(),
         }];
         let current_url = url::Url::parse("https://music.youtube.com/").unwrap();
 
@@ -354,7 +827,7 @@ mod tests {
         let entries = vec![CookieEntry {
             name: "SAPISID".into(),
             value: "new-session".into(),
-            domain: "google.com".into(),
+            domain: ".youtube.com".into(),
         }];
         let current_url = url::Url::parse("https://music.youtube.com/").unwrap();
 
@@ -371,7 +844,7 @@ mod tests {
 
 /// 从 WebView 窗口轮询提取 Cookie（使用 Tauri 内置 API 读取 HttpOnly）
 async fn poll_webview_cookies(
-    app: &AppHandle,
+    pending: &PendingLogin<'_>,
     window_label: &str,
     sentinel_cookie: &str,
     required_host: Option<&str>,
@@ -379,6 +852,7 @@ async fn poll_webview_cookies(
     timeout_secs: u64,
     close_requested: &AtomicBool,
 ) -> AppResult<Vec<CookieEntry>> {
+    let app = pending.app;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let poll_interval = Duration::from_millis(800);
     let initial_window = app.get_webview_window(window_label);
@@ -389,6 +863,12 @@ async fn poll_webview_cookies(
     let initial_url = initial_window.and_then(|window| window.url().ok());
 
     loop {
+        if !pending.state.auth_operations.lock().is_current(pending.operation) {
+            if let Some(window) = app.get_webview_window(window_label) {
+                let _ = window.destroy();
+            }
+            return Err(AppError::Other("Authentication superseded by a newer operation".into()));
+        }
         if close_requested.load(Ordering::Acquire) {
             if let Some(window) = app.get_webview_window(window_label) {
                 let entries = read_webview_cookies(&window, cookie_urls);
@@ -444,10 +924,12 @@ async fn poll_webview_cookies(
 /// 网易云登录
 #[tauri::command]
 pub async fn login_netease(app: AppHandle, state: State<'_, AppState>) -> AppResult<AuthInfo> {
-    let label = "netease-login";
+    let pending = PendingLogin::new(&app, &state, AuthPlatform::Netease);
+    let operation = pending.operation;
+    let label = login_window_label(operation);
     let window = WebviewWindowBuilder::new(
         &app,
-        label,
+        &label,
         WebviewUrl::External("https://music.163.com/#/login".parse().unwrap()),
     )
     .title("NeriPlayer - 网易云音乐登录")
@@ -465,7 +947,7 @@ pub async fn login_netease(app: AppHandle, state: State<'_, AppState>) -> AppRes
         "https://interface3.music.163.com",
     ];
     let mut entries = poll_webview_cookies(
-        &app, label, "MUSIC_U", None, cookie_urls, 300, &close_requested,
+        &pending, &label, "MUSIC_U", None, cookie_urls, 300, &close_requested,
     ).await?;
 
     // 补全默认 Cookie（与 Android 一致）
@@ -476,11 +958,10 @@ pub async fn login_netease(app: AppHandle, state: State<'_, AppState>) -> AppRes
         entries.push(CookieEntry { name: "appver".into(), value: "8.10.35".into(), domain: "music.163.com".into() });
     }
 
-    // 注入 Jar
-    cookies::inject_cookies(&state.cookie_jar, &entries);
+    let jar = isolated_cookie_jar(&entries);
 
     // 调用 API 获取用户信息
-    let client = state.netease();
+    let client = netease_auth_client(&state, &jar)?;
     let (user_id, nickname, avatar_url) = match client.get_user_account().await {
         Ok(account) => {
             let profile = &account["profile"];
@@ -494,27 +975,18 @@ pub async fn login_netease(app: AppHandle, state: State<'_, AppState>) -> AppRes
     };
 
     let auth = NeteaseAuth { cookies: entries, user_id, nickname: nickname.clone(), avatar_url: avatar_url.clone() };
-    {
-        let mut auth_state = state.auth.lock();
-        auth_state.netease = Some(auth);
-        cookies::save_auth(&app, &auth_state);
-    }
-
-    Ok(AuthInfo {
-        platform: "netease".into(),
-        logged_in: true,
-        nickname,
-        avatar_url,
-    })
+    commit_login(&app, &state, operation, AuthState { netease: Some(auth), ..AuthState::default() }, &jar)
 }
 
 /// B站登录
 #[tauri::command]
 pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppResult<AuthInfo> {
-    let label = "bilibili-login";
+    let pending = PendingLogin::new(&app, &state, AuthPlatform::Bilibili);
+    let operation = pending.operation;
+    let label = login_window_label(operation);
     let window = WebviewWindowBuilder::new(
         &app,
-        label,
+        &label,
         WebviewUrl::External("https://passport.bilibili.com/login".parse().unwrap()),
     )
     .title("NeriPlayer - 哔哩哔哩登录")
@@ -533,7 +1005,7 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
         "https://api.bilibili.com",
     ];
     let mut entries = poll_webview_cookies(
-        &app, label, "SESSDATA", None, cookie_urls, 300, &close_requested,
+        &pending, &label, "SESSDATA", None, cookie_urls, 300, &close_requested,
     ).await?;
 
     // B 站登录 cookie 必须关联到 .bilibili.com 域，确保 api.bilibili.com 子域名也能发送
@@ -544,8 +1016,7 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
         }
     }
 
-    // 注入 Jar（含 Domain 属性，确保子域名 API 生效）
-    cookies::inject_cookies(&state.cookie_jar, &entries);
+    let jar = isolated_cookie_jar(&entries);
 
     // 从 Cookie 提取 DedeUserID
     let mid = entries.iter()
@@ -553,7 +1024,7 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
         .and_then(|c| c.value.parse::<u64>().ok());
 
     // 调用 B站 nav API 获取用户信息
-    let client = state.bilibili();
+    let client = bilibili_auth_client(&state, &jar)?;
     let (mid, nickname, avatar_url) = match client.get_user_info().await {
         Ok(info) => {
             let data = &info["data"];
@@ -577,29 +1048,20 @@ pub async fn login_bilibili(app: AppHandle, state: State<'_, AppState>) -> AppRe
     };
 
     let auth = BiliAuth { cookies: entries, mid, nickname: nickname.clone(), avatar_url: avatar_url.clone() };
-    {
-        let mut auth_state = state.auth.lock();
-        auth_state.bilibili = Some(auth);
-        cookies::save_auth(&app, &auth_state);
-    }
-
-    Ok(AuthInfo {
-        platform: "bilibili".into(),
-        logged_in: true,
-        nickname,
-        avatar_url,
-    })
+    commit_login(&app, &state, operation, AuthState { bilibili: Some(auth), ..AuthState::default() }, &jar)
 }
 
 /// YouTube Music 登录
 #[tauri::command]
 pub async fn login_youtube(app: AppHandle, state: State<'_, AppState>) -> AppResult<AuthInfo> {
+    let pending = PendingLogin::new(&app, &state, AuthPlatform::Youtube);
+    let operation = pending.operation;
     let login_url = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
-    let label = "youtube-login";
+    let label = login_window_label(operation);
 
     let window = WebviewWindowBuilder::new(
         &app,
-        label,
+        &label,
         WebviewUrl::External(login_url.parse().unwrap()),
     )
     .title("NeriPlayer - YouTube Music Login")
@@ -622,32 +1084,24 @@ pub async fn login_youtube(app: AppHandle, state: State<'_, AppState>) -> AppRes
         "https://m.youtube.com",
     ];
     let entries = poll_webview_cookies(
-        &app, label, "SAPISID", Some("music.youtube.com"), cookie_urls, 300, &close_requested,
+        &pending, &label, "SAPISID", Some("music.youtube.com"), cookie_urls, 300, &close_requested,
     ).await?;
 
     // 入库前按白名单过滤: google 账号域会带 LSID 等超出播放所需的整套会话 cookie,
     // 只保留 session 持久化白名单键, 对齐 Android sanitizePersistedCookies（AU-13）
-    let entries: Vec<CookieEntry> = entries
-        .into_iter()
-        .filter(|c| crate::api::youtube::session::cookie_key_allowed(&c.name))
-        .collect();
+    let mut entries = entries;
+    filter_youtube_login_cookies(&mut entries);
 
-    // 注入 Jar
-    cookies::inject_cookies(&state.cookie_jar, &entries);
+    let jar = isolated_cookie_jar(&entries);
 
     let mut auth = YouTubeAuth {
         cookies: entries,
         nickname: None,
         avatar_url: None,
+        auth_user: None,
     };
     apply_youtube_profile_best_effort(&state, &mut auth).await;
-    {
-        let mut auth_state = state.auth.lock();
-        auth_state.youtube = Some(auth.clone());
-        cookies::save_auth(&app, &auth_state);
-    }
-
-    Ok(youtube_auth_info(&auth))
+    commit_login(&app, &state, operation, AuthState { youtube: Some(auth), ..AuthState::default() }, &jar)
 }
 
 /// Cookie 粘贴登录（对齐 Android 端）
@@ -658,7 +1112,10 @@ pub async fn login_with_cookies(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<AuthInfo> {
-    // 解析用户粘贴的 Cookie 文本
+    let auth_platform = AuthPlatform::from_name(&platform)
+        .ok_or_else(|| AppError::Other(format!("Unknown platform: {platform}")))?;
+    let pending = PendingLogin::new(&app, &state, auth_platform);
+    let operation = pending.operation;
     let mut entries = cookies::parse_raw_cookie_text(&raw_cookies, &platform);
 
     if entries.is_empty() {
@@ -666,10 +1123,10 @@ pub async fn login_with_cookies(
     }
 
     if platform == "youtube" {
-        entries.retain(|entry| crate::api::youtube::session::cookie_key_allowed(&entry.name));
+        filter_youtube_login_cookies(&mut entries);
     }
 
-    // 先做格式校验（必需 cookie 是否存在），通过后再注入共享 Jar
+    // 候选凭据只进入隔离 Jar，验证中的响应不能污染当前登录
     match platform.as_str() {
         "netease" if !entries.iter().any(|c| c.name == "MUSIC_U" && !c.value.is_empty()) => {
             return Err(AppError::Other("Missing required cookie: MUSIC_U".into()));
@@ -681,127 +1138,75 @@ pub async fn login_with_cookies(
         _ => return Err(AppError::Other(format!("Unknown platform: {}", platform))),
     }
 
-    let previous_entries = {
-        let auth = state.auth.lock();
-        match platform.as_str() {
-            "netease" => auth.netease.as_ref().map(|value| value.cookies.clone()),
-            "bilibili" => auth.bilibili.as_ref().map(|value| value.cookies.clone()),
-            "youtube" => auth.youtube.as_ref().map(|value| value.cookies.clone()),
-            _ => None,
-        }
-    };
-
-    // 注入 Jar
-    cookies::inject_cookies(&state.cookie_jar, &entries);
+    let jar = isolated_cookie_jar(&entries);
 
     let result = match platform.as_str() {
         "netease" => {
-            let client = state.netease();
+            let client = netease_auth_client(&state, &jar)?;
             let (user_id, nickname, avatar_url) = match client.get_user_account().await {
                 Ok(account) => {
                     let profile = &account["profile"];
+                    let Some(user_id) = netease_verified_account_id(&account) else {
+                        return Err(AppError::Other("Cookie 验证失败：网易云未返回有效登录身份".into()));
+                    };
                     (
-                        profile["userId"].as_u64(),
+                        Some(user_id),
                         profile["nickname"].as_str().map(String::from),
                         profile["avatarUrl"].as_str().map(String::from),
                     )
                 }
                 Err(e) => {
-                    return rollback_cookie_login(
-                        &state.cookie_jar,
-                        &entries,
-                        previous_entries.as_deref(),
-                        AppError::Other(format!("Cookie validation failed: {}", e)),
-                    )
+                    return Err(AppError::Other(format!("Cookie validation failed: {e}")));
                 }
             };
 
             let auth = NeteaseAuth { cookies: entries, user_id, nickname: nickname.clone(), avatar_url: avatar_url.clone() };
-            {
-                let mut auth_state = state.auth.lock();
-                auth_state.netease = Some(auth);
-                cookies::save_auth(&app, &auth_state);
-            }
-
-            Ok(AuthInfo { platform: "netease".into(), logged_in: true, nickname, avatar_url })
+            commit_login(&app, &state, operation, AuthState { netease: Some(auth), ..AuthState::default() }, &jar)
         }
         "bilibili" => {
-            let client = state.bilibili();
+            let client = bilibili_auth_client(&state, &jar)?;
             let (mid, nickname, avatar_url) = match client.get_user_info().await {
                 Ok(info) => {
                     let data = &info["data"];
                     if let Some(mid) = bili_verified_nav_mid(&info, &entries) {
                         (Some(mid), data["uname"].as_str().map(String::from), data["face"].as_str().map(String::from))
                     } else {
-                        return rollback_cookie_login(
-                            &state.cookie_jar,
-                            &entries,
-                            previous_entries.as_deref(),
-                            AppError::Other("Cookie 验证失败：B站未返回有效登录身份".into()),
-                        );
+                        return Err(AppError::Other("Cookie 验证失败：B站未返回有效登录身份".into()));
                     }
                 }
                 Err(e) => {
-                    return rollback_cookie_login(
-                        &state.cookie_jar,
-                        &entries,
-                        previous_entries.as_deref(),
-                        AppError::Other(format!("Cookie validation failed: {}", e)),
-                    )
+                    return Err(AppError::Other(format!("Cookie validation failed: {e}")));
                 }
             };
 
             let auth = BiliAuth { cookies: entries, mid, nickname: nickname.clone(), avatar_url: avatar_url.clone() };
-            {
-                let mut auth_state = state.auth.lock();
-                auth_state.bilibili = Some(auth);
-                cookies::save_auth(&app, &auth_state);
-            }
-
-            Ok(AuthInfo { platform: "bilibili".into(), logged_in: true, nickname, avatar_url })
+            commit_login(&app, &state, operation, AuthState { bilibili: Some(auth), ..AuthState::default() }, &jar)
         }
         "youtube" => {
-            if !entries.iter().any(|c| c.name == "SAPISID" && !c.value.is_empty()) {
-                return rollback_cookie_login(
-                    &state.cookie_jar,
-                    &entries,
-                    previous_entries.as_deref(),
-                    AppError::Other("Missing required cookie: SAPISID".into()),
-                );
-            }
-
+            let auth_user = raw_cookies.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if !name.trim().eq_ignore_ascii_case("x-goog-authuser") {
+                    return None;
+                }
+                crate::auth::state::youtube_auth_user(value).map(String::from)
+            });
             let mut auth = YouTubeAuth {
                 cookies: entries,
                 nickname: None,
                 avatar_url: None,
+                auth_user,
             };
-            apply_youtube_profile_best_effort(&state, &mut auth).await;
-            {
-                let mut auth_state = state.auth.lock();
-                auth_state.youtube = Some(auth.clone());
-                cookies::save_auth(&app, &auth_state);
+            if !auth.has_login() {
+                return Err(AppError::Other("Missing required cookie: SAPISID / __Secure-1PAPISID / __Secure-3PAPISID".into()));
             }
 
-            Ok(youtube_auth_info(&auth))
+            apply_youtube_profile_best_effort(&state, &mut auth).await;
+            commit_login(&app, &state, operation, AuthState { youtube: Some(auth), ..AuthState::default() }, &jar)
         }
         _ => Err(AppError::Other(format!("Unknown platform: {}", platform))),
     };
 
     result
-}
-
-fn rollback_cookie_login(
-    jar: &std::sync::Arc<reqwest::cookie::Jar>,
-    candidate_entries: &[CookieEntry],
-    previous_entries: Option<&[CookieEntry]>,
-    error: AppError,
-) -> AppResult<AuthInfo> {
-    // 验证失败时移除本次候选值并恢复旧会话，避免粘贴坏 Cookie 后整个平台请求都被污染
-    cookies::expire_cookie_entries(jar, candidate_entries);
-    if let Some(previous) = previous_entries {
-        cookies::inject_cookies(jar, previous);
-    }
-    Err(error)
 }
 
 /// 刷新已保存的 YouTube Music 账号资料
@@ -810,13 +1215,15 @@ pub async fn refresh_youtube_profile(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<AuthInfo> {
-    let current_auth = {
+    let (operation, current_auth) = {
+        let operations = state.auth_operations.lock();
         let auth_state = state.auth.lock();
-        auth_state
+        let auth = auth_state
             .youtube
             .clone()
             .filter(YouTubeAuth::has_login)
-            .ok_or_else(|| AppError::Other("YouTube not logged in".into()))?
+            .ok_or_else(|| AppError::Other("YouTube not logged in".into()))?;
+        (operations.current(AuthPlatform::Youtube), auth)
     };
 
     let profile = fetch_youtube_profile(&state, &current_auth).await?;
@@ -824,6 +1231,10 @@ pub async fn refresh_youtube_profile(
     apply_youtube_profile(&mut updated_auth, profile);
 
     {
+        let operations = state.auth_operations.lock();
+        if !operations.is_current(operation) {
+            return Err(AppError::Other("Authentication superseded by a newer operation".into()));
+        }
         let mut auth_state = state.auth.lock();
         let Some(saved_auth) = auth_state.youtube.as_mut() else {
             return Err(AppError::Other("YouTube not logged in".into()));
@@ -835,6 +1246,7 @@ pub async fn refresh_youtube_profile(
             return Ok(youtube_auth_info(saved_auth));
         }
 
+        updated_auth.cookies = saved_auth.cookies.clone();
         *saved_auth = updated_auth.clone();
         cookies::save_auth(&app, &auth_state);
     }
@@ -842,21 +1254,65 @@ pub async fn refresh_youtube_profile(
     Ok(youtube_auth_info(&updated_auth))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum YouTubeSessionUpdateSource {
+    PageRefresh,
+    CookieRotation,
+}
+
 /// 机会式/强制保鲜 YouTube 登录会话(受冷却 + 熔断闸门约束)
 /// 成功回收轮换 cookie 后持久化并注入共享 Jar; 失败仅计数熔断, 绝不清除本地登录
-fn apply_youtube_session_update(
+pub(crate) fn apply_youtube_session_update(
     app: &AppHandle,
     state: &AppState,
+    operation: AuthOperation,
     current: &YouTubeAuth,
     updated: YouTubeAuth,
-    reason: &str,
+    source: YouTubeSessionUpdateSource,
 ) -> bool {
+    let operations = state.auth_operations.lock();
+    if !operations.is_current(operation) { return false; }
     let mut auth_state = state.auth.lock();
     let Some(saved) = auth_state.youtube.as_mut() else {
         return false;
     };
+    if !merge_youtube_session_update_state(saved, current, updated) { return false; }
+    let refreshed_cookies = saved.cookies.clone();
+    cookies::save_auth(app, &auth_state);
+    crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
+    let reason = match source {
+        YouTubeSessionUpdateSource::PageRefresh => "page refresh",
+        YouTubeSessionUpdateSource::CookieRotation => "RotateCookies",
+    };
+    log::info!(target: "youtube-refresh", "YouTube session cookies updated: {reason}");
+    true
+}
+
+fn youtube_rotating_cookies_match(left: &YouTubeAuth, right: &YouTubeAuth) -> bool {
+    ["__Secure-1PSIDTS", "__Secure-3PSIDTS"].into_iter().all(|name| {
+        let left_values: std::collections::BTreeSet<_> = left.cookies.iter()
+            .filter(|cookie| cookie.name.eq_ignore_ascii_case(name))
+            .map(|cookie| (cookie.domain.trim_start_matches('.').to_ascii_lowercase(), cookie.value.as_str()))
+            .collect();
+        let right_values: std::collections::BTreeSet<_> = right.cookies.iter()
+            .filter(|cookie| cookie.name.eq_ignore_ascii_case(name))
+            .map(|cookie| (cookie.domain.trim_start_matches('.').to_ascii_lowercase(), cookie.value.as_str()))
+            .collect();
+        left_values == right_values
+    })
+}
+
+fn merge_youtube_session_update_state(
+    saved: &mut YouTubeAuth,
+    current: &YouTubeAuth,
+    updated: YouTubeAuth,
+) -> bool {
     // 仅当仍是同一账号且未登出时才落盘, 避免刷新期间账号切换被旧 cookie 覆盖
-    if !saved.has_login() || saved.get_sapisid() != current.get_sapisid() {
+    if !saved.has_login() || !youtube_auth_matches(saved, current) {
+        return false;
+    }
+    // 会话已更新时丢弃旧请求结果，避免并发响应回退轮换令牌
+    if !youtube_rotating_cookies_match(saved, current) {
         return false;
     }
 
@@ -868,11 +1324,6 @@ fn apply_youtube_session_update(
         merged.avatar_url = saved.avatar_url.clone();
     }
     *saved = merged;
-    // 先克隆再落盘, 避免 saved 的可变借用跨越 save_auth 的不可变借用
-    let refreshed_cookies = saved.cookies.clone();
-    cookies::save_auth(app, &auth_state);
-    crate::auth::cookies::inject_cookies(&state.cookie_jar, &refreshed_cookies);
-    log::info!(target: "youtube-refresh", "YouTube session cookies updated: {reason}");
     true
 }
 
@@ -880,55 +1331,60 @@ pub async fn maybe_refresh_youtube_session(app: &AppHandle, state: &AppState, fo
     use crate::api::youtube::refresh;
 
     let now = refresh::now_ms();
-    let current = {
+    let (operation, current) = {
+        let operations = state.auth_operations.lock();
         let auth = state.auth.lock();
-        auth.youtube.clone().filter(YouTubeAuth::has_login)
+        (operations.current(AuthPlatform::Youtube), auth.youtube.clone().filter(YouTubeAuth::has_login))
     };
     let Some(current) = current else { return };
 
-    let should_refresh = {
-        let mut gate = state.youtube_refresh.lock();
-        if gate.should_attempt(now, force, true) {
-            gate.record_attempt(now);
-            true
-        } else {
-            false
-        }
-    };
-    let should_rotate = {
-        let mut gate = state.youtube_cookie_rotation.lock();
-        if gate.should_attempt(
-            now,
-            force,
-            refresh::has_rotation_prerequisites(&current),
-        ) {
-            gate.record_attempt(now);
-            true
-        } else {
-            false
-        }
-    };
+    let Some((should_refresh, should_rotate)) = with_current_youtube_session(
+        &state.auth_operations, &state.auth, operation, &current, || {
+            let should_refresh = {
+                let mut gate = state.youtube_refresh.lock();
+                if gate.should_attempt(now, force, true) {
+                    gate.record_attempt(now);
+                    true
+                } else {
+                    false
+                }
+            };
+            let should_rotate = {
+                let mut gate = state.youtube_cookie_rotation.lock();
+                if gate.should_attempt(now, force, refresh::has_rotation_prerequisites(&current)) {
+                    gate.record_attempt(now);
+                    true
+                } else {
+                    false
+                }
+            };
+            (should_refresh, should_rotate)
+        },
+    ) else { return };
     if !should_refresh && !should_rotate {
         return;
     }
 
-    let http = state.transport("youtube-refresh");
+    let jar = isolated_cookie_jar(&current.cookies);
+    let Ok((primary, alternate)) = state.auth_http_clients(jar) else { return };
+    let http = crate::api::transport::FallbackHttp::with_fallback(&primary, &alternate, "youtube-refresh");
     if should_rotate {
         match refresh::rotate_youtube_session(&http, &current).await {
             Ok(result) => {
-                state
-                    .youtube_cookie_rotation
-                    .lock()
-                    .record_success(result.next_interval_ms);
+                if with_current_youtube_session(&state.auth_operations, &state.auth, operation, &current, || {
+                    state.youtube_cookie_rotation.lock().record_success(result.next_interval_ms);
+                }).is_none() { return; }
                 if let Some(updated) = result.updated_auth {
-                    if apply_youtube_session_update(app, state, &current, updated, "RotateCookies")
+                    if apply_youtube_session_update(app, state, operation, &current, updated, YouTubeSessionUpdateSource::CookieRotation)
                     {
                         return;
                     }
                 }
             }
             Err(error) => {
-                state.youtube_cookie_rotation.lock().record_failure();
+                if with_current_youtube_session(&state.auth_operations, &state.auth, operation, &current, || {
+                    state.youtube_cookie_rotation.lock().record_failure();
+                }).is_none() { return; }
                 log::warn!(target: "youtube-refresh", "RotateCookies failed: {error}");
             }
         }
@@ -940,23 +1396,101 @@ pub async fn maybe_refresh_youtube_session(app: &AppHandle, state: &AppState, fo
 
     match refresh::refresh_youtube_session(&http, &current).await {
         Ok(updated) => {
-            state.youtube_refresh.lock().record_success(refresh::now_ms());
+            if with_current_youtube_session(&state.auth_operations, &state.auth, operation, &current, || {
+                state.youtube_refresh.lock().record_success(refresh::now_ms());
+            }).is_none() { return; }
             if let Some(new_auth) = updated {
-                apply_youtube_session_update(app, state, &current, new_auth, "page refresh");
+                apply_youtube_session_update(app, state, operation, &current, new_auth, YouTubeSessionUpdateSource::PageRefresh);
             }
         }
         Err(e) => {
-            state.youtube_refresh.lock().record_failure(refresh::now_ms());
+            if with_current_youtube_session(&state.auth_operations, &state.auth, operation, &current, || {
+                state.youtube_refresh.lock().record_failure(refresh::now_ms());
+            }).is_none() { return; }
             log::warn!(target: "youtube-refresh", "refresh failed: {e}");
         }
     }
 }
 
-/// 查询所有平台登录状态
+fn schedule_missing_account_profiles(app: &AppHandle, state: &AppState) {
+    let (netease, bilibili) = {
+        let mut operations = state.auth_operations.lock();
+        let auth = state.auth.lock();
+        (
+            auth.netease.as_ref().filter(|auth| auth.has_login() && auth.user_id.is_none())
+                .and_then(|auth| operations.claim_profile_refresh(AuthPlatform::Netease, std::time::Instant::now())
+                    .map(|operation| (operation, AuthState { netease: Some(auth.clone()), ..AuthState::default() }))),
+            auth.bilibili.as_ref().filter(|auth| auth.has_login() && auth.mid.is_none())
+                .and_then(|auth| operations.claim_profile_refresh(AuthPlatform::Bilibili, std::time::Instant::now())
+                    .map(|operation| (operation, AuthState { bilibili: Some(auth.clone()), ..AuthState::default() }))),
+        )
+    };
+    for (operation, previous) in [netease, bilibili].into_iter().flatten() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            let result = refresh_missing_account_profile(&app, &state, operation, previous).await;
+            state.auth_operations.lock().finish_profile_refresh(operation, result.is_ok(), std::time::Instant::now());
+            if result.is_err() {
+                log::warn!(target: "auth", "{} 登录资料补齐失败，保留已保存凭据", operation.platform.as_str());
+            }
+        });
+    }
+}
+
+async fn refresh_missing_account_profile(app: &AppHandle, state: &AppState, operation: AuthOperation, previous: AuthState) -> AppResult<()> {
+    let (id, nickname, avatar_url) = match operation.platform {
+        AuthPlatform::Netease => {
+            let previous = previous.netease.ok_or_else(|| AppError::Other("Netease session missing".into()))?;
+            let jar = isolated_cookie_jar(&previous.cookies);
+            let client = netease_auth_client(state, &jar)?;
+            let account = tokio::time::timeout(AUTH_PROFILE_REFRESH_TIMEOUT, client.get_user_account()).await
+                .map_err(|_| AppError::Other("Account profile request timed out".into()))??;
+            let id = netease_verified_account_id(&account).ok_or_else(|| AppError::Other("Netease account identity missing".into()))?;
+            (id, account["profile"]["nickname"].as_str().map(String::from), account["profile"]["avatarUrl"].as_str().map(String::from))
+        }
+        AuthPlatform::Bilibili => {
+            let previous = previous.bilibili.ok_or_else(|| AppError::Other("Bilibili session missing".into()))?;
+            let jar = isolated_cookie_jar(&previous.cookies);
+            let client = bilibili_auth_client(state, &jar)?;
+            let info = tokio::time::timeout(AUTH_PROFILE_REFRESH_TIMEOUT, client.get_user_info()).await
+                .map_err(|_| AppError::Other("Account profile request timed out".into()))??;
+            let id = bili_verified_nav_mid(&info, &previous.cookies).ok_or_else(|| AppError::Other("Bilibili account identity missing".into()))?;
+            (id, info["data"]["uname"].as_str().map(String::from), info["data"]["face"].as_str().map(String::from))
+        }
+        AuthPlatform::Youtube => return Ok(()),
+    };
+    {
+        let operations = state.auth_operations.lock();
+        if !operations.is_current(operation) { return Ok(()); }
+        let mut auth = state.auth.lock();
+        match operation.platform {
+            AuthPlatform::Netease => {
+                let Some(saved) = auth.netease.as_mut().filter(|auth| auth.has_login()) else { return Ok(()); };
+                saved.user_id = Some(id);
+                saved.nickname = nickname.or_else(|| saved.nickname.clone());
+                saved.avatar_url = avatar_url.or_else(|| saved.avatar_url.clone());
+            }
+            AuthPlatform::Bilibili => {
+                let Some(saved) = auth.bilibili.as_mut().filter(|auth| auth.has_login()) else { return Ok(()); };
+                saved.mid = Some(id);
+                saved.nickname = nickname.or_else(|| saved.nickname.clone());
+                saved.avatar_url = avatar_url.or_else(|| saved.avatar_url.clone());
+            }
+            AuthPlatform::Youtube => return Ok(()),
+        }
+        cookies::save_auth(app, &auth);
+    }
+    let _ = app.emit("auth-profile-updated", operation.platform.as_str());
+    Ok(())
+}
+
+/// 立即返回保存状态，缺失的账号 ID 在后台按会话去重补齐
 #[tauri::command]
-pub async fn check_auth_status(state: State<'_, AppState>) -> AppResult<AuthStatusResponse> {
-    let auth = state.auth.lock();
-    Ok(auth.to_status_response())
+pub async fn check_auth_status(app: AppHandle, state: State<'_, AppState>) -> AppResult<AuthStatusResponse> {
+    let status = state.auth.lock().to_status_response();
+    schedule_missing_account_profiles(&app, &state);
+    Ok(status)
 }
 
 #[derive(Serialize)]
@@ -991,33 +1525,30 @@ pub async fn clear_debug_cookie_storage(
 
     #[cfg(debug_assertions)]
     {
-        if !cookies::delete_persisted_auth(&app) {
-            return Err(AppError::Other(
-                "Failed to delete debug Cookie storage".into(),
-            ));
-        }
-
-        let previous_auth = {
+        let operations = {
+            let mut operations = state.auth_operations.lock();
             let mut auth = state.auth.lock();
-            std::mem::take(&mut *auth)
+            if !cookies::delete_persisted_auth(&app) {
+                return Err(AppError::Other("Failed to delete debug Cookie storage".into()));
+            }
+            let invalidated = operations.invalidate_all();
+            let previous_auth = std::mem::take(&mut *auth);
+            for platform in ["netease", "bilibili", "youtube"] {
+                cookies::expire_platform_cookies(&state.cookie_jar, &previous_auth, platform);
+            }
+            invalidated
         };
-        for platform in ["netease", "bilibili", "youtube"] {
-            cookies::expire_platform_cookies(&state.cookie_jar, &previous_auth, platform);
-        }
-
-        clear_and_reinject_webview_cookies(
-            &app,
-            &state.cookie_jar,
-            &crate::auth::state::AuthState::default(),
-            None,
-        )
-        .await
+        clear_webview_cookies(&app, None, &operations).await
     }
 }
 
 /// 登出指定平台
 #[tauri::command]
 pub async fn logout(platform: String, app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let auth_platform = AuthPlatform::from_name(&platform)
+        .ok_or_else(|| AppError::Other(format!("Unknown platform: {platform}")))?;
+    let mut operations = state.auth_operations.lock();
+    let operation = operations.begin(auth_platform);
     let mut auth = state.auth.lock();
 
     // 过期 reqwest Jar 中的 Cookie
@@ -1035,16 +1566,14 @@ pub async fn logout(platform: String, app: AppHandle, state: State<'_, AppState>
     cookies::save_auth(&app, &auth);
 
     // 清除 WebView2 浏览器 cookie（所有平台共享一个 cookie store）
-    // 清除后重新注入剩余已登录平台的 cookie
-    let remaining_auth = auth.clone();
     drop(auth);
+    drop(operations);
 
     // 在后台清除该平台的 WebView cookie
     let app_clone = app.clone();
-    let jar = state.cookie_jar.clone();
     tokio::task::spawn(async move {
         if let Err(e) =
-            clear_and_reinject_webview_cookies(&app_clone, &jar, &remaining_auth, Some(&platform))
+            clear_webview_cookies(&app_clone, Some(&platform), &[operation])
                 .await
         {
             log::warn!(target: "auth", "清除 WebView cookie 失败: {}", e);
@@ -1085,16 +1614,15 @@ fn cookie_domain_belongs_to(cookie_domain: &str, domains: &[&str]) -> bool {
     })
 }
 
-/// 清除指定平台的 WebView cookie 并重新注入剩余平台的 cookie
+/// 仅在对应会话仍未改变时清除 WebView Cookie
 ///
 /// `platform` 为 None 时清空全部（仅 Debug 的清库入口使用）。
 /// 三个平台共用同一个 WebView cookie store，所以绝不能用
 /// `clear_all_browsing_data()` —— 登出一个平台会把另外两个的浏览器登录态一起抹掉。
-async fn clear_and_reinject_webview_cookies(
+async fn clear_webview_cookies(
     app: &AppHandle,
-    jar: &std::sync::Arc<reqwest::cookie::Jar>,
-    remaining_auth: &crate::auth::state::AuthState,
     platform: Option<&str>,
+    expected: &[AuthOperation],
 ) -> AppResult<()> {
     // 创建一个不可见的临时窗口来操作 WebView cookie
     let label = "cookie-cleaner";
@@ -1109,6 +1637,13 @@ async fn clear_and_reinject_webview_cookies(
 
     // 短暂等待窗口初始化
     tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let state = app.state::<AppState>();
+    let operations = state.auth_operations.lock();
+    if !expected.iter().all(|operation| operations.is_current(*operation)) {
+        let _ = window.close();
+        return Ok(());
+    }
 
     match platform {
         None => {
@@ -1141,9 +1676,6 @@ async fn clear_and_reinject_webview_cookies(
 
     // 关闭临时窗口
     let _ = window.close();
-
-    // 重新注入剩余已登录平台的 cookie 到 reqwest Jar
-    cookies::inject_all(jar, remaining_auth);
 
     Ok(())
 }

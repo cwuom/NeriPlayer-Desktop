@@ -286,15 +286,28 @@ fn refresh_platform_auth_entries(
 }
 
 fn persisted_cookie_allowed(platform: &str, name: &str) -> bool {
+    cookie_name_allowed(name, platform)
+        && (platform != "youtube" || !is_rotating_session_cookie(name))
+}
+
+/// 配置导入和平台会话回收共用凭据白名单
+pub fn cookie_name_allowed(name: &str, platform: &str) -> bool {
     match platform {
         "netease" => NETEASE_COOKIE_KEYS.iter().any(|key| key.eq_ignore_ascii_case(name)),
         "bilibili" => BILIBILI_COOKIE_KEYS.iter().any(|key| key.eq_ignore_ascii_case(name)),
-        "youtube" => {
-            crate::api::youtube::session::cookie_key_allowed(name)
-                && !is_rotating_session_cookie(name)
-        }
+        "youtube" => crate::api::youtube::session::cookie_key_allowed(name),
         _ => false,
     }
+}
+
+fn canonical_cookie_name<'a>(name: &'a str, platform: &str) -> &'a str {
+    let canonical = match platform {
+        "netease" => NETEASE_COOKIE_KEYS.iter().copied().find(|key| key.eq_ignore_ascii_case(name)),
+        "bilibili" => BILIBILI_COOKIE_KEYS.iter().copied().find(|key| key.eq_ignore_ascii_case(name)),
+        "youtube" => crate::api::youtube::session::canonical_cookie_key(name),
+        _ => None,
+    };
+    canonical.unwrap_or(name)
 }
 
 fn read_jar_cookies(jar: &Arc<Jar>, domain: &str) -> HashMap<String, String> {
@@ -342,14 +355,15 @@ pub fn expire_platform_cookies(jar: &Arc<Jar>, auth: &AuthState, platform: &str)
         expire_cookie_entries(jar, entries);
     }
 
-    let domains = match platform {
-        "netease" => NETEASE_COOKIE_DOMAINS,
-        "bilibili" => BILIBILI_COOKIE_DOMAINS,
-        "youtube" => YOUTUBE_COOKIE_DOMAINS,
+    // 请求头没有原始 Domain，补查平台父域才能过期只存在 Jar 中的会话 Cookie
+    let (domains, parent_domains): (&[&str], &[&str]) = match platform {
+        "netease" => (NETEASE_COOKIE_DOMAINS, &["163.com"]),
+        "bilibili" => (BILIBILI_COOKIE_DOMAINS, &["bilibili.com"]),
+        "youtube" => (YOUTUBE_COOKIE_DOMAINS, &["youtube.com", "google.com"]),
         _ => return,
     };
     let mut discovered = Vec::new();
-    for domain in domains {
+    for domain in domains.iter().chain(parent_domains) {
         for (name, value) in read_jar_cookies(jar, domain) {
             if persisted_cookie_allowed(platform, &name) && !value.is_empty() {
                 discovered.push(CookieEntry {
@@ -391,21 +405,43 @@ pub fn parse_raw_cookie_text(raw: &str, platform: &str) -> Vec<CookieEntry> {
         "netease" => "music.163.com",
         "bilibili" => ".bilibili.com",
         "youtube" => ".youtube.com",
-        _ => "unknown",
+        _ => return Vec::new(),
     };
 
-    let mut entries = Vec::new();
-    // 按 ; \r \n 分割
+    let raw = raw.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim().eq_ignore_ascii_case("cookie").then_some(value)
+    }).unwrap_or(raw);
+    let mut entries: Vec<CookieEntry> = Vec::new();
     for segment in raw.split([';', '\r', '\n']) {
         let segment = segment.trim();
         if segment.is_empty() {
             continue;
         }
         if let Some((name, value)) = segment.split_once('=') {
-            let name = name.trim().to_string();
-            let value = value.trim().to_string();
-            if !name.is_empty() {
-                entries.push(CookieEntry { name, value, domain: domain.to_string() });
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty()
+                || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&byte))
+                || value.chars().any(char::is_control)
+                || (platform == "youtube" && !cookie_name_allowed(name, platform))
+            {
+                continue;
+            }
+            // 白名单兼容大小写输入，落盘和登录判定仍使用平台定义的标准名
+            let name = canonical_cookie_name(name, platform);
+            if let Some(existing) = entries.iter_mut().find(|entry| entry.name == name) {
+                existing.value = value.to_string();
+            } else {
+                entries.push(CookieEntry { name: name.to_string(), value: value.to_string(), domain: domain.to_string() });
+            }
+        }
+    }
+
+    if platform == "netease" && !entries.is_empty() {
+        for (name, value) in [("os", "pc"), ("appver", "8.10.35")] {
+            if !entries.iter().any(|entry| entry.name == name) {
+                entries.push(CookieEntry { name: name.into(), value: value.into(), domain: domain.into() });
             }
         }
     }
@@ -438,11 +474,78 @@ mod tests {
     use crate::auth::state::{NeteaseAuth, YouTubeAuth};
 
     #[test]
+    fn raw_cookie_parser_canonicalizes_allowlisted_names_and_deduplicates_aliases() {
+        for (platform, keys) in [
+            ("netease", NETEASE_COOKIE_KEYS),
+            ("bilibili", BILIBILI_COOKIE_KEYS),
+            ("youtube", &[
+                "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "SID",
+                "LOGIN_INFO", "VISITOR_INFO1_LIVE", "__Secure-1PSIDTS", "PREF",
+            ][..]),
+        ] {
+            for canonical in keys {
+                for alias in [canonical.to_ascii_lowercase(), canonical.to_ascii_uppercase()] {
+                    let entries = parse_raw_cookie_text(&format!("{alias}=fixture"), platform);
+                    assert!(entries.iter().any(|entry| entry.name == *canonical && entry.value == "fixture"), "{platform}: {alias}");
+                }
+            }
+        }
+        for (platform, raw, canonical) in [
+            ("netease", "music_u=first; MuSiC_U=last", "MUSIC_U"),
+            ("bilibili", "sessdata=first; SeSsDaTa=last", "SESSDATA"),
+            ("youtube", "sapisid=first; SaPiSiD=last", "SAPISID"),
+        ] {
+            let entries = parse_raw_cookie_text(raw, platform);
+            assert!(entries.iter().filter(|entry| entry.name == canonical).all(|entry| entry.value == "last"));
+            assert_eq!(entries.iter().filter(|entry| entry.name == canonical && entry.domain != ".google.com").count(), 1);
+        }
+    }
+
+    #[test]
     fn raw_cookie_parser_accepts_all_supported_separators() {
         let entries = parse_raw_cookie_text("first=1;second=2\rthird=3\nfourth=4", "netease");
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
 
-        assert_eq!(names, ["first", "second", "third", "fourth"]);
+        assert_eq!(&names[..4], ["first", "second", "third", "fourth"]);
+    }
+
+    #[test]
+    fn raw_cookie_parser_uses_last_nonempty_value_and_rejects_invalid_pairs() {
+        let entries = parse_raw_cookie_text(
+            "SESSDATA=first; SESSDATA=last=part; empty=; bad key=value; injected=bad\u{7f}",
+            "bilibili",
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "SESSDATA");
+        assert_eq!(entries[0].value, "last=part");
+    }
+
+    #[test]
+    fn raw_cookie_header_prefix_is_accepted_for_each_platform() {
+        for (platform, name) in [("netease", "MUSIC_U"), ("bilibili", "SESSDATA"), ("youtube", "SAPISID")] {
+            let entries = parse_raw_cookie_text(&format!("Cookie: {name}=fixture"), platform);
+            assert!(entries.iter().any(|entry| entry.name == name && entry.value == "fixture"), "{platform}");
+        }
+    }
+
+    #[test]
+    fn raw_cookie_parser_applies_netease_defaults_without_overwriting_explicit_values() {
+        let entries = parse_raw_cookie_text("MUSIC_U=fixture; os=android", "netease");
+        assert!(entries.iter().any(|entry| entry.name == "os" && entry.value == "android"));
+        assert!(entries.iter().any(|entry| entry.name == "appver" && entry.value == "8.10.35"));
+        assert!(parse_raw_cookie_text("empty=; bad key=value", "netease").is_empty());
+    }
+
+    #[test]
+    fn youtube_raw_headers_only_import_allowlisted_cookies() {
+        let entries = parse_raw_cookie_text(
+            "Cookie: SAPISID=fixture; account_secret=private; __Secure-1PAPISID=alias\nAuthorization: SAPISIDHASH unused\nX-Goog-AuthUser: 1",
+            "youtube",
+        );
+        assert!(entries.iter().any(|entry| entry.name == "SAPISID" && entry.domain == ".youtube.com"));
+        assert!(entries.iter().any(|entry| entry.name == "__Secure-1PAPISID"));
+        assert!(!entries.iter().any(|entry| entry.name == "account_secret"));
+        assert!(parse_raw_cookie_text("Authorization: SAPISIDHASH unused", "youtube").is_empty());
     }
 
     #[test]
@@ -544,6 +647,51 @@ mod tests {
     }
 
     #[test]
+    fn logout_expiry_removes_jar_only_cookies_at_parent_and_request_domains() {
+        for (platform, name, domain, host) in [
+            ("netease", "__csrf", ".163.com", "music.163.com"),
+            ("netease", "__csrf", "music.163.com", "music.163.com"),
+            ("netease", "__csrf", "interface.music.163.com", "interface.music.163.com"),
+            ("bilibili", "bili_jct", ".bilibili.com", "api.bilibili.com"),
+            ("bilibili", "bili_jct", "api.bilibili.com", "api.bilibili.com"),
+            ("bilibili", "bili_jct", "www.bilibili.com", "www.bilibili.com"),
+            ("youtube", "SIDCC", ".youtube.com", "music.youtube.com"),
+            ("youtube", "SIDCC", "music.youtube.com", "music.youtube.com"),
+            ("youtube", "SIDCC", ".google.com", "accounts.google.com"),
+            ("youtube", "SIDCC", "accounts.google.com", "accounts.google.com"),
+        ] {
+            let jar = Arc::new(Jar::default());
+            inject_cookies(&jar, &[
+                CookieEntry { name: name.into(), value: "runtime".into(), domain: domain.into() },
+                CookieEntry { name: "unrelated_cookie".into(), value: "preserved".into(), domain: domain.into() },
+            ]);
+            assert_eq!(read_jar_cookies(&jar, host).get(name).map(String::as_str), Some("runtime"));
+            expire_platform_cookies(&jar, &AuthState::default(), platform);
+            let remaining = read_jar_cookies(&jar, host);
+            assert!(!remaining.contains_key(name), "{platform}: {name} at {domain}");
+            assert_eq!(remaining.get("unrelated_cookie").map(String::as_str), Some("preserved"));
+        }
+    }
+
+    #[test]
+    fn logout_discovery_preserves_jar_only_youtube_rotation_tokens() {
+        for domain in ["music.youtube.com", ".youtube.com", "accounts.google.com", ".google.com"] {
+            let jar = Arc::new(Jar::default());
+            let tokens: Vec<_> = ["__Secure-1PSIDTS", "__Secure-3PSIDTS"].into_iter().map(|name| CookieEntry {
+                name: name.into(), value: "jar-only".into(), domain: domain.into(),
+            }).collect();
+            inject_cookies(&jar, &tokens);
+            let host = domain.trim_start_matches('.');
+            assert_eq!(read_jar_cookies(&jar, host).len(), 2);
+            expire_platform_cookies(&jar, &AuthState::default(), "youtube");
+            let remaining = read_jar_cookies(&jar, host);
+            for token in tokens {
+                assert_eq!(remaining.get(&token.name).map(String::as_str), Some("jar-only"), "{} at {domain}", token.name);
+            }
+        }
+    }
+
+    #[test]
     fn rotating_youtube_cookie_is_not_recovered_from_generic_jar() {
         let jar = Arc::new(Jar::default());
         jar.add_cookie_str(
@@ -566,6 +714,7 @@ mod tests {
                 ],
                 nickname: None,
                 avatar_url: None,
+                auth_user: None,
             }),
             ..Default::default()
         };

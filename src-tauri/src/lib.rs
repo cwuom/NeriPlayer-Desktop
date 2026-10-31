@@ -6,6 +6,7 @@ pub mod audio;
 pub mod linux_graphics;
 pub mod auth;
 pub mod commands;
+pub mod config_backup;
 pub mod db;
 pub mod error;
 pub mod fsutil;
