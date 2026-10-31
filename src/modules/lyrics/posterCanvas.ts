@@ -162,7 +162,9 @@ function blurStripInto(
 /**
  * 先按目标比例中心裁切，再逐级折半缩小到目标尺寸。
  * 一步从 600px 缩到 135px 用的是双线性采样，封面里的细条纹会混叠成残影；
- * 每次只折半就等价于做了面积平均，模糊后才干净。先裁比例是为了折半时不被拉伸
+ * 每次只折半就等价于做了面积平均，模糊后才干净。先裁比例是为了折半时不被拉伸。
+ * 第一步不分配整张裁切面：原图可能是 3000×3000 的封面原图，那样仅为了拿 135px 的模糊底
+ * 就要先复制一张约 36MB 的画布，所以首步直接缩到裁切尺寸的一半（不小于目标尺寸）
  */
 function downscaleTo(source: HTMLImageElement | HTMLCanvasElement, targetWidth: number, targetHeight: number): HTMLCanvasElement {
   const aspect = targetWidth / targetHeight
@@ -173,12 +175,16 @@ function downscaleTo(source: HTMLImageElement | HTMLCanvasElement, targetWidth: 
   if (cropWidth / cropHeight > aspect) cropWidth = Math.max(1, Math.round(cropHeight * aspect))
   else cropHeight = Math.max(1, Math.round(cropWidth / aspect))
 
-  let [canvas, ctx] = makeCanvas(cropWidth, cropHeight)
+  const firstScale = Math.min(1, Math.max(0.5, Math.max(targetWidth / cropWidth, targetHeight / cropHeight)))
+  const firstWidth = Math.max(targetWidth, Math.round(cropWidth * firstScale))
+  const firstHeight = Math.max(targetHeight, Math.round(cropHeight * firstScale))
+
+  let [canvas, ctx] = makeCanvas(firstWidth, firstHeight)
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(source,
     (sourceWidth - cropWidth) / 2, (sourceHeight - cropHeight) / 2, cropWidth, cropHeight,
-    0, 0, cropWidth, cropHeight)
+    0, 0, firstWidth, firstHeight)
 
   while (canvas.width > targetWidth * 2 && canvas.height > targetHeight * 2) {
     const nextWidth = Math.max(targetWidth, Math.round(canvas.width / 2))

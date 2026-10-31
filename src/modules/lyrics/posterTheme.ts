@@ -1,6 +1,8 @@
 // 海报配色：数值取自安卓端 LyricShareSheet.kt（drawLyricCardBackground / drawSongInfoBar / drawLyricCardBrand），
-// 原样保留它的对角渐变与叠白，只在"白字对比度不达标"时补一层压暗
-// 门槛：歌词正文 ≥7:1（AAA）、底栏歌名歌手与品牌文字 ≥4.5:1（AA）
+// 原样保留它的对角渐变与叠白，只在"白字对比度不达标"时补一层压暗。
+// 实际校验的只有歌词区：门槛 7:1，补暗上限 EXTRA_SCRIM_RANGE.max；极浅封面补满也到不了门槛，
+// 那是"不比自己明显暗一档"换来的取舍，不是已保证的性质。
+// 底栏歌名/歌手与左上品牌沿用安卓的固定 alpha（224 / 142，叠白 70），本模块不对它们做校验。
 
 export type Rgb = readonly [number, number, number]
 

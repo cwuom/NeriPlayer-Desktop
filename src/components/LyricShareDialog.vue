@@ -39,6 +39,12 @@ const DEFAULT_SELECTED_LINES = 5
 const stage = ref<Stage>('select')
 const selected = ref(new Set<number>())
 const busy = ref(false)
+/**
+ * 出图会话号：封面取图和渲染都在 await 里，期间用户可以关掉弹窗再从另一句打开。
+ * 每次打开与每次点"生成海报"都推进一次号，结果回来对不上就直接丢掉，
+ * 否则旧会话的海报会盖掉新会话的状态，保存与复制发出去的是上一张图
+ */
+let renderGeneration = 0
 const poster = ref<RenderedPoster | null>(null)
 const previewRef = ref<HTMLCanvasElement | null>(null)
 const listRef = ref<HTMLDivElement | null>(null)
@@ -52,19 +58,46 @@ const measure = createPosterMeasure()
 const visualLines = computed(() => posterVisualLines(selectedLines.value, measure))
 /** 版面满了就不让再勾 */
 const atLimit = computed(() => visualLines.value >= MAX_POSTER_VISUAL_LINES)
+/** 点下去才发现这一句装不下：用它把上限提示顶出来，否则用户只看到点了没反应 */
+const rejectedAdd = ref(false)
+const limitReached = computed(() => atLimit.value || rejectedAdd.value)
 const canSubmit = computed(() => selectedCount.value > 0 && !busy.value)
+
+/** 拟议的这批句子能不能排进海报预算（含"排不下会丢行"那种情况） */
+function fitsBudget(texts: string[]): boolean {
+  return posterVisualLines(texts, measure) <= MAX_POSTER_VISUAL_LINES
+}
+
+/** 按勾选顺序取出给定集合的歌词文本 */
+function textsOf(indices: Set<number>): string[] {
+  return props.lines.filter(line => indices.has(line.index)).map(line => line.text)
+}
 
 watch(() => props.open, open => {
   if (!open) return
   stage.value = 'select'
   poster.value = null
+  rejectedAdd.value = false
+  // 旧会话的渲染结果会被会话号丢掉，所以这里直接放开 busy：
+  // 否则新会话要等那张已经作废的海报画完才能点"生成海报"，看起来就像按钮坏了
+  busy.value = false
+  renderGeneration++
   // 默认从右键那一句往后共 5 行：歌词是往前写的，往前选不符合"分享正在唱的这段"的直觉
   const anchor = props.initialIndex >= 0 ? props.initialIndex : 0
-  const initial = props.lines
-    .filter(line => line.index >= anchor && line.text.trim())
-    .slice(0, DEFAULT_SELECTED_LINES)
-    .map(line => line.index)
-  selected.value = new Set(initial.length ? initial : props.lines.slice(0, 1).map(line => line.index))
+  const picked: string[] = []
+  const initial: number[] = []
+  for (const line of props.lines) {
+    if (initial.length >= DEFAULT_SELECTED_LINES) break
+    if (line.index < anchor || !line.text.trim()) continue
+    if (!fitsBudget([...picked, line.text])) break
+    picked.push(line.text)
+    initial.push(line.index)
+  }
+  if (!initial.length) {
+    // 连右键那句本身都排不进预算时不预选，同时把上限提示顶出来
+    rejectedAdd.value = true
+  }
+  selected.value = new Set(initial)
 })
 
 /** 滚动定位的锚点：已选中的第一句，清空选择时退回右键那一句 */
@@ -96,8 +129,20 @@ useEscapeClose(() => props.open, close)
 
 function toggleLine(index: number) {
   const next = new Set(selected.value)
-  if (next.has(index)) next.delete(index)
-  else if (!atLimit.value) next.add(index)
+  if (next.has(index)) {
+    next.delete(index)
+    rejectedAdd.value = false
+  } else {
+    // 按"加上这一句之后"的集合试算：一句长歌词可能占两三个视觉行，
+    // 只看当前选择会放行到 25/24，海报就会超出书面承诺的上限
+    const proposed = new Set(next)
+    proposed.add(index)
+    if (!fitsBudget(textsOf(proposed))) {
+      rejectedAdd.value = true
+      return
+    }
+    next.add(index)
+  }
   selected.value = next
   poster.value = null
 }
@@ -108,16 +153,18 @@ function selectAll() {
   const next = new Set<number>()
   for (const line of props.lines) {
     if (!line.text.trim()) continue
-    if (picked.length && posterVisualLines([...picked, line.text], measure) > MAX_POSTER_VISUAL_LINES) break
+    if (picked.length && !fitsBudget([...picked, line.text])) break
     picked.push(line.text)
     next.add(line.index)
   }
   selected.value = next
+  rejectedAdd.value = false
   poster.value = null
 }
 
 function clearSelection() {
   selected.value = new Set()
+  rejectedAdd.value = false
   poster.value = null
 }
 
@@ -136,6 +183,7 @@ async function copySelectedText() {
 async function generatePoster() {
   if (!selectedLines.value.length || busy.value) return
   busy.value = true
+  const generation = ++renderGeneration
   let coverSource: string | null = coverUrl.value
   let objectUrl = ''
   try {
@@ -151,10 +199,13 @@ async function generatePoster() {
         coverSource = null
       }
     }
+    if (generation !== renderGeneration) return
     const rendered = await renderPoster(
       { coverUrl: coverSource, lines: selectedLines.value, title: title.value, artist: artist.value },
       await loadPosterLogo(),
     )
+    // 期间弹窗被关掉又重开过（或又点了一次生成）：这一版结果属于旧会话，整张丢掉
+    if (generation !== renderGeneration) return
     poster.value = rendered
     stage.value = 'preview'
     await nextTick()
@@ -169,7 +220,8 @@ async function generatePoster() {
     toast.error(t('lyrics.poster_render_failed'))
   } finally {
     if (objectUrl) URL.revokeObjectURL(objectUrl)
-    busy.value = false
+    // 只由当前会话释放 busy：旧会话收尾时新会话可能正在渲染，覆盖会把新会话的进度打掉
+    if (generation === renderGeneration) busy.value = false
   }
 }
 
@@ -262,7 +314,7 @@ async function copyPosterImage() {
                 <span class="lsd-text">{{ line.text }}</span>
               </label>
             </div>
-            <p v-if="atLimit" class="lsd-hint">{{ t('lyrics.line_limit_hint', { max: MAX_POSTER_VISUAL_LINES }) }}</p>
+            <p v-if="limitReached" class="lsd-hint">{{ t('lyrics.line_limit_hint', { max: MAX_POSTER_VISUAL_LINES }) }}</p>
           </div>
 
           <div v-else class="lsd-body lsd-preview-body">

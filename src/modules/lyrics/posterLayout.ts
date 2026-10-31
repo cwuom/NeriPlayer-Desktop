@@ -93,6 +93,8 @@ export interface PosterPlan {
     artist: PosterText
   }
   lyricFontSize: number
+  /** 这批歌词需要的视觉行数（按选定字号折行、丢行之前统计） */
+  requiredVisualLines: number
   /** 因装不下而被丢掉的行数，弹窗要提示 */
   dropped: number
   titleTruncated: boolean
@@ -144,7 +146,20 @@ export function wrapText(
   if (!tokens.length) return ['']
   const lines: string[] = ['']
   for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index]
+    let token = tokens[index]
+    if (!lines[lines.length - 1] && token.length > 1 && measure(token, fontSize, weight) > maxWidth) {
+      // 空行也塞不下的整块（无空格的超长拉丁词）：按字符切成若干不超宽的段，
+      // 否则整词占一行，超出画布的部分直接被裁掉
+      const pieces: string[] = []
+      let piece = ''
+      for (const character of [...token]) {
+        if (piece && measure(piece + character, fontSize, weight) > maxWidth) { pieces.push(piece); piece = character }
+        else piece += character
+      }
+      if (piece) pieces.push(piece)
+      tokens.splice(index, 1, ...pieces)
+      token = pieces[0]
+    }
     const candidate = lines[lines.length - 1] + token
     if (lines[lines.length - 1] && measure(candidate, fontSize, weight) > maxWidth) {
       if (/\s/.test(token)) {
@@ -154,7 +169,8 @@ export function wrapText(
       lines.push(token)
       const previous = lines[lines.length - 2]
       const head = [...token][0]
-      if (head && NO_LINE_START.has(head) && previous) {
+      if (head && NO_LINE_START.has(head) && previous && measure(previous + head, fontSize, weight) <= maxWidth) {
+        // 推回后必须复测上一行：行首禁则不能把上一行顶出内容宽，否则宁可让标点留在行首
         lines[lines.length - 2] = previous + head
         lines[lines.length - 1] = [...token].slice(1).join('')
         if (!lines[lines.length - 1]) lines.pop()
@@ -227,7 +243,10 @@ export function planPoster(source: PosterSource, measure: Measure): PosterPlan {
     }
   }
 
-  let keptSubLines = activeWrapped.reduce((count, entry) => count + entry.length, 0)
+  // 这批歌词"需要"多少个视觉行（丢行之前），与下面实际画出的行数分开：
+  // 调用方要判断的是预算够不够，不是最终显示了几行
+  const requiredVisualLines = activeWrapped.reduce((count, entry) => count + entry.length, 0)
+  let keptSubLines = requiredVisualLines
   while (activeWrapped.length > 1 && fixedHeight + blockHeight(keptSubLines, fontSize) > layout.maxHeight) {
     keptSubLines -= activeWrapped[activeWrapped.length - 1]?.length ?? 0
     activeWrapped = activeWrapped.slice(0, -1)
@@ -294,6 +313,8 @@ export function planPoster(source: PosterSource, measure: Measure): PosterPlan {
       },
     },
     lyricFontSize: fontSize,
+    /** 这批歌词需要的视觉行数（丢行前）；实际画出的行数看 lyrics.length，两者在有丢行时不同 */
+    requiredVisualLines,
     dropped,
     titleTruncated: title.truncated,
     artistTruncated: artist.truncated,
@@ -302,8 +323,9 @@ export function planPoster(source: PosterSource, measure: Measure): PosterPlan {
 
 /**
  * 这批歌词会占多少个视觉行（勾选上限按它算）。
- * 超出画布容量时排版会丢行，所以返回值封顶在容量内，够判断"是否已经超预算"
+ * 取丢行之前的需求行数：报丢行之后的显示行数会让调用方以为仍有余量，
+ * 于是放行一批超出预算的歌词，出图时把用户勾过的整句悄悄丢掉
  */
 export function posterVisualLines(lines: string[], measure: Measure): number {
-  return planPoster({ lines, title: '', artist: '' }, measure).lyrics.length
+  return planPoster({ lines, title: '', artist: '' }, measure).requiredVisualLines
 }

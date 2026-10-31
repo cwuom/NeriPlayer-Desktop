@@ -128,6 +128,42 @@ check('版面预算按视觉行算，长句与短句一视同仁', () => {
     '12 句长句折行后的占用应与 24 句短句相同')
 })
 
+check('回报需求行数而不是丢行之后的显示行数', () => {
+  // 两句各 400 字：真占 40 视觉行，planPoster 会丢掉后一句只画 20 行。
+  // 报 20 会让调用方以为还有余量，于是放行一批、出图时悄悄丢掉用户勾过的整句
+  const lines = ['歌'.repeat(400), '歌'.repeat(400)]
+  const plan = planPoster({ lines, title: '', artist: '' }, measure)
+  assert.ok(plan.dropped > 0, '这批必然要丢行，否则用例不成立')
+  assert.equal(plan.lyrics.length, 20, '画布只画得下 20 行')
+  assert.equal(posterVisualLines(lines, measure), 40, '上限判据必须看需求行数 40，不是显示行数 20')
+  assert.ok(posterVisualLines(lines, measure) > MAX_POSTER_VISUAL_LINES, '调用方据此拒绝')
+  // 反面对照：预算内的选择报的就是它自己的行数
+  assert.equal(posterVisualLines(['歌'.repeat(10), '歌'.repeat(10)], measure), 2)
+})
+
+check('整词比整行还宽时按字符拆行，不留超宽行', () => {
+  const word = 'Supercalifragilisticexpialidocious'.repeat(3)
+  const wrapped = wrapText(word, CONTENT_WIDTH, 112, 700, measure)
+  assert.ok(wrapped.length > 1, `一个 102 字符的词在 112px 下必然要拆，实际 ${wrapped.length} 行`)
+  for (const line of wrapped) {
+    assert.ok(measure(line, 112, 700) <= CONTENT_WIDTH, `拆完仍有超宽行：${Math.round(measure(line, 112, 700))}`)
+  }
+  assert.equal(wrapped.join(''), word, '拆行只能断行，不能吞字')
+})
+
+check('行首禁则推回后上一行仍在内容宽内', () => {
+  // 8 个全角在 112px 下正好 896，再收下「，」就变 1008 > 904：这种情况宁可让标点留在行首
+  const wrapped = wrapText(`${'歌'.repeat(8)}，`, CONTENT_WIDTH, 112, 700, measure)
+  for (const line of wrapped) {
+    assert.ok(measure(line, 112, 700) <= CONTENT_WIDTH,
+      `推回禁则标点把行顶宽了：${line} → ${Math.round(measure(line, 112, 700))}`)
+  }
+  assert.equal(wrapped.join(''), `${'歌'.repeat(8)}，`)
+  // 装得下的情形仍然要走禁则：7 个字加标点不该把标点甩到行首
+  const tidy = wrapText(`${'歌'.repeat(7)}，`, CONTENT_WIDTH, 112, 700, measure)
+  assert.equal(tidy.length, 1, '7 字加标点在 112px 下排得下，应合成一行')
+})
+
 check('预算内的选择不会丢行', () => {
   const lines = Array.from({ length: MAX_POSTER_VISUAL_LINES }, (_, index) => `第${index + 1}句正常长度的歌词`)
   const plan = planPoster({ lines, title: 'T', artist: 'A' }, measure)
@@ -197,9 +233,14 @@ check('无封面时封面位仍在，改画首字母占位', () => {
   assert.equal(without.bar.placeholderLetter, '夜')
 })
 
-check('extraScrimFor：暗底不补、亮底才补，补完必须达标', () => {
+check('extraScrimFor：暗底不补、亮底才补，补到上限为止（上限内不保证达标）', () => {
   assert.equal(extraScrimFor([8, 8, 12], 7), 0, '本来就很暗不该再补')
   assert.equal(extraScrimFor([255, 255, 255], 7), EXTRA_SCRIM_RANGE.max, '纯白封面补到上限为止，不再压更深')
+  // 上限 0.35 是"不比安卓暗一档"换来的约束：极浅底色补满也到不了 7:1，这里把这个已知边界钉住，
+  // 免得下一个人以为达标是必然结果
+  const paleAlpha = extraScrimFor([255, 255, 255], 7)
+  assert.ok(contrastRatio(WHITE, mixRgb([255, 255, 255], BLACK, paleAlpha)) < 7,
+    '纯白底补满上限仍达不到 7:1，这是设计上的取舍而非缺陷')
   for (const background of [[120, 140, 160], [240, 244, 250], [255, 255, 255], [200, 220, 180]]) {
     const alpha = extraScrimFor(background, 7)
     assert.ok(alpha > 0 && alpha <= EXTRA_SCRIM_RANGE.max, `亮底应补暗：${background} → ${alpha}`)
