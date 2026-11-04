@@ -190,6 +190,13 @@ html.nvidia-compat .slide-up-leave-to {
 html.nvidia-compat .np-underlay-scrim {
   transition: none;
 }
+
+html.nvidia-compat .np-background-enter-active {
+  transition: none;
+}
+html.nvidia-compat .np-background-enter-from {
+  opacity: 0.8;
+}
 .slide-up-leave-to { transform: translateY(100%); }
 .slide-up-enter-to,
 .slide-up-leave-from { transform: translateY(0); }

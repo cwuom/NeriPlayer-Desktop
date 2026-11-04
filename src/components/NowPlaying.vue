@@ -95,6 +95,7 @@ import { createLogger } from '@/utils/logger'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { summarizeLogError } from '@/utils/logSanitizer'
 import { neteaseSongArtists } from '@/modules/library/artistNavigation'
+import { artistNavigationTargetKey, artistSearchRoute, resolveBiliArtistUploader } from '@/modules/library/artistTrackNavigation'
 import { splitArtistNames } from '@/modules/library/localArtists'
 import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 import { normalizeDesktopLyricsStyle } from '@/modules/desktopLyrics/style'
@@ -970,9 +971,11 @@ const artistLinksLoading = ref(false)
 async function openArtistPage(event: MouseEvent) {
   const track = player.currentTrack
   if (!track?.artist.trim() || artistLinksLoading.value) return
+  const targetKey = artistNavigationTargetKey(track)
   const source = getPlaybackSourceKind(track)
-  if (source === 'qq') {
-    await router.push({ name: 'explore', query: { q: track.artist, platform: 'netease', kind: 'artists' } })
+  const searchRoute = artistSearchRoute(track)
+  if (searchRoute || source === 'qq') {
+    await router.push(searchRoute ?? { name: 'explore', query: { q: track.artist, platform: 'netease', kind: 'artists' } })
     emit('collapse')
     return
   }
@@ -987,15 +990,15 @@ async function openArtistPage(event: MouseEvent) {
         route: { name: 'youtube-artist', params: { browseId: creator.id }, query: { name: creator.name, cover: creator.cover_url || '' } },
       }))
       if (!links.length) {
-        if (player.currentTrack?.id !== track.id) return
+        if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
         await router.push({ name: 'explore', query: { q: track.artist, platform: 'youtube', kind: 'creators' } })
         emit('collapse')
         return
       }
     } else if (source === 'bilibili') {
       // 对齐 Android resolveBiliUploader：B 站的「歌手」就是视频的 UP 主
-      const bvid = `${track.id} ${track.syncPayload?.audioId ?? track.syncPayload?.audio_id ?? ''}`.match(/BV[0-9A-Za-z]{10}/)?.[0]
-      const uploader = bvid ? await invoke<{ id: string; name: string; cover_url: string | null } | null>('resolve_bili_uploader', { bvid }) : null
+      const uploader = await resolveBiliArtistUploader(track)
+      if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
       if (!uploader) {
         toast.show(t('player.bili_uploader_unavailable'), 'info')
         return
@@ -1018,7 +1021,7 @@ async function openArtistPage(event: MouseEvent) {
         id: name, name, route: { name: 'local-artist', params: { name } },
       }))
     }
-    if (player.currentTrack?.id !== track.id) return
+    if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
     if (links.length === 1) {
       await router.push(links[0]!.route)
       emit('collapse')
@@ -1028,6 +1031,7 @@ async function openArtistPage(event: MouseEvent) {
       contextMenu.value = { show: true, x: event.clientX, y: event.clientY, type: 'artist-page' }
     }
   } catch (error) {
+    if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
     log.warn('failed to open artist page:', error)
     toast.error(t('player.artist_load_failed'))
   } finally {
@@ -1764,10 +1768,21 @@ async function openCurrentAlbum() {
 }
 
 async function openCurrentArtist() {
+  const track = player.currentTrack
+  if (!track) return
+  const targetKey = artistNavigationTargetKey(track)
+  const searchRoute = artistSearchRoute(track)
+  if (searchRoute) {
+    hideMoreSheet()
+    emit('collapse')
+    await router.push(searchRoute)
+    return
+  }
   const songId = currentNeteaseSongNumericId.value
   if (!songId) return
   try {
     const detail = await invoke<any>('get_netease_song_detail', { songId })
+    if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
     const song = detail?.songs?.[0]
     const artist = (song?.ar || []).find((a: any) => a?.id)
     if (!artist?.id) {
@@ -1783,6 +1798,7 @@ async function openCurrentArtist() {
       query: { name: artist.name || primaryArtistName.value },
     })
   } catch (e) {
+    if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
     log.error('Open artist failed:', e)
     toast.error(String(e))
   }
@@ -2106,18 +2122,20 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
          whole more-options panel below) every 200ms. The readers return exactly the same
          values and the background frame loop still reads them per frame, so nothing about
          the rendering changes. -->
-    <HyperBackground
-      v-else-if="shouldRenderDynamicBackground"
-      :playing="player.isPlaying"
-      :low-performance="settings.lowPerformanceMode"
-      :suspended="frameLoopSuspended"
-      :music-level="readAudioLevel"
-      :beat-impulse="readBeatImpulse"
-      :colors="extractedColors"
-      :is-dark="true"
-      :light-offset="paletteResult?.lightOffset ?? 0"
-      :saturate-offset="paletteResult?.saturateOffset ?? 0"
-    />
+    <Transition name="np-background" appear>
+      <HyperBackground
+        v-if="!settings.coverBlurBg && shouldRenderDynamicBackground"
+        :playing="player.isPlaying"
+        :low-performance="settings.lowPerformanceMode"
+        :suspended="frameLoopSuspended"
+        :music-level="readAudioLevel"
+        :beat-impulse="readBeatImpulse"
+        :colors="extractedColors"
+        :is-dark="true"
+        :light-offset="paletteResult?.lightOffset ?? 0"
+        :saturate-offset="paletteResult?.saturateOffset ?? 0"
+      />
+    </Transition>
     <div class="np-scrim" />
     <div class="np-ambient-glow" />
 
@@ -2432,9 +2450,9 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
                 min="0"
                 max="1"
                 step="0.01"
-                :value="1 - player.volume"
+                :value="player.volume"
                 class="volume-slider"
-                @input="player.setVolume(1 - parseFloat(($event.target as HTMLInputElement).value))"
+                @input="player.setVolume(parseFloat(($event.target as HTMLInputElement).value))"
               />
               <EditableRangeValue
                 :model-value="player.volume"
@@ -2444,7 +2462,6 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
                 :step="0.01"
                 :input-scale="100"
                 :input-width="32"
-                :range-reversed="true"
                 :display-value="`${Math.round(player.volume * 100)}%`"
                 input-suffix="%"
                 :aria-label="t('player.volume')"
@@ -3297,6 +3314,15 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
   inset: 0;
   z-index: -1;
   transition: background 0.8s ease;
+}
+
+// 封面异步取色完成后渐入，避免播放页滑入途中突然切换整屏背景
+.np-background-enter-active {
+  transition: opacity 360ms ease;
+}
+
+.np-background-enter-from {
+  opacity: 0;
 }
 
 // 对齐 Android：无全局遮罩，对比度完全由文字颜色和动态配色保证
@@ -4548,13 +4574,12 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
 }
 
 .volume-slider {
-  // 竖排滑条不能用 writing-mode（WebKitGTK 圆点错位且拖不动），
-  // 用原生横向滑条整体旋转：几何/命中计算保持原生，视觉为竖向。
-  // value = 1 - volume：rotate(90deg) 使 min 在上，即音量满格在上
+  // 保留原生横向滑条的命中计算，避免 WebKitGTK 竖排错位
+  // 逆时针旋转让最大音量在上，数值不反转以保持方向键语义
   appearance: none;
   width: 100px;
   height: 4px;
-  transform: rotate(90deg);
+  transform: rotate(-90deg);
   margin: 48px 0;
   background: rgba(255, 255, 255, 0.15);
   border-radius: 2px;

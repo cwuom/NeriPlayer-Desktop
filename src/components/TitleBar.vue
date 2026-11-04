@@ -5,15 +5,16 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { isMacPlatform } from '@/modules/shortcuts/platform'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   forceLight?: boolean
   nowPlaying?: boolean
+  showNowPlayingTitle?: boolean
   hasPlaybackSession?: boolean
   trackName?: string
   albumName?: string
   transitioning?: boolean
   transitionState?: 'opening' | 'closing' | null
-}>()
+}>(), { showNowPlayingTitle: true })
 
 const emit = defineEmits<{
   collapse: []
@@ -140,7 +141,7 @@ onUnmounted(() => {
     <!-- 播放器模式：居中播放信息（等品牌淡完再出现） -->
     <transition name="tb-center-fade">
       <div v-if="nowPlaying" class="tb-np-center" data-tauri-drag-region>
-        <span class="tb-np-label">{{ titleBarLabel }}</span>
+        <span v-if="showNowPlayingTitle" class="tb-np-label">{{ titleBarLabel }}</span>
         <transition name="tb-track-swap" mode="out-in">
           <span :key="titleBarTrackKey" class="tb-np-track">{{ titleBarTrackText }}</span>
         </transition>

@@ -6,6 +6,10 @@
   "packageManager": "pnpm@9.15.9",
   "type": "module",
   "scripts": {
+    "test:now-playing-title": "node scripts/test-now-playing-title.mjs",
+    "test:volume-controls": "node scripts/test-volume-controls.mjs",
+    "test:artist-metadata-navigation": "node scripts/test-artist-metadata-navigation.mjs",
+    "test:hyper-background": "node scripts/test-hyper-background.mjs",
     "test:cookie-auth": "node scripts/test-cookie-auth.mjs",
     "test:cookie-login-dialog": "node scripts/test-cookie-login-dialog.mjs",
     "test:config-transfer": "node scripts/test-config-transfer.mjs",

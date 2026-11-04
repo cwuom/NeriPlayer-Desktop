@@ -353,6 +353,7 @@ defineExpose({
                 step="0.01"
                 :value="player.volume"
                 class="mp-volume-slider"
+                :style="{ background: `linear-gradient(to right, var(--md-primary) ${volumePercent}%, var(--md-surface-container-highest) ${volumePercent}%)` }"
                 @input="player.setVolume(parseFloat(($event.target as HTMLInputElement).value))"
               />
               <EditableRangeValue
