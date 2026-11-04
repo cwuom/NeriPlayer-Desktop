@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import * as vue from 'vue'
-import { compileTemplate, parse } from 'vue/compiler-sfc'
+import { compileStyleAsync, compileTemplate, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
 
 async function volumeSlider(component, className) {
@@ -25,9 +25,21 @@ async function volumeSlider(component, className) {
   new Function('require', 'exports', ts.transpileModule(template.code, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText)(name => { assert.equal(name, 'vue'); return vue }, exports)
-  const player = { volume: 0.5, setVolume(value) { this.volume = value } }
-  const context = { player, get volumePercent() { return Math.round(player.volume * 100) } }
-  return { player, render: () => exports.render(context, []) }
+  const player = vue.reactive({ volume: 0.5, setVolume(value) { this.volume = value } })
+  const bindings = { player }
+  if (component === 'MiniPlayer') {
+    const script = ts.createSourceFile(`${component}.ts`, descriptor.scriptSetup.content, ts.ScriptTarget.ES2022, true)
+    const percent = script.statements.filter(ts.isVariableStatement)
+      .flatMap(statement => [...statement.declarationList.declarations])
+      .find(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === 'volumePercent')
+    assert.ok(percent?.initializer, 'MiniPlayer must derive its displayed volume from player state')
+    const computed = ts.transpileModule(`const actual = ${percent.initializer.getText(script)}`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText
+    bindings.volumePercent = new Function('computed', 'player', `${computed}\nreturn actual`)(vue.computed, player)
+  }
+  const context = vue.proxyRefs(bindings)
+  return { player, descriptor, render: () => exports.render(context, []) }
 }
 
 let failures = 0
@@ -46,6 +58,28 @@ for (const [component, className] of [['NowPlaying', 'volume-slider'], ['MiniPla
       props.onInput({ target: { value: String(nativeValue) } })
       assert.equal(slider.player.volume, expected)
     }
+  })
+
+  await test(`${component} places maximum volume above mute after styling`, async () => {
+    const slider = await volumeSlider(component, className)
+    const style = slider.descriptor.styles[0]
+    const compiled = await compileStyleAsync({
+      source: style.content, filename: `${component}.vue`, id: 'volume-controls-test',
+      preprocessLang: style.lang,
+    })
+    assert.deepEqual(compiled.errors, [])
+    let transform = 'none'
+    compiled.rawResult.root.walkRules(rule => {
+      if (rule.selector !== `.${className}`) return
+      rule.walkDecls('transform', declaration => { transform = declaration.value })
+    })
+    const rotation = /^rotate\(([-+\d.]+)(deg|rad|turn)\)$/.exec(transform)
+    assert.ok(rotation, 'the horizontal range must rotate into a vertical control')
+    const radians = Number(rotation[1]) * ({ deg: Math.PI / 180, rad: 1, turn: Math.PI * 2 })[rotation[2]]
+    const minimum = { x: -50 * Math.cos(radians), y: -50 * Math.sin(radians) }
+    const maximum = { x: 50 * Math.cos(radians), y: 50 * Math.sin(radians) }
+    assert.ok(Math.abs(maximum.x - minimum.x) < 0.001, 'the range endpoints must align vertically')
+    assert.ok(maximum.y < minimum.y, 'increasing the native range value must move the thumb upward')
   })
 }
 

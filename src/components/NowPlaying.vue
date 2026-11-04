@@ -974,13 +974,13 @@ async function openArtistPage(event: MouseEvent) {
   const targetKey = artistNavigationTargetKey(track)
   const source = getPlaybackSourceKind(track)
   const searchRoute = artistSearchRoute(track)
-  if (searchRoute || source === 'qq') {
-    await router.push(searchRoute ?? { name: 'explore', query: { q: track.artist, platform: 'netease', kind: 'artists' } })
-    emit('collapse')
-    return
-  }
   artistLinksLoading.value = true
   try {
+    if (searchRoute || source === 'qq') {
+      await router.push(searchRoute ?? { name: 'explore', query: { q: track.artist, platform: 'netease', kind: 'artists' } })
+      emit('collapse')
+      return
+    }
     let links: typeof artistLinks.value
     if (source === 'youtube') {
       // 对齐 Android resolveYouTubeMusicCreators：按名字精确匹配创作者，匹配不到再退回创作者搜索
@@ -1001,6 +1001,12 @@ async function openArtistPage(event: MouseEvent) {
       if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
       if (!uploader) {
         toast.show(t('player.bili_uploader_unavailable'), 'info')
+        return
+      }
+      const sharedArtistRoute = artistSearchRoute(track, uploader.name)
+      if (sharedArtistRoute) {
+        await router.push(sharedArtistRoute)
+        emit('collapse')
         return
       }
       links = [{
@@ -1771,16 +1777,16 @@ async function openCurrentArtist() {
   const track = player.currentTrack
   if (!track) return
   const targetKey = artistNavigationTargetKey(track)
-  const searchRoute = artistSearchRoute(track)
-  if (searchRoute) {
-    hideMoreSheet()
-    emit('collapse')
-    await router.push(searchRoute)
-    return
-  }
-  const songId = currentNeteaseSongNumericId.value
-  if (!songId) return
   try {
+    const searchRoute = artistSearchRoute(track)
+    if (searchRoute) {
+      hideMoreSheet()
+      emit('collapse')
+      await router.push(searchRoute)
+      return
+    }
+    const songId = currentNeteaseSongNumericId.value
+    if (!songId) return
     const detail = await invoke<any>('get_netease_song_detail', { songId })
     if (artistNavigationTargetKey(player.currentTrack) !== targetKey) return
     const song = detail?.songs?.[0]

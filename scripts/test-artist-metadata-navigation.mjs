@@ -41,6 +41,13 @@ const playbackIdentityFunctions = ['getPlaybackSourceKind', 'syncPayloadString']
   return declaration.getText(playbackParsed)
 }).join('\n')
 const playbackIdentity = loadModule(`${remoteKinds.getText(playbackParsed)}\n${playbackIdentityFunctions}`)
+const localArtistsSource = await readFile(new URL('../src/modules/library/localArtists.ts', import.meta.url), 'utf8')
+const localArtistsParsed = ts.createSourceFile('localArtists.ts', localArtistsSource, ts.ScriptTarget.ES2022, true)
+const localArtistDeclarations = localArtistsParsed.statements.filter(node =>
+  (ts.isFunctionDeclaration(node) && ['splitArtistNames', 'localArtistStableKey'].includes(node.name?.text))
+  || (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+    declaration.name.getText(localArtistsParsed) === 'ARTIST_SEPARATORS')))
+const localArtists = loadModule(localArtistDeclarations.map(node => node.getText(localArtistsParsed)).join('\n'))
 
 function artistPage(track, options = {}) {
   const routes = []
@@ -70,19 +77,26 @@ function artistPage(track, options = {}) {
     artistLinkTrackId: { value: '' },
     contextMenu: { value: {} },
     getPlaybackSourceKind: playbackIdentity.getPlaybackSourceKind,
-    router: { push: async route => routes.push(route) },
+    router: { push: async route => {
+      if (options.navigate) await options.navigate(route)
+      routes.push(route)
+    } },
     invoke,
     emit() {},
     toast: { show: message => messages.push(message), error: message => messages.push(message) },
     t: key => key,
     log: { warn() {}, error() {} },
-    splitArtistNames: value => value.split('/'),
+    splitArtistNames: localArtists.splitArtistNames,
     currentNeteaseSongNumericId: { value: track.id.startsWith('netease:') ? Number(track.id.slice(8)) : null },
     primaryArtistName: { value: track.artist },
     hideMoreSheet() {},
   }
   const actions = new Function(...Object.keys(dependencies), `${compiled}\nreturn { openArtistPage, openCurrentArtist }`)(...Object.values(dependencies))
-  return { open: () => actions.openArtistPage({ clientX: 0, clientY: 0 }), openMenu: actions.openCurrentArtist, routes, commands, messages, player: dependencies.player }
+  return {
+    open: () => actions.openArtistPage({ clientX: 0, clientY: 0 }), openMenu: actions.openCurrentArtist,
+    routes, commands, messages, player: dependencies.player,
+    artistLinks: dependencies.artistLinks, contextMenu: dependencies.contextMenu,
+  }
 }
 
 await test('explicitly replaced artist searches its displayed name', async () => {
@@ -119,6 +133,18 @@ await test('local artist edits retain aggregation by the displayed artist name',
   assert.deepEqual(page.commands, [])
 })
 
+await test('multiple local artists offer a separate target for each displayed name', async () => {
+  const page = artistPage({ id: 'local:77', source: 'local', artist: ' Alice / Bob / alice ', album: '' })
+  await page.open()
+  assert.deepEqual(page.routes, [])
+  assert.deepEqual(page.artistLinks.value, [
+    { id: 'Alice', name: 'Alice', route: { name: 'local-artist', params: { name: 'Alice' } } },
+    { id: 'Bob', name: 'Bob', route: { name: 'local-artist', params: { name: 'Bob' } } },
+  ])
+  assert.equal(page.contextMenu.value.show, true)
+  assert.equal(page.contextMenu.value.type, 'artist-page')
+})
+
 for (const [label, payload] of [
   ['unchanged override', { customArtist: '原UP主', originalArtist: '原UP主' }],
   ['unchanged stored artist', { customArtist: '原UP主', artist: '原UP主' }],
@@ -140,6 +166,27 @@ await test('missing original artist still searches an explicit nonempty override
   assert.deepEqual(page.commands, [])
 })
 
+await test('a shared Bilibili track searches a displayed artist that differs from its uploader', async () => {
+  const page = artistPage({
+    id: 'bilibili:123', source: 'bilibili', artist: '房主选择的歌手', album: '',
+    syncPayload: { listenTogetherDisplayArtist: '房主选择的歌手' },
+  })
+  await page.open()
+  assert.deepEqual(page.routes, [{ name: 'explore', query: { q: '房主选择的歌手', platform: 'netease', kind: 'artists' } }])
+  assert.deepEqual(page.commands, [{ command: 'get_bili_video_info', args: { bvid: null, avid: 123 } }])
+})
+
+await test('a shared Bilibili track with its original uploader still opens the uploader page', async () => {
+  const page = artistPage({
+    id: 'bilibili:123', source: 'bilibili', artist: '原UP主', album: '',
+    syncPayload: { listenTogetherDisplayArtist: '原UP主' },
+  })
+  await page.open()
+  assert.equal(page.routes[0]?.name, 'bili-artist')
+  assert.equal(page.routes[0]?.params.mid, '1')
+  assert.deepEqual(page.commands, [{ command: 'get_bili_video_info', args: { bvid: null, avid: 123 } }])
+})
+
 await test('unchanged NetEase artist still uses its exact platform identity', async () => {
   const page = artistPage({ id: 'netease:77', source: 'netease', artist: '原歌手', album: '', syncPayload: { customArtist: '原歌手', originalArtist: '原歌手' } })
   await page.open()
@@ -153,6 +200,18 @@ await test('NetEase menu entry searches an explicitly replaced artist', async ()
   assert.deepEqual(page.routes, [{ name: 'explore', query: { q: '匹配歌手', platform: 'netease', kind: 'artists' } }])
   assert.deepEqual(page.commands, [])
 })
+
+for (const [entry, expectedMessage] of [['open', 'player.artist_load_failed'], ['openMenu', 'Error: route load failed']]) {
+  await test(`${entry} reports a rejected artist search without an unhandled rejection`, async () => {
+    const page = artistPage({
+      id: 'netease:77', source: 'netease', artist: '匹配歌手', album: '',
+      syncPayload: { customArtist: '匹配歌手', originalArtist: '原歌手' },
+    }, { navigate: async () => { throw new Error('route load failed') } })
+    await assert.doesNotReject(page[entry]())
+    assert.deepEqual(page.routes, [])
+    assert.deepEqual(page.messages, [expectedMessage])
+  })
+}
 
 await test('NetEase menu entry retains the original exact artist link', async () => {
   const page = artistPage({ id: 'netease:77', source: 'netease', artist: '原歌手', album: '' })

@@ -17,13 +17,17 @@ function payloadText(payload: Record<string, unknown> | undefined, ...keys: stri
   return ''
 }
 
-export function artistSearchRoute(track: TrackInfo): ArtistSearchRoute | null {
+export function artistSearchRoute(track: TrackInfo, sourceArtist?: string): ArtistSearchRoute | null {
   if (!getPlaybackSourceKind(track)) return null
   const artist = track.artist.trim()
+  if (!artist) return null
   const customArtist = payloadText(track.syncPayload, 'customArtist', 'custom_artist')
-  if (!artist || customArtist !== artist) return null
   const originalArtist = payloadText(track.syncPayload, 'originalArtist', 'original_artist', 'artist')
-  if (customArtist === originalArtist) return null
+  const customArtistChanged = customArtist === artist && customArtist !== originalArtist
+  const roomArtist = payloadText(track.syncPayload, 'listenTogetherDisplayArtist')
+  const sourceName = sourceArtist?.trim() || ''
+  const roomArtistDiffers = roomArtist === artist && !!sourceName && sourceName !== artist
+  if (!customArtistChanged && !roomArtistDiffers) return null
   // 自定义歌手和播放身份可以来自不同平台，歌词匹配 ID 也不能当作歌手身份
   return { name: 'explore', query: { q: artist, platform: 'netease', kind: 'artists' } }
 }
@@ -55,6 +59,7 @@ export function artistNavigationTargetKey(track: TrackInfo | null): string {
     source,
     artist: track.artist.trim(),
     search: artistSearchRoute(track),
+    roomArtist: payloadText(track.syncPayload, 'listenTogetherDisplayArtist'),
     biliVideo: source === 'bilibili' ? biliArtistVideoIdentity(track) : null,
     neteaseSongId: neteaseSongId !== null && Number.isSafeInteger(neteaseSongId) && neteaseSongId > 0 ? neteaseSongId : null,
   })
