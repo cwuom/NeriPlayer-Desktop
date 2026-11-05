@@ -278,6 +278,8 @@ export function ltTrackToTrackInfo(lt: ListenTogetherTrack, preferredQuality?: s
     channelId: lt.channelId,
     audioId: lt.audioId,
   }
+  // 房间协议只保留显示歌手，留本机来源标记供取得平台作者后比较
+  if (lt.artist.trim()) syncPayload.listenTogetherDisplayArtist = lt.artist.trim()
   if (lt.subAudioId) syncPayload.subAudioId = lt.subAudioId
   if (playlistContextId) syncPayload.playlistContextId = playlistContextId
   if (mediaUri) syncPayload.mediaUri = mediaUri

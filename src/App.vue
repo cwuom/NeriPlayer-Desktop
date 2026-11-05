@@ -712,6 +712,7 @@ onUnmounted(() => {
     <TitleBar
       :force-light="isNowPlayingOpen"
       :now-playing="isNowPlayingOpen"
+      :show-now-playing-title="settingsStore.showNowPlayingTitle"
       :has-playback-session="player.hasPlaybackSession"
       :track-name="player.hasPlaybackSession ? player.currentTrack?.title : ''"
       :album-name="player.hasPlaybackSession && player.currentTrack?.album ? displayAlbum(player.currentTrack.album) : ''"

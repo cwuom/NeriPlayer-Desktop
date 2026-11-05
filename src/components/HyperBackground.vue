@@ -71,7 +71,7 @@ const QUALITY_FPS_TIERS = [60, 30, 20]
 let scaleTier = 0
 let fpsTier = 0
 let lastQualityCheckAt = 0
-let lastRenderedAt = 0
+let nextRenderAt = 0
 let lastTickAt = 0
 let avgFrameInterval = 0
 let healthyChecks = 0
@@ -301,6 +301,7 @@ function initGL() {
   targetSaturate = props.saturateOffset
 
   lastFrameMs = performance.now()
+  nextRenderAt = 0
   render()
 }
 
@@ -310,17 +311,18 @@ function render(nowMs = performance.now()) {
   if (!gl || !program) return
   // In low performance mode the overlay covers the whole canvas: stop the loop and let the
   // watcher start it again once the overlay closes
-  if (props.suspended) {
+  if (props.suspended || document.hidden) {
     animFrame = 0
     return
   }
   sampleFrameInterval(nowMs)
   adjustQuality(nowMs)
 
-  // 帧率档位低于满速时按目标帧间隔跳过绘制（保留 rAF 保证恢复及时）；
+  // 每档都遵守渲染预算，避免高刷屏重复绘制；累积截止时间保留余量，避免 144Hz 被量化成 48fps
   // 留 2ms 余量吸收 vsync 抖动，否则 30fps 档会被量化成 20fps
   const qualityFps = QUALITY_FPS_TIERS[fpsTier]
-  if (fpsTier > 0 && nowMs - lastRenderedAt < 1000 / qualityFps - 2) {
+  const qualityIntervalMs = 1000 / qualityFps
+  if (nowMs < nextRenderAt - 2) {
     animFrame = scheduleFrame(render)
     return
   }
@@ -391,7 +393,9 @@ function render(nowMs = performance.now()) {
   gl.uniform1f(uSaturateOffset, smoothSaturateOffset)
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-  lastRenderedAt = nowMs
+  nextRenderAt = nextRenderAt > 0 && nowMs - nextRenderAt < qualityIntervalMs
+    ? nextRenderAt + qualityIntervalMs
+    : nowMs + qualityIntervalMs
 
   const settled = !transitioning
     && smoothLevel < SETTLED_EPSILON
@@ -409,6 +413,7 @@ function wake() {
   // 重置帧时钟，避免 dt 巨大导致平滑量跳变
   lastFrameMs = performance.now()
   lastTickAt = 0
+  nextRenderAt = 0
   animFrame = scheduleFrame(render)
 }
 

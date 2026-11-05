@@ -40,8 +40,9 @@ for (const state of ['fade-enter-from', 'fade-leave-to']) {
   assert.equal(style.opacity, '1', 'NVIDIA compatibility keeps pages visible during an instant switch')
   assert.equal(style.transform, 'none', 'NVIDIA compatibility avoids the full-page compositor transform')
 }
-for (const state of ['fade-enter-active', 'fade-leave-active', 'slide-up-enter-active', 'slide-up-leave-active']) {
+for (const state of ['fade-enter-active', 'fade-leave-active', 'slide-up-enter-active', 'slide-up-leave-active', 'np-background-enter-active']) {
   assert.equal(transitionStyle(state, nvidia).transition, 'none', 'NVIDIA compatibility keeps the no-animation fallback')
 }
+assert.equal(transitionStyle('np-background-enter-from', nvidia).opacity, '0.8', 'NVIDIA compatibility shows the background immediately at its normal opacity')
 
 console.log('page transition styles passed: original motion on three platforms and NVIDIA compatibility fallback')
