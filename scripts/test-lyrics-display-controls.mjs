@@ -97,6 +97,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   })
   const clipboardWrites = []
   const menu = {}
+  const share = {}
   const dependencies = {
     vue,
     '@amll-core/lyric-player/dom/index.ts': { DomLyricPlayer: FakeDomLyricPlayer },
@@ -114,6 +115,10 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
     } },
     '@/utils/frameLoop': { scheduleFrame, cancelFrame },
     '@/utils/contextMenu': { createContextMenuItem: (label, options) => ({ label, ...options }) },
+    '@/components/LyricShareDialog.vue': { default: {
+      props: ['open', 'lines', 'initialIndex'], emits: ['update:open'], inheritAttrs: false,
+      setup(props) { share.props = props; return () => null },
+    } },
   }
   const component = new Function(
     'require', 'exports', 'document', 'window', 'performance', 'requestAnimationFrame',
@@ -159,7 +164,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   }
   return {
     settings, player, props, clock, seekEvents, settle, button, findButton, findControls,
-    host, menu, clipboardWrites, find,
+    host, menu, share, clipboardWrites, find,
     async controlsContextMenu() {
       const controls = findControls()
       assert.ok(controls, 'available controls must exist before hiding')
@@ -252,6 +257,7 @@ function assertLyricMenu(menu, x, y, displayItem = null) {
   assertMenu(menu, x, y, [
     { id: 'copy-line', label: 'lyrics.copy_line' },
     { id: 'copy-all', label: 'lyrics.copy_all' },
+    { id: 'select-lines', label: 'lyrics.select_lines' },
     { id: 'seek', label: 'lyrics.seek_here' },
     ...(displayItem ? [displayItem] : []),
   ])
@@ -505,6 +511,22 @@ await test('host context menus restore hidden controls only when the show action
     r.assertAvailable(true, true)
     assert.equal(r.menu.props.open, false)
     r.assertPlaybackUnchanged()
+  } finally { r.stop() }
+})
+
+await test('select-lines menu action opens the share dialog on the right-clicked line only', async () => {
+  const r = await mount({ lyrics: [plainLine, plainLine, plainLine] })
+  try {
+    assert.equal(r.share.props.open, false, 'dialog stays closed until the action is chosen')
+    await r.lineContextMenu({ lineIndex: 1 })
+    assertLyricMenu(r.menu, 240, 320)
+    await r.selectMenu('select-lines')
+    assert.equal(r.share.props.open, true)
+    assert.equal(r.share.props.initialIndex, 1)
+    assert.deepEqual(r.share.props.lines.map(line => line.index), [0, 1, 2])
+    assert.deepEqual(r.clipboardWrites, [], 'opening the picker must not touch the clipboard')
+    assert.deepEqual(r.seekEvents, [], 'opening the picker must not seek')
+    assert.equal(r.menu.props.open, false, 'the lyric menu closes after the action')
   } finally { r.stop() }
 })
 
