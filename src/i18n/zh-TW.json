@@ -688,6 +688,11 @@
   "player": {
     "bili_parts_title": "選擇分 P",
     "bili_parts_hint": "共 {count} 個分 P，選擇後整組加入佇列，從所選分 P 開始播放",
+    "bili_parts_name_order": "這組分 P 的標題格式",
+    "bili_parts_title_first": "歌名 - 歌手",
+    "bili_parts_artist_first": "歌手 - 歌名",
+    "bili_parts_preview": "P{page} 預覽",
+    "bili_parts_name_order_hint": "播放後，本裝置會記住這個影片的標題格式。",
     "bili_parts_load_failed": "分 P 清單載入失敗，請重試",
     "vinyl_effect": "唱片效果",
     "bili_skip_identity_missing": "無法辨識影片來源，請重新載入曲目資訊",

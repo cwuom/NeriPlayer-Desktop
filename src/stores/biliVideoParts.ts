@@ -1,12 +1,37 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useListenTogetherStore } from '@/stores/listenTogether'
 import { useToastStore } from '@/stores/toast'
 import i18n from '@/i18n'
-import { buildBiliPartTracks, type BiliVideoInfo } from '@/modules/playback/biliVideoParts'
+import { buildBiliPartTracks, type BiliPartNameOrder, type BiliVideoInfo } from '@/modules/playback/biliVideoParts'
 import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid, resolveBiliVideoSkipCid } from '@/modules/playback/biliVideoSkip'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('bili-video-parts')
+const NAME_ORDER_STORAGE_PREFIX = 'neri:bili-part-name-order:v1:'
+
+function readNameOrder(bvid: string): BiliPartNameOrder {
+  try {
+    return localStorage.getItem(`${NAME_ORDER_STORAGE_PREFIX}${bvid}`) === 'artist-first'
+      ? 'artist-first'
+      : 'title-first'
+  } catch (error) {
+    log.warn('Failed to read part name order:', error)
+    return 'title-first'
+  }
+}
+
+function saveNameOrder(bvid: string, order: BiliPartNameOrder) {
+  try {
+    const key = `${NAME_ORDER_STORAGE_PREFIX}${bvid}`
+    if (order === 'artist-first') localStorage.setItem(key, order)
+    else localStorage.removeItem(key)
+  } catch (error) {
+    log.warn('Failed to save part name order:', error)
+  }
+}
 
 export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
   const player = usePlayerStore()
@@ -15,6 +40,10 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
   const failed = ref(false)
   const info = ref<BiliVideoInfo | null>(null)
   const track = ref<TrackInfo | null>(null)
+  const nameOrder = ref<BiliPartNameOrder>('title-first')
+  const tracks = computed(() => info.value && track.value
+    ? buildBiliPartTracks(info.value, track.value, nameOrder.value)
+    : [])
   let generation = 0
   let fallback: (() => void) | null = null
 
@@ -34,6 +63,7 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
     failed.value = false
     info.value = null
     track.value = null
+    nameOrder.value = 'title-first'
     fallback = null
   }
 
@@ -72,6 +102,7 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
         play()
         return
       }
+      nameOrder.value = readNameOrder(detail.bvid)
       info.value = detail
     } catch {
       if (token === generation) failed.value = true
@@ -86,16 +117,17 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
       close()
       return
     }
-    const tracks = buildBiliPartTracks(info.value, track.value)
-    const selected = tracks.find(item => item.syncPayload?.subAudioId === String(cid))
+    const queue = tracks.value
+    const selected = queue.find(item => item.syncPayload?.subAudioId === String(cid))
     if (!selected) return
+    saveNameOrder(info.value.bvid, nameOrder.value)
     close()
-    player.playAll(tracks, selected.id)
+    player.playAll(queue, selected.id)
   }
 
   function retry() {
     if (track.value && fallback) return request(track.value, fallback)
   }
 
-  return { open, loading, failed, info, track, request, choose, close, retry }
+  return { open, loading, failed, info, track, nameOrder, tracks, request, choose, close, retry }
 })

@@ -688,6 +688,11 @@
   "player": {
     "bili_parts_title": "パートを選択",
     "bili_parts_hint": "全{count}パート。すべてをキューに追加し、選んだパートから再生します",
+    "bili_parts_name_order": "この動画のパート名の形式",
+    "bili_parts_title_first": "曲名 - アーティスト",
+    "bili_parts_artist_first": "アーティスト - 曲名",
+    "bili_parts_preview": "パート{page}のプレビュー",
+    "bili_parts_name_order_hint": "再生すると、この動画のタイトル形式をこの端末に保存します。",
     "bili_parts_load_failed": "パート一覧を読み込めませんでした。再試行してください",
     "vinyl_effect": "レコード効果",
     "bili_skip_identity_missing": "動画を識別できません。曲の情報を再読み込みしてください。",
