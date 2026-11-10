@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
+import { format } from './bili-subtitle-test-loader.mjs'
 
 const source = await readFile(new URL('../src/components/LyricsView.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(source).descriptor, {
@@ -98,6 +99,7 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
   const clipboardWrites = []
   const menu = {}
   const dependencies = {
+    '@/modules/lyrics/lyricsFormat': format,
     vue,
     '@amll-core/lyric-player/dom/index.ts': { DomLyricPlayer: FakeDomLyricPlayer },
     '@/stores/settings': { useSettingsStore: () => settings },
@@ -309,6 +311,33 @@ await test('display buttons independently toggle translation and line and word r
   } finally { r.stop() }
 })
 
+await test('enabling translations explains missing segments and clears the notice on a translated line or song switch', async () => {
+  const r = await mount({ lyrics: [
+    { startMs: 0, durationMs: 6000, text: 'Original only', words: [] },
+    { startMs: 6000, durationMs: 2000, text: 'Bilingual', translation: '双语', words: [] },
+  ] })
+  const notice = () => r.find(node => node.props?.role === 'status')
+  try {
+    r.props.isPlaying = false; await r.settle()
+    await r.click('show_translation')
+    assert.ok(notice())
+    assert.equal(r.player.lines[0].translatedLyric, '')
+    assert.equal(r.player.lines[1].translatedLyric, '双语')
+    r.assertPlaybackUnchanged()
+    await r.click('show_translation'); assert.equal(notice(), undefined)
+    await r.click('show_translation'); assert.ok(notice())
+    r.clock.value = 6000; await r.settle(); assert.equal(notice(), undefined)
+    await r.click('show_translation'); await r.click('show_translation')
+    assert.equal(notice(), undefined)
+    r.clock.value = 9000; await r.settle()
+    await r.click('show_translation'); await r.click('show_translation'); assert.ok(notice())
+    r.props.lyrics = [{ startMs: 0, durationMs: 30000, text: 'New song', words: [] }]
+    await r.settle()
+    assert.equal(notice(), undefined)
+    r.assertAvailable(false, false)
+  } finally { r.stop() }
+})
+
 await test('external display setting changes update pressed states and AMLL content', async () => {
   const r = await mount({ settingOverrides: { showTranslation: true } })
   try {
@@ -337,6 +366,9 @@ const wordRomanLine = {
 
 for (const [name, lyrics, translation, romanization] of [
   ['translation only', [{ ...plainLine, translation: ' Translation ' }], true, false],
+  ['duplicate translation', [{ ...plainLine, translation: ' PLAIN, lyric! ' }], false, false],
+  ['punctuation placeholder', [{ ...plainLine, translation: ' / … ♪ ' }], false, false],
+  ['duplicate word-only translation', [{ ...wordRomanLine, text: '', translation: '歌词' }], false, true],
   ['line romanization only', [{ ...plainLine, roman: ' Romanization ' }], false, true],
   ['word romanization only', [wordRomanLine], false, true],
   ['no auxiliary lyrics', [plainLine], false, false],

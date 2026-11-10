@@ -2538,7 +2538,7 @@ useEscapeClose(
         :label="t('settings.default_lyric_source')" @update:model-value="changeDefaultLyricSource" />
     </div>
 
-    <BiliSubtitleSettings :show-offset="false" />
+    <BiliSubtitleSettings variant="settings" :show-offset="false" />
 
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>

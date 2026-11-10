@@ -153,6 +153,39 @@ await test('cache clearing and song switches reject late subtitle results', asyn
   assert.equal(r.sources.lyricSourceOf(old), 'bilibili_cc')
   assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'bilibili_cc')
 })
+await test('switching from captions to a video without captions clears both tracks and falls back automatically', async r => {
+  const empty = deferred(), fallback = deferred()
+  r.settings.biliCcSubtitleLanguage = 'zh'
+  r.handlers.cc = track => track.id === bili(1).id ? cc('zh') : empty.promise
+  r.handlers.automatic = () => fallback.promise
+  r.store.acquire(); await flush()
+  assert.equal(r.store.subtitle.track.language, 'zh')
+  r.player.currentTrack = { ...bili(2), album: 'Bilibili|33|BV1xx411c7mD' }; await flush()
+  assert.deepEqual(r.store.lines, [])
+  assert.equal(r.store.subtitle, null)
+  assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), null)
+  empty.resolve({ source: 'bilibili_cc', lines: [] }); await flush()
+  assert.equal(r.calls.automatic.length, 1)
+  assert.equal(r.calls.automatic[0][0].id, bili(2).id)
+  fallback.resolve({ source: null, lines: [] }); await flush()
+  assert.deepEqual(r.store.lines, [])
+  assert.equal(r.store.subtitle, null)
+  assert.equal(r.store.loading, false)
+  assert.equal(r.settings.biliCcSubtitleLanguage, 'zh')
+  r.player.currentTrack = bili(1); await flush()
+  assert.equal(r.store.subtitle.track.language, 'zh')
+})
+await test('old caption results cannot restore subtitles after switching to a video without captions', async r => {
+  const old = deferred()
+  r.handlers.cc = track => track.id === bili(1).id ? old.promise : { source: 'bilibili_cc', lines: [] }
+  r.store.acquire(); await flush()
+  r.player.currentTrack = bili(2); await flush()
+  assert.equal(r.store.lines[0].text, 'music')
+  old.resolve(cc('zh')); await flush()
+  assert.equal(r.store.subtitle, null)
+  assert.equal(r.store.lines[0].text, 'music')
+  assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'netease')
+})
 await test('a stale persistent cache read cannot overwrite a newly published subtitle source', async r => {
   const late = deferred()
   r.handlers.cacheRead = () => late.promise

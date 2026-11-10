@@ -1761,7 +1761,10 @@
     "copy_all": "複製全部歌詞",
     "seek_here": "跳到這一句",
     "show_display_controls": "顯示翻譯/音譯按鈕",
-    "hide_display_controls": "隱藏翻譯/音譯按鈕"
+    "hide_display_controls": "隱藏翻譯/音譯按鈕",
+    "hide_translation": "隱藏譯文",
+    "translation_source_hint": "顯示或隱藏字幕來源提供的譯文",
+    "translation_unavailable_here": "譯文顯示已開啟，目前片段沒有譯文。"
   },
   "desktop_lyrics": {
     "menu_bar": "在 macOS 選單列顯示歌詞",
@@ -1860,7 +1863,7 @@
   "bili_subtitle": {
     "title": "Bilibili CC 字幕",
     "description": "登入 Bilibili 後，可將影片字幕顯示為歌詞。儲存的歌詞和優先選擇的歌詞來源優先使用。",
-    "language": "字幕語言與軌道",
+    "language": "字幕偏好語言",
     "automatic": "自動選擇",
     "ai_fallback": "允許 AI 字幕備援",
     "ai_description": "自動選擇時包含 AI 字幕；手動選擇的 AI 軌道始終可用。",
@@ -1877,7 +1880,14 @@
       "en": "英語",
       "ja": "日語",
       "ai-zh": "中文 · AI",
-      "ai-en": "英語 · AI"
-    }
+      "ai-en": "英語 · AI",
+      "zh": "中文"
+    },
+    "track": "目前影片字幕",
+    "language_description": "自動選擇時優先使用中文。各影片實際可用的字幕以播放選單為準。",
+    "track_description": "僅列出目前影片提供的字幕軌道。譯文顯示取決於影片是否提供其他語言字幕。",
+    "no_tracks": "暫無字幕",
+    "login_required_short": "請先登入",
+    "failed_short": "讀取失敗"
   }
 }

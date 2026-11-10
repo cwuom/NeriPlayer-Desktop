@@ -1,7 +1,7 @@
 // CC subtitle selection and interval matching ported from NeriPlayer PR #575.
 import type { LyricLine, TrackInfo } from '@/stores/player'
 import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid, resolveBiliVideoSkipCid } from '@/modules/playback/biliVideoSkip'
-import { isLyricCreditMetadataLine } from './lyricsFormat'
+import { isLyricCreditMetadataLine, visibleLyricTranslation } from './lyricsFormat'
 
 export interface BiliSubtitleTrack {
   id: string
@@ -165,6 +165,7 @@ export function alignBiliSubtitleLyrics(original: BiliSubtitleCue[], translated:
       const overlap = Math.min(line.endMs, cue.endMs) - Math.max(line.startMs, cue.startMs)
       return overlap > 0 && overlap >= Math.min(line.endMs - line.startMs, cue.endMs - cue.startMs) * 0.5
     }).map(cue => cue.text).join('\n')
-    return { startMs: line.startMs, durationMs: line.endMs - line.startMs, text: line.text, words: [], translation: translation || undefined }
+    return { startMs: line.startMs, durationMs: line.endMs - line.startMs, text: line.text, words: [],
+      translation: visibleLyricTranslation({ text: line.text, words: [], translation }) || undefined }
   })
 }

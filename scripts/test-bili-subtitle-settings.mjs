@@ -20,9 +20,10 @@ const result = language => ({ tracks: [{ language, label: `label-${language}`, i
 function mount(track = null, handler = async () => result('zh-CN'), overrides = {}) {
   const settings = vue.reactive({ biliCcSubtitleEnabled: true, biliCcSubtitleLanguage: '', biliCcSubtitleAiFallback: true, biliCcSubtitleOffset: 0, ...overrides })
   const revision = vue.ref(0)
+  const locale = vue.ref('zh-CN')
   const calls = []
   const dependencies = {
-    vue, 'vue-i18n': { useI18n: () => ({ t: key => key }) },
+    vue, 'vue-i18n': { useI18n: () => ({ t: key => key, locale }) },
     '@/stores/settings': { useSettingsStore: () => settings }, '@/modules/lyrics/biliSubtitle': subtitle,
     '@/modules/lyrics/biliSubtitleLoader': {
       biliSubtitleRevision: revision, invalidateBiliSubtitleCache: () => { revision.value++ },
@@ -40,7 +41,7 @@ function mount(track = null, handler = async () => result('zh-CN'), overrides = 
   const input = vue.reactive({ track })
   const app = renderer.createApp({ setup: () => () => vue.h(component, input) })
   app.mount({ children: [] })
-  return { bindings, input, settings, calls, revision, stop: () => app.unmount() }
+  return { bindings, input, settings, calls, revision, locale, stop: () => app.unmount() }
 }
 let cases = 0
 async function test(name, run) { await run(); cases++; console.log(`PASS ${name}`) }
@@ -90,6 +91,65 @@ await test('late lists cannot replace a new video or repopulate disabled control
     r.settings.biliCcSubtitleEnabled = false; await flush()
     assert.deepEqual(r.bindings.tracks.value, [])
     assert.equal(r.bindings.loading.value, false)
+  } finally { r.stop() }
+})
+await test('switching to a video without captions removes the previous selection without changing the preference', async () => {
+  const empty = deferred()
+  const r = mount(video(22), track => track.id.endsWith(':22') ? result('zh') : empty.promise, { biliCcSubtitleLanguage: 'zh' })
+  try {
+    await flush()
+    assert.equal(r.bindings.selectedLanguage.value, 'zh')
+    r.input.track = video(33); await flush()
+    assert.equal(r.bindings.selectedLanguage.value, '')
+    assert.equal(r.bindings.selectedLabel.value, 'bili_subtitle.loading')
+    assert.deepEqual(r.bindings.languageOptions.value.map(option => option.value), [''])
+    empty.resolve({ tracks: [], loginRequired: false }); await flush()
+    assert.equal(r.bindings.selectedLabel.value, 'bili_subtitle.no_tracks')
+    assert.equal(r.bindings.status.value, 'bili_subtitle.empty')
+    assert.equal(r.settings.biliCcSubtitleLanguage, 'zh')
+    assert.equal(r.calls.length, 2)
+    r.input.track = video(22); await flush()
+    assert.equal(r.bindings.selectedLanguage.value, 'zh')
+    assert.equal(r.bindings.selectedLabel.value, undefined)
+  } finally { r.stop() }
+})
+await test('a late subtitle list cannot repopulate a video without captions', async () => {
+  const old = deferred()
+  const r = mount(video(22), track => track.id.endsWith(':22') ? old.promise : { tracks: [], loginRequired: false }, { biliCcSubtitleLanguage: 'zh' })
+  try {
+    await flush(); r.input.track = video(33); await flush()
+    old.resolve(result('zh')); await flush()
+    assert.equal(r.bindings.selectedLanguage.value, '')
+    assert.equal(r.bindings.selectedLabel.value, 'bili_subtitle.no_tracks')
+    assert.deepEqual(r.bindings.languageOptions.value.map(option => option.value), [''])
+  } finally { r.stop() }
+})
+await test('track identity changes refresh lists even when video metadata is shared', async () => {
+  const r = mount(video(22))
+  try {
+    await flush()
+    r.input.track = { ...video(22), id: 'bilibili:another:22' }; await flush()
+    assert.equal(r.calls.length, 2)
+    r.input.track = { ...r.input.track, playlistKey: 'next-entry' }; await flush()
+    assert.equal(r.calls.length, 3)
+    r.bindings.selectLanguage(''); await flush()
+    assert.equal(r.revision.value, 1)
+    assert.equal(r.calls.length, 4)
+  } finally { r.stop() }
+})
+await test('language names include generic Chinese and localize codes and AI labels', async () => {
+  const r = mount(null, undefined, { biliCcSubtitleLanguage: 'ko' })
+  try {
+    await flush()
+    assert.equal(r.bindings.languageOptions.value.find(option => option.value === 'zh').label, 'bili_subtitle.languages.zh')
+    assert.equal(r.bindings.languageOptions.value.find(option => option.value === 'ko').label, '韩语')
+    assert.equal(r.bindings.languageName('zh_Hans'), 'bili_subtitle.languages.zh-CN')
+    assert.equal(r.bindings.languageName('ai-zh'), 'bili_subtitle.languages.zh · AI')
+    r.locale.value = 'en'; await flush()
+    assert.equal(r.bindings.languageOptions.value.find(option => option.value === 'ko').label, 'Korean')
+    r.input.track = video(22); await flush()
+    r.bindings.tracks.value = [{ language: 'ai-en', label: 'English · AI', isAi: true }]
+    assert.equal(r.bindings.languageOptions.value[1].label, 'English · AI')
   } finally { r.stop() }
 })
 await test('unmount rejects pending UI updates', async () => {

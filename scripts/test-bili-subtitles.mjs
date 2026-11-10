@@ -50,19 +50,26 @@ await test('cue parsing handles seconds, missing ends, duplicates and malformed 
 
 const align = (a, b) => s.alignBiliSubtitleLyrics(s.parseBiliSubtitleCues(payload(a)), s.parseBiliSubtitleCues(payload(b)))
 await test('a long translation stays on every matching original row without moving to the next sentence', () => {
-  const result = align([row(50, 52, 'a'), row(52, 54, 'b'), row(54, 57, 'c'), row(57, 60, 'd')], [row(50, 54, 'AB'), row(54, 57, 'C'), row(57, 60, 'D')])
+  const result = align([row(50, 52, '甲'), row(52, 54, '乙'), row(54, 57, '丙'), row(57, 60, '丁')], [row(50, 54, 'AB'), row(54, 57, 'C'), row(57, 60, 'D')])
   assert.deepEqual(result.map(line => line.translation), ['AB', 'AB', 'C', 'D'])
   assert.ok(result.every(line => line.words.length === 0))
 })
 await test('short translations combine; visible cue intervals stop at the next start', () => {
   assert.equal(align([row(0, 6, 'long')], [row(0, 2, 'A'), row(2, 4, 'B'), row(4, 6, 'C')])[0].translation, 'A\nB\nC')
-  const result = align([row(0, 10, 'a'), row(4, 8, 'b')], [row(0, 10, 'A'), row(4, 8, 'B')])
+  const result = align([row(0, 10, '甲'), row(4, 8, '乙')], [row(0, 10, 'A'), row(4, 8, 'B')])
   assert.deepEqual(result.map(line => [line.durationMs, line.translation]), [[4000, 'A'], [4000, 'B']])
 })
 await test('small boundary overlaps, gaps and placeholder translations do not attach to adjacent sentences', () => {
-  const result = align([row(0, 2, 'a'), row(2, 4, 'b'), row(8, 9, 'c')], [row(1.9, 4, 'B'), row(4, 7, 'gap'), row(8, 9, '//')])
+  const result = align([row(0, 2, '甲'), row(2, 4, '乙'), row(8, 9, '丙')], [row(1.9, 4, 'B'), row(4, 7, 'gap'), row(8, 9, '//')])
   assert.deepEqual(result.map(line => line.translation), [undefined, 'B', undefined])
   assert.equal(align([row(0, 1, '作曲: spoken words')], [row(0, 1, '作词: credit')])[0].text, '作曲: spoken words')
+})
+
+await test('duplicate originals and symbolic placeholders do not become translation lyrics', async () => {
+  const original = [row(0, 2, 'Hello, world!'), row(2, 4, '歌词'), row(4, 6, 'Hello')]
+  const translated = [row(0, 2, 'ＨＥＬＬＯ WORLD'), row(2, 4, '♪ …'), row(4, 6, '你好')]
+  const lines = s.alignBiliSubtitleLyrics(s.parseBiliSubtitleCues(payload(original)), s.parseBiliSubtitleCues(payload(translated)))
+  assert.deepEqual(lines.map(line => line.translation), [undefined, undefined, '你好'])
 })
 
 function runtime(handler) {

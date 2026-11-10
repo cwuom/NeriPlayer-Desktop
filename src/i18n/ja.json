@@ -1761,7 +1761,10 @@
     "copy_all": "歌詞をすべてコピー",
     "seek_here": "この行へジャンプ",
     "show_display_controls": "翻訳/ローマ字ボタンを表示",
-    "hide_display_controls": "翻訳/ローマ字ボタンを非表示"
+    "hide_display_controls": "翻訳/ローマ字ボタンを非表示",
+    "hide_translation": "訳文を非表示",
+    "translation_source_hint": "歌詞の提供元にある訳文の表示を切り替えます",
+    "translation_unavailable_here": "訳文表示は有効です。この区間には訳文がありません。"
   },
   "desktop_lyrics": {
     "menu_bar": "macOS のメニューバーに歌詞を表示",
@@ -1860,7 +1863,7 @@
   "bili_subtitle": {
     "title": "Bilibili CC 字幕",
     "description": "Bilibili にログインすると、動画の字幕を歌詞として表示できます。保存された歌詞と優先する歌詞ソースが優先されます。",
-    "language": "字幕の言語とトラック",
+    "language": "字幕の優先言語",
     "automatic": "自動選択",
     "ai_fallback": "AI 字幕を補助として使用",
     "ai_description": "自動選択に AI 字幕を含めます。手動で選択した AI トラックは常に使用できます。",
@@ -1877,7 +1880,14 @@
       "en": "英語",
       "ja": "日本語",
       "ai-zh": "中国語 · AI",
-      "ai-en": "英語 · AI"
-    }
+      "ai-en": "英語 · AI",
+      "zh": "中国語"
+    },
+    "track": "現在の動画の字幕",
+    "language_description": "自動選択では中国語を優先します。各動画で利用できる字幕は再生メニューに表示されます。",
+    "track_description": "この動画が提供する字幕のみ表示します。訳文の表示には別の言語の字幕が必要です。",
+    "no_tracks": "字幕なし",
+    "login_required_short": "ログインが必要です",
+    "failed_short": "読み込み失敗"
   }
 }

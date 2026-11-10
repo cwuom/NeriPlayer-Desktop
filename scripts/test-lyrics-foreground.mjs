@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
+import { format } from './bili-subtitle-test-loader.mjs'
 
 const source = await readFile(new URL('../src/components/LyricsView.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(source).descriptor, {
@@ -80,6 +81,7 @@ async function mount(overrides = {}) {
     lyricBlur: true, lyricBlurAmount: 1, lyricFontScale: 1,
   })
   const dependencies = {
+    '@/modules/lyrics/lyricsFormat': format,
     vue,
     '@amll-core/lyric-player/dom/index.ts': { DomLyricPlayer: FakeDomLyricPlayer },
     '@/stores/settings': { useSettingsStore: () => settings },
