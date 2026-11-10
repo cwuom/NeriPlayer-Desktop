@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use reqwest::Url;
 
-/// Subtitle URLs originate in player metadata. Credentials may only reach Bilibili's CDN.
+/// Restrict caption fetches to HTTPS endpoints on Bilibili and its subtitle CDN.
 pub fn subtitle_url(raw: &str) -> AppResult<Url> {
     let raw = raw.trim();
     let normalized = if raw.starts_with("//") {
