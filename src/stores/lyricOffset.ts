@@ -61,6 +61,7 @@ const SETTING_KEYS = {
   kugou: 'kugouOffset',
   lrclib: 'lrclibOffset',
   amll_ttml: 'amllTtmlOffset',
+  bilibili_cc: 'biliCcSubtitleOffset',
 } as const satisfies Record<LyricOffsetSource, string>
 
 function playbackSourceOf(track: OffsetTrack): string | null {

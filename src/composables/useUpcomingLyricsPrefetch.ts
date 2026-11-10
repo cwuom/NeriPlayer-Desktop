@@ -4,6 +4,8 @@ import { useSettingsStore } from '@/stores/settings'
 import { prefetchTrackLyrics } from '@/modules/lyrics/lyricsPrefetch'
 import { lyricsIdentity } from '@/modules/lyrics/lyricsRequest'
 import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
+import { biliSubtitlePreferences } from '@/modules/lyrics/biliSubtitle'
+import { biliSubtitleRevision } from '@/modules/lyrics/biliSubtitleLoader'
 import { createLogger } from '@/utils/logger'
 import { summarizeLogError } from '@/utils/logSanitizer'
 
@@ -19,6 +21,7 @@ export function useUpcomingLyricsPrefetch(): void {
   const settings = useSettingsStore()
   const attempted = new Set<string>()
   let timer: ReturnType<typeof setTimeout> | null = null
+  const preferencesKey = () => JSON.stringify([settings.defaultLyricSource, settings.preferWordTimedLyrics, biliSubtitlePreferences(settings), biliSubtitleRevision.value])
 
   function cancel() {
     if (timer) clearTimeout(timer)
@@ -29,7 +32,8 @@ export function useUpcomingLyricsPrefetch(): void {
     timer = null
     const track = player.upcomingTrack()
     if (!track || !player.isPlaying) return
-    const key = `${lyricsIdentity(track)}|${settings.defaultLyricSource}|${settings.preferWordTimedLyrics}`
+    const preferences = preferencesKey()
+    const key = `${lyricsIdentity(track)}|${preferences}`
     if (attempted.has(key)) return
     attempted.add(key)
     if (attempted.size > MAX_REMEMBERED) {
@@ -41,6 +45,8 @@ export function useUpcomingLyricsPrefetch(): void {
         playbackSource: getPlaybackSourceKind(track),
         defaultLyricSource: settings.defaultLyricSource,
         preferWordTimed: settings.preferWordTimedLyrics,
+        subtitle: biliSubtitlePreferences(settings),
+        isCurrent: () => preferences === preferencesKey(),
       })
       log.info('upcoming lyrics prefetch:', { trackId: track.id, outcome })
     } catch (error) {
@@ -55,6 +61,7 @@ export function useUpcomingLyricsPrefetch(): void {
       player.currentTrack?.id ?? '',
       player.isPlaying && !player.isLoadingAudio,
       player.upcomingTrack()?.id ?? '',
+      preferencesKey(),
     ] as const,
     ([currentId, steady, upcomingId]) => {
       cancel()

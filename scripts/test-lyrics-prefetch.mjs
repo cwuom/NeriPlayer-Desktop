@@ -63,8 +63,9 @@ function prefetchRuntime(state = {}) {
   const calls = []
   const sources = new Map(Object.entries(state.sources ?? {}))
   const deps = {
+    './biliSubtitleLoader': { biliSubtitleRevision: { value: 0 }, loadBiliSubtitleLyrics: async () => ({ lines: [] }) },
     './lyricsCache': {
-      getCachedLyrics: async () => { calls.push('cache-read'); return state.cached ?? null },
+      readCachedLyrics: async track => { calls.push('cache-read'); return state.cached ? { lines: state.cached, source: sources.get(track.id) ?? null } : null },
       saveCachedLyrics: async (_, lines, source) => { calls.push(['cache-write', source, lines.length]) },
     },
     './lyricsFetch': {
@@ -103,7 +104,7 @@ const track = { id: 'netease:1', source: 'netease', title: 'T', artist: 'A', dur
   const r = prefetchRuntime()
   const { prefetchTrackLyrics } = await loadModule('../src/modules/lyrics/lyricsPrefetch.ts', r.deps)
   assert.equal(await prefetchTrackLyrics(track, options()), 'fetched')
-  assert.deepEqual(r.calls, ['cache-read', 'automatic', ['remember', 'netease'], ['cache-write', 'netease', 1]])
+  assert.deepEqual(r.calls, ['cache-read', 'automatic', ['cache-write', 'netease', 1]])
 }
 {
   const r = prefetchRuntime({ automatic: { source: null, lines: [] } })
@@ -116,7 +117,7 @@ const track = { id: 'netease:1', source: 'netease', title: 'T', artist: 'A', dur
   const r = prefetchRuntime({ cached: plain, sources: { 'netease:1': 'netease' }, preferred: { source: 'kugou', lines: timed } })
   const { prefetchTrackLyrics } = await loadModule('../src/modules/lyrics/lyricsPrefetch.ts', r.deps)
   assert.equal(await prefetchTrackLyrics(track, options('kugou')), 'fetched')
-  assert.deepEqual(r.calls, ['cache-read', ['preferred', 'kugou'], ['remember', 'kugou'], ['cache-write', 'kugou', 1]])
+  assert.deepEqual(r.calls, ['cache-read', ['preferred', 'kugou'], ['cache-write', 'kugou', 1]])
 }
 {
   // 默认歌词源没匹配上时保留已有缓存，不再走自动取词

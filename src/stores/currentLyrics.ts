@@ -6,6 +6,8 @@ import { computed, ref, shallowRef, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type LyricLine, type TrackInfo } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
+import { biliSubtitlePreferences, biliSubtitleTarget } from '@/modules/lyrics/biliSubtitle'
+import { biliSubtitleRevision, loadBiliSubtitleLyrics, type BiliSubtitleLyrics } from '@/modules/lyrics/biliSubtitleLoader'
 import { getCachedLyrics, saveCachedLyrics } from '@/modules/lyrics/lyricsCache'
 import { hasWordTimedLyrics, loadLyricsSingleFlight } from '@/modules/lyrics/lyricsRequest'
 import {
@@ -45,6 +47,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
   const settings = useSettingsStore()
   const lines = shallowRef<LyricLine[]>([])
   const loading = ref(false)
+  const subtitle = shallowRef<BiliSubtitleLyrics | null>(null)
   let consumers = 0
   let request = 0
   /** 已经按哪首歌、哪套歌词设置取过；没有界面时换歌只清空，下次 acquire 再取 */
@@ -62,11 +65,12 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
       track?.id ?? '',
       settings.defaultLyricSource,
       settings.preferWordTimedLyrics,
+      track && biliSubtitleTarget(track) ? JSON.stringify([biliSubtitleTarget(track), biliSubtitlePreferences(settings), biliSubtitleRevision.value]) : '',
     ].join('|')
   }
 
   // 同步载荷里的歌词：null 表示没有本地覆盖（可在线取）；[] 表示有意清空或解析失败
-  async function materializeSynced(track: TrackInfo): Promise<LyricLine[] | null> {
+  async function materializeSynced(track: TrackInfo, id: number): Promise<LyricLine[] | null> {
     try {
       const synced = await materializeStoredLyrics(
         track.syncPayload,
@@ -75,7 +79,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
           : { content })),
         error => log.warn('stored translation or romanization not parsed:', summarizeLogError(error)),
       )
-      if (synced?.length) rememberLyricSource(track, readSyncedLyricSource(track.syncPayload))
+      if (synced?.length && id === request) rememberLyricSource(track, readSyncedLyricSource(track.syncPayload))
       return synced
     } catch (error) {
       log.warn('synced lyrics not materialized:', summarizeLogError(error))
@@ -85,6 +89,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
 
   /** 缺逐字时间轴时后台换上 AMLL TTML / 酷狗的逐字版本；期间歌词被编辑或换歌就作废 */
   function upgradeWordTimed(track: TrackInfo, id: number) {
+    if (lyricSourceOf(track) === 'bilibili_cc') return
     const baseline = lines.value
     if (!settings.preferWordTimedLyrics || !getPlaybackSourceKind(track) || hasWordTimedLyrics(baseline)) return
     if (resolveStoredLyricStateFromPayload(track.syncPayload).kind !== 'absent') return
@@ -118,6 +123,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
   function backfillSecondaryLyrics(requestedTrack: TrackInfo, id: number) {
     const track = player.currentTrack
     if (!track || id !== request || !sameSong(track, requestedTrack)) return
+    if (lyricSourceOf(track) === 'bilibili_cc') return
     if (normalizeLyricSource(lyricSourceOf(track)) === 'kugou') {
       const needs = kugouSecondaryLyricNeeds(lines.value, track.syncPayload, lyricSourceOf(track))
       if (!needs.translation && !needs.romanization) return
@@ -157,18 +163,20 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     const track = player.hasPlaybackSession ? player.currentTrack : null
     // 换曲瞬间立即撤下旧词：旧词挂着时歌词视图会把归零的进度当成大幅回跳
     lines.value = []
+    subtitle.value = null
     if (!track) {
       loading.value = false
       return
     }
 
-    const cached = await getCachedLyrics(track)
+    if (lyricSourceOf(track) === 'bilibili_cc') rememberLyricSource(track, null)
+    const cached = await getCachedLyrics(track, () => id === request)
     if (id !== request) return
     lines.value = cached || []
     loading.value = true
     try {
       // 同步歌词最优先（Android 匹配的歌词经云同步落在 syncPayload，必须压过本地旧缓存）
-      const synced = await materializeSynced(track)
+      const synced = await materializeSynced(track, id)
       if (id !== request) return
       if (synced !== null) {
         lines.value = synced
@@ -179,13 +187,25 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
         return
       }
 
+      // Downloaded Bilibili tracks can have edited sidecars; read them before online subtitles.
+      if (biliSubtitleTarget(track) && track.audioUrl && !/^https?:\/\//i.test(track.audioUrl)) {
+        const local = mapBackendLyrics(await invoke<any[]>('load_local_lyrics', { audioPath: track.audioUrl }).catch(() => []))
+        if (id !== request) return
+        if (local.length) {
+          rememberLyricSource(track, 'local')
+          lines.value = local
+          return
+        }
+      }
+      if (cached?.length && ['local', 'localedit'].includes((lyricSourceOf(track) ?? '').toLowerCase().replace(/_/g, ''))) return
+
       // 设了默认歌词源时先按它匹配（Android tryGetPreferredLyricSourceResult），缓存已是该来源就直接用
       const preferredSource = preferredLyricMatchSource(getPlaybackSourceKind(track), settings.defaultLyricSource)
       if (preferredSource && !(cached?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource)) {
         const preferred = await fetchPreferredSourceLyrics(track, preferredSource, settings.preferWordTimedLyrics)
           .catch(error => { log.warn('preferred lyric source unavailable:', summarizeLogError(error)); return null })
         if (id !== request) return
-        if (preferred) {
+        if (preferred?.lines.length) {
           rememberLyricSource(track, preferred.source)
           lines.value = preferred.lines
           cache(track, preferred.lines)
@@ -194,27 +214,35 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
         }
       }
 
+      if (preferredSource && cached?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource) return
+
+      const cc = await loadBiliSubtitleLyrics(track, biliSubtitlePreferences(settings))
+        .catch(error => { log.warn('Bilibili subtitles unavailable:', summarizeLogError(error)); return null })
+      if (id !== request) return
+      if (cc?.lines.length) {
+        rememberLyricSource(track, cc.source)
+        subtitle.value = cc
+        lines.value = cc.lines
+        return
+      }
+
       if (cached?.length) {
         if (!preferredSource) upgradeWordTimed(track, id)
         backfillSecondaryLyrics(track, id)
         return
       }
 
-      const fetched = await loadLyricsSingleFlight(track, async () => {
-        const result = await fetchAutomaticLyrics(track, getPlaybackSourceKind(track), settings.preferWordTimedLyrics)
-        if (result.lines.length > 0) {
-          rememberLyricSource(track, result.source)
-          cache(track, result.lines)
-        }
-        return result
-      })
+      const fetched = await loadLyricsSingleFlight(track, () =>
+        fetchAutomaticLyrics(track, getPlaybackSourceKind(track), settings.preferWordTimedLyrics))
       if (id !== request) return
+      rememberLyricSource(track, fetched.source)
       lines.value = fetched.lines
+      cache(track, fetched.lines)
       upgradeWordTimed(track, id)
       backfillSecondaryLyrics(track, id)
     } catch (error) {
       log.error('lyrics not loaded:', { trackId: track.id, error: summarizeLogError(error) })
-      const restored = await getCachedLyrics(track)
+      const restored = await getCachedLyrics(track, () => id === request)
       if (id === request) lines.value = restored || cached || []
     } finally {
       if (id === request) loading.value = false
@@ -230,6 +258,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     request++
     loadedKey = null
     lines.value = []
+    subtitle.value = null
     loading.value = false
   })
 
@@ -260,8 +289,9 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     loadedKey = loadKey()
     loading.value = false
     lines.value = next
+    subtitle.value = null
   }
 
-  const displayLines = computed(() => filterLyricCreditMetadataLines(lines.value, player.currentTrack))
-  return { lines: displayLines, loading, acquire, replace }
+  const displayLines = computed(() => subtitle.value ? lines.value : filterLyricCreditMetadataLines(lines.value, player.currentTrack))
+  return { lines: displayLines, loading, subtitle, acquire, replace }
 })

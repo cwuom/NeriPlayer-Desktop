@@ -67,6 +67,45 @@ pub struct BiliVideoPage {
 }
 
 impl BiliClient {
+    pub fn has_login_session(&self) -> bool {
+        self.cookie_jar.as_ref().and_then(|jar| bili_cookie_value(jar, "SESSDATA")).is_some()
+    }
+
+    pub async fn get_player_subtitles(&self, bvid: &str, cid: u64) -> AppResult<Value> {
+        if cid == 0 { return Err(AppError::Api("Invalid Bilibili subtitle CID".into())); }
+        let response = self.wbi_get("https://api.bilibili.com/x/player/wbi/v2", BTreeMap::from([
+            ("bvid".into(), bvid.into()), ("cid".into(), cid.to_string()),
+        ])).await?;
+        Ok(response["data"]["subtitle"].clone())
+    }
+
+    /// The supplied transport rejects redirects, including redirects to another trusted host.
+    pub async fn get_subtitle_payload(&self, http: FallbackHttp, raw_url: &str, bvid: &str) -> AppResult<Value> {
+        let url = super::subtitle::subtitle_url(raw_url)?;
+        let referer = super::subtitle::subtitle_referer(bvid)?;
+        let cookie = self.cookie_jar.as_ref().and_then(|jar| {
+            jar.cookies(&reqwest::Url::parse("https://www.bilibili.com/").expect("static URL"))
+        });
+        let mut response = http.send(|client| {
+            let mut request = client.get(url.clone())
+                .header("User-Agent", USER_AGENT).header("Referer", &referer)
+                .header("Origin", "https://www.bilibili.com").timeout(Duration::from_secs(20));
+            if let Some(cookie) = &cookie { request = request.header(reqwest::header::COOKIE, cookie); }
+            request
+        }).await?;
+        if !response.status().is_success() {
+            return Err(AppError::Api(format!("Bilibili subtitle: HTTP {}", response.status())));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(reqwest::Error::without_url)? {
+            if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+                return Err(AppError::Api("Bilibili subtitle exceeds 4 MiB".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| AppError::Api("Invalid Bilibili subtitle JSON".into()))
+    }
+
     pub fn new(http: &Client) -> Self {
         Self::with_transport(FallbackHttp::new(http, "bilibili"))
     }

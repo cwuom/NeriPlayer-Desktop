@@ -10,7 +10,7 @@
 // TTML 的默认。其余情况（来源未知、YouTube 原生歌词、本地歌词文件、手动编辑）与 Android
 // resolveLyricDefaultOffsetMs 一样：QQ 曲目用 QQ 默认，其它一律用网易云默认。
 
-export const LYRIC_OFFSET_SOURCES = ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml'] as const
+export const LYRIC_OFFSET_SOURCES = ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml', 'bilibili_cc'] as const
 export type LyricOffsetSource = typeof LYRIC_OFFSET_SOURCES[number]
 
 // 与 Android DEFAULT_*_LYRIC_OFFSET_MS 一致
@@ -20,6 +20,7 @@ export const DEFAULT_LYRIC_OFFSET_MS: Readonly<Record<LyricOffsetSource, number>
   kugou: 0,
   lrclib: 0,
   amll_ttml: 0,
+  bilibili_cc: 0,
 }
 
 // 与 Android MIN/MAX_LYRIC_DEFAULT_OFFSET_MS、LYRIC_DEFAULT_OFFSET_STEP_MS 一致
@@ -58,6 +59,9 @@ export function normalizeLyricSource(value: unknown): LyricOffsetSource | 'none'
     case 'amllttml':
     case 'ttml':
       return 'amll_ttml'
+    case 'bilibilicc':
+    case 'bilicc':
+      return 'bilibili_cc'
     case 'youtube':
     case 'local':
     case 'localedit':

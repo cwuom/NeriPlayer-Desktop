@@ -311,7 +311,7 @@ pub async fn get_bili_audio_url(
 
 const BILI_VIDEO_INFO_UNAVAILABLE: &str = "Bilibili video info unavailable";
 
-async fn resolve_bili_playback_target(
+pub(crate) async fn resolve_bili_playback_target(
     client: &BiliClient,
     bvid: String,
     avid: Option<u64>,

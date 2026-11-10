@@ -1856,5 +1856,28 @@
     "show_main": "Show NeriPlayer",
     "desktop_lyrics": "Desktop Lyrics",
     "quit": "Quit NeriPlayer"
+  },
+  "bili_subtitle": {
+    "title": "Bilibili CC subtitles",
+    "description": "Use video captions as lyrics after signing in to Bilibili. Saved lyrics and the preferred lyric source take priority.",
+    "language": "Subtitle language and track",
+    "automatic": "Automatic",
+    "ai_fallback": "Allow AI subtitle fallback",
+    "ai_description": "Include AI captions in automatic selection. An explicitly selected AI track remains available.",
+    "offset": "CC subtitle default offset",
+    "loading": "Loading subtitle tracks…",
+    "login_required": "Sign in to Bilibili to load CC subtitles.",
+    "failed": "Could not load subtitle tracks. Refresh to retry.",
+    "empty": "This video has no available CC subtitles.",
+    "tracks_available": "{count} subtitle tracks available.",
+    "refresh": "Refresh subtitles",
+    "languages": {
+      "zh-CN": "Simplified Chinese",
+      "zh-TW": "Traditional Chinese",
+      "en": "English",
+      "ja": "Japanese",
+      "ai-zh": "Chinese · AI",
+      "ai-en": "English · AI"
+    }
   }
 }

@@ -5,6 +5,8 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { SUPPORTED_LOCALES, setLocaleWithTransition } from '@/i18n'
 import DesktopLyricsStage from '@/components/desktopLyrics/DesktopLyricsStage.vue'
+import BiliSubtitleSettings from '@/components/BiliSubtitleSettings.vue'
+import { invalidateBiliSubtitleCache } from '@/modules/lyrics/biliSubtitleLoader'
 import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
 import type { DesktopLyricsFrameLine } from '@/modules/desktopLyrics/frame'
 import {
@@ -1117,6 +1119,7 @@ async function clearStorageCache(options: StorageCacheClearOptions) {
       { options, downloadDir: downloadDir.value || null },
     )
     clearBrowserCache(options)
+    if (options.lyricsCache) invalidateBiliSubtitleCache()
     const mb = ((result.clearedBytes || 0) / 1024 / 1024).toFixed(1)
     if (result.failedCount > 0) {
       toast.show(t('settings.storage_cache_partial', { mb, count: result.failedCount }), 'info')
@@ -1251,6 +1254,7 @@ const lyricOffsetSettings = [
   { key: 'kugouOffset', label: 'settings.kugou_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.kugou, iconSvg: '/icons/ic_kugou.svg' },
   { key: 'lrclibOffset', label: 'settings.lrclib_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.lrclib, iconSvg: '/icons/ic_lrclib.svg' },
   { key: 'amllTtmlOffset', label: 'settings.amll_ttml_offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.amll_ttml, iconSvg: '/icons/ic_amll.svg' },
+  { key: 'biliCcSubtitleOffset', label: 'bili_subtitle.offset', defaultMs: DEFAULT_LYRIC_OFFSET_MS.bilibili_cc, iconSvg: '/icons/ic_bilibili.svg' },
 ] as const
 
 const lyricOffsetsChanged = computed(() => lyricOffsetSettings.some(item => settings[item.key] !== item.defaultMs))
@@ -2533,6 +2537,8 @@ useEscapeClose(
       <CustomSelect class="settings-select" :model-value="defaultLyricSource" :options="defaultLyricSourceOptions"
         :label="t('settings.default_lyric_source')" @update:model-value="changeDefaultLyricSource" />
     </div>
+
+    <BiliSubtitleSettings :show-offset="false" />
 
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>

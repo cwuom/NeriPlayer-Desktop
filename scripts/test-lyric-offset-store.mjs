@@ -45,7 +45,7 @@ async function runtime({ hydrated = true, savedOffsets = null, savedMeta = null 
   if (savedMeta) storage.set('neri:lyric-offset-meta', JSON.stringify(savedMeta))
   const settings = vue.reactive({
     isHydrated: hydrated,
-    cloudMusicOffset: 1000, qqMusicOffset: 500, kugouOffset: 0, lrclibOffset: 0, amllTtmlOffset: 300,
+    cloudMusicOffset: 1000, qqMusicOffset: 500, kugouOffset: 0, lrclibOffset: 0, amllTtmlOffset: 300, biliCcSubtitleOffset: 0,
   })
   const player = {
     currentTrack: null,
@@ -91,6 +91,23 @@ await regression('the default follows the source of the lyrics on screen', async
   assert.equal(store.effectiveOffsetMs(youtube), 1000, 'YouTube 曲目来源未知时也回落网易云默认')
   sourceModule.rememberLyricSource(youtube, 'lrclib')
   assert.equal(store.offsetSourceFor(youtube), 'lrclib')
+})
+
+await regression('CC subtitles use an independent live default and preserve per-track adjustments', async () => {
+  const { store, settings, player } = await runtime()
+  const song = track('bilibili:cc')
+  player.currentTrack = song
+  sourceModule.rememberLyricSource(song, 'bilibili_cc')
+  assert.equal(store.offsetSourceFor(song), 'bilibili_cc')
+  assert.equal(store.effectiveOffsetMs(song), 0)
+  settings.biliCcSubtitleOffset = 250
+  await vue.nextTick()
+  assert.equal(store.effectiveOffsetMs(song), 250)
+  store.setEffectiveOffsetMs(song, 400)
+  settings.biliCcSubtitleOffset = 500
+  await vue.nextTick()
+  assert.equal(store.effectiveOffsetMs(song), 400)
+  assert.equal(settings.cloudMusicOffset, 1000)
 })
 
 await regression('a NetEase default borrowed for unknown lyrics is reported as a guess', async () => {

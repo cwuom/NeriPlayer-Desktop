@@ -438,4 +438,24 @@ for (const [value, step, min, max, expected] of [
 cases++
 console.log('ok - typed values are rounded to the step precision and clamped')
 
+await regression('CC subtitle preferences normalize and survive hydration, persistence and config replacement', async store => {
+  assert.equal(store.biliCcSubtitleEnabled, true)
+  assert.equal(store.biliCcSubtitleAiFallback, true)
+  assert.equal(store.biliCcSubtitleOffset, 0)
+  loadResult = { settings: { biliCcSubtitleEnabled: false, biliCcSubtitleLanguage: ' ai-zh ', biliCcSubtitleAiFallback: false, biliCcSubtitleOffset: -75 }, persisted: true }
+  await store.hydrate()
+  assert.equal(store.biliCcSubtitleLanguage, 'ai-zh')
+  assert.equal(store.biliCcSubtitleOffset, -50)
+  store.biliCcSubtitleEnabled = true
+  await flushPersist()
+  const savedSettings = saved.at(-1)
+  assert.equal(savedSettings.biliCcSubtitleEnabled, true)
+  assert.equal(savedSettings.biliCcSubtitleAiFallback, false)
+  assert.equal(savedSettings.biliCcSubtitleLanguage, 'ai-zh')
+  store.applySnapshot(JSON.parse(JSON.stringify(savedSettings)))
+  assert.equal(store.snapshot().biliCcSubtitleOffset, -50)
+  store.applySnapshot({ biliCcSubtitleLanguage: 'invalid language', biliCcSubtitleOffset: Infinity })
+  assert.equal(store.biliCcSubtitleLanguage, '')
+  assert.equal(store.biliCcSubtitleOffset, 0)
+})
 console.log(`Settings integrity regressions: ${cases} passed`)

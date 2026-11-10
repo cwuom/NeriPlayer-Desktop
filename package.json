@@ -6,6 +6,9 @@
   "packageManager": "pnpm@9.15.9",
   "type": "module",
   "scripts": {
+    "test:bili-subtitles": "node scripts/test-bili-subtitles.mjs",
+    "test:bili-subtitle-current": "node scripts/test-bili-subtitle-current.mjs",
+    "test:bili-subtitle-settings": "node scripts/test-bili-subtitle-settings.mjs",
     "test:now-playing-title": "node scripts/test-now-playing-title.mjs",
     "test:volume-controls": "node scripts/test-volume-controls.mjs",
     "test:artist-metadata-navigation": "node scripts/test-artist-metadata-navigation.mjs",

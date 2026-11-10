@@ -191,6 +191,12 @@ impl AppState {
         )
     }
 
+    pub fn subtitle_transport(&self) -> crate::api::transport::FallbackHttp {
+        crate::api::transport::FallbackHttp::with_fallback(
+            &self.sync_http(), &self.sync_alt_http.read().clone(), "bilibili_subtitle",
+        )
+    }
+
     /// 代理设置与 http() 相反的备用客户端
     pub fn alt_http(&self) -> reqwest::Client {
         self.alt_http.read().clone()

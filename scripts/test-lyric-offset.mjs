@@ -33,8 +33,8 @@ const {
 } = await loadTsModule('../src/modules/lyrics/lyricOffset.ts')
 
 // 五个来源与默认值对齐 Android LyricOffsetDefaults
-assert.deepEqual([...LYRIC_OFFSET_SOURCES], ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml'])
-assert.deepEqual(DEFAULT_LYRIC_OFFSET_MS, { netease: 1000, qq: 500, kugou: 0, lrclib: 0, amll_ttml: 0 })
+assert.deepEqual([...LYRIC_OFFSET_SOURCES], ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml', 'bilibili_cc'])
+assert.deepEqual(DEFAULT_LYRIC_OFFSET_MS, { netease: 1000, qq: 500, kugou: 0, lrclib: 0, amll_ttml: 0, bilibili_cc: 0 })
 
 // 默认偏移按 50ms 对齐、夹到 ±5000ms；半步向正无穷取整（Kotlin roundToLong）
 assert.equal(normalizeLyricDefaultOffsetMs(1024), 1000)
@@ -52,6 +52,7 @@ for (const [raw, expected] of [
   ['kugou', 'kugou'], ['Kugou', 'kugou'],
   ['lrclib', 'lrclib'], ['LRCLIB', 'lrclib'], ['LrcLib', 'lrclib'],
   ['amll_ttml', 'amll_ttml'], ['AmllTtml', 'amll_ttml'],
+  ['bilibili_cc', 'bilibili_cc'], ['BiliCc', 'bilibili_cc'],
   ['youtube', 'none'], ['local', 'none'], ['LOCAL_EDIT', 'none'],
   ['', null], [null, null], [undefined, null], ['something', null], [42, null],
 ]) {

@@ -322,6 +322,12 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
    与 `commands/desktop_lyrics_cmd.rs`，验证窗口锁定、点击穿透、拖动和关闭恢复。
 4. 时间逻辑可用回归脚本验证；多窗口行为仍需在受影响桌面系统验证。
 
+Bilibili CC 字幕移植依据 Android PR #575，参考提交 `43cf89ae2e331f80eecdb55efabc7c8f5d6df533`。
+`biliSubtitle.ts` 负责解析、语言选择与字幕显示区间匹配；`biliSubtitleLoader.ts` 管理登录会话内缓存。
+原生接口复用播放分 P 解析与 WBI 签名，字幕文件请求限定官方 CDN 并禁止重定向。
+运行 `pnpm test:bili-subtitles`、`pnpm test:bili-subtitle-current` 和 `pnpm test:bili-subtitle-settings`。
+固定字幕测试使用构造时间戳；真实登录、视频字幕与桌面窗口显示仍需原生环境验证。
+
 #### 6. 修改 GitHub / WebDAV 同步
 
 1. 先读 `sync/models.rs`、`proto_models.rs`、`serializer.rs`、`archive/`、`merge.rs`、
