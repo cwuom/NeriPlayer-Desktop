@@ -15,7 +15,7 @@ const renderer = vue.createRenderer({
   remove(node) { node.parent.children = node.parent.children.filter(child => child !== node) },
 })
 const video = cid => ({ id: `bilibili:170001:${cid}`, album: `Bilibili|${cid}|BV1xx411c7mD` })
-const result = language => ({ tracks: [{ language, label: `label-${language}`, isAi: language.startsWith('ai-') }], loginRequired: false })
+const result = language => ({ tracks: [{ language, label: `label-${language}`, url: `https://aisubtitle.hdslb.com/${language}.json`, isAi: language.startsWith('ai-') }], loginRequired: false })
 
 function mount(track = null, handler = async () => result('zh-CN'), overrides = {}) {
   const settings = vue.reactive({ biliCcSubtitleEnabled: true, biliCcSubtitleLanguage: '', biliCcSubtitleAiFallback: true, biliCcSubtitleOffset: 0, ...overrides })
@@ -151,6 +151,30 @@ await test('language names include generic Chinese and localize codes and AI lab
     r.bindings.tracks.value = [{ language: 'ai-en', label: 'English · AI', isAi: true }]
     assert.equal(r.bindings.languageOptions.value[1].label, 'English · AI')
   } finally { r.stop() }
+})
+await test('the selected video track follows loader aliases, exact-match priority and Chinese scripts', async () => {
+  for (const [preference, languages, expected] of [
+    ['zh', ['zh-CN'], 'zh-CN'],
+    ['en', ['en-US'], 'en-US'],
+    ['zh-Hans', ['zh-TW', 'zh-CN'], 'zh-CN'],
+    ['zh-Hant', ['zh-CN', 'zh-TW'], 'zh-TW'],
+    ['zh-CN', ['zh-TW'], ''],
+    ['zh', ['zh-TW', 'zh-CN'], 'zh-CN'],
+    ['en-US', ['en-GB', 'en-US'], 'en-US'],
+    ['en', ['ai-en'], ''],
+    ['ai-en', ['en-US', 'ai-en'], 'ai-en'],
+    ['', ['zh-CN', 'en-US'], ''],
+  ]) {
+    const r = mount(video(22), async () => ({ tracks: languages.flatMap(language => result(language).tracks), loginRequired: false }), {
+      biliCcSubtitleLanguage: preference, biliCcSubtitleAiFallback: false,
+    })
+    try {
+      await flush()
+      assert.equal(r.bindings.selectedLanguage.value, expected, `${preference}: ${languages.join(', ')}`)
+      assert.equal(r.settings.biliCcSubtitleLanguage, preference, 'displaying an alias preserves the preference')
+      assert.ok(r.bindings.languageOptions.value.some(option => option.value === expected))
+    } finally { r.stop() }
+  }
 })
 await test('unmount rejects pending UI updates', async () => {
   const late = deferred()

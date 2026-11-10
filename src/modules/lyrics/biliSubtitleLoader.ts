@@ -30,6 +30,7 @@ const pendingTracks = new Map<string, Promise<BiliSubtitleTracks>>()
 const pendingLyrics = new Map<string, Promise<BiliSubtitleLyrics>>()
 export const biliSubtitleRevision = ref(0)
 
+/** Clear session data and invalidate results still pending across login or refresh changes. */
 export function invalidateBiliSubtitleCache(): void {
   biliSubtitleRevision.value++
   tracksCache.clear()
@@ -38,12 +39,14 @@ export function invalidateBiliSubtitleCache(): void {
   pendingLyrics.clear()
 }
 
+/** Cache a successful result with a TTL and evict the oldest entries above the size limit. */
 function put<T>(cache: Map<string, { value: T; expires: number }>, key: string, value: T) {
   cache.delete(key)
   cache.set(key, { value, expires: Date.now() + TTL_MS })
   while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value!)
 }
 
+/** Share an in-flight request; settling an obsolete request cannot remove its replacement. */
 function singleFlight<T>(pending: Map<string, Promise<T>>, key: string, loader: () => Promise<T>): Promise<T> {
   const existing = pending.get(key)
   if (existing) return existing
@@ -54,6 +57,7 @@ function singleFlight<T>(pending: Map<string, Promise<T>>, key: string, loader: 
   return request
 }
 
+/** Fetch tracks for one video part, caching only nonempty results from the current session. */
 export async function loadBiliSubtitleTracks(track: TrackInfo): Promise<BiliSubtitleTracks> {
   const target = biliSubtitleTarget(track)
   if (!target) return { bvid: '', cid: 0, tracks: [], loginRequired: false }
@@ -69,6 +73,7 @@ export async function loadBiliSubtitleTracks(track: TrackInfo): Promise<BiliSubt
   })
 }
 
+/** Load and align the preferred original/translation pair, leaving incomplete results retryable. */
 export async function loadBiliSubtitleLyrics(track: TrackInfo, preferences: BiliSubtitlePreferences): Promise<BiliSubtitleLyrics> {
   const empty: BiliSubtitleLyrics = { source: 'bilibili_cc', lines: [] }
   const target = biliSubtitleTarget(track)

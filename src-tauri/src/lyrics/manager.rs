@@ -813,6 +813,7 @@ fn normalize_artists(value: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Load saved lyrics and nearby lyric files, preserving translation and romanization metadata.
 pub(crate) fn load_local_sidecar_lyrics(audio_path: &str) -> Option<Vec<LyricLine>> {
     let path = Path::new(audio_path);
     let metadata = crate::commands::download_cmd::metadata::read_metadata(path);

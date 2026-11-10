@@ -458,6 +458,7 @@ function hasLegacySnapshot(): boolean {
     || localStorage.getItem('neri:player-state') !== null
 }
 
+/** Restore settings over current defaults and normalize persisted values before use or export. */
 function normalizeSnapshot(input: unknown): AppSettings {
   const source = input && typeof input === 'object' ? input as Partial<AppSettings> : {}
   const result = { ...DEFAULT_SETTINGS, equalizerBands: [...DEFAULT_SETTINGS.equalizerBands] }

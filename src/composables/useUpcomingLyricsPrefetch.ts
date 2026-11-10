@@ -28,6 +28,7 @@ export function useUpcomingLyricsPrefetch(): void {
     timer = null
   }
 
+  /** Prefetch the next playing entry once per preference set; failures remain retryable. */
   async function run() {
     timer = null
     const track = player.upcomingTrack()

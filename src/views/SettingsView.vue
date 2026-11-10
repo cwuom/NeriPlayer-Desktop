@@ -3789,7 +3789,7 @@ useEscapeClose(
 .settings-result-enter-from { opacity: 0; transform: translateY(6px); }
 .settings-result-move { transition: transform 220ms var(--ease-emphasized-decel); }
 
-.setting-card.search-highlight {
+:deep(.setting-card.search-highlight) {
   animation: settings-search-flash 1.6s var(--ease-standard);
 }
 

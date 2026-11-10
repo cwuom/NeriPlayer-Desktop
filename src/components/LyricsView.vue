@@ -128,6 +128,7 @@ const currentTranslation = computed(() => {
   return translations.value[index] ?? ''
 })
 
+/** Toggle source-provided translations and explain gaps without changing playback time. */
 function toggleTranslation() {
   settings.showTranslation = !settings.showTranslation
   translationNotice.value = settings.showTranslation && !currentTranslation.value
@@ -293,6 +294,7 @@ function buildTimedWords(line: PlayerLyricLine): AmllLyricWord[] {
     .map(toAmllWord)
 }
 
+/** Adapt one lyric row to AMLL timing and the effective translation/romanization preferences. */
 function toAmllLine(line: PlayerLyricLine): AmllLyricLine {
   const startTime = Math.max(0, Math.round(line.startMs))
   const fallbackEndTime = Math.max(startTime + 1, Math.round(line.startMs + line.durationMs))

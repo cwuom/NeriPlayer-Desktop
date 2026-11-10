@@ -398,6 +398,7 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Normalize persisted preferences to the current format, supported choices and numeric bounds.
     pub fn normalize(&mut self) {
         self.format_version = SETTINGS_FORMAT_VERSION;
         self.dark_mode = normalize_choice(

@@ -39,9 +39,10 @@ export function normalizeLyricDefaultOffsetMs(value: number, fallback = 0): numb
   return Math.min(MAX_LYRIC_DEFAULT_OFFSET_MS, Math.max(MIN_LYRIC_DEFAULT_OFFSET_MS, aligned)) || 0
 }
 
-/// 把各处记下的歌词来源归一：后端 snake_case、Android MusicPlatform（CLOUD_MUSIC）、
-/// LyricSourcePreference（AmllTtml）以及桌面端旧写法（LRCLIB、LOCAL_EDIT）
-/// 返回 'none' 表示来源已知但没有可调默认；null 表示不知道
+/**
+ * 统一后端、Android 和桌面端的歌词来源名称。
+ * 返回 'none' 表示来源没有可调默认偏移；null 表示来源未知。
+ */
 export function normalizeLyricSource(value: unknown): LyricOffsetSource | 'none' | null {
   if (typeof value !== 'string') return null
   const key = value.toLowerCase().replace(/[^a-z0-9]/g, '')

@@ -23,6 +23,7 @@ export interface BiliSubtitleCue {
   text: string
 }
 
+/** Read subtitle preferences with defaults for settings saved before CC support. */
 export function biliSubtitlePreferences(settings: {
   biliCcSubtitleEnabled?: boolean
   biliCcSubtitleLanguage?: string
@@ -35,6 +36,7 @@ export function biliSubtitlePreferences(settings: {
   }
 }
 
+/** Resolve video and part IDs from online, legacy and downloaded Bilibili metadata. */
 export function biliSubtitleTarget(track: TrackInfo) {
   if (!isBiliVideoSkipTrack(track)) return null
   const bvid = resolveBiliVideoSkipBvid(track) ?? ''
@@ -47,10 +49,12 @@ export function biliSubtitleTarget(track: TrackInfo) {
     ?? (Number.isSafeInteger(idCid) && idCid > 0 ? idCid : null) }
 }
 
+/** Treat absent or non-object API fields as empty records during tolerant parsing. */
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
 }
 
+/** Upgrade official subtitle URLs to HTTPS; reject credentials, ports and external hosts. */
 export function normalizeBiliSubtitleUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null
   const raw = value.trim()
@@ -63,6 +67,7 @@ export function normalizeBiliSubtitleUrl(value: unknown): string | null {
   } catch { return null }
 }
 
+/** Parse usable caption tracks while retaining string IDs and platform language labels. */
 export function parseBiliSubtitleTracks(payload: unknown): BiliSubtitleTrack[] {
   const subtitles = record(payload).subtitles
   if (!Array.isArray(subtitles)) return []
@@ -80,16 +85,19 @@ export function parseBiliSubtitleTracks(payload: unknown): BiliSubtitleTrack[] {
   })
 }
 
+/** Compare natural languages independently of AI prefixes, scripts and regions. */
 function baseLanguage(language: string): string {
   return language.trim().toLowerCase().replace(/^ai-/, '').split(/[-_]/)[0] ?? ''
 }
 
+/** Identify explicit simplified or traditional Chinese tags; generic tags remain neutral. */
 function script(language: string): string {
   if (/(?:^|[-_])(hant|tw|hk|mo)(?:$|[-_])/.test(language)) return 'hant'
   if (/(?:^|[-_])(hans|cn|sg)(?:$|[-_])/.test(language)) return 'hans'
   return ''
 }
 
+/** Match language aliases without crossing Chinese scripts or implicit AI selections. */
 export function matchesBiliSubtitleLanguage(language: string, preferred: string): boolean {
   const a = language.trim().toLowerCase()
   const b = preferred.trim().toLowerCase()
@@ -100,6 +108,7 @@ export function matchesBiliSubtitleLanguage(language: string, preferred: string)
   return !script(a) || !script(b) || script(a) === script(b)
 }
 
+/** Rank explicit matches first, then Chinese/manual fallbacks; exact tags break alias ties. */
 export function biliSubtitleCandidates(tracks: BiliSubtitleTrack[], preferences: BiliSubtitlePreferences): BiliSubtitleTrack[] {
   const language = preferences.language.toLowerCase()
   const usable = tracks.filter(track => track.url)
@@ -113,12 +122,14 @@ export function biliSubtitleCandidates(tracks: BiliSubtitleTrack[], preferences:
   return [...explicit, ...automatic]
 }
 
+/** Select a different natural language for translation, preferring manual tracks. */
 export function translatedBiliSubtitleTrack(primary: BiliSubtitleTrack, tracks: BiliSubtitleTrack[], aiFallback: boolean) {
   return tracks.filter(track => track.url && baseLanguage(track.language) !== baseLanguage(primary.language)
     && (aiFallback || !track.isAi))
     .sort((a, b) => Number(a.isAi) - Number(b.isAi) || a.language.localeCompare(b.language))[0]
 }
 
+/** Convert valid seconds to ordered millisecond cues and remove duplicate rows. */
 export function parseBiliSubtitleCues(payload: unknown): BiliSubtitleCue[] {
   const body = record(payload).body
   if (!Array.isArray(body)) return []
@@ -140,6 +151,7 @@ export function parseBiliSubtitleCues(payload: unknown): BiliSubtitleCue[] {
   }).sort((a, b) => a.startMs - b.startMs)
 }
 
+/** Limit each cue to the next distinct start time while preserving simultaneous rows. */
 function displayIntervals(cues: BiliSubtitleCue[]): BiliSubtitleCue[] {
   const sorted = [...cues].sort((a, b) => a.startMs - b.startMs)
   let groupEnd = 0

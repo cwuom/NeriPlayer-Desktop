@@ -1763,7 +1763,7 @@
     "show_display_controls": "显示翻译/音译按钮",
     "hide_display_controls": "隐藏翻译/音译按钮",
     "hide_translation": "隐藏译文",
-    "translation_source_hint": "显示或隐藏字幕来源提供的译文",
+    "translation_source_hint": "显示或隐藏歌词来源提供的译文",
     "translation_unavailable_here": "译文显示已开启，当前片段没有译文。"
   },
   "desktop_lyrics": {

@@ -67,10 +67,12 @@ pub struct BiliVideoPage {
 }
 
 impl BiliClient {
+    /// Report whether the cookie jar contains a Bilibili login session for subtitle requests.
     pub fn has_login_session(&self) -> bool {
         self.cookie_jar.as_ref().and_then(|jar| bili_cookie_value(jar, "SESSDATA")).is_some()
     }
 
+    /// Retrieve subtitle metadata for a resolved video part through the signed player endpoint.
     pub async fn get_player_subtitles(&self, bvid: &str, cid: u64) -> AppResult<Value> {
         if cid == 0 { return Err(AppError::Api("Invalid Bilibili subtitle CID".into())); }
         let response = self.wbi_get("https://api.bilibili.com/x/player/wbi/v2", BTreeMap::from([

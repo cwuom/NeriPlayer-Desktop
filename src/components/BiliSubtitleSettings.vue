@@ -3,7 +3,7 @@ import { computed, onUnmounted, ref, useId, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { TrackInfo } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
-import { biliSubtitleTarget, type BiliSubtitleTrack } from '@/modules/lyrics/biliSubtitle'
+import { biliSubtitleCandidates, biliSubtitlePreferences, biliSubtitleTarget, matchesBiliSubtitleLanguage, type BiliSubtitleTrack } from '@/modules/lyrics/biliSubtitle'
 import { biliSubtitleRevision, invalidateBiliSubtitleCache, loadBiliSubtitleTracks } from '@/modules/lyrics/biliSubtitleLoader'
 import { normalizeLyricDefaultOffsetMs } from '@/modules/lyrics/lyricOffset'
 import CustomSelect from '@/components/ui/CustomSelect.vue'
@@ -40,6 +40,7 @@ watch(() => JSON.stringify([props.track?.id, props.track?.playlistKey, props.tra
 }, { immediate: true })
 onUnmounted(() => { request++ })
 
+/** Localize language tags while preserving Chinese script variants and AI labels. */
 function languageName(language: string): string {
   const ai = /^ai-/i.test(language)
   const tag = language.replace(/^ai-/i, '').replace(/_/g, '-')
@@ -75,7 +76,9 @@ const languageOptions = computed(() => {
 })
 const selectedLanguage = computed(() => {
   const selected = settings.biliCcSubtitleLanguage
-  return !props.track || tracks.value.some(track => track.language === selected) ? selected : ''
+  if (!props.track || !selected) return selected
+  return biliSubtitleCandidates(tracks.value, biliSubtitlePreferences(settings))
+    .find(track => matchesBiliSubtitleLanguage(track.language, selected))?.language ?? ''
 })
 const selectedLabel = computed(() => {
   if (!props.track) return undefined
@@ -85,6 +88,7 @@ const selectedLabel = computed(() => {
   if (!tracks.value.length) return t('bili_subtitle.no_tracks')
   return undefined
 })
+/** Selecting the active preference explicitly retries expired or failed requests. */
 function selectLanguage(language: string) {
   if (settings.biliCcSubtitleLanguage === language) invalidateBiliSubtitleCache()
   else settings.biliCcSubtitleLanguage = language
@@ -97,6 +101,7 @@ const status = computed(() => {
   if (!tracks.value.length) return t('bili_subtitle.empty')
   return t('bili_subtitle.tracks_available', { count: tracks.value.length })
 })
+/** Clamp an edited subtitle offset to the shared default-offset range and step. */
 function updateOffset(event: Event) {
   settings.biliCcSubtitleOffset = normalizeLyricDefaultOffsetMs(Number((event.target as HTMLInputElement).value))
 }
@@ -104,31 +109,31 @@ function updateOffset(event: Event) {
 
 <template>
   <section class="bili-subtitle-settings" :class="{ 'bili-subtitle-settings--page': variant === 'settings' }" :aria-label="t('bili_subtitle.title')">
-    <div class="subtitle-row">
+    <div class="subtitle-row" :class="{ 'setting-card': variant === 'settings' }">
       <span class="subtitle-icon material-symbols-rounded" aria-hidden="true">subtitles</span>
-      <div class="subtitle-info"><div class="subtitle-title">{{ t('bili_subtitle.title') }}</div><p>{{ t('bili_subtitle.description') }}</p></div>
+      <div class="subtitle-info"><div class="subtitle-title" :class="{ 'setting-title': variant === 'settings' }">{{ t('bili_subtitle.title') }}</div><p>{{ t('bili_subtitle.description') }}</p></div>
       <label class="m3-switch">
         <input v-model="settings.biliCcSubtitleEnabled" type="checkbox" :aria-label="t('bili_subtitle.title')" />
         <span class="track"><span class="thumb"><span v-if="settings.biliCcSubtitleEnabled" class="material-symbols-rounded">check</span></span></span>
       </label>
     </div>
-    <div class="subtitle-row subtitle-row--select">
+    <div class="subtitle-row subtitle-row--select" :class="{ 'setting-card': variant === 'settings' }">
       <span class="subtitle-icon material-symbols-rounded" aria-hidden="true">language</span>
-      <div class="subtitle-info"><div class="subtitle-title">{{ languageLabel }}</div><p>{{ t(track ? 'bili_subtitle.track_description' : 'bili_subtitle.language_description') }}</p></div>
+      <div class="subtitle-info"><div class="subtitle-title" :class="{ 'setting-title': variant === 'settings' }">{{ languageLabel }}</div><p>{{ t(track ? 'bili_subtitle.track_description' : 'bili_subtitle.language_description') }}</p></div>
       <CustomSelect class="subtitle-select" :model-value="selectedLanguage" :selected-label="selectedLabel" :options="languageOptions" :label="languageLabel"
         :disabled="!settings.biliCcSubtitleEnabled || loading || (!!track && !tracks.length)" @update:model-value="selectLanguage" />
     </div>
-    <div class="subtitle-row">
+    <div class="subtitle-row" :class="{ 'setting-card': variant === 'settings' }">
       <span class="subtitle-icon material-symbols-rounded" aria-hidden="true">auto_awesome</span>
-      <div class="subtitle-info"><div class="subtitle-title">{{ t('bili_subtitle.ai_fallback') }}</div><p>{{ t('bili_subtitle.ai_description') }}</p></div>
+      <div class="subtitle-info"><div class="subtitle-title" :class="{ 'setting-title': variant === 'settings' }">{{ t('bili_subtitle.ai_fallback') }}</div><p>{{ t('bili_subtitle.ai_description') }}</p></div>
       <label class="m3-switch">
         <input v-model="settings.biliCcSubtitleAiFallback" type="checkbox" :disabled="!settings.biliCcSubtitleEnabled" :aria-label="t('bili_subtitle.ai_fallback')" />
         <span class="track"><span class="thumb"><span v-if="settings.biliCcSubtitleAiFallback" class="material-symbols-rounded">check</span></span></span>
       </label>
     </div>
-    <div v-if="showOffset" class="subtitle-row">
+    <div v-if="showOffset" class="subtitle-row" :class="{ 'setting-card': variant === 'settings' }">
       <span class="subtitle-icon material-symbols-rounded" aria-hidden="true">timer</span>
-      <label class="subtitle-info subtitle-title" :for="offsetId">{{ t('bili_subtitle.offset') }}</label>
+      <label class="subtitle-info subtitle-title" :class="{ 'setting-title': variant === 'settings' }" :for="offsetId">{{ t('bili_subtitle.offset') }}</label>
       <div class="subtitle-offset"><input :id="offsetId" type="number" :value="settings.biliCcSubtitleOffset" min="-5000" max="5000" step="50"
         :disabled="!settings.biliCcSubtitleEnabled" @change="updateOffset" /><span>ms</span></div>
     </div>

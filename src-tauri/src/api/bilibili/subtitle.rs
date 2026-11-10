@@ -28,6 +28,7 @@ pub fn subtitle_url(raw: &str) -> AppResult<Url> {
     Ok(url)
 }
 
+/// Build a video referer from a bounded alphanumeric BV identifier.
 pub fn subtitle_referer(bvid: &str) -> AppResult<String> {
     if !bvid.starts_with("BV") || bvid.len() > 32 || !bvid.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(AppError::Api("Invalid Bilibili video ID".into()));

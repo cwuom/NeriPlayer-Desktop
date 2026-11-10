@@ -53,11 +53,13 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
   /** 已经按哪首歌、哪套歌词设置取过；没有界面时换歌只清空，下次 acquire 再取 */
   let loadedKey: string | null = null
 
+  /** Persist nonempty music lyrics; the cache layer excludes session-bound CC subtitles. */
   function cache(track: TrackInfo | null | undefined, value: LyricLine[]) {
     if (!track || value.length === 0) return
     void saveCachedLyrics(track, value).catch(error => log.warn('lyrics not cached:', summarizeLogError(error)))
   }
 
+  /** Identify the playback entry and subtitle preferences whose results are currently valid. */
   function loadKey(): string {
     const track = player.currentTrack
     return [
@@ -69,7 +71,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     ].join('|')
   }
 
-  // 同步载荷里的歌词：null 表示没有本地覆盖（可在线取）；[] 表示有意清空或解析失败
+  /** 同步载荷中的歌词：null 允许在线获取；空数组表示有意清空或解析失败。 */
   async function materializeSynced(track: TrackInfo, id: number): Promise<LyricLine[] | null> {
     try {
       const synced = await materializeStoredLyrics(
@@ -157,6 +159,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     }).catch(error => log.warn('netease romanization backfill unavailable:', summarizeLogError(error)))
   }
 
+  /** Replace old lyrics immediately, then apply saved/local, preferred, CC and music fallbacks in order. */
   async function load() {
     const id = ++request
     loadedKey = loadKey()
