@@ -875,6 +875,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Verify destination matching preserves host-only cookies and excludes unrelated URL paths.
     #[test]
     fn subtitle_cookies_preserve_destination_host_and_path_scope() {
         let jar = Arc::new(Jar::default());
@@ -898,6 +899,7 @@ mod tests {
         assert!(anonymous.subtitle_cookie(&origin).is_none());
     }
 
+    /// Verify subtitle CDN and lookalike domains never receive cookies, including CDN-scoped cookies.
     #[test]
     fn subtitle_cookies_are_omitted_for_cdn_and_lookalike_hosts() {
         let jar = Arc::new(Jar::default());

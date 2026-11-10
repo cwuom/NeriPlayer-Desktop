@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import * as vue from 'vue'
 import * as pinia from 'pinia'
 import { loadModule, subtitle, format, deferred, flush } from './bili-subtitle-test-loader.mjs'
@@ -6,12 +8,27 @@ import { loadModule, subtitle, format, deferred, flush } from './bili-subtitle-t
 const plain = text => [{ startMs: 1000, durationMs: 2000, text, words: [] }]
 const cc = (language = 'zh-CN') => ({ source: 'bilibili_cc', lines: [{ ...plain(language)[0], translation: `${language} translation` }], track: { language, label: language } })
 const bili = id => ({ id: `bilibili:${id}:22`, title: 'Video', artist: 'Uploader', album: 'Bilibili|22|BV1xx411c7mD', durationMs: 60000, audioUrl: '', source: 'bilibili' })
+const playerSource = ts.createSourceFile('player.ts', readFileSync(new URL('../src/stores/player.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
+let downloadResolver
+function findDownloadResolver(node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.text === 'downloadedTrackForPlayback') downloadResolver = node.getText(playerSource)
+  ts.forEachChild(node, findDownloadResolver)
+}
+findDownloadResolver(playerSource)
+assert.ok(downloadResolver)
+const compiledDownloadResolver = ts.transpileModule(downloadResolver, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText
+const downloadPolicy = loadModule('../src/modules/playback/biliVideoSkip.ts')
 
 async function runtime() {
   const instance = pinia.createPinia()
   pinia.setActivePinia(instance)
   const settings = vue.reactive({ defaultLyricSource: 'automatic', preferWordTimedLyrics: true, biliCcSubtitleEnabled: true, biliCcSubtitleLanguage: '', biliCcSubtitleAiFallback: true })
   const player = vue.reactive({ hasPlaybackSession: true, currentTrack: bili(1), durationMs: 60000, isLoadingAudio: false, loadedPlaybackTrackKey: null })
+  const downloads = vue.reactive(new Map())
+  const resolverDependencies = { ...downloadPolicy, useDownloadStore: () => ({ getDownloadedTrack: id => downloads.get(id) }) }
+  player.downloadedTrackForPlayback = new Function(...Object.keys(resolverDependencies), `${compiledDownloadResolver}\nreturn downloadedTrackForPlayback`)(...Object.values(resolverDependencies))
   const revision = vue.ref(0)
   const sources = loadModule('../src/modules/lyrics/lyricSource.ts', { vue })
   const offset = loadModule('../src/modules/lyrics/lyricOffset.ts')
@@ -32,7 +49,7 @@ async function runtime() {
   const { useCurrentLyricsStore } = loadModule('../src/stores/currentLyrics.ts', {
     vue, pinia, '@/stores/player': { usePlayerStore: () => player }, '@/stores/settings': { useSettingsStore: () => settings },
     '@tauri-apps/api/core': { invoke: async (command, args) => {
-      if (command === 'load_local_lyrics') { calls.local.push(args); return handlers.local() }
+      if (command === 'load_local_lyrics') { calls.local.push(args); return handlers.local(args) }
       if (command === 'parse_lrc_content') return plain(args.content)
       throw new Error(command)
     } },
@@ -59,7 +76,7 @@ async function runtime() {
     '@/utils/logger': { createLogger: () => ({ warn() {}, error() {} }) }, '@/utils/logSanitizer': { summarizeLogError: String },
   })
   const store = useCurrentLyricsStore()
-  return { settings, player, revision, sources, cache, entries, calls, handlers, store, stop: () => pinia.disposePinia(instance) }
+  return { settings, player, downloads, revision, sources, cache, entries, calls, handlers, store, stop: () => pinia.disposePinia(instance) }
 }
 
 let cases = 0
@@ -91,6 +108,82 @@ await test('downloaded sidecars and explicitly preferred sources win over captio
   await flush()
   assert.equal(r.store.lines[0].text, 'preferred')
   assert.equal(r.calls.cc.length, 0)
+})
+for (const audioUrl of ['', 'https://example.test/video.m4a']) {
+  await test(`online queue entries with ${audioUrl ? 'HTTP' : 'empty'} audio URLs prefer downloaded lyrics`, async r => {
+    r.player.currentTrack.audioUrl = audioUrl
+    r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/download.m4a' })
+    r.handlers.local = async () => plain('edited sidecar')
+    r.settings.defaultLyricSource = 'qq'
+    await r.cache.saveCachedLyrics(r.player.currentTrack, plain('old music'), 'netease')
+    r.store.acquire(); await flush()
+    assert.deepEqual(r.calls.local, [{ audioPath: 'C:/Music/download.m4a' }])
+    assert.equal(r.store.lines[0].text, 'edited sidecar')
+    assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'local')
+    assert.equal(r.store.subtitle, null)
+    assert.equal(r.calls.cc.length + r.calls.preferred.length + r.calls.word.length, 0)
+    assert.equal(r.player.currentTrack.audioUrl, audioUrl)
+  })
+}
+for (const legacyId of ['bilibili:1', 'bilibili:BV1xx411c7mD']) {
+  await test(`legacy download ${legacyId} supplies sidecars for the matching part`, async r => {
+    r.downloads.set(legacyId, { ...bili(1), id: legacyId, filePath: 'C:/Music/legacy.m4a' })
+    r.handlers.local = async () => plain('legacy sidecar')
+    r.store.acquire(); await flush()
+    assert.deepEqual(r.calls.local, [{ audioPath: 'C:/Music/legacy.m4a' }])
+    assert.equal(r.store.lines[0].text, 'legacy sidecar')
+    assert.equal(r.calls.cc.length, 0)
+  })
+}
+await test('a legacy download from another part cannot supply local lyrics', async r => {
+  r.downloads.set('bilibili:1', { ...bili(1), id: 'bilibili:1', album: 'Bilibili|33|BV1xx411c7mD', filePath: 'C:/Music/other-part.m4a' })
+  r.handlers.local = async () => plain('wrong part')
+  r.store.acquire(); await flush()
+  assert.deepEqual(r.calls.local, [])
+  assert.equal(r.store.lines[0].text, 'zh-CN')
+})
+await test('a download discovered during CC loading replaces the pending subtitle request', async r => {
+  const late = deferred()
+  r.handlers.cc = () => late.promise
+  r.handlers.local = async () => plain('downloaded')
+  r.store.acquire(); await flush()
+  r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/discovered.m4a' }); await flush()
+  assert.equal(r.store.lines[0].text, 'downloaded')
+  late.resolve(cc('obsolete')); await flush()
+  assert.equal(r.store.lines[0].text, 'downloaded')
+  assert.equal(r.store.subtitle, null)
+  assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'local')
+})
+await test('changing the downloaded file for the same queue entry invalidates pending sidecars', async r => {
+  const late = deferred()
+  r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/old.m4a' })
+  r.handlers.local = ({ audioPath }) => audioPath.endsWith('/old.m4a') ? late.promise : plain('new sidecar')
+  r.store.acquire(); await flush()
+  r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/new.m4a' }); await flush()
+  late.resolve(plain('old sidecar')); await flush()
+  assert.equal(r.store.lines[0].text, 'new sidecar')
+  assert.equal(r.calls.cc.length, 0)
+})
+await test('missing or unreadable sidecars allow subtitle fallback', async r => {
+  r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/empty.m4a' })
+  r.store.acquire(); await flush()
+  assert.equal(r.calls.local.length, 1)
+  assert.equal(r.store.lines[0].text, 'zh-CN')
+  r.handlers.local = async () => { throw new Error('unavailable file') }
+  r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/missing.m4a' }); await flush()
+  assert.equal(r.calls.local.length, 2)
+  assert.equal(r.store.lines[0].text, 'zh-CN')
+  assert.equal(r.store.loading, false)
+})
+await test('a previous song sidecar cannot overwrite the new song after switching', async r => {
+  const late = deferred()
+  r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/previous.m4a' })
+  r.handlers.local = () => late.promise
+  r.store.acquire(); await flush()
+  r.player.currentTrack = bili(2); await flush()
+  late.resolve(plain('previous song')); await flush()
+  assert.equal(r.store.lines[0].text, 'zh-CN')
+  assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'bilibili_cc')
 })
 await test('CC replaces old automatic music caches and retains its own translation and source', async r => {
   await r.cache.saveCachedLyrics(r.player.currentTrack, plain('old matched song'), 'netease')

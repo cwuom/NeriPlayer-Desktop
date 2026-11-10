@@ -59,6 +59,13 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     void saveCachedLyrics(track, value).catch(error => log.warn('lyrics not cached:', summarizeLogError(error)))
   }
 
+  /** Use playback's matching download before the queue URL when looking for Bilibili sidecars. */
+  function localAudioPath(track: TrackInfo | null | undefined): string | null {
+    if (!track || !biliSubtitleTarget(track)) return null
+    const path = player.downloadedTrackForPlayback(track)?.filePath || track.audioUrl
+    return path && !/^https?:\/\//i.test(path) ? path : null
+  }
+
   /** Identify the playback entry and subtitle preferences whose results are currently valid. */
   function loadKey(): string {
     const track = player.currentTrack
@@ -67,6 +74,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
       track?.id ?? '',
       settings.defaultLyricSource,
       settings.preferWordTimedLyrics,
+      localAudioPath(track) ?? '',
       track && biliSubtitleTarget(track) ? JSON.stringify([biliSubtitleTarget(track), biliSubtitlePreferences(settings), biliSubtitleRevision.value]) : '',
     ].join('|')
   }
@@ -191,8 +199,9 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
       }
 
       // Downloaded Bilibili tracks can have edited sidecars; read them before online subtitles.
-      if (biliSubtitleTarget(track) && track.audioUrl && !/^https?:\/\//i.test(track.audioUrl)) {
-        const local = mapBackendLyrics(await invoke<any[]>('load_local_lyrics', { audioPath: track.audioUrl }).catch(() => []))
+      const audioPath = localAudioPath(track)
+      if (audioPath) {
+        const local = mapBackendLyrics(await invoke<any[]>('load_local_lyrics', { audioPath }).catch(() => []))
         if (id !== request) return
         if (local.length) {
           rememberLyricSource(track, 'local')

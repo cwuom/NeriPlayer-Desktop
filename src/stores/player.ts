@@ -1481,6 +1481,7 @@ export const usePlayerStore = defineStore('player', () => {
     ).catch(error => log.warn('decoded audio properties unavailable:', error))
   }
 
+  /** Match downloads by exact ID, or by legacy video ID only when the requested CID agrees. */
   function downloadedTrackForPlayback(track: TrackInfo) {
     const downloadStore = useDownloadStore()
     const exact = downloadStore.getDownloadedTrack(track.id)
@@ -3719,7 +3720,7 @@ export const usePlayerStore = defineStore('player', () => {
     playAll, shufflePlay, playQueueItem, addToQueueNext, addToQueueEnd, moveQueueItem, removeFromQueue, clearQueue,
     prefetchPlaybackTracks, prefetchIntent, upcomingTrack: () => nextPrefetchTracks()[0] ?? null,
     updateCurrentTrackInfo, patchCurrentTrackSyncPayload, restoreOriginalTrackInfo, hasOriginalTrackInfo,
-    handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality,
+    handleDownloadedFileRemoved, withReleasedAudioFile, replayWithQuality, downloadedTrackForPlayback,
   }
 })
 

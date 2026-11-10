@@ -75,6 +75,7 @@ const wordTimed = [
 
 const player = { hasPlaybackSession: true, isLoadingAudio: false, durationMs: 0, loadedPlaybackTrackKey: null,
   currentTrack: { id: 'netease:1', title: '歌', artist: '人', durationMs: 0 },
+  downloadedTrackForPlayback: () => undefined,
 }
 const settings = { defaultLyricSource: 'automatic', preferWordTimedLyrics: true }
 const sources = new Map()
