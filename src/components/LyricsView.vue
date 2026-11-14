@@ -15,6 +15,7 @@ import { useI18n } from 'vue-i18n'
 import { visibleLyricTranslation } from '@/modules/lyrics/lyricsFormat'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
+import LyricShareDialog from '@/components/LyricShareDialog.vue'
 import {
   createContextMenuItem,
   type ContextMenuActionItem,
@@ -45,6 +46,11 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{ seek: [timeMs: number] }>()
+
+/** 歌词分享弹窗：右键菜单打开，勾选要导出的句子 */
+const shareOpen = ref(false)
+const shareLineIndex = ref(-1)
+const shareLines = computed(() => props.lyrics.map((line, index) => ({ index, text: displayText(line) })))
 
 const hostRef = ref<HTMLDivElement>()
 const isLayoutReady = ref(false)
@@ -441,6 +447,7 @@ const lyricMenuItems = computed<ContextMenuItem[]>(() => {
   const items: ContextMenuItem[] = lyricMenu.value.index >= 0 ? [
     createContextMenuItem(t('lyrics.copy_line'), { id: 'copy-line', icon: 'content_copy' }),
     createContextMenuItem(t('lyrics.copy_all'), { id: 'copy-all', icon: 'copy_all' }),
+    createContextMenuItem(t('lyrics.select_lines'), { id: 'select-lines', icon: 'checklist' }),
     createContextMenuItem(t('lyrics.seek_here'), { id: 'seek', icon: 'play_arrow' }),
   ] : []
   if (hasTranslation.value || hasRomanization.value) {
@@ -454,6 +461,11 @@ const lyricMenuItems = computed<ContextMenuItem[]>(() => {
 async function handleLyricMenuClick(item: ContextMenuActionItem): Promise<void> {
   const index = lyricMenu.value.index
   lyricMenu.value.show = false
+  if (item.id === 'select-lines') {
+    shareLineIndex.value = index
+    shareOpen.value = true
+    return
+  }
   if (item.id === 'hide-display-controls') {
     displayControlsHidden.value = true
     return
@@ -852,6 +864,11 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
     :items="lyricMenuItems"
     @update:open="lyricMenu.show = $event"
     @click="handleLyricMenuClick"
+  />
+  <LyricShareDialog
+    v-model:open="shareOpen"
+    :lines="shareLines"
+    :initial-index="shareLineIndex"
   />
 </template>
 
