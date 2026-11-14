@@ -89,6 +89,7 @@ const dependencies = {
   '@/modules/lyrics/biliSubtitleLoader': { biliSubtitleRevision: vue.ref(0), invalidateBiliSubtitleCache() {}, loadBiliSubtitleTracks: async () => ({ tracks: [] }) },
   '@/modules/lyrics/lyricOffset': loadModule('../src/modules/lyrics/lyricOffset.ts'),
   '@/components/ui/CustomSelect.vue': { default: { render: () => null } },
+  '@/components/ui/EditableRangeValue.vue': { default: { render: () => null } },
 }
 const subtitleComponent = new Function('require', 'exports', `${subtitleCompiled}\nreturn component`)(name => {
   assert.ok(name in dependencies, name); return dependencies[name]

@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, useId, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { TrackInfo } from '@/stores/player'
 import { useSettingsStore } from '@/stores/settings'
 import { biliSubtitleCandidates, biliSubtitlePreferences, biliSubtitleTarget, matchesBiliSubtitleLanguage, type BiliSubtitleTrack } from '@/modules/lyrics/biliSubtitle'
 import { biliSubtitleRevision, invalidateBiliSubtitleCache, loadBiliSubtitleTracks } from '@/modules/lyrics/biliSubtitleLoader'
-import { normalizeLyricDefaultOffsetMs } from '@/modules/lyrics/lyricOffset'
+import {
+  formatLyricOffsetMs, LYRIC_OFFSET_STEP_MS, MAX_LYRIC_DEFAULT_OFFSET_MS, MIN_LYRIC_DEFAULT_OFFSET_MS,
+  normalizeLyricDefaultOffsetMs,
+} from '@/modules/lyrics/lyricOffset'
 import CustomSelect from '@/components/ui/CustomSelect.vue'
+import EditableRangeValue from '@/components/ui/EditableRangeValue.vue'
 
 const props = withDefaults(defineProps<{ track?: TrackInfo | null; showOffset?: boolean; variant?: 'settings' | 'player' }>(), { track: null, showOffset: true, variant: 'player' })
 const { t, locale } = useI18n()
-const offsetId = `bili-cc-offset-${useId()}`
 const languageLabel = computed(() => t(props.track ? 'bili_subtitle.track' : 'bili_subtitle.language'))
 const settings = useSettingsStore()
 const tracks = ref<BiliSubtitleTrack[]>([])
@@ -101,9 +104,8 @@ const status = computed(() => {
   if (!tracks.value.length) return t('bili_subtitle.empty')
   return t('bili_subtitle.tracks_available', { count: tracks.value.length })
 })
-/** Clamp an edited subtitle offset to the shared default-offset range and step. */
-function updateOffset(event: Event) {
-  settings.biliCcSubtitleOffset = normalizeLyricDefaultOffsetMs(Number((event.target as HTMLInputElement).value))
+function updateOffset(value: number) {
+  settings.biliCcSubtitleOffset = normalizeLyricDefaultOffsetMs(value)
 }
 </script>
 
@@ -133,9 +135,19 @@ function updateOffset(event: Event) {
     </div>
     <div v-if="showOffset" class="subtitle-row" :class="{ 'setting-card': variant === 'settings' }">
       <span class="subtitle-icon material-symbols-rounded" aria-hidden="true">timer</span>
-      <label class="subtitle-info subtitle-title" :class="{ 'setting-title': variant === 'settings' }" :for="offsetId">{{ t('bili_subtitle.offset') }}</label>
-      <div class="subtitle-offset"><input :id="offsetId" type="number" :value="settings.biliCcSubtitleOffset" min="-5000" max="5000" step="50"
-        :disabled="!settings.biliCcSubtitleEnabled" @change="updateOffset" /><span>ms</span></div>
+      <div class="subtitle-info subtitle-title" :class="{ 'setting-title': variant === 'settings' }">{{ t('bili_subtitle.offset') }}</div>
+      <EditableRangeValue
+        v-if="settings.biliCcSubtitleEnabled"
+        :model-value="settings.biliCcSubtitleOffset"
+        :min="MIN_LYRIC_DEFAULT_OFFSET_MS"
+        :max="MAX_LYRIC_DEFAULT_OFFSET_MS"
+        :step="LYRIC_OFFSET_STEP_MS"
+        :display-value="formatLyricOffsetMs(settings.biliCcSubtitleOffset)"
+        :aria-label="t('bili_subtitle.offset')"
+        input-suffix="ms"
+        @update:model-value="updateOffset"
+      />
+      <span v-else class="subtitle-offset-disabled">{{ formatLyricOffsetMs(settings.biliCcSubtitleOffset) }}</span>
     </div>
     <div v-if="track" class="subtitle-row">
       <p role="status">{{ status }}</p>
@@ -187,6 +199,5 @@ function updateOffset(event: Event) {
 p { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--md-on-surface-variant); }
 .m3-switch { flex-shrink: 0; }
 .thumb .material-symbols-rounded { font-size: 14px; }
-.subtitle-offset { display: flex; align-items: center; gap: 6px; }
-.subtitle-offset input { width: 90px; padding: 8px; color: var(--md-on-surface); background: var(--md-surface-container-high); border: 1px solid var(--md-outline-variant); border-radius: 8px; }
+.subtitle-offset-disabled { opacity: 0.38; white-space: nowrap; }
 </style>

@@ -213,7 +213,11 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
 
       // 设了默认歌词源时先按它匹配（Android tryGetPreferredLyricSourceResult），缓存已是该来源就直接用
       const preferredSource = preferredLyricMatchSource(getPlaybackSourceKind(track), settings.defaultLyricSource)
-      if (preferredSource && !(cached?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource)) {
+      if (preferredSource) {
+        if (cached?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource) {
+          backfillSecondaryLyrics(track, id)
+          return
+        }
         const preferred = await fetchPreferredSourceLyrics(track, preferredSource, settings.preferWordTimedLyrics)
           .catch(error => { log.warn('preferred lyric source unavailable:', summarizeLogError(error)); return null })
         if (id !== request) return
@@ -225,8 +229,6 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
           return
         }
       }
-
-      if (preferredSource && cached?.length && normalizeLyricSource(lyricSourceOf(track)) === preferredSource) return
 
       const cc = await loadBiliSubtitleLyrics(track, biliSubtitlePreferences(settings))
         .catch(error => { log.warn('Bilibili subtitles unavailable:', summarizeLogError(error)); return null })

@@ -31,6 +31,7 @@ function mount(track = null, handler = async () => result('zh-CN'), overrides = 
     },
     '@/modules/lyrics/lyricOffset': loadModule('../src/modules/lyrics/lyricOffset.ts'),
     '@/components/ui/CustomSelect.vue': {},
+    '@/components/ui/EditableRangeValue.vue': {},
   }
   const component = new Function('require', 'exports', `${compiled}\nreturn component`)(name => {
     assert.ok(name in dependencies, name); return dependencies[name]
@@ -53,9 +54,9 @@ await test('settings-only controls preserve a selected language and need no vide
     assert.equal(r.calls.length, 0)
     assert.ok(r.bindings.languageOptions.value.some(option => option.value === 'ko'))
     assert.equal(r.bindings.languageOptions.value[0].value, '')
-    r.bindings.updateOffset({ target: { value: '-75' } })
+    r.bindings.updateOffset(-75)
     assert.equal(r.settings.biliCcSubtitleOffset, -50)
-    r.bindings.updateOffset({ target: { value: '9000' } })
+    r.bindings.updateOffset(9000)
     assert.equal(r.settings.biliCcSubtitleOffset, 5000)
   } finally { r.stop() }
 })

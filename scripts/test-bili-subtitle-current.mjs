@@ -32,6 +32,16 @@ async function runtime() {
   const revision = vue.ref(0)
   const sources = loadModule('../src/modules/lyrics/lyricSource.ts', { vue })
   const offset = loadModule('../src/modules/lyrics/lyricOffset.ts')
+  const secondary = loadModule('../src/modules/lyrics/lyricsSupplement.ts', {
+    './lyricsFormat': format, './lyricOffset': offset,
+    './lyricMatch': {
+      defaultLyricMatchKeyword: title => title,
+      matchLyrics: async ({ sources }) => sources[0] === 'netease' ? [{
+        source: 'netease', confidence: 'high', durationMs: 60000,
+        lines: [{ ...plain('cached Kugou')[0], translation: 'translation', roman: 'romanization' }],
+      }] : [],
+    },
+  })
   const entries = new Map()
   const calls = { cc: [], automatic: [], preferred: [], word: [], roman: [], local: [] }
   const handlers = {
@@ -44,6 +54,7 @@ async function runtime() {
       setCachedValue: async (_, key, value) => entries.set(key, value),
       removeCachedValue: async (_, key) => entries.delete(key),
     },
+    './biliSubtitle': subtitle,
     './lyricsRequest': loadModule('../src/modules/lyrics/lyricsRequest.ts'), './lyricSource': sources,
   })
   const { useCurrentLyricsStore } = loadModule('../src/stores/currentLyrics.ts', {
@@ -70,7 +81,7 @@ async function runtime() {
       fetchWordTimedLyrics: async (...args) => { calls.word.push(args); return { source: null, lines: [] } },
       fetchNeteaseRomanization: async (...args) => { calls.roman.push(args); return null },
     },
-    '@/modules/lyrics/lyricsSupplement': { kugouSecondaryLyricNeeds: () => ({ translation: false, romanization: false }) },
+    '@/modules/lyrics/lyricsSupplement': secondary,
     '@/modules/playback/playbackSource': { getPlaybackSourceKind: track => track.source ?? track.id.split(':')[0] },
     '@/modules/playback/playbackRequest': { playbackSessionTrackKey: (has, key, id) => has ? key || id : 'empty' },
     '@/utils/logger': { createLogger: () => ({ warn() {}, error() {} }) }, '@/utils/logSanitizer': { summarizeLogError: String },
@@ -175,6 +186,17 @@ await test('missing or unreadable sidecars allow subtitle fallback', async r => 
   assert.equal(r.store.lines[0].text, 'zh-CN')
   assert.equal(r.store.loading, false)
 })
+await test('a removed Bilibili download cannot restore its stale local lyric cache', async r => {
+  const id = r.player.currentTrack.id
+  r.downloads.set(id, { ...r.player.currentTrack, filePath: 'C:/Music/removed.m4a' })
+  r.handlers.local = async () => plain('old sidecar')
+  r.entries.set(`v5:${id}`, { source: 'local', lines: plain('old sidecar') })
+  r.store.acquire(); await flush()
+  assert.equal(r.store.lines[0].text, 'old sidecar')
+  r.downloads.delete(id); await flush()
+  assert.equal(r.store.lines[0].text, 'zh-CN')
+  assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'bilibili_cc')
+})
 await test('a previous song sidecar cannot overwrite the new song after switching', async r => {
   const late = deferred()
   r.downloads.set(bili(1).id, { ...bili(1), filePath: 'C:/Music/previous.m4a' })
@@ -197,6 +219,16 @@ await test('CC replaces old automatic music caches and retains its own translati
   assert.equal([...r.entries.values()][0].source, 'netease', 'captions never pollute the persistent music cache')
   const release = r.store.acquire(); await flush(); release()
   assert.equal(r.calls.cc.length, 1, 'desktop and player consumers share the same original and translation')
+})
+await test('cached preferred Kugou lyrics retain secondary lyric backfill and take priority over CC', async r => {
+  r.settings.defaultLyricSource = 'kugou'
+  await r.cache.saveCachedLyrics(r.player.currentTrack, plain('cached Kugou'), 'kugou')
+  r.store.acquire(); await flush()
+  assert.equal(r.store.lines[0].text, 'cached Kugou')
+  assert.equal(r.store.lines[0].translation, 'translation')
+  assert.equal(r.store.lines[0].roman, 'romanization')
+  assert.equal(r.sources.lyricSourceOf(r.player.currentTrack), 'kugou')
+  assert.equal(r.calls.preferred.length + r.calls.cc.length, 0)
 })
 await test('language changes refresh both tracks and reject earlier responses', async r => {
   const first = deferred(), second = deferred()

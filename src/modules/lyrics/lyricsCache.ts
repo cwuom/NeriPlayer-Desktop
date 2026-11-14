@@ -1,5 +1,6 @@
 import type { LyricLine, TrackInfo } from '@/stores/player'
 import { getCachedValue, removeCachedValue, setCachedValue } from '@/utils/persistentCache'
+import { biliSubtitleTarget } from './biliSubtitle'
 import { lyricsIdentity } from './lyricsRequest'
 import { lyricSourceOf, rememberLyricSource } from './lyricSource'
 
@@ -24,6 +25,11 @@ function cacheKey(track: TrackInfo) {
 // 本地文件每次都重新读取 .lrc / 内嵌歌词（对齐 Android），否则编辑后的歌词最长 30 天都看不到
 function bypassesCache(track: TrackInfo): boolean {
   return track.source === 'local' || track.id.startsWith('local:')
+}
+
+function bypassesSourceCache(track: TrackInfo, source: string | null): boolean {
+  // 字幕按登录会话缓存，B 站下载的副文件歌词每次从当前文件读取
+  return source === 'bilibili_cc' || (source === 'local' && biliSubtitleTarget(track) !== null)
 }
 
 function normalizeLyricLine(line: LyricLine): LyricLine {
@@ -57,7 +63,7 @@ export async function readCachedLyrics(track: TrackInfo): Promise<CachedLyricsEn
   const entry = Array.isArray(cached)
     ? { source: null, lines: cached }
     : cached && Array.isArray(cached.lines) ? cached : null
-  if (!entry || entry.source === 'bilibili_cc') return null
+  if (!entry || bypassesSourceCache(track, entry.source)) return null
 
   const lines = entry.lines.map(normalizeLyricLine)
   if (!hasVisibleLyric(lines)) return null
@@ -78,8 +84,7 @@ export async function saveCachedLyrics(
   lines: LyricLine[],
   source: string | null = lyricSourceOf(track),
 ) {
-  // CC data belongs to the bounded login-session cache, never the persistent music-lyric cache.
-  if (bypassesCache(track) || source === 'bilibili_cc') return
+  if (bypassesCache(track) || bypassesSourceCache(track, source)) return
   const normalized = lines.map(normalizeLyricLine)
   if (!hasVisibleLyric(normalized)) {
     await clearCachedLyrics(track)

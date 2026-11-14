@@ -168,4 +168,22 @@ await test('authentication changes clear both caption and signed track caches', 
   assert.equal(r.calls.length, 6)
 })
 
+await test('authentication changes prevent a pending original from starting a stale translation request', async () => {
+  const originalStarted = deferred()
+  const originalPayload = deferred()
+  const r = runtime((command, args) => {
+    if (command === 'get_bili_subtitle_payload' && args.url.includes('/zh-CN.')) {
+      originalStarted.resolve()
+      return originalPayload.promise
+    }
+    return defaultHandler(command, args)
+  })
+  const old = r.loadBiliSubtitleLyrics(track, preferences)
+  await originalStarted.promise
+  r.listeners.get('neri:auth-changed')({ detail: { platform: 'bilibili' } })
+  originalPayload.resolve(payload([row(0, 2, 'original')]))
+  assert.deepEqual((await old).lines, [])
+  assert.equal(r.calls.filter(([command]) => command === 'get_bili_subtitle_payload').length, 1)
+})
+
 console.log(`Bilibili subtitle regressions: ${cases} passed`)

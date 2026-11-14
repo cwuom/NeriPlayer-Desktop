@@ -90,8 +90,8 @@ export async function loadBiliSubtitleLyrics(track: TrackInfo, preferences: Bili
       url: candidate.url, bvid: available.bvid,
     }))
     for (const candidate of candidates) {
-      if (generation !== biliSubtitleRevision.value) return empty
       const original = await read(candidate).catch(() => [])
+      if (generation !== biliSubtitleRevision.value) return empty
       if (!original.length) continue
       const translatedTrack = translatedBiliSubtitleTrack(candidate, available.tracks, preferences.aiFallback)
       const translated = translatedTrack ? await read(translatedTrack).catch(() => []) : []
