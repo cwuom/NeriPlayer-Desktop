@@ -85,7 +85,7 @@ assert.match(
 )
 assert.match(
   currentLyricsSource,
-  /const restored = await getCachedLyrics\(track\)\s+if \(id === request\) lines\.value = restored \|\| cached \|\| \[\]/,
+  /const restored = await getCachedLyrics\(track, \(\) => id === request\)\s+if \(id === request\) lines\.value = restored \|\| cached \|\| \[\]/,
   'a failed refresh must restore the latest cached lyrics',
 )
 

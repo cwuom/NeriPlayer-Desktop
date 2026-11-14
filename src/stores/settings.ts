@@ -75,6 +75,10 @@ export interface AppSettings {
   kugouOffset: number
   lrclibOffset: number
   amllTtmlOffset: number
+  biliCcSubtitleOffset: number
+  biliCcSubtitleEnabled: boolean
+  biliCcSubtitleLanguage: string
+  biliCcSubtitleAiFallback: boolean
   coverStyle: CoverStyle
   advancedLyrics: boolean
   /** 有逐字结果时优先用；关闭后不再用 AMLL/酷狗补逐字（Android prefer_word_timed_lyrics） */
@@ -241,6 +245,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   kugouOffset: 0,
   lrclibOffset: 0,
   amllTtmlOffset: 0,
+  biliCcSubtitleOffset: 0,
+  biliCcSubtitleEnabled: true,
+  biliCcSubtitleLanguage: '',
+  biliCcSubtitleAiFallback: true,
   coverStyle: 'card',
   advancedLyrics: true,
   preferWordTimedLyrics: true,
@@ -450,6 +458,7 @@ function hasLegacySnapshot(): boolean {
     || localStorage.getItem('neri:player-state') !== null
 }
 
+/** Restore settings over current defaults and normalize persisted values before use or export. */
 function normalizeSnapshot(input: unknown): AppSettings {
   const source = input && typeof input === 'object' ? input as Partial<AppSettings> : {}
   const result = { ...DEFAULT_SETTINGS, equalizerBands: [...DEFAULT_SETTINGS.equalizerBands] }
@@ -533,6 +542,8 @@ function normalizeSnapshot(input: unknown): AppSettings {
   result.kugouOffset = normalizeLyricDefaultOffset(result.kugouOffset, DEFAULT_SETTINGS.kugouOffset)
   result.lrclibOffset = normalizeLyricDefaultOffset(result.lrclibOffset, DEFAULT_SETTINGS.lrclibOffset)
   result.amllTtmlOffset = normalizeLyricDefaultOffset(result.amllTtmlOffset, DEFAULT_SETTINGS.amllTtmlOffset)
+  result.biliCcSubtitleOffset = normalizeLyricDefaultOffset(result.biliCcSubtitleOffset, DEFAULT_SETTINGS.biliCcSubtitleOffset)
+  result.biliCcSubtitleLanguage = /^[a-zA-Z0-9_-]{1,32}$/.test(result.biliCcSubtitleLanguage.trim()) ? result.biliCcSubtitleLanguage.trim() : ''
   result.coverBlurAmount = clamp(result.coverBlurAmount, 0, MAX_COVER_BLUR_AMOUNT)
   result.coverBlurDarken = clamp(result.coverBlurDarken, 0, 1)
   result.backgroundImageBlur = clamp(result.backgroundImageBlur, 0, 100)
@@ -696,6 +707,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const kugouOffset = ref(initial.kugouOffset)
   const lrclibOffset = ref(initial.lrclibOffset)
   const amllTtmlOffset = ref(initial.amllTtmlOffset)
+  const biliCcSubtitleOffset = ref(initial.biliCcSubtitleOffset)
+  const biliCcSubtitleEnabled = ref(initial.biliCcSubtitleEnabled)
+  const biliCcSubtitleLanguage = ref(initial.biliCcSubtitleLanguage)
+  const biliCcSubtitleAiFallback = ref(initial.biliCcSubtitleAiFallback)
   const coverStyle = ref<CoverStyle>(initial.coverStyle)
   const advancedLyrics = ref(initial.advancedLyrics)
   const preferWordTimedLyrics = ref(initial.preferWordTimedLyrics)
@@ -766,7 +781,7 @@ export const useSettingsStore = defineStore('settings', () => {
     crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
     localLibrarySortBy, localLibrarySortDescending, showTranslation,
     showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
-    amllTtmlOffset, coverStyle,
+    amllTtmlOffset, biliCcSubtitleOffset, biliCcSubtitleEnabled, biliCcSubtitleLanguage, biliCcSubtitleAiFallback, coverStyle,
     advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground, colorMode, audioReactive,
     lowPerformanceMode, coverBlurBg,
     coverBlurAmount, coverBlurDarken, neteaseQuality, qqMusicQuality,
@@ -867,6 +882,7 @@ export const useSettingsStore = defineStore('settings', () => {
     localLibrarySortBy, localLibrarySortDescending, showTranslation, showRomanization,
     lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
+    biliCcSubtitleOffset, biliCcSubtitleEnabled, biliCcSubtitleLanguage, biliCcSubtitleAiFallback,
     advancedLyrics, preferWordTimedLyrics, defaultLyricSource, dynamicBackground,
     colorMode, audioReactive, lowPerformanceMode, coverBlurBg, coverBlurAmount, coverBlurDarken,
     neteaseQuality, qqMusicQuality, youtubeQuality, biliQuality, bypassProxy,

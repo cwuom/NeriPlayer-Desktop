@@ -228,6 +228,10 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
   an info bar with the cover thumbnail. Layout counts wrapped visual lines (up to 24); the canvas is 1080
   wide and grows between 1080 and 2400. Lyric text and the rendered image stay on this machine, and export
   is a PNG file or a clipboard image.
+- **Bilibili CC subtitles**: signed-in accounts can display video captions in Now Playing and desktop lyrics,
+  with language/track selection, AI fallback, bilingual interval matching, and a separate default offset.
+  Changes from Settings or Now Playing apply immediately. Saved lyrics, local sidecars, and the preferred
+  lyric source take priority; unavailable captions fall back to the existing music lyric sources.
 - **Independent desktop lyrics**: one/two/three lines, word or whole-line display, translations/romanization,
   fonts, gradients, outlines, shadows, opacity, backgrounds, saved position and size, locking, and click-through.
   On Windows, WebView2 disconnect error `0x80010108` during window creation triggers one retry
@@ -293,7 +297,7 @@ Text fields and active controls take priority over the relevant keys.
 | Source | Current capabilities | Limits |
 | --- | --- | --- |
 | NetEase Cloud Music | Login, search, recommendations, playlists/albums, artists, likes, multiple playback qualities, downloads, YRC/translated/romanized lyrics, comments | Membership, regional, and account permissions still apply; alternative sources are an optional playback policy |
-| Bilibili | Login, search, discovery, favorites, creators, DASH audio with MP4 fallback, video parts, downloads, skip ranges, comments | Primarily audio playback from videos; content/account permissions affect streams, and lyrics are matched externally |
+| Bilibili | Login, search, discovery, favorites, creators, DASH audio with MP4 fallback, video parts, downloads, skip ranges, CC subtitles, comments | Primarily audio playback from videos; content/account permissions affect streams. CC subtitles require login and available video tracks; music lyrics can also be matched externally |
 | YouTube Music | Login, home, search, playlists and artists, multiple stream clients, downloads, lyrics | Depends on connectivity, region, sessions, and client availability; compatibility logic does not bypass platform restrictions |
 | QQ Music | Backend search, streaming within guest API availability, downloads, lyrics/metadata matching | Depends on guest API and content availability |
 | Local audio | Multi-folder scans, direct playback, playlist and artist management, tags and lyrics | Paths must exist on the current device; formats depend on available decoders |

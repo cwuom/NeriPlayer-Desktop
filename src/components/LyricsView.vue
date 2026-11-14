@@ -12,6 +12,7 @@ import type {
 import { cancelFrame, scheduleFrame } from '@/utils/frameLoop'
 import { useSettingsStore } from '@/stores/settings'
 import { useI18n } from 'vue-i18n'
+import { visibleLyricTranslation } from '@/modules/lyrics/lyricsFormat'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LyricShareDialog from '@/components/LyricShareDialog.vue'
@@ -94,7 +95,9 @@ type RichPlayerLyricWord = PlayerLyricWord & {
   ruby?: PlayerRubyWord[]
 }
 
-const hasTranslation = computed(() => props.lyrics.some(line => line.translation?.trim()))
+const translations = computed(() => props.lyrics.map(visibleLyricTranslation))
+const hasTranslation = computed(() => translations.value.some(Boolean))
+const translationNotice = ref(false)
 const hasRomanization = computed(() => props.lyrics.some(line =>
   line.roman?.trim() || line.words?.some(word => (word as RichPlayerLyricWord).romanWord?.trim()),
 ))
@@ -114,6 +117,33 @@ const effectiveTimeMs = computed(() => {
 })
 
 const amllTimeMs = computed(() => Math.max(0, effectiveTimeMs.value + offsetMs.value))
+
+const currentLineIndex = computed(() => {
+  let left = 0, right = props.lyrics.length
+  while (left < right) {
+    const middle = (left + right) >>> 1
+    if (props.lyrics[middle]!.startMs <= amllTimeMs.value) left = middle + 1
+    else right = middle
+  }
+  return left - 1
+})
+const currentTranslation = computed(() => {
+  const index = currentLineIndex.value
+  const line = props.lyrics[index]
+  if (!line || (line.durationMs > 0 && amllTimeMs.value >= line.startMs + line.durationMs)) return ''
+  return translations.value[index] ?? ''
+})
+
+/** Toggle source-provided translations and explain gaps without changing playback time. */
+function toggleTranslation() {
+  settings.showTranslation = !settings.showTranslation
+  translationNotice.value = settings.showTranslation && !currentTranslation.value
+}
+
+watch([currentLineIndex, () => props.lyrics], () => {
+  translationNotice.value = false
+})
+watch(() => settings.showTranslation, enabled => { if (!enabled) translationNotice.value = false })
 
 function displayText(line: PlayerLyricLine): string {
   if (line.text) return line.text
@@ -270,6 +300,7 @@ function buildTimedWords(line: PlayerLyricLine): AmllLyricWord[] {
     .map(toAmllWord)
 }
 
+/** Adapt one lyric row to AMLL timing and the effective translation/romanization preferences. */
 function toAmllLine(line: PlayerLyricLine): AmllLyricLine {
   const startTime = Math.max(0, Math.round(line.startMs))
   const fallbackEndTime = Math.max(startTime + 1, Math.round(line.startMs + line.durationMs))
@@ -290,7 +321,7 @@ function toAmllLine(line: PlayerLyricLine): AmllLyricLine {
 
   return {
     words,
-    translatedLyric: settings.showTranslation ? (line.translation || '') : '',
+    translatedLyric: settings.showTranslation ? visibleLyricTranslation(line) : '',
     romanLyric: settings.showRomanization ? (line.roman || '') : '',
     startTime,
     endTime,
@@ -802,13 +833,13 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
         type="button"
         class="lyrics-display-toggle"
         :class="{ active: settings.showTranslation }"
-        :title="t('settings.show_translation')"
+        :title="t('lyrics.translation_source_hint')"
         :aria-label="t('settings.show_translation')"
         :aria-pressed="settings.showTranslation"
-        @click.stop="settings.showTranslation = !settings.showTranslation"
+        @click.stop="toggleTranslation"
       >
         <span class="material-symbols-rounded" aria-hidden="true">translate</span>
-        <span>{{ t('player.lyrics_editor_translation') }}</span>
+        <span>{{ t(settings.showTranslation ? 'lyrics.hide_translation' : 'settings.show_translation') }}</span>
       </button>
       <button
         v-if="hasRomanization"
@@ -823,6 +854,7 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
         <span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span>
         <span>{{ t('player.lyrics_editor_romanization') }}</span>
       </button>
+      <span v-if="translationNotice" class="translation-notice" role="status">{{ t('lyrics.translation_unavailable_here') }}</span>
     </div>
   </div>
   <ContextMenu
@@ -870,6 +902,22 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
   pointer-events: none;
   transform: translate(-50%, 6px);
   transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.translation-notice {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(340px, 70vw);
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(20, 20, 24, 0.9);
+  color: white;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .lyrics-view:hover .lyrics-display-controls {

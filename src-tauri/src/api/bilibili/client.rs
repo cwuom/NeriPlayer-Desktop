@@ -67,6 +67,53 @@ pub struct BiliVideoPage {
 }
 
 impl BiliClient {
+    /// Report whether the cookie jar contains a Bilibili login session for subtitle requests.
+    pub fn has_login_session(&self) -> bool {
+        self.cookie_jar.as_ref().and_then(|jar| bili_cookie_value(jar, "SESSDATA")).is_some()
+    }
+
+    /// Retrieve subtitle metadata for a resolved video part through the signed player endpoint.
+    pub async fn get_player_subtitles(&self, bvid: &str, cid: u64) -> AppResult<Value> {
+        if cid == 0 { return Err(AppError::Api("Invalid Bilibili subtitle CID".into())); }
+        let response = self.wbi_get("https://api.bilibili.com/x/player/wbi/v2", BTreeMap::from([
+            ("bvid".into(), bvid.into()), ("cid".into(), cid.to_string()),
+        ])).await?;
+        Ok(response["data"]["subtitle"].clone())
+    }
+
+    /// The supplied transport rejects redirects, including redirects to another trusted host.
+    pub async fn get_subtitle_payload(&self, http: FallbackHttp, raw_url: &str, bvid: &str) -> AppResult<Value> {
+        let url = super::subtitle::subtitle_url(raw_url)?;
+        let referer = super::subtitle::subtitle_referer(bvid)?;
+        let cookie = self.subtitle_cookie(&url);
+        let mut response = http.send(|client| {
+            let mut request = client.get(url.clone())
+                .header("User-Agent", USER_AGENT).header("Referer", &referer)
+                .header("Origin", "https://www.bilibili.com").timeout(Duration::from_secs(20));
+            if let Some(cookie) = &cookie { request = request.header(reqwest::header::COOKIE, cookie); }
+            request
+        }).await?;
+        if !response.status().is_success() {
+            return Err(AppError::Api(format!("Bilibili subtitle: HTTP {}", response.status())));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(reqwest::Error::without_url)? {
+            if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+                return Err(AppError::Api("Bilibili subtitle exceeds 4 MiB".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| AppError::Api("Invalid Bilibili subtitle JSON".into()))
+    }
+
+    /// Keep subtitle cookies on bilibili.com and honor the jar's host and path restrictions.
+    fn subtitle_cookie(&self, url: &reqwest::Url) -> Option<reqwest::header::HeaderValue> {
+        url.host_str()
+            .filter(|host| *host == "bilibili.com" || host.ends_with(".bilibili.com"))
+            .and_then(|_| self.cookie_jar.as_ref())
+            .and_then(|jar| jar.cookies(url))
+    }
+
     pub fn new(http: &Client) -> Self {
         Self::with_transport(FallbackHttp::new(http, "bilibili"))
     }
@@ -827,6 +874,46 @@ fn find_video_page_cid(response: &Value, page: u64) -> Option<u64> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Verify destination matching preserves host-only cookies and excludes unrelated URL paths.
+    #[test]
+    fn subtitle_cookies_preserve_destination_host_and_path_scope() {
+        let jar = Arc::new(Jar::default());
+        let origin = "https://www.bilibili.com/".parse().unwrap();
+        jar.add_cookie_str("SESSDATA=fixture-session; Domain=bilibili.com; Path=/; Secure", &origin);
+        jar.add_cookie_str("bili_jct=fixture-csrf; Domain=bilibili.com; Path=/; Secure", &origin);
+        jar.add_cookie_str("host_only=fixture-www; Path=/; Secure", &origin);
+        jar.add_cookie_str("private_path=fixture-private; Domain=bilibili.com; Path=/account; Secure", &origin);
+        let client = BiliClient::new(&Client::new()).with_cookie_jar(jar);
+
+        for host in ["bilibili.com", "www.bilibili.com", "api.bilibili.com"] {
+            let url = format!("https://{host}/subtitle.json").parse().unwrap();
+            let cookie = client.subtitle_cookie(&url).unwrap();
+            let cookie = cookie.to_str().unwrap();
+            assert!(cookie.contains("SESSDATA=fixture-session"));
+            assert!(cookie.contains("bili_jct=fixture-csrf"));
+            assert_eq!(cookie.contains("host_only="), host == "www.bilibili.com");
+            assert!(!cookie.contains("private_path="));
+        }
+        let anonymous = BiliClient::new(&Client::new());
+        assert!(anonymous.subtitle_cookie(&origin).is_none());
+    }
+
+    /// Verify subtitle CDN and lookalike domains never receive cookies, including CDN-scoped cookies.
+    #[test]
+    fn subtitle_cookies_are_omitted_for_cdn_and_lookalike_hosts() {
+        let jar = Arc::new(Jar::default());
+        let origin = "https://www.bilibili.com/".parse().unwrap();
+        jar.add_cookie_str("SESSDATA=fixture-session; Domain=bilibili.com; Path=/; Secure", &origin);
+        let cdn = "https://aisubtitle.hdslb.com/".parse().unwrap();
+        jar.add_cookie_str("cdn_cookie=fixture-cdn; Domain=hdslb.com; Path=/; Secure", &cdn);
+        let client = BiliClient::new(&Client::new()).with_cookie_jar(jar);
+
+        for host in ["hdslb.com", "aisubtitle.hdslb.com", "i0.hdslb.com", "evilbilibili.com", "bilibili.com.evil.test"] {
+            let url = format!("https://{host}/subtitle.json?auth_key=fixture-signature").parse().unwrap();
+            assert!(client.subtitle_cookie(&url).is_none(), "sent cookies to {host}");
+        }
+    }
 
     #[test]
     fn finds_cid_for_legacy_page_number() {

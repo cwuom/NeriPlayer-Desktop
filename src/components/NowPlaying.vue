@@ -73,6 +73,8 @@ import { resolveCommentTarget } from '@/modules/playback/commentTarget'
 import BilibiliCoverImage from './BilibiliCoverImage.vue'
 import WaveformSlider from './WaveformSlider.vue'
 import LyricsView from './LyricsView.vue'
+import BiliSubtitleSettings from './BiliSubtitleSettings.vue'
+import { biliSubtitleTarget } from '@/modules/lyrics/biliSubtitle'
 import QueuePanel from './QueuePanel.vue'
 import AddToPlaylistDialog from './AddToPlaylistDialog.vue'
 import BiliVideoSkipDialog from './BiliVideoSkipDialog.vue'
@@ -1147,7 +1149,7 @@ const displayLyrics = computed(() => currentLyrics.lines)
 // 更多选项面板子视图
 const moreSheetView = ref<
   'main' | 'offset' | 'fontsize' | 'effects' | 'search' | 'editinfo' |
-  'quality' | 'lyrics-editor' | 'lyrics-fill' | 'track-detail'
+  'quality' | 'lyrics-editor' | 'lyrics-fill' | 'track-detail' | 'bili-subtitles'
 >('main')
 const moreSheetTransition = ref('slide-left')
 
@@ -1485,6 +1487,7 @@ const currentLyricSourceLabel = computed(() => {
     case 'kugou': return t('player.lyric_source_kugou')
     case 'lrclib': return 'LRCLIB'
     case 'amll_ttml': return 'AMLL TTML'
+    case 'bilibili_cc': return t('bili_subtitle.title')
   }
   const raw = (lyricSourceOf(player.currentTrack) ?? '').toLowerCase().replace(/[^a-z]/g, '')
   if (raw === 'youtube') return t('player.source_youtube')
@@ -2590,6 +2593,14 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
 
             <!-- 歌词 -->
             <div class="np-more-group">
+              <button v-if="player.currentTrack && biliSubtitleTarget(player.currentTrack)" class="np-more-list-item" @click="goToSubView('bili-subtitles')">
+                <span class="material-symbols-rounded">subtitles</span>
+                <div class="np-more-list-info">
+                  <span class="np-more-list-headline">{{ t('bili_subtitle.title') }}</span>
+                  <span v-if="currentLyrics.subtitle?.track" class="np-more-list-desc">{{ currentLyrics.subtitle.track.label }}</span>
+                </div>
+                <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
+              </button>
               <div class="np-more-list-item np-more-list-item--stepper">
                 <button class="np-more-stepper-main" @click="goToSubView('offset')">
                   <span class="material-symbols-rounded">timer</span>
@@ -2706,6 +2717,14 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
                 <span class="material-symbols-rounded np-more-chevron">chevron_right</span>
               </button>
             </div>
+          </template>
+
+          <template v-else-if="moreSheetView === 'bili-subtitles'">
+            <div class="np-more-sub-header">
+              <button class="np-more-back" :aria-label="t('common.back')" @click="goBackToMain()"><span class="material-symbols-rounded">arrow_back</span></button>
+              <h4 class="np-more-title">{{ t('bili_subtitle.title') }}</h4>
+            </div>
+            <BiliSubtitleSettings :track="player.currentTrack" />
           </template>
 
           <!-- 子视图：歌词偏移（显示与编辑的都是实际生效的偏移） -->

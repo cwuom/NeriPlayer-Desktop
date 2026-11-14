@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
+import { subtitle } from './bili-subtitle-test-loader.mjs'
 
 async function loadModule(path, dependencies) {
   const source = await readFile(new URL(path, import.meta.url), 'utf8')
@@ -74,6 +75,7 @@ const wordTimed = [
 
 const player = { hasPlaybackSession: true, isLoadingAudio: false, durationMs: 0, loadedPlaybackTrackKey: null,
   currentTrack: { id: 'netease:1', title: '歌', artist: '人', durationMs: 0 },
+  downloadedTrackForPlayback: () => undefined,
 }
 const settings = { defaultLyricSource: 'automatic', preferWordTimedLyrics: true }
 const sources = new Map()
@@ -99,6 +101,11 @@ const { useCurrentLyricsStore } = await loadModule('../src/stores/currentLyrics.
   '@tauri-apps/api/core': { invoke: async () => [] },
   '@/stores/player': { usePlayerStore: () => player },
   '@/stores/settings': { useSettingsStore: () => settings },
+  '@/modules/lyrics/biliSubtitle': subtitle,
+  '@/modules/lyrics/biliSubtitleLoader': {
+    biliSubtitleRevision: { value: 0 },
+    loadBiliSubtitleLyrics: async () => ({ source: 'bilibili_cc', lines: [] }),
+  },
   '@/modules/lyrics/lyricsCache': {
     getCachedLyrics: async () => cached,
     saveCachedLyrics: async (track, lines) => { cacheWrites.push([track.id, lines]) },

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
+import { subtitle } from './bili-subtitle-test-loader.mjs'
 
 const source = await readFile(new URL('../src/modules/lyrics/lyricsCache.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, {
@@ -24,6 +25,7 @@ new Function('require', 'exports', compiled)(name => {
   if (name === '@/utils/persistentCache') return persistentCache
   if (name === './lyricsRequest') return { lyricsIdentity: track => track.id }
   if (name === './lyricSource') return lyricSource
+  if (name === './biliSubtitle') return subtitle
   throw new Error(`Unexpected lyrics cache dependency: ${name}`)
 }, exports)
 
@@ -61,6 +63,15 @@ const local = { id: 'local:D:\\Music\\a.flac', source: 'local', title: 't', arti
 await exports.saveCachedLyrics(local, lines)
 assert.equal(await exports.getCachedLyrics(local), null)
 assert.deepEqual(calls, [])
+
+// B 站的副文件歌词跟随当前下载，用户保存的编辑仍可读回
+const bili = { ...online, source: 'bilibili', id: 'bilibili:170001:22' }
+await exports.saveCachedLyrics(bili, lines, 'local')
+assert.equal(store.has(`v5:${bili.id}`), false)
+await exports.saveCachedLyrics(bili, lines, 'LOCAL_EDIT')
+assert.equal((await exports.readCachedLyrics(bili)).source, 'LOCAL_EDIT')
+await exports.saveCachedLyrics(online, lines, 'local')
+assert.equal((await exports.readCachedLyrics(online)).source, 'local')
 
 // 网易云私人雷达歌单的详情缓存按账号区分，其余歌单键不变
 const detailSource = await readFile(new URL('../src/modules/library/playlistDetailCache.ts', import.meta.url), 'utf8')

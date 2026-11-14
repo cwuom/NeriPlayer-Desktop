@@ -350,6 +350,13 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
    and `commands/desktop_lyrics_cmd.rs`. Verify locking, click-through, dragging, closing, and restoration.
 4. Regression scripts can verify timing logic; multiple-window behavior still needs testing on affected systems.
 
+Bilibili CC subtitles are ported from Android PR #575, reference commit `43cf89ae2e331f80eecdb55efabc7c8f5d6df533`.
+`biliSubtitle.ts` handles parsing, language selection, and visible cue interval matching; `biliSubtitleLoader.ts`
+owns the login-session caches. Native commands reuse playback part resolution and WBI signing, restrict
+subtitle files to official CDN hosts, and reject redirects. Run `pnpm test:bili-subtitles`,
+`pnpm test:bili-subtitle-current`, and `pnpm test:bili-subtitle-settings`. Timing fixtures are constructed;
+authenticated video requests and desktop window rendering still require native validation.
+
 #### 6. Modify GitHub / WebDAV sync
 
 1. Read `sync/models.rs`, `proto_models.rs`, `serializer.rs`, `archive/`, `merge.rs`, `manager.rs`,

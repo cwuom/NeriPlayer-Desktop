@@ -4,6 +4,15 @@
  */
 import type { LyricLine, LyricWord, TrackInfo } from '@/stores/player'
 
+/** Only source-provided text that adds content to the original is a visible translation. */
+export function visibleLyricTranslation(line: Pick<LyricLine, 'text' | 'words' | 'translation'>): string {
+  const translation = line.translation?.trim() ?? ''
+  const comparable = (value: string) => value.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase()
+  const translatedText = comparable(translation)
+  const original = line.text || (line.words ?? []).map(word => word.text).join('')
+  return translatedText && translatedText !== comparable(original) ? translation : ''
+}
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0')
 }

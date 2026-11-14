@@ -1767,6 +1767,9 @@
     "seek_here": "跳到这一句",
     "show_display_controls": "显示翻译/音译按钮",
     "hide_display_controls": "隐藏翻译/音译按钮",
+    "hide_translation": "隐藏译文",
+    "translation_source_hint": "显示或隐藏歌词来源提供的译文",
+    "translation_unavailable_here": "译文显示已开启，当前片段没有译文。",
     "select_lines": "选择歌词",
     "select_all": "全选",
     "clear_selection": "清空",
@@ -1880,5 +1883,35 @@
     "show_main": "显示主界面",
     "desktop_lyrics": "桌面歌词",
     "quit": "退出 NeriPlayer"
+  },
+  "bili_subtitle": {
+    "title": "Bilibili CC 字幕",
+    "description": "登录 Bilibili 后，可将视频字幕显示为歌词。保存的歌词和优先选择的歌词来源优先使用。",
+    "language": "字幕首选语言",
+    "automatic": "自动选择",
+    "ai_fallback": "允许 AI 字幕后备",
+    "ai_description": "自动选择时包含 AI 字幕；手动选择的 AI 轨道始终可用。",
+    "offset": "CC 字幕默认偏移",
+    "loading": "正在读取字幕轨道…",
+    "login_required": "登录 Bilibili 后可读取 CC 字幕。",
+    "failed": "字幕轨道读取失败，可重新刷新。",
+    "empty": "当前视频没有可用的 CC 字幕。",
+    "tracks_available": "当前视频提供 {count} 条字幕轨道。",
+    "refresh": "刷新字幕",
+    "languages": {
+      "zh-CN": "简体中文",
+      "zh-TW": "繁体中文",
+      "en": "英语",
+      "ja": "日语",
+      "ai-zh": "中文 · AI",
+      "ai-en": "英语 · AI",
+      "zh": "中文"
+    },
+    "track": "当前视频字幕",
+    "language_description": "自动选择时优先使用中文。各视频实际可用的字幕以播放菜单为准。",
+    "track_description": "仅列出当前视频提供的字幕轨道。译文显示取决于视频是否提供其他语言字幕。",
+    "no_tracks": "暂无字幕",
+    "login_required_short": "请先登录",
+    "failed_short": "读取失败"
   }
 }

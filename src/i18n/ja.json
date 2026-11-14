@@ -1767,6 +1767,9 @@
     "seek_here": "この行へジャンプ",
     "show_display_controls": "翻訳/ローマ字ボタンを表示",
     "hide_display_controls": "翻訳/ローマ字ボタンを非表示",
+    "hide_translation": "訳文を非表示",
+    "translation_source_hint": "歌詞の提供元にある訳文の表示を切り替えます",
+    "translation_unavailable_here": "訳文表示は有効です。この区間には訳文がありません。",
     "select_lines": "歌詞を選択",
     "select_all": "すべて選択",
     "clear_selection": "選択を解除",
@@ -1880,5 +1883,35 @@
     "show_main": "NeriPlayer を表示",
     "desktop_lyrics": "デスクトップ歌詞",
     "quit": "NeriPlayer を終了"
+  },
+  "bili_subtitle": {
+    "title": "Bilibili CC 字幕",
+    "description": "Bilibili にログインすると、動画の字幕を歌詞として表示できます。保存された歌詞と優先する歌詞ソースが優先されます。",
+    "language": "字幕の優先言語",
+    "automatic": "自動選択",
+    "ai_fallback": "AI 字幕を補助として使用",
+    "ai_description": "自動選択に AI 字幕を含めます。手動で選択した AI トラックは常に使用できます。",
+    "offset": "CC 字幕の標準オフセット",
+    "loading": "字幕トラックを読み込み中…",
+    "login_required": "CC 字幕を読み込むには Bilibili にログインしてください。",
+    "failed": "字幕トラックを読み込めませんでした。更新して再試行できます。",
+    "empty": "この動画には利用可能な CC 字幕がありません。",
+    "tracks_available": "{count} 件の字幕トラックが利用可能です。",
+    "refresh": "字幕を更新",
+    "languages": {
+      "zh-CN": "簡体字中国語",
+      "zh-TW": "繁体字中国語",
+      "en": "英語",
+      "ja": "日本語",
+      "ai-zh": "中国語 · AI",
+      "ai-en": "英語 · AI",
+      "zh": "中国語"
+    },
+    "track": "現在の動画の字幕",
+    "language_description": "自動選択では中国語を優先します。各動画で利用できる字幕は再生メニューに表示されます。",
+    "track_description": "この動画が提供する字幕のみ表示します。訳文の表示には別の言語の字幕が必要です。",
+    "no_tracks": "字幕なし",
+    "login_required_short": "ログインが必要です",
+    "failed_short": "読み込み失敗"
   }
 }

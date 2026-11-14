@@ -9,6 +9,42 @@ use std::time::Instant;
 use tauri::ipc::Channel;
 use tauri::State;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiliSubtitleTracks {
+    bvid: String,
+    cid: u64,
+    subtitle: serde_json::Value,
+    login_required: bool,
+}
+
+/// Resolve the current part and return its tracks, with an explicit unauthenticated state.
+#[tauri::command]
+pub async fn get_bili_subtitle_tracks(
+    bvid: String, avid: Option<u64>, cid: Option<u64>, state: State<'_, AppState>,
+) -> AppResult<BiliSubtitleTracks> {
+    let client = state.bilibili();
+    if !client.has_login_session() {
+        return Ok(BiliSubtitleTracks { bvid, cid: cid.unwrap_or(0), subtitle: serde_json::Value::Null, login_required: true });
+    }
+    let (bvid, cid) = super::settings_cmd::resolve_bili_playback_target(&client, bvid, avid, cid).await?;
+    let subtitle = client.get_player_subtitles(&bvid, cid).await?;
+    Ok(BiliSubtitleTracks { bvid, cid, subtitle, login_required: false })
+}
+
+/// Fetch validated caption JSON using the subtitle transport that rejects redirects.
+#[tauri::command]
+pub async fn get_bili_subtitle_payload(url: String, bvid: String, state: State<'_, AppState>) -> AppResult<serde_json::Value> {
+    state.bilibili().get_subtitle_payload(state.subtitle_transport(), &url, &bvid).await
+}
+
+/// Read local caption files on the blocking pool before attempting online CC subtitles.
+#[tauri::command]
+pub async fn load_local_lyrics(audio_path: String) -> AppResult<Vec<LyricLine>> {
+    tokio::task::spawn_blocking(move || crate::lyrics::manager::load_local_sidecar_lyrics(&audio_path).unwrap_or_default())
+        .await.map_err(|error| crate::error::AppError::Other(format!("Load local lyrics: {error}")))
+}
+
 /// 自动识别 LRC / YRC(逐字), 支持逐字歌词编辑往返
 ///
 /// 传了歌名时按匹配歌词处理：同步来的歌词多是 Android 从平台匹配的，同样去掉制作信息和标题行

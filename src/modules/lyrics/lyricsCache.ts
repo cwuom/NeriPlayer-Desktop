@@ -1,10 +1,11 @@
 import type { LyricLine, TrackInfo } from '@/stores/player'
 import { getCachedValue, removeCachedValue, setCachedValue } from '@/utils/persistentCache'
+import { biliSubtitleTarget } from './biliSubtitle'
 import { lyricsIdentity } from './lyricsRequest'
 import { lyricSourceOf, rememberLyricSource } from './lyricSource'
 
 /** 缓存条目连同歌词来源一起存，读回时偏移量还能按来源选默认；旧条目是纯数组，来源未知 */
-interface CachedLyricsEntry {
+export interface CachedLyricsEntry {
   source: string | null
   lines: LyricLine[]
 }
@@ -24,6 +25,11 @@ function cacheKey(track: TrackInfo) {
 // 本地文件每次都重新读取 .lrc / 内嵌歌词（对齐 Android），否则编辑后的歌词最长 30 天都看不到
 function bypassesCache(track: TrackInfo): boolean {
   return track.source === 'local' || track.id.startsWith('local:')
+}
+
+function bypassesSourceCache(track: TrackInfo, source: string | null): boolean {
+  // 字幕按登录会话缓存，B 站下载的副文件歌词每次从当前文件读取
+  return source === 'bilibili_cc' || (source === 'local' && biliSubtitleTarget(track) !== null)
 }
 
 function normalizeLyricLine(line: LyricLine): LyricLine {
@@ -50,19 +56,26 @@ function hasVisibleLyric(lines: LyricLine[]): boolean {
   )
 }
 
-/** 读缓存的歌词；命中时顺带记下这份歌词的来源 */
-export async function getCachedLyrics(track: TrackInfo): Promise<LyricLine[] | null> {
+/** Read data without publishing a displayed source (prefetch must never change active lyrics). */
+export async function readCachedLyrics(track: TrackInfo): Promise<CachedLyricsEntry | null> {
   if (bypassesCache(track)) return null
   const cached = await getCachedValue<CachedLyricsEntry | LyricLine[]>('lyrics', cacheKey(track), LYRICS_CACHE_MAX_AGE_MS)
   const entry = Array.isArray(cached)
     ? { source: null, lines: cached }
     : cached && Array.isArray(cached.lines) ? cached : null
-  if (!entry) return null
+  if (!entry || bypassesSourceCache(track, entry.source)) return null
 
   const lines = entry.lines.map(normalizeLyricLine)
   if (!hasVisibleLyric(lines)) return null
-  rememberLyricSource(track, typeof entry.source === 'string' ? entry.source : null)
-  return lines
+  return { source: typeof entry.source === 'string' ? entry.source : null, lines }
+}
+
+/** Only the current consumer may publish the cache's source. */
+export async function getCachedLyrics(track: TrackInfo, isCurrent: () => boolean = () => true): Promise<LyricLine[] | null> {
+  const entry = await readCachedLyrics(track)
+  if (!entry || !isCurrent()) return null
+  rememberLyricSource(track, entry.source)
+  return entry.lines
 }
 
 /** 写缓存；来源默认取这首歌当前记下的歌词来源，调用方应先 rememberLyricSource 再缓存 */
@@ -71,7 +84,7 @@ export async function saveCachedLyrics(
   lines: LyricLine[],
   source: string | null = lyricSourceOf(track),
 ) {
-  if (bypassesCache(track)) return
+  if (bypassesCache(track) || bypassesSourceCache(track, source)) return
   const normalized = lines.map(normalizeLyricLine)
   if (!hasVisibleLyric(normalized)) {
     await clearCachedLyrics(track)

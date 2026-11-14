@@ -10,7 +10,7 @@
 // TTML 的默认。其余情况（来源未知、YouTube 原生歌词、本地歌词文件、手动编辑）与 Android
 // resolveLyricDefaultOffsetMs 一样：QQ 曲目用 QQ 默认，其它一律用网易云默认。
 
-export const LYRIC_OFFSET_SOURCES = ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml'] as const
+export const LYRIC_OFFSET_SOURCES = ['netease', 'qq', 'kugou', 'lrclib', 'amll_ttml', 'bilibili_cc'] as const
 export type LyricOffsetSource = typeof LYRIC_OFFSET_SOURCES[number]
 
 // 与 Android DEFAULT_*_LYRIC_OFFSET_MS 一致
@@ -20,6 +20,7 @@ export const DEFAULT_LYRIC_OFFSET_MS: Readonly<Record<LyricOffsetSource, number>
   kugou: 0,
   lrclib: 0,
   amll_ttml: 0,
+  bilibili_cc: 0,
 }
 
 // 与 Android MIN/MAX_LYRIC_DEFAULT_OFFSET_MS、LYRIC_DEFAULT_OFFSET_STEP_MS 一致
@@ -38,9 +39,10 @@ export function normalizeLyricDefaultOffsetMs(value: number, fallback = 0): numb
   return Math.min(MAX_LYRIC_DEFAULT_OFFSET_MS, Math.max(MIN_LYRIC_DEFAULT_OFFSET_MS, aligned)) || 0
 }
 
-/// 把各处记下的歌词来源归一：后端 snake_case、Android MusicPlatform（CLOUD_MUSIC）、
-/// LyricSourcePreference（AmllTtml）以及桌面端旧写法（LRCLIB、LOCAL_EDIT）
-/// 返回 'none' 表示来源已知但没有可调默认；null 表示不知道
+/**
+ * 统一后端、Android 和桌面端的歌词来源名称。
+ * 返回 'none' 表示来源没有可调默认偏移；null 表示来源未知。
+ */
 export function normalizeLyricSource(value: unknown): LyricOffsetSource | 'none' | null {
   if (typeof value !== 'string') return null
   const key = value.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -58,6 +60,9 @@ export function normalizeLyricSource(value: unknown): LyricOffsetSource | 'none'
     case 'amllttml':
     case 'ttml':
       return 'amll_ttml'
+    case 'bilibilicc':
+    case 'bilicc':
+      return 'bilibili_cc'
     case 'youtube':
     case 'local':
     case 'localedit':

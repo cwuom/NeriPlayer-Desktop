@@ -23,6 +23,34 @@ const UI_SCALE_MIN: i32 = 25;
 const UI_SCALE_MAX: i32 = 1000;
 const UI_SCALE_STEP: i32 = 5;
 
+#[cfg(test)]
+mod bili_subtitle_settings_tests {
+    use super::AppSettings;
+
+    #[test]
+    fn subtitle_preferences_round_trip_and_normalize_independently() {
+        let defaults: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(defaults.bili_cc_subtitle_enabled);
+        assert!(defaults.bili_cc_subtitle_ai_fallback);
+        assert_eq!(defaults.bili_cc_subtitle_offset, 0);
+        let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "biliCcSubtitleEnabled": false, "biliCcSubtitleAiFallback": false,
+            "biliCcSubtitleLanguage": " ai-zh ", "biliCcSubtitleOffset": -75
+        })).unwrap();
+        settings.normalize();
+        assert_eq!(settings.bili_cc_subtitle_language, "ai-zh");
+        assert_eq!(settings.bili_cc_subtitle_offset, -50);
+        assert_eq!(settings.cloud_music_offset, defaults.cloud_music_offset);
+        let restored: AppSettings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(restored, settings);
+        settings.bili_cc_subtitle_language = "invalid language".into();
+        settings.bili_cc_subtitle_offset = 9000;
+        settings.normalize();
+        assert!(settings.bili_cc_subtitle_language.is_empty());
+        assert_eq!(settings.bili_cc_subtitle_offset, 5000);
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsLoadResult {
@@ -100,6 +128,11 @@ pub struct AppSettings {
     pub lrclib_offset: i32,
     #[serde(deserialize_with = "lenient_i32")]
     pub amll_ttml_offset: i32,
+    #[serde(deserialize_with = "lenient_i32")]
+    pub bili_cc_subtitle_offset: i32,
+    pub bili_cc_subtitle_enabled: bool,
+    pub bili_cc_subtitle_language: String,
+    pub bili_cc_subtitle_ai_fallback: bool,
     pub cover_style: String,
     pub advanced_lyrics: bool,
     /// 有逐字结果时优先用；关闭后不再用 AMLL/酷狗补逐字（对齐 Android prefer_word_timed_lyrics）
@@ -295,6 +328,10 @@ impl Default for AppSettings {
             kugou_offset: 0,
             lrclib_offset: 0,
             amll_ttml_offset: 0,
+            bili_cc_subtitle_offset: 0,
+            bili_cc_subtitle_enabled: true,
+            bili_cc_subtitle_language: String::new(),
+            bili_cc_subtitle_ai_fallback: true,
             cover_style: "card".into(),
             advanced_lyrics: true,
             prefer_word_timed_lyrics: true,
@@ -361,6 +398,7 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Normalize persisted preferences to the current format, supported choices and numeric bounds.
     pub fn normalize(&mut self) {
         self.format_version = SETTINGS_FORMAT_VERSION;
         self.dark_mode = normalize_choice(
@@ -418,9 +456,14 @@ impl AppSettings {
             &mut self.kugou_offset,
             &mut self.lrclib_offset,
             &mut self.amll_ttml_offset,
+            &mut self.bili_cc_subtitle_offset,
         ] {
             *offset = normalize_lyric_default_offset(*offset);
         }
+        let language = self.bili_cc_subtitle_language.trim();
+        self.bili_cc_subtitle_language = if language.len() <= 32
+            && language.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        { language.to_owned() } else { String::new() };
         self.cover_blur_amount = clamp_f32(self.cover_blur_amount, 0.0, 8.0, 1.5);
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
