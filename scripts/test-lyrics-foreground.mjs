@@ -86,6 +86,7 @@ async function mount(overrides = {}) {
     'vue-i18n': { useI18n: () => ({ t: key => key }) },
     '@tauri-apps/plugin-clipboard-manager': { writeText: async () => {} },
     '@/components/ui/ContextMenu.vue': { default: {} },
+    '@/components/LyricShareDialog.vue': { default: {} },
     '@/utils/frameLoop': { scheduleFrame, cancelFrame },
     '@/utils/contextMenu': { createContextMenuItem: (label, options) => ({ label, ...options }) },
   }

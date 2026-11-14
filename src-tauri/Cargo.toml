@@ -12,7 +12,8 @@ tauri-build = { version = "2", features = [] }
 cc = "1"
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+# image-png: 歌词海报复制图片到剪贴板走 Image.fromBytes(PNG)，核心解码需要它
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
