@@ -106,6 +106,16 @@ await test('saved edited lyrics take priority and intentional clearing remains e
   assert.deepEqual(r.store.lines, [])
   assert.equal(r.calls.cc.length, 0)
 })
+await test('cached manual edits take priority over downloaded sidecars', async r => {
+  const track = r.player.currentTrack
+  r.downloads.set(track.id, { ...track, filePath: 'C:/Music/download.m4a' })
+  r.handlers.local = async () => plain('sidecar')
+  await r.cache.saveCachedLyrics(track, plain('saved edit'), 'LOCAL_EDIT')
+  r.store.acquire(); await flush()
+  assert.equal(r.store.lines[0].text, 'saved edit')
+  assert.equal(r.sources.lyricSourceOf(track), 'LOCAL_EDIT')
+  assert.equal(r.calls.local.length + r.calls.cc.length, 0)
+})
 await test('downloaded sidecars and explicitly preferred sources win over captions', async r => {
   r.player.currentTrack.audioUrl = 'C:\\Music\\video.m4a'
   r.handlers.local = async () => plain('sidecar')

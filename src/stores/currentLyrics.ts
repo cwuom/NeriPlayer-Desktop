@@ -198,6 +198,9 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
         return
       }
 
+      const cachedSource = cached?.length ? (lyricSourceOf(track) ?? '').toLowerCase().replace(/_/g, '') : null
+      if (cachedSource === 'localedit') return
+
       // Downloaded Bilibili tracks can have edited sidecars; read them before online subtitles.
       const audioPath = localAudioPath(track)
       if (audioPath) {
@@ -209,7 +212,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
           return
         }
       }
-      if (cached?.length && ['local', 'localedit'].includes((lyricSourceOf(track) ?? '').toLowerCase().replace(/_/g, ''))) return
+      if (cachedSource === 'local') return
 
       // 设了默认歌词源时先按它匹配（Android tryGetPreferredLyricSourceResult），缓存已是该来源就直接用
       const preferredSource = preferredLyricMatchSource(getPlaybackSourceKind(track), settings.defaultLyricSource)
