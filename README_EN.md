@@ -245,6 +245,7 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
   replies, and likes. An uncertain request result keeps the draft without automatic resubmission.
 - **Bilibili parts and skip ranges**: choose a starting part, queue all parts, and edit, preview,
   or sync multiple skip ranges identified by `bvid + cid`. Automatic skipping pauses during Listen Together.
+  Choose and preview Song - Artist or Artist - Song for each video, with the choice saved on this device when playback starts.
 - **Backups and stats**: playlist JSON import/export, full configuration import/export, recent-play management,
   play counts and listening time, and GitHub/WebDAV metadata sync.
 - **Listen Together**: create/join rooms, invitations, playback and queue sync, member controls,
