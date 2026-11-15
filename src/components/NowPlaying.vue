@@ -52,6 +52,7 @@ import {
   MAX_LYRIC_DEFAULT_OFFSET_MS,
   MIN_LYRIC_DEFAULT_OFFSET_MS,
   LYRIC_OFFSET_STEP_MS,
+  withUpdatedUserOffsetPayload,
 } from '@/modules/lyrics/lyricOffset'
 import {
   fetchLyrics,
@@ -250,11 +251,12 @@ async function commitLyricsToTrack(
   nextTranslated: string | null,
   source?: string | null,
   nextRomanized?: string | null,
+  resetOffset = false,
 ) {
   const track = player.currentTrack
   if (!track) return
   const nextPayload = withUpdatedLyricsPayload(
-    track.syncPayload,
+    resetOffset ? withUpdatedUserOffsetPayload(track.syncPayload, 0) : track.syncPayload,
     nextLyric,
     nextTranslated,
     source ?? 'LOCAL_EDIT',
@@ -265,6 +267,7 @@ async function commitLyricsToTrack(
   nextPayload.syncMetadataVersion = 1
   delete nextPayload.sync_metadata_version
   player.patchCurrentTrackSyncPayload(nextPayload)
+  if (resetOffset) lyricOffsetStore.clearLocalUserOffset(track)
   const updatedTrack = player.currentTrack
   if (updatedTrack) {
     await persistTrackSyncPayload(updatedTrack)
@@ -413,12 +416,15 @@ async function onLyricMatchPicked(result: LyricMatchResult) {
     goBackTo('lyrics-editor')
     return
   }
+  const track = player.currentTrack
+  if (!track) return
   try {
-    rememberLyricSource(player.currentTrack, source)
+    const resetOffset = lyricOffsetStore.shouldResetOffsetForMatch(track, result.source)
+    rememberLyricSource(track, source)
     currentLyrics.replace(result.lines)
-    cacheLyricsForTrack(player.currentTrack, result.lines)
+    cacheLyricsForTrack(track, result.lines)
     // 换了一份歌词：候选没有音译时清掉旧音译，免得挂到新歌词上
-    await commitLyricsToTrack(lyricText, translationText || null, source, romanizationText || null)
+    await commitLyricsToTrack(lyricText, translationText || null, source, romanizationText || null, resetOffset)
     toast.success(t('player.lyrics_fill_applied'))
     goBackToMain()
   } catch (e) {

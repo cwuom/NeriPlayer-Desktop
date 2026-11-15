@@ -223,6 +223,7 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
 - **Lyrics display and matching**: line/word sync, translations, romanization, fonts and sizes, lyric blur,
   local/embedded lyrics, and per-source/per-track offsets.
   Manually match lyrics from NetEase, QQ Music, Kugou, LRCLIB, and AMLL TTML.
+  Applying lyrics from a different source in Now Playing restores that source's configured default offset.
 - **Lyric share poster**: right-click a lyric line, choose "Select lyrics", tick the lines, then either copy
   the selected text or render a poster drawn locally: blurred cover background, brand mark, lyric block and
   an info bar with the cover thumbnail. Layout counts wrapped visual lines (up to 24); the canvas is 1080

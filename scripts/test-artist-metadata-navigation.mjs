@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
+import * as pinia from 'pinia'
 import ts from 'typescript'
+import * as vue from 'vue'
 
 const source = await readFile(new URL('../src/components/NowPlaying.vue', import.meta.url), 'utf8')
 const script = source.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
@@ -374,6 +376,11 @@ await test('stale Bilibili owner absence does not report unavailable for the edi
 const format = loadModule(await readFile(new URL('../src/modules/lyrics/lyricsFormat.ts', import.meta.url), 'utf8'))
 const matchSource = await readFile(new URL('../src/modules/lyrics/lyricMatch.ts', import.meta.url), 'utf8')
 const syncSource = await readFile(new URL('../src/modules/lyrics/syncTrackPayload.ts', import.meta.url), 'utf8')
+const offsetSource = await readFile(new URL('../src/modules/lyrics/lyricOffset.ts', import.meta.url), 'utf8')
+const offsetStoreSource = await readFile(new URL('../src/stores/lyricOffset.ts', import.meta.url), 'utf8')
+const userDataSource = await readFile(new URL('../src/modules/persistence/userData.ts', import.meta.url), 'utf8')
+const lyricSource = loadModule(await readFile(new URL('../src/modules/lyrics/lyricSource.ts', import.meta.url), 'utf8'), { vue })
+const offset = loadModule(offsetSource)
 const lyricFunctions = ['onLyricMatchPicked', 'commitLyricsToTrack', 'confirmApplySearchResult', 'parseLyricsFromSearchResult',
   'lyricSourceForPlatform', 'mapBackendLyrics'].map(name => {
   const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
@@ -383,7 +390,7 @@ const lyricFunctions = ['onLyricMatchPicked', 'commitLyricsToTrack', 'confirmApp
 const compiledLyrics = ts.transpileModule(lyricFunctions, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
-function lyricActions(fields) {
+async function lyricActions(fields, { beforeTrackWrite = async () => {} } = {}) {
   const stored = []
   const player = {
     currentTrack: {
@@ -395,40 +402,68 @@ function lyricActions(fields) {
     updateCurrentTrackInfo(patch) { this.currentTrack = { ...this.currentTrack, ...patch } },
   }
   const invoke = async (command, args) => {
+    if (command === 'load_user_data_snapshot') {
+      return { lyricOffsets: {}, migrated: { lyricOffsets: true, playbackState: true, history: true } }
+    }
+    if (command === 'set_lyric_offset') {
+      stored.push({ command, ...args })
+      return
+    }
     if (command === 'parse_lrc_content') return [{ start_ms: 1000, duration_ms: 1000, text: '新歌词', words: [] }]
     if (command === 'update_playlist_track' || command === 'record_lyric_override') {
+      if (command === 'update_playlist_track') await beforeTrackWrite(args.track)
       stored.push({ command, track: args.track })
       return 1
     }
     throw new Error(`unexpected command ${command}`)
   }
   const log = { warn() {}, error() {} }
+  const userData = loadModule(userDataSource, { '@tauri-apps/api/core': { invoke } })
+  await userData.preloadUserData({ getItem: () => null, removeItem() {} })
   const sync = loadModule(syncSource, {
     '@tauri-apps/api/core': { invoke }, '@/utils/logger': { createLogger: () => log },
+    '@/modules/persistence/userData': userData,
   })
   const match = loadModule(matchSource, { '@tauri-apps/api/core': { invoke }, './lyricsFormat': format })
+  const settings = {
+    isHydrated: true,
+    cloudMusicOffset: 1000, qqMusicOffset: 500, kugouOffset: 150, lrclibOffset: 0,
+    amllTtmlOffset: 0, biliCcSubtitleOffset: 0,
+  }
+  const offsetStore = loadModule(offsetStoreSource, {
+    pinia, vue,
+    '@/stores/settings': { useSettingsStore: () => settings },
+    '@/modules/lyrics/lyricOffset': offset,
+    '@/modules/lyrics/lyricSource': lyricSource,
+    '@/modules/lyrics/syncTrackPayload': sync,
+    '@/stores/player': { usePlayerStore: () => player },
+    '@/modules/persistence/userData': userData,
+    '@/utils/logger': { createLogger: () => log },
+  }).useLyricOffsetStore(pinia.createPinia())
+  lyricSource.rememberLyricSource(player.currentTrack, null)
+  let displayedLyrics = []
   const result = {
     id: 'netease:77', source: 'netease', title: '匹配歌曲', artist: '匹配歌手', cover_url: 'https://p1.music.126.net/match.jpg',
     synced_lyrics: '[00:01.00]新歌词',
     lines: [{ startMs: 1000, durationMs: 1000, text: '新歌词', words: [] }],
   }
   const dependencies = {
-    ...format, ...sync, ...match, player, invoke, log,
+    ...format, ...sync, ...match, ...offset, ...lyricSource, player, invoke, log, lyricOffsetStore: offsetStore,
     mapBackendLyricsShared: format.mapBackendLyrics,
-    currentLyrics: { replace() {} },
-    cacheLyricsForTrack() {}, rememberLyricSource() {},
+    currentLyrics: { replace(lines) { displayedLyrics = lines } },
+    cacheLyricsForTrack() {},
     toast: { success() {}, error(message) { throw new Error(message) } }, t: key => key,
     lyricMatchTarget: { value: 'track' },
     infoApplyCandidate: { value: result }, applyInfoFields: { value: fields },
     goBackToMain() {}, goBackTo() {},
   }
   const actions = new Function(...Object.keys(dependencies), `${compiledLyrics}\nreturn { onLyricMatchPicked, confirmApplySearchResult }`)(...Object.values(dependencies))
-  return { ...actions, result, player, stored }
+  return { ...actions, result, player, stored, offsetStore, get displayedLyrics() { return displayedLyrics } }
 }
 
 for (const path of ['lyric matcher', 'song information with only lyrics selected']) {
   await test(`${path} preserves the original audio metadata`, async () => {
-    const actions = lyricActions({ title: false, artist: false, cover: false, lyrics: true })
+    const actions = await lyricActions({ title: false, artist: false, cover: false, lyrics: true })
     if (path === 'lyric matcher') await actions.onLyricMatchPicked(actions.result)
     else await actions.confirmApplySearchResult()
     const track = actions.player.currentTrack
@@ -443,8 +478,94 @@ for (const path of ['lyric matcher', 'song information with only lyrics selected
   })
 }
 
+await test('selecting Kugou after adjusting NetEase lyrics resets to the configured Kugou default', async () => {
+  const actions = await lyricActions({})
+  const { player, offsetStore, stored, result } = actions
+  await actions.onLyricMatchPicked(result)
+  offsetStore.setEffectiveOffsetMs(player.currentTrack, -200)
+  assert.equal(offsetStore.effectiveOffsetMs(player.currentTrack), -200)
+
+  const kugou = { ...result, source: 'kugou', lines: [{ ...result.lines[0], text: '酷狗歌词' }] }
+  await actions.onLyricMatchPicked(kugou)
+
+  assert.deepEqual(actions.displayedLyrics, kugou.lines)
+  assert.equal(offsetStore.offsetSourceFor(player.currentTrack), 'kugou')
+  assert.equal(offsetStore.effectiveOffsetMs(player.currentTrack), 150)
+  assert.equal(offsetStore.getUserOffsetMs(player.currentTrack), 0)
+  assert.equal(offsetStore.offsets[player.currentTrack.id], undefined)
+  assert.equal(player.currentTrack.syncPayload.matchedLyricSource, 'KUGOU')
+  assert.equal(player.currentTrack.syncPayload.userLyricOffsetMs, 0)
+  assert.deepEqual(stored.filter(entry => entry.command === 'set_lyric_offset').map(entry => entry.offsetMs), [-1200, 0])
+  for (const command of ['update_playlist_track', 'record_lyric_override']) {
+    const { sync_payload } = stored.findLast(entry => entry.command === command).track
+    assert.equal(sync_payload.matchedLyric, '[00:01.00]酷狗歌词')
+    assert.equal(sync_payload.matchedLyricSource, 'KUGOU')
+    assert.equal(sync_payload.userLyricOffsetMs, 0)
+  }
+})
+
+await test('matching from the same provider keeps its manual offset', async () => {
+  const { player, offsetStore, result, onLyricMatchPicked } = await lyricActions({})
+  await onLyricMatchPicked(result)
+  offsetStore.setEffectiveOffsetMs(player.currentTrack, -200)
+  await onLyricMatchPicked(result)
+  assert.equal(offsetStore.offsetSourceFor(player.currentTrack), 'netease')
+  assert.equal(offsetStore.effectiveOffsetMs(player.currentTrack), -200)
+})
+
+await test('matching the saved provider preserves a synced offset without local calibration metadata', async () => {
+  const { player, offsetStore, result, onLyricMatchPicked } = await lyricActions({})
+  player.patchCurrentTrackSyncPayload({
+    matched_lyric_source: 'KUGOU',
+    user_lyric_offset_ms: -200,
+  })
+  await onLyricMatchPicked({ ...result, source: 'kugou' })
+
+  assert.equal(offsetStore.getUserOffsetMs(player.currentTrack), -200)
+})
+
+await test('reselecting the displayed provider clears an offset still tied to the old provider', async () => {
+  const { player, offsetStore, result, onLyricMatchPicked } = await lyricActions({})
+  await onLyricMatchPicked(result)
+  offsetStore.setEffectiveOffsetMs(player.currentTrack, -200)
+  player.patchCurrentTrackSyncPayload({ ...player.currentTrack.syncPayload, matchedLyricSource: 'KUGOU' })
+  lyricSource.rememberLyricSource(player.currentTrack, 'KUGOU')
+  assert.equal(offsetStore.offsetSourceFor(player.currentTrack), 'netease')
+
+  await onLyricMatchPicked({ ...result, source: 'kugou' })
+  assert.equal(offsetStore.offsetSourceFor(player.currentTrack), 'kugou')
+  assert.equal(offsetStore.effectiveOffsetMs(player.currentTrack), 150)
+})
+
+await test('a pending offset write cannot overwrite the newly selected lyrics', async () => {
+  let markOldWriteStarted
+  let releaseOldWrite
+  const oldWriteStarted = new Promise(resolve => { markOldWriteStarted = resolve })
+  const oldWritePending = new Promise(resolve => { releaseOldWrite = resolve })
+  const { player, offsetStore, stored, result, onLyricMatchPicked } = await lyricActions({}, {
+    async beforeTrackWrite(track) {
+      if (track.sync_payload.matchedLyricSource !== 'CLOUD_MUSIC' || track.sync_payload.userLyricOffsetMs !== -1200) return
+      markOldWriteStarted()
+      await oldWritePending
+    },
+  })
+  await onLyricMatchPicked(result)
+  offsetStore.setEffectiveOffsetMs(player.currentTrack, -200)
+  await oldWriteStarted
+  const apply = onLyricMatchPicked({ ...result, source: 'kugou' })
+  await new Promise(resolve => setImmediate(resolve))
+  const wroteKugouEarly = stored.some(entry => entry.track?.sync_payload.matchedLyricSource === 'KUGOU')
+  releaseOldWrite()
+  await apply
+  assert.equal(wroteKugouEarly, false)
+  assert.deepEqual(stored.filter(entry => entry.command === 'update_playlist_track').slice(1).map(entry => [
+    entry.track.sync_payload.matchedLyricSource,
+    entry.track.sync_payload.userLyricOffsetMs,
+  ]), [['CLOUD_MUSIC', -1200], ['KUGOU', 0]])
+})
+
 await test('explicit artist and cover selection still persists custom display metadata', async () => {
-  const actions = lyricActions({ title: false, artist: true, cover: true, lyrics: false })
+  const actions = await lyricActions({ title: false, artist: true, cover: true, lyrics: false })
   await actions.confirmApplySearchResult()
   const track = actions.player.currentTrack
   assert.equal(track.id, 'bilibili:123')
