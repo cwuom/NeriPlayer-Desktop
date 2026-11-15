@@ -9,6 +9,7 @@ import {
   displayAlbum,
   tracePlaybackUi,
 } from '@/stores/player'
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 import { useDownloadStore } from '@/stores/download'
 import { useTrackDownloadMenu } from '@/composables/useTrackDownloadMenu'
 import { useToastStore } from '@/stores/toast'
@@ -38,6 +39,7 @@ const log = createLogger('local-playlist-view')
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const biliParts = useBiliVideoPartsStore()
 const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const downloadStore = useDownloadStore()
 const toast = useToastStore()
@@ -403,12 +405,12 @@ async function confirmRemove() {
 
 function addToQueueNext(track: TrackInfo) {
   closeTrackMenu()
-  player.addToQueueNext(track)
+  player.addToQueueNext({ ...track })
 }
 
 function addToQueueEnd(track: TrackInfo) {
   closeTrackMenu()
-  player.addToQueueEnd(track)
+  player.addToQueueEnd({ ...track })
 }
 
 const trackMenuItems = computed<ContextMenuItem[]>(() => [
@@ -769,11 +771,11 @@ async function onTrackDragPointerUp(e: PointerEvent) {
 
 function playSelected() {
   if (selectedTracks.value.length === 0) return
-  player.playAll(selectedTracks.value, undefined, undefined, String(route.params.id))
+  player.playAll(selectedTracks.value.map(track => ({ ...track })), undefined, undefined, String(route.params.id))
 }
 
 function addSelectedToQueueEnd() {
-  for (const track of selectedTracks.value) player.addToQueueEnd(track)
+  for (const track of selectedTracks.value) player.addToQueueEnd({ ...track })
   toast.success(t('player.added_to_queue_count', { count: selectedTracks.value.length }))
 }
 
@@ -785,12 +787,12 @@ function downloadSelected() {
 
 function playAll() {
   if (tracks.value.length === 0) return
-  player.playAll(tracks.value, undefined, undefined, String(route.params.id))
+  player.playAll(tracks.value.map(track => ({ ...track })), undefined, undefined, String(route.params.id))
 }
 
 function shufflePlay() {
   if (tracks.value.length === 0) return
-  player.shufflePlay(tracks.value, String(route.params.id))
+  player.shufflePlay(tracks.value.map(track => ({ ...track })), String(route.params.id))
 }
 
 function playTrack(track: TrackInfo) {
@@ -803,7 +805,14 @@ function playTrack(track: TrackInfo) {
     toggleSelected(trackSelectionKey(track))
     return
   }
-  player.playAll(filteredTracks.value, track.id, trackSelectionKey(track), String(route.params.id))
+  const playlistId = String(route.params.id)
+  const playlistTracks = filteredTracks.value
+  // 播放器会给队列条目补 CID，保留原歌单里的合集身份
+  void biliParts.request(
+    track,
+    () => player.playAll(playlistTracks.map(item => ({ ...item })), track.id, trackSelectionKey(track), playlistId),
+    (parts, startTrackId) => player.playAll(parts, startTrackId, undefined, playlistId),
+  )
 }
 
 function prefetchTrack(track: TrackInfo) {

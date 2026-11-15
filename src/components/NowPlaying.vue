@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore, displayAlbum, type AudioInfo, type LyricLine, type TrackInfo } from '@/stores/player'
 import { AUDIO_EFFECT_PRESETS } from '@/modules/audioEffects/model'
 import { useLikedSongsStore } from '@/stores/likedSongs'
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 import {
   COVER_BLUR_PX_PER_UNIT,
   LYRIC_FONT_SCALE_MAX,
@@ -122,6 +123,7 @@ const props = defineProps<{
 }>()
 const player = usePlayerStore()
 const likedSongs = useLikedSongsStore()
+const biliParts = useBiliVideoPartsStore()
 const settings = useSettingsStore()
 const toast = useToastStore()
 const downloadStore = useDownloadStore()
@@ -151,6 +153,9 @@ const coverUrl = ref('')
 const showVolumeSlider = ref(false)
 const showQueue = ref(false)
 const showAddToPlaylist = ref(false)
+const addToPlaylistTrack = ref<TrackInfo | null>(null)
+const addToPlaylistAbort = new AbortController()
+onBeforeUnmount(() => addToPlaylistAbort.abort())
 const showBiliVideoSkip = ref(false)
 const biliVideoSkipTrack = ref<TrackInfo | null>(null)
 const canManageBiliVideoSkip = computed(() => !!player.currentTrack && !!resolveBiliVideoSkipBvid(player.currentTrack))
@@ -172,6 +177,7 @@ const fullScreenOverlayOpen = computed(() =>
   || showMoreSheet.value
   || showLtPanel.value
   || showAddToPlaylist.value
+  || !!biliParts.collection
   || showBiliVideoSkip.value)
 const frameLoopSuspended = computed(() => settings.lowPerformanceMode && fullScreenOverlayOpen.value)
 const controlFeedbackPulse = ref(0)
@@ -736,10 +742,18 @@ function onLyricSeek(ms: number) {
   player.seekTo(ms)
 }
 
-const isFavorite = computed(() => likedSongs.isTrackLiked(player.currentTrack))
+const isFavorite = computed(() => likedSongs.isTrackLiked(player.currentTrack, true))
 
-async function toggleFavorite() {
-  await likedSongs.toggleTrack(player.currentTrack)
+function toggleFavorite() {
+  likedSongs.requestToggleTrack(player.currentTrack)
+}
+
+function openAddToPlaylist() {
+  if (!player.currentTrack) return
+  void biliParts.requestCollection(player.currentTrack, track => {
+    addToPlaylistTrack.value = track
+    showAddToPlaylist.value = true
+  }, undefined, addToPlaylistAbort.signal)
 }
 
 // 睡眠定时器选项
@@ -824,7 +838,7 @@ function toggleToolbarPanel(panel: 'sleep' | 'volume' | 'audiofx' | 'add') {
   if (panel === 'sleep') showSleepMenu.value = true
   else if (panel === 'volume') showVolumeSlider.value = true
   else if (panel === 'audiofx') showAudioFxPanel.value = true
-  else showAddToPlaylist.value = true
+  else openAddToPlaylist()
 }
 
 function triggerControlFeedbackPulse(direction: 'prev' | 'next' | 'misc' = 'misc') {
@@ -1126,7 +1140,7 @@ function handleContextMenuClick(item: ContextMenuActionItem) {
     case 'copy-info': void copyText(track ? `${track.title} - ${track.artist}` : ''); break
     case 'copy-artist': void copyText(track?.artist || ''); break
     case 'share': closeContextMenu(); void shareSong(); break
-    case 'add-to-playlist': closeContextMenu(); showAddToPlaylist.value = true; break
+    case 'add-to-playlist': closeContextMenu(); openAddToPlaylist(); break
     case 'open-artist': closeContextMenu(); void openArtistPage(new MouseEvent('click', { clientX: x, clientY: y })); break
     case 'save-cover': void saveCoverArt(); break
     case 'cover-style-card': settings.coverStyle = 'card'; closeContextMenu(); break
@@ -2522,7 +2536,7 @@ const sliderActiveColor = computed(() => dynamicColorVars.value['--np-primary'] 
         <QueuePanel v-if="player.hasPlaybackSession && showQueue" @close="showQueue = false" />
       </Transition>
     </Teleport>
-    <AddToPlaylistDialog v-if="player.hasPlaybackSession" v-model:open="showAddToPlaylist" :track="player.currentTrack" />
+    <AddToPlaylistDialog v-if="player.hasPlaybackSession" v-model:open="showAddToPlaylist" :track="addToPlaylistTrack" />
     <BiliVideoSkipDialog v-model:open="showBiliVideoSkip" :track="biliVideoSkipTrack" />
     <CommentsPanel v-model:open="showComments" :track="player.currentTrack" />
     <ListenTogetherPanel v-if="player.hasPlaybackSession" v-model:open="showLtPanel" />

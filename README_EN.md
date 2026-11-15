@@ -253,9 +253,10 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
   Lyrics go in `Lyrics/`, artwork in `Covers/`, and source references in `.npmeta.json` beside the audio.
 - **Comments**: NetEase and Bilibili comment browsing, reply threads, copying, and signed-in posting,
   replies, and likes. An uncertain request result keeps the draft without automatic resubmission.
-- **Bilibili parts and skip ranges**: choose a starting part, queue all parts, and edit, preview,
+- **Bilibili parts and skip ranges**: choose a starting part to queue the entire video. From Now Playing,
+  save the entire video or just the current part to favorites or a playlist. Choose and preview Song - Artist or
+  Artist - Song for each video, with the choice saved on this device when playback starts. Edit, preview,
   or sync multiple skip ranges identified by `bvid + cid`. Automatic skipping pauses during Listen Together.
-  Choose and preview Song - Artist or Artist - Song for each video, with the choice saved on this device when playback starts.
 - **Backups and stats**: playlist JSON import/export, full configuration import/export, recent-play management,
   play counts and listening time, and GitHub/WebDAV metadata sync.
 - **Listen Together**: create/join rooms, invitations, playback and queue sync, member controls,

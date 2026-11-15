@@ -226,4 +226,45 @@ await downloadAction.handleDownloadAction()
 assert.deepEqual(downloadAction.actions.at(-1), ['download', 'netease:1'])
 downloadAction.player.currentTrack = null
 assert.equal(downloadAction.downloadActionDisabled.value, true)
-console.log('now playing local audio quality tests passed')
+
+const playlistSetup = parsed.statements.filter(statement => {
+  if (ts.isFunctionDeclaration(statement)) return statement.name?.text === 'openAddToPlaylist'
+  if (ts.isVariableStatement(statement)) return statement.declarationList.declarations.some(item =>
+    ['showAddToPlaylist', 'addToPlaylistTrack', 'addToPlaylistAbort'].includes(item.name.getText(parsed)))
+  return ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression)
+    && statement.expression.expression.getText(parsed) === 'onBeforeUnmount'
+}).map(statement => statement.getText(parsed)).join('\n')
+const playlistHandler = new Function('ref', 'onBeforeUnmount', 'biliParts', 'player', ts.transpileModule(`
+  ${playlistSetup}
+  return { openAddToPlaylist, showAddToPlaylist, addToPlaylistTrack }
+`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)
+
+function mountPlaylistEntry() {
+  const beforeUnmount = []
+  const track = { id: 'bilibili:BV1demo' }
+  let request
+  const view = playlistHandler(value => ({ value }), cleanup => beforeUnmount.push(cleanup), {
+    requestCollection(target, save, _isLiked, signal) { request = { target, save, signal } },
+  }, { currentTrack: track })
+  return {
+    ...view, track,
+    request: () => request,
+    unmount: () => beforeUnmount.forEach(cleanup => cleanup()),
+  }
+}
+
+const departing = mountPlaylistEntry()
+departing.openAddToPlaylist()
+const surviving = mountPlaylistEntry()
+surviving.openAddToPlaylist()
+departing.unmount()
+assert.equal(departing.request()?.signal?.aborted, true, 'closing Now Playing cancels its playlist scope request')
+assert.equal(surviving.request()?.signal?.aborted, false, 'another instance retains its own collection request')
+assert.equal(surviving.request().target, surviving.track)
+const selectedPart = { id: 'bilibili:1:2' }
+surviving.request().save(selectedPart)
+assert.equal(surviving.showAddToPlaylist.value, true)
+assert.equal(surviving.addToPlaylistTrack.value, selectedPart)
+surviving.unmount()
+
+console.log('now playing local audio quality and playlist entry tests passed')

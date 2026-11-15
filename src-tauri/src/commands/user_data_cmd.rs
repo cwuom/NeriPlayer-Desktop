@@ -121,6 +121,11 @@ pub async fn record_play_history(track: Value, played_at: i64, resume_position_m
 }
 
 #[tauri::command]
+pub async fn update_play_history_metadata(entries: Vec<play_history::HistoryEntry>) -> AppResult<()> {
+    blocking(move |database| database.write(|transaction| play_history::update_metadata(transaction, &entries))).await
+}
+
+#[tauri::command]
 pub async fn remove_play_history(identity_key: String, deleted_at: i64) -> AppResult<()> {
     blocking(move |database| {
         database.write(|transaction| play_history::remove(transaction, &identity_key, deleted_at).map(|_| ()))

@@ -1,4 +1,10 @@
 import type { TrackInfo } from '@/stores/player'
+import { createLogger } from '@/utils/logger'
+import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid } from './biliVideoSkip'
+export { resolveBiliVideoSkipCid as resolveBiliPartCid } from './biliVideoSkip'
+
+const log = createLogger('bili-video-parts')
+const NAME_ORDER_STORAGE_PREFIX = 'neri:bili-part-name-order:v1:'
 
 export interface BiliVideoPage {
   cid: number
@@ -20,6 +26,27 @@ export interface BiliVideoInfo {
 
 export type BiliPartNameOrder = 'title-first' | 'artist-first'
 
+export function readBiliPartNameOrder(bvid: string): BiliPartNameOrder {
+  try {
+    return localStorage.getItem(`${NAME_ORDER_STORAGE_PREFIX}${bvid}`) === 'artist-first'
+      ? 'artist-first'
+      : 'title-first'
+  } catch (error) {
+    log.warn('Failed to read part name order:', error)
+    return 'title-first'
+  }
+}
+
+export function saveBiliPartNameOrder(bvid: string, order: BiliPartNameOrder) {
+  try {
+    const key = `${NAME_ORDER_STORAGE_PREFIX}${bvid}`
+    if (order === 'artist-first') localStorage.setItem(key, order)
+    else localStorage.removeItem(key)
+  } catch (error) {
+    log.warn('Failed to save part name order:', error)
+  }
+}
+
 function stripPartNumber(part: string): string {
   const trimmed = part.trim()
   return trimmed.replace(/^\d+\.\s*/, '').trim() || trimmed
@@ -38,6 +65,16 @@ export function hasBiliPartNameSeparator(part: string): boolean {
   return splitPartName(stripPartNumber(part)) !== null
 }
 
+export function resolveBiliVideoReference(track: Pick<TrackInfo, 'id' | 'source' | 'album' | 'syncPayload'>) {
+  if (!isBiliVideoSkipTrack(track)) return null
+  const bvid = resolveBiliVideoSkipBvid(track)
+  const id = track.id.replace(/^bilibili:/i, '').split(':')[0]
+  const ids = [track.syncPayload?.audioId, track.syncPayload?.audio_id, id]
+  const avid = ids.map(value => Number(/^(?:av)?(\d+)$/i.exec(String(value).trim())?.[1]))
+    .find(id => id > 0 && Number.isSafeInteger(id)) ?? null
+  return bvid || avid ? { bvid, avid } : null
+}
+
 export function buildBiliPartTracks(
   info: BiliVideoInfo,
   parent: TrackInfo,
@@ -47,7 +84,7 @@ export function buildBiliPartTracks(
     const partName = stripPartNumber(page.part) || info.title
     const fields = splitPartName(partName)
     if (fields && nameOrder === 'artist-first') fields.reverse()
-    const [title, artist] = fields ?? [partName || info.title, info.owner]
+    const [title, artist] = fields ?? [partName, info.owner || parent.artist]
     return {
       id: `bilibili:${info.aid}:${page.cid}`,
       title,
