@@ -156,7 +156,7 @@ async function runtime(options = {}) {
     '@/modules/library/albumDisplay': { displayAlbum: album => album },
     '@/modules/persistence/userData': {
       LEGACY_PLAYER_STATE_KEY: 'neri:player-state',
-      preloadedUserData: () => null,
+      preloadedUserData: () => options.playbackState ? { playbackState: options.playbackState } : null,
       persistUserData: async () => undefined,
       finishLegacyPlayerStateCleanup: () => {},
     },
@@ -184,6 +184,83 @@ await run('real online resolver without decoder parameters gains native IPC prop
   assert.equal(r.store.audioInfo.source, 'netease')
   assert.ok(r.store.audioInfo.qualityOptions.length > 0)
   assert.deepEqual(display.actualAudioParameterLabels(r.store.audioInfo, visibility), ['2964 kbps', 'FLAC', '2 ch', '96 kHz', '24 bit'])
+})
+
+await run('the position event advances the loaded track when the standalone EOF event is missed', async () => {
+  const r = await runtime()
+  const first = track('101')
+  const second = track('102')
+  r.store.playAll([first, second])
+  await flush()
+  assert.equal(r.store.currentTrack.id, first.id)
+  const generation = r.calls.find(call => call.command === 'play_url_streaming').args.requestGeneration
+  const position = { requestGeneration: generation, positionMs: 180000, durationMs: 180000, isPlaying: false }
+  const report = r.events.get('player:position')
+
+  report({ payload: { ...position, endedTransition: 1, requestGeneration: generation - 1 } })
+  report({ payload: { ...position, endedTransition: null } })
+  await flush()
+  assert.equal(r.store.currentTrack.id, first.id)
+
+  report({ payload: { ...position, endedTransition: 1 } })
+  report({ payload: { ...position, endedTransition: 1 } })
+  r.events.get('player:track-ended')({ payload: { ...position, endedTransition: 1 } })
+  await flush()
+  assert.equal(r.store.currentTrack.id, second.id)
+  assert.equal(r.calls.filter(call => call.command === 'play_url_streaming').length, 2)
+  assert.equal(r.store.nativeTrackEndCount, 1)
+})
+
+await run('a queued EOF report cannot advance the track while an earlier seek is pending', async () => {
+  const r = await runtime()
+  const first = track('101')
+  r.store.playAll([first, track('102')])
+  await flush()
+  const generation = r.calls.find(call => call.command === 'play_url_streaming').args.requestGeneration
+  await r.store.seekTo(1000)
+  const payload = { requestGeneration: generation, positionMs: 180000, durationMs: 180000, endedTransition: 1 }
+  r.events.get('player:position')({ payload })
+  r.events.get('player:track-ended')({ payload })
+  await flush()
+  assert.equal(r.store.currentTrack.id, first.id)
+  assert.equal(r.store.nativeTrackEndCount, 0)
+})
+
+await run('a repeated native EOF is counted once even when the playback request does not change', async () => {
+  const r = await runtime()
+  const first = track('101')
+  r.store.playAll([first])
+  await flush()
+  await r.store.toggleShuffle()
+  const generation = r.calls.find(call => call.command === 'play_url_streaming').args.requestGeneration
+  const payload = { requestGeneration: generation, positionMs: 180000, durationMs: 180000, endedTransition: 1 }
+  r.events.get('player:track-ended')({ payload })
+  r.events.get('player:position')({ payload })
+  await flush()
+  assert.equal(r.store.isPlaying, true, 'the exhausted shuffle queue leaves the current request in place')
+  assert.equal(r.calls.filter(call => call.command === 'play_url_streaming').length, 1)
+  assert.equal(r.store.nativeTrackEndCount, 1)
+})
+
+await run('a tray or system media action can start a restored queue before any playback', async () => {
+  const first = track('101')
+  const r = await runtime({ playbackState: { queue: [first], queueIndex: 0, hasPlaybackSession: true, currentTrackId: first.id } })
+  assert.equal(r.store.currentTrack.id, first.id)
+  assert.equal(r.store.isPlaying, false)
+  r.store.initEvents()
+  r.events.get('media:toggle')()
+  await flush()
+  assert.equal(r.store.isPlaying, true)
+  assert.equal(r.calls.filter(call => call.command === 'play_url_streaming').length, 1)
+})
+
+await run('a tray or system media toggle on an empty queue stays idle', async () => {
+  const r = await runtime()
+  r.store.initEvents()
+  r.events.get('media:toggle')()
+  await flush()
+  assert.equal(r.store.isPlaying, false)
+  assert.equal(r.calls.some(call => call.command === 'resume'), false)
 })
 
 for (const [name, options, item] of [

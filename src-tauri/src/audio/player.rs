@@ -1149,6 +1149,7 @@ pub struct PlayerEngine {
     seek_generation: Arc<AtomicU64>,
     transition_generation: Arc<AtomicU64>,
     loaded_generation: Option<u64>,
+    ended_transition: Option<u64>,
     clock: Option<Arc<PlaybackClock>>,
     audio_info: Option<SourceAudioInfo>,
 }
@@ -1192,6 +1193,7 @@ impl PlayerEngine {
             seek_generation,
             transition_generation,
             loaded_generation: None,
+            ended_transition: None,
             clock: None,
             audio_info: None,
         }
@@ -1276,6 +1278,7 @@ impl PlayerEngine {
         self.current_path = Some(current_path);
         self.duration_ms = result.duration_ms;
         self.loaded_generation = Some(expected_generation);
+        self.ended_transition = None;
         self.clock = Some(result.clock);
         self.audio_info = Some(result.audio_info);
         Ok(result.duration_ms)
@@ -1422,7 +1425,7 @@ impl PlayerEngine {
     }
 
     pub fn pause(&mut self) {
-        if self.is_playing {
+        if self.is_playing || self.ended_transition().is_some() {
             self.transition_generation.fetch_add(1, Ordering::AcqRel);
             let _ = self.cmd_tx.send(AudioCmd::Pause);
             self.is_playing = false;
@@ -1453,6 +1456,7 @@ impl PlayerEngine {
         self.current_path = None;
         self.duration_ms = 0;
         self.loaded_generation = None;
+        self.ended_transition = None;
         self.clock = None;
         self.audio_info = None;
         SharedAudioLevel::reset(&self.shared_audio_level);
@@ -1579,6 +1583,7 @@ impl PlayerEngine {
         if self.loaded_generation != Some(request_generation) {
             return Err(AppError::Audio(PLAYBACK_SUPERSEDED.into()));
         }
+        let seeking_after_end = self.ended_transition().is_some();
         let position_ms = clamp_position(position_ms, self.duration_ms);
         self.transition_generation.fetch_add(1, Ordering::AcqRel);
         let seek_generation = self.seek_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1592,6 +1597,10 @@ impl PlayerEngine {
                 reply: reply_tx,
             })
             .map_err(|_| AppError::Audio("Audio thread disconnected".into()))?;
+        // 自然结束只更新引擎状态，未暂停音频会话，seek 后输出会继续
+        if seeking_after_end {
+            self.is_playing = true;
+        }
         Ok(reply_rx)
     }
 
@@ -1640,8 +1649,20 @@ impl PlayerEngine {
         Some(reply_rx)
     }
 
-    pub fn mark_ended(&mut self) {
+    pub fn transition_generation(&self) -> u64 {
+        self.transition_generation.load(Ordering::Acquire)
+    }
+
+    pub fn ended_transition(&self) -> Option<u64> {
+        self.ended_transition.filter(|&ended| {
+            self.loaded_generation == Some(self.playback_generation.load(Ordering::Acquire))
+                && ended == self.transition_generation()
+        })
+    }
+
+    pub fn mark_ended(&mut self, transition: u64) {
         self.is_playing = false;
+        self.ended_transition = Some(transition);
     }
 
     /// 两段式淡出暂停第一段：仅发送命令并返回结果接收端，不阻塞等待。
@@ -4311,9 +4332,32 @@ mod tests {
             playback_generation: Arc::new(AtomicU64::new(generation)),
             seek_generation: Arc::new(AtomicU64::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
-            loaded_generation: Some(generation), clock: Some(Arc::new(PlaybackClock::new(42))),
+            loaded_generation: Some(generation), ended_transition: None,
+            clock: Some(Arc::new(PlaybackClock::new(42))),
             audio_info: None,
         }, receiver)
+    }
+
+    #[test]
+    fn natural_end_marker_is_invalidated_by_seek_and_explicit_pause() {
+        let (mut player, commands) = player_without_output(8);
+        let first_end = player.transition_generation();
+        player.mark_ended(first_end);
+        assert!(!player.is_playing);
+        assert_eq!(player.ended_transition(), Some(first_end));
+
+        let _seek = player.request_seek(60, 8).unwrap();
+        assert!(matches!(commands.recv().unwrap(), AudioCmd::Seek { .. }));
+        assert!(player.is_playing);
+        assert_eq!(player.ended_transition(), None);
+
+        let second_end = player.transition_generation();
+        player.mark_ended(second_end);
+        assert_eq!(player.ended_transition(), Some(second_end));
+        player.pause();
+        assert!(matches!(commands.recv().unwrap(), AudioCmd::Pause));
+        assert!(!player.is_playing);
+        assert_eq!(player.ended_transition(), None);
     }
 
     #[test]

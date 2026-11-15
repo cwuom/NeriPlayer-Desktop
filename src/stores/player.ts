@@ -577,6 +577,8 @@ export const usePlayerStore = defineStore('player', () => {
 
   // 是否已初始化事件监听
   let eventsInitialized = false
+  let lastNativeEnd: { requestGeneration: number; transition: number } | null = null
+  const nativeTrackEndCount = ref(0)
   // seek 后忽略 position 事件的时间窗口
   let seekGuardUntil = 0
   // 记住最后 seek 的位置，用于 resume 时重新 seek（防止后端丢失 seek-while-paused）
@@ -1358,8 +1360,13 @@ export const usePlayerStore = defineStore('player', () => {
       positionMs: number
       durationMs: number
       requestGeneration: number
+      endedTransition?: number | null
     }>('player:position', (e) => {
       if (e.payload.requestGeneration !== playbackRequestToken) return
+      if (e.payload.endedTransition != null) {
+        acceptNativeTrackEnd(e.payload.requestGeneration, e.payload.endedTransition, e.payload.positionMs, e.payload.durationMs)
+        return
+      }
       // seek 后时间窗口内忽略旧位置事件
       if (Date.now() < seekGuardUntil) return
       if (!shouldAcceptPositionAfterSeek(e.payload.positionMs, e.payload.durationMs)) return
@@ -1381,9 +1388,13 @@ export const usePlayerStore = defineStore('player', () => {
     })
 
     // 监听播放完成（对齐 Android handleTrackEnded）
-    listen<{ requestGeneration: number }>('player:track-ended', (e) => {
-      if (e.payload.requestGeneration !== playbackRequestToken) return
-      handleTrackEnded()
+    listen<{
+      requestGeneration: number
+      endedTransition: number
+      positionMs: number
+      durationMs: number
+    }>('player:track-ended', ({ payload }) => {
+      acceptNativeTrackEnd(payload.requestGeneration, payload.endedTransition, payload.positionMs, payload.durationMs)
     })
 
     // 系统媒体键事件（SMTC / MPRIS，来自 Rust 后端）
@@ -1430,7 +1441,7 @@ export const usePlayerStore = defineStore('player', () => {
     })
 
     listen('media:toggle', () => {
-      void togglePlayPause()
+      if (currentTrack.value) void togglePlayPause()
     })
 
     listen('media:next', () => {
@@ -1444,6 +1455,17 @@ export const usePlayerStore = defineStore('player', () => {
     listen<{ positionMs: number }>('media:seek-requested', (e) => {
       void seekTo(e.payload.positionMs)
     })
+  }
+
+  function acceptNativeTrackEnd(requestGeneration: number, transition: number, position: number, duration: number) {
+    if (requestGeneration !== playbackRequestToken
+      || requestGeneration !== loadedPlaybackRequestToken || !isPlaying.value) return
+    if (lastNativeEnd?.requestGeneration === requestGeneration && transition <= lastNativeEnd.transition) return
+    // 刚发出的 seek 可能与旧的曲终通知在途交错，等位置收敛后再接受自然结束
+    if (pendingSeek && (Date.now() < seekGuardUntil || !shouldAcceptPositionAfterSeek(position, duration))) return
+    lastNativeEnd = { requestGeneration, transition }
+    nativeTrackEndCount.value++
+    void handleTrackEnded().catch(error => log.warn('track advancement failed:', error))
   }
 
   function readLocalAudioInfo(path: string, requestGeneration: number) {
@@ -3698,7 +3720,7 @@ export const usePlayerStore = defineStore('player', () => {
     repeatMode, shuffleEnabled, volume, lyrics, playError, isLoadingAudio, isLoadingAudioSlow,
     hasPlaybackSession, loadedPlaybackTrackKey,
     audioLevel, beatImpulse, audioInfo, isPlayingFromDownload, isPlayingFromCache,
-    lastCommandSource, lastCommandSequence, lastSeekCommand, isRemoteSyncGuardActive,
+    lastCommandSource, lastCommandSequence, lastSeekCommand, isRemoteSyncGuardActive, nativeTrackEndCount,
     playbackSpeed, playbackPitch, vinylEffectEnabled, effectivePlaybackPitch, setVinylEffect,
     currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
@@ -3708,7 +3730,7 @@ export const usePlayerStore = defineStore('player', () => {
     deleteAudioEffectsPreset, exportAudioEffectsPreset, importAudioEffectsPreset, importAutoEq, refreshAudioEffectsStats,
     progress, interpolatedPositionMs, interpolatedProgress, livePositionMs, isPlaybackClockAdvancing, effectivePlaybackSpeed,
     currentTimeFormatted, durationFormatted,
-    play, togglePlayPause, pause, resume, seekTo, next, previous,
+    initEvents, play, togglePlayPause, pause, resume, seekTo, next, previous,
     flushPlayerState,
     toggleRepeatMode, toggleShuffle, cyclePlayMode, applyListenTogetherPlaybackMode,
     playMode, setVolume, setSpeed, setPitch, setListenTogetherSyncPlaybackRate, getCurrentStreamUrl, getCurrentStreamUrls,
