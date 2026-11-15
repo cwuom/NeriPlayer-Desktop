@@ -12,6 +12,7 @@ import {
   LYRIC_OFFSET_SOURCES,
   lyricUserOffsetStorageKey,
   normalizeLyricSource,
+  readSyncedLyricSource,
   readSyncedUserOffsetMs,
   rebaseLyricUserOffsetMs,
   resolveLyricDefaultOffsetMs,
@@ -219,6 +220,33 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     return key && synced === songMeta.value[key]?.zeroedPayload ? 0 : synced
   }
 
+  function shouldResetOffsetForMatch(track: OffsetTrack, nextSource: LyricOffsetSource): boolean {
+    if (getUserOffsetMs(track) === 0) return false
+    const previousSource = normalizeLyricSource(lyricSourceOf(track) ?? readSyncedLyricSource(track?.syncPayload))
+      ?? lyricOffsetSourceFor(track)
+    const calibratedSource = songMeta.value[lyricUserOffsetStorageKey(track)]?.source
+    if (previousSource !== nextSource) return true
+    // 只有明确记录的校准来源才能判定现有调整属于其他平台
+    return calibratedSource !== undefined && calibratedSource !== 'none' && calibratedSource !== nextSource
+  }
+
+  function writeLocalOffset(key: string, delta: number) {
+    const next = { ...offsets.value }
+    // delta 归零即视为"未调整", 删除键避免本地表膨胀, 也让 rebase 跳过
+    if (delta === 0) delete next[key]
+    else next[key] = delta
+    offsets.value = next
+    persistOffsets('set_lyric_offset', { trackKey: key, offsetMs: Math.round(delta) }, next)
+  }
+
+  // 歌词替换会一起写入新的曲目载荷，这里只清掉本地偏移
+  function clearLocalUserOffset(track: OffsetTrack) {
+    const key = lyricUserOffsetStorageKey(track)
+    if (!key) return
+    writeLocalOffset(key, 0)
+    updateMeta(meta => { delete meta[key] })
+  }
+
   function setUserOffsetMs(
     track: OffsetTrack,
     value: number,
@@ -227,12 +255,7 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     const key = lyricUserOffsetStorageKey(track)
     if (!key) return
     const delta = clampLyricOffsetMs(value)
-    const next = { ...offsets.value }
-    // delta 归零即视为"未调整", 删除键避免本地表膨胀, 也让 rebase 跳过
-    if (delta === 0) delete next[key]
-    else next[key] = delta
-    offsets.value = next
-    persistOffsets('set_lyric_offset', { trackKey: key, offsetMs: Math.round(delta) }, next)
+    writeLocalOffset(key, delta)
 
     // 写回 syncPayload.userLyricOffsetMs, 对齐 Android SongItem 字段, 供同步上传
     const player = usePlayerStore()
@@ -324,6 +347,8 @@ export const useLyricOffsetStore = defineStore('lyricOffset', () => {
     offsets,
     getUserOffsetMs,
     setUserOffsetMs,
+    clearLocalUserOffset,
+    shouldResetOffsetForMatch,
     replaceFromSync,
     offsetSourceFor,
     offsetSourceIsGuessed,

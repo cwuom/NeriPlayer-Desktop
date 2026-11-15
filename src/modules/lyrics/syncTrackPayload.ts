@@ -3,6 +3,7 @@
  * 对齐 Android: 编辑歌词 / 偏移写入 SongItem 后触发同步
  */
 import { invoke } from '@tauri-apps/api/core'
+import { persistUserData } from '@/modules/persistence/userData'
 import type { TrackInfo } from '@/stores/player'
 import { createLogger } from '@/utils/logger'
 
@@ -89,7 +90,7 @@ export async function persistTrackSyncPayload(
 ): Promise<number> {
   if (!track?.id) return 0
   try {
-    const updated = await invoke<number>('update_playlist_track', {
+    const updated = await persistUserData<number>('update_playlist_track', {
       playlistId: playlistId ?? null,
       track: toBackendTrack(track),
     })
