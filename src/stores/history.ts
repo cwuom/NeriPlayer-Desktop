@@ -457,28 +457,46 @@ export const useHistoryStore = defineStore('history', () => {
       .filter(entry => entry.track.id && entry.playedAt > 0 && !isLocalTrack(entry.track))
     const candidates = [...previousEntries, ...previousDeletions, ...nextEntries.map(entry => entry.track)]
       .filter(track => !isLocalTrack(track))
-    const findMatchingTrack = createDeletionTrackMatcher(candidates)
+    const findMatchingTracks = createDeletionTrackMatcher(candidates)
     const resolvedDeletions: HistoryDeletion[] = []
-
-    for (const rawDeletion of rawDeletions) {
-      const candidate = await findMatchingTrack(rawDeletion, canApply)
-      if (!canApply()) return interrupted()
-      if (candidate) {
-        resolvedDeletions.push({
-          track: candidate,
-          deletedAt: Number(rawDeletion.deletedAt ?? rawDeletion.deleted_at ?? 0),
-        })
-      }
-    }
 
     // 同一曲目只留最新状态，删除和播放同一时刻时以删除为准
     const mergedEntries = uniqueByIdentity([...nextEntries, ...localEntries]
       .sort((left, right) => right.playedAt - left.playedAt))
+    const playedTimes = new Map(mergedEntries.map(entry => [historyEntryKey(entry.track), entry.playedAt]))
+    const deletedTimes = new Map<string, number>()
+    const noteDeletion = (key: string, time: number) => deletedTimes.set(key, Math.max(deletedTimes.get(key) ?? 0, time))
+
+    function applyMatchedDeletion(matchingTracks: TrackInfo[], deletedAt: number) {
+      if (!matchingTracks.length || !(deletedAt > 0)) return
+      const keys = matchingTracks.map(historyEntryKey)
+      for (const key of keys) noteDeletion(key, deletedAt)
+      // 一个分 P 可能有多种旧 ID，以同一同步身份下的所有播放时间判定墓碑
+      if (keys.every(key => (playedTimes.get(key) ?? 0) <= deletedAt)) {
+        resolvedDeletions.push({ track: matchingTracks[0], deletedAt })
+      }
+    }
+
+    for (const rawDeletion of rawDeletions) {
+      const matchingTracks = await findMatchingTracks(rawDeletion, canApply)
+      if (!canApply()) return interrupted()
+      applyMatchedDeletion(matchingTracks, Number(rawDeletion.deletedAt ?? rawDeletion.deleted_at ?? 0))
+    }
+
+    // 用同步身份保留尚未被较新重播覆盖的本机 B 站墓碑，避免不完整快照恢复旧分 P
+    for (const deletion of deletions.value) {
+      if (inferSource(deletion.track) !== 'bilibili' || !(deletion.deletedAt > 0)) continue
+      const identity = await syncIdentity(deletion.track)
+      if (!canApply()) return interrupted()
+      const matchingTracks = await findMatchingTracks(identity, canApply)
+      if (!canApply()) return interrupted()
+      applyMatchedDeletion(matchingTracks, deletion.deletedAt)
+    }
+
     const mergedDeletions = uniqueByIdentity([...resolvedDeletions, ...localDeletions]
       .filter(deletion => deletion.track.id && deletion.deletedAt > 0)
       .sort((left, right) => right.deletedAt - left.deletedAt))
-    const playedTimes = new Map(mergedEntries.map(entry => [historyEntryKey(entry.track), entry.playedAt]))
-    const deletedTimes = new Map(mergedDeletions.map(deletion => [historyEntryKey(deletion.track), deletion.deletedAt]))
+    for (const deletion of mergedDeletions) noteDeletion(historyEntryKey(deletion.track), deletion.deletedAt)
 
     // 提交阶段没有异步等待，先复核账号意图和本地修改再一起保存
     if (!canApply()) return interrupted()
@@ -512,20 +530,20 @@ export const useHistoryStore = defineStore('history', () => {
 
   function createDeletionTrackMatcher(candidates: TrackInfo[]) {
     const identities = new Map<string, Awaited<ReturnType<typeof syncIdentity>>>()
-    const matches = new Map<string, TrackInfo>()
+    const matches = new Map<string, TrackInfo[]>()
     let nextCandidate = 0
 
-    return async (deletion: BackendHistoryDeletion, isCurrent: () => boolean): Promise<TrackInfo | undefined> => {
-      const expectedKey = JSON.stringify([
-        String(deletion.songId ?? ''),
-        String(deletion.album ?? '') || null,
-        String(deletion.mediaUri ?? '') || null,
-      ])
-      if (!isCurrent()) return undefined
-      if (matches.has(expectedKey)) return matches.get(expectedKey)
+    return async (deletion: BackendHistoryDeletion, isCurrent: () => boolean): Promise<TrackInfo[]> => {
+      const songId = String(deletion.songId ?? '')
+      const album = String(deletion.album ?? '') || null
+      const mediaUri = String(deletion.mediaUri ?? '') || null
+      const expectedKey = JSON.stringify([songId, album, mediaUri])
+      if (!isCurrent()) return []
 
-      // 沿原候选顺序逐步建立索引，保留首次命中并避免重复扫描与异步哈希
+      // 沿原候选顺序逐步建立索引，B 站分 P 需要继续收集同一同步身份的其它旧 ID
       while (nextCandidate < candidates.length) {
+        const match = matches.get(expectedKey)
+        if (match && inferSource(match[0]) !== 'bilibili') return match
         const candidate = candidates[nextCandidate++]!
         const source = inferSource(candidate)
         const identityKey = JSON.stringify(source === 'bilibili'
@@ -534,18 +552,23 @@ export const useHistoryStore = defineStore('history', () => {
         let identity = identities.get(identityKey)
         if (!identity) {
           identity = await syncIdentity(candidate)
-          if (!isCurrent()) return undefined
+          if (!isCurrent()) return []
           identities.set(identityKey, identity)
         }
         for (const album of new Set([identity.album, ...(identity.albumAliases ?? []), null])) {
           for (const mediaUri of [identity.mediaUri, null]) {
             const key = JSON.stringify([identity.songId, album, mediaUri])
-            if (!matches.has(key)) matches.set(key, candidate)
+            const sameIdentity = matches.get(key)
+            if (!sameIdentity) matches.set(key, [candidate])
+            else if (source === 'bilibili' && inferSource(sameIdentity[0]) === 'bilibili') sameIdentity.push(candidate)
           }
         }
-        if (matches.has(expectedKey)) return matches.get(expectedKey)
       }
-      return undefined
+      const match = matches.get(expectedKey)
+      if (match && inferSource(match[0]) === 'bilibili') {
+        return matches.get(JSON.stringify([songId, 'bilibili', mediaUri])) ?? match
+      }
+      return match ?? []
     }
   }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount, onMounted, onUnmounted } from 'vue'
 import { usePlayerStore, displayAlbum, type AudioInfo, type LyricLine, type TrackInfo } from '@/stores/player'
 import { AUDIO_EFFECT_PRESETS } from '@/modules/audioEffects/model'
 import { useLikedSongsStore } from '@/stores/likedSongs'
@@ -154,6 +154,8 @@ const showVolumeSlider = ref(false)
 const showQueue = ref(false)
 const showAddToPlaylist = ref(false)
 const addToPlaylistTrack = ref<TrackInfo | null>(null)
+const addToPlaylistAbort = new AbortController()
+onBeforeUnmount(() => addToPlaylistAbort.abort())
 const showBiliVideoSkip = ref(false)
 const biliVideoSkipTrack = ref<TrackInfo | null>(null)
 const canManageBiliVideoSkip = computed(() => !!player.currentTrack && !!resolveBiliVideoSkipBvid(player.currentTrack))
@@ -751,7 +753,7 @@ function openAddToPlaylist() {
   void biliParts.requestCollection(player.currentTrack, track => {
     addToPlaylistTrack.value = track
     showAddToPlaylist.value = true
-  })
+  }, undefined, addToPlaylistAbort.signal)
 }
 
 // 睡眠定时器选项

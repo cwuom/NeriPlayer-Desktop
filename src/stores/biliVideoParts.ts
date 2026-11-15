@@ -14,7 +14,13 @@ import { isBiliVideoSkipTrack } from '@/modules/playback/biliVideoSkip'
 type PlayParts = (tracks: TrackInfo[], startTrackId: string) => void
 type CollectionScope = 'whole' | 'part'
 type VideoReference = NonNullable<ReturnType<typeof resolveBiliVideoReference>>
-type CollectionSave = (track: TrackInfo, video?: VideoReference, isSingleVideo?: boolean) => void
+export interface BiliCollectionIdentity {
+  video: VideoReference
+  allowWholeFavorite?: boolean
+  singlePageCid?: number
+}
+
+type CollectionSave = (track: TrackInfo, identity?: BiliCollectionIdentity) => void
 
 interface CollectionChoice {
   whole: TrackInfo
@@ -36,6 +42,7 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
     : [])
   let generation = 0
   let lastDetail: BiliVideoInfo | null = null
+  let releaseCollectionSignal: (() => void) | undefined
 
   function blockedByRoom(): boolean {
     const restriction = useListenTogetherStore().localControlRestriction
@@ -48,6 +55,8 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
 
   function close() {
     generation++
+    releaseCollectionSignal?.()
+    releaseCollectionSignal = undefined
     info.value = null
     collection.value = null
     selection.value = null
@@ -58,10 +67,6 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
     const detail = await invoke<BiliVideoInfo>('get_bili_video_info', { bvid, avid: bvid ? null : avid })
     if (!detail.bvid || !detail.aid || !detail.pages.length) throw new Error('Missing video parts')
     return detail
-  }
-
-  function notifyLoadFailed() {
-    useToastStore().error(i18n.global.t('player.bili_parts_load_failed'))
   }
 
   async function request(parent: TrackInfo, play: () => void, playParts: PlayParts = player.playAll) {
@@ -108,7 +113,13 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
     playParts(queue, selected.id)
   }
 
-  async function requestCollection(track: TrackInfo, save: CollectionSave, isLiked?: (track: TrackInfo, video: VideoReference) => boolean) {
+  async function requestCollection(
+    track: TrackInfo,
+    save: CollectionSave,
+    isLiked?: (track: TrackInfo, video: VideoReference) => boolean,
+    signal?: AbortSignal,
+  ) {
+    if (signal?.aborted) return
     close()
     const reference = resolveBiliVideoReference(track)
     if (!reference) {
@@ -116,31 +127,44 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
       return
     }
     const token = generation
+    if (signal) {
+      const abort = () => { if (token === generation) close() }
+      signal.addEventListener('abort', abort, { once: true })
+      releaseCollectionSignal = () => signal.removeEventListener('abort', abort)
+    }
+    function saveCurrent(video: VideoReference, singlePageCid?: number) {
+      if (token !== generation) return
+      close()
+      save(track, { video, allowWholeFavorite: true, singlePageCid })
+    }
+
     let detail: BiliVideoInfo
     try {
       const cached = lastDetail
       detail = cached && (reference.bvid ? cached.bvid === reference.bvid : cached.aid === reference.avid)
         ? cached : await loadDetail(reference)
     } catch {
-      if (token === generation) notifyLoadFailed()
+      // 歌单保存在本机，视频详情不可用时仍可按当前条目的身份保存
+      saveCurrent(reference)
       return
     }
     if (token !== generation) return
-    lastDetail = detail
     const video = { bvid: detail.bvid, avid: detail.aid }
-    if (detail.pages.length === 1) {
-      save(track, video, true)
-      return
-    }
     const fixedCid = resolveBiliPartCid(track)
     const cid = fixedCid ?? detail.cid
     const page = detail.pages.find(item => item.cid === cid)
     if (!page) {
-      notifyLoadFailed()
+      saveCurrent(video)
+      return
+    }
+    if (detail.pages.length === 1) {
+      lastDetail = detail
+      saveCurrent(video, page.cid)
       return
     }
     const [part] = buildBiliPartTracks({ ...detail, pages: [page] }, track, readBiliPartNameOrder(detail.bvid))
     if (!part) return
+    lastDetail = detail
     // 批量播放时，视频条目可能带着整集的标题和时长，但已被播放器补上了 CID
     const hasWholeVideoMetadata = track.title === detail.title && track.durationMs === detail.duration * 1000
     collection.value = {
@@ -160,7 +184,7 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
       } : part,
       partNumber: page.page,
       isLiked: isLiked && (target => isLiked(target, video)),
-      save: target => save(target, video),
+      save: target => save(target, { video }),
     }
   }
 

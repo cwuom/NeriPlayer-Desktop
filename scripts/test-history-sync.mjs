@@ -437,6 +437,49 @@ for (const album of ['Bilibili|1002', 'bilibili']) {
   })
 }
 
+for (const { playedAt, album } of [
+  { playedAt: 150, album: 'bilibili' },
+  { playedAt: 175, album: 'Bilibili|1002|BV14Dn16tELC' },
+  { playedAt: 200, album: 'Bilibili|1002' },
+  { playedAt: 250, album: 'bilibili' },
+]) {
+  await databaseRegression(`Bilibili deletion compares aliases against the incoming play at ${playedAt}`, async store => {
+    const sibling = { track: missingBiliPage(1001), playedAt: 300 }
+    const local = { track: missingBiliPage(1002), playedAt: 100 }
+    const incoming = { track: missingBiliPage(1002, {
+      id: 'bilibili:114:1002',
+      album: 'Bilibili|1002|BV14Dn16tELC',
+    }), playedAt }
+    store.entries = [sibling, local]
+    const signed = new DataView(digestBytes('bilibili|114|1002')).getBigInt64(0)
+    await store.applySyncPayload({
+      entries: [incoming, sibling, local],
+      deletions: [{ songId: String(signed), album, deletedAt: 200 }],
+    })
+    const newerReplay = playedAt > 200
+    const wantedEntries = newerReplay ? [sibling, incoming] : [sibling]
+    assert.deepEqual(store.entries.map(entry => [entry.track.id, entry.playedAt]), wantedEntries.map(entry => [entry.track.id, entry.playedAt]))
+    assert.deepEqual(store.deletions.map(entry => [entry.track.id, entry.deletedAt]), newerReplay ? [] : [['bilibili:114', 200]])
+    assert.deepEqual(persisted.at(-1)[1].history.entries.map(entry => entry.track.id), wantedEntries.map(entry => entry.track.id))
+  })
+}
+
+await databaseRegression('a local Bilibili tombstone survives an incomplete snapshot until a newer alias is played', async store => {
+  const local = missingBiliPage(1002)
+  const incoming = missingBiliPage(1002, { id: 'bilibili:114:1002', album: 'Bilibili|1002|BV14Dn16tELC' })
+  store.deletions = [{ track: local, deletedAt: 200 }]
+  await store.applySyncPayload({ entries: [{ track: incoming, playedAt: 150 }], deletions: [] })
+  assert.deepEqual(store.entries, [])
+  assert.deepEqual(store.deletions.map(entry => [entry.track.id, entry.deletedAt]), [['bilibili:114', 200]])
+  const signed = new DataView(digestBytes('bilibili|114|1002')).getBigInt64(0)
+  await store.applySyncPayload({
+    entries: [{ track: incoming, playedAt: 250 }],
+    deletions: [{ songId: String(signed), album: 'bilibili', deletedAt: 200 }],
+  })
+  assert.deepEqual(store.entries.map(entry => [entry.track.id, entry.playedAt]), [['bilibili:114:1002', 250]])
+  assert.deepEqual(store.deletions, [])
+})
+
 await databaseRegression('late Bilibili metadata does not recreate a deleted history entry', async store => {
   now = 2_000
   store.record(missingBiliPage(1001))

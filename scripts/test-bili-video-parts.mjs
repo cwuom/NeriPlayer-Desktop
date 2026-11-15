@@ -290,11 +290,28 @@ const favorites = [
   })),
 ]
 const removals = []
+const addedFavorites = []
+let failedFavoriteReads = 0
+let favoriteReads = 0
+let failReadsAfterAdd = false
 const { useLikedSongsStore } = evaluate(await readFile(new URL('src/stores/likedSongs.ts', root), 'utf8'), {
   pinia, vue, '@tauri-apps/api/event': {},
   '@tauri-apps/api/core': { invoke: async (command, args) => {
     if (command === 'list_playlists') return [{ id: -1001, name: '我喜欢的音乐' }]
-    if (command === 'get_playlist_tracks') return favorites
+    if (command === 'get_playlist_tracks') {
+      favoriteReads++
+      if (failedFavoriteReads > 0) {
+        failedFavoriteReads--
+        throw new Error('local playlist read failed')
+      }
+      return favorites
+    }
+    if (command === 'add_to_playlist') {
+      addedFavorites.push(args.track)
+      favorites.push({ ...args.track, playlist_key: 'authoritative-part' })
+      if (failReadsAfterAdd) failedFavoriteReads = 2
+      return
+    }
     assert.equal(command, 'remove_from_playlist')
     removals.push(args.trackId)
     favorites.splice(favorites.findIndex(item => item.playlist_key === args.trackId), 1)
@@ -302,8 +319,9 @@ const { useLikedSongsStore } = evaluate(await readFile(new URL('src/stores/liked
   '@/stores/recommend': {}, '@/stores/toast': {}, '@/i18n': {},
   '@/modules/library/localPlaylists': { FAVORITES_PLAYLIST_NAMES: ['我喜欢的音乐'], isFavoritesPlaylist: playlist => playlist.id === -1001 },
   '@/modules/playback/biliVideoParts': policy,
+  '@/modules/playback/biliVideoSkip': skipPolicy,
   '@/stores/biliVideoParts': { useBiliVideoPartsStore },
-  '@/utils/logger': { createLogger: () => console },
+  '@/utils/logger': { createLogger: () => ({ error: (...args) => warnings.push(args), warn: (...args) => warnings.push(args) }) },
 })
 const liked = useLikedSongsStore()
 await liked.loadLikedPlaylist()
@@ -325,6 +343,95 @@ store.chooseCollection('whole')
 await new Promise(setImmediate)
 assert.deepEqual(removals, ['part-2', 'whole'])
 assert.equal(liked.isTrackLiked(tracks[1], true), false)
+
+const offlineInfo = { ...info, bvid: 'BV1offline', aid: 114 }
+const offlineTracks = policy.buildBiliPartTracks(offlineInfo, parent)
+const offlinePart = { ...offlineTracks[1], id: 'bilibili:114' }
+const offlineAdded = []
+const offlineAdd = store.requestCollection(offlinePart, item => offlineAdded.push(item))
+pending.at(-1).reject(new Error('Bilibili unavailable'))
+await offlineAdd
+assert.deepEqual(offlineAdded, [offlinePart], 'offline playlist actions keep the selected track and CID')
+assert.equal(store.open, false)
+
+const availableWithoutPage = store.requestCollection(offlinePart, item => offlineAdded.push(item))
+pending.at(-1).resolve({ ...offlineInfo, pages: [offlineInfo.pages[0], offlineInfo.pages[2]] })
+await availableWithoutPage
+assert.deepEqual(offlineAdded, [offlinePart, offlinePart], 'a removed page can still be saved locally using its original identity')
+assert.equal(store.open, false)
+
+const interrupted = new AbortController()
+const abandonedSave = store.requestCollection({ ...parent, id: 'bilibili:BV1abandoned' },
+  () => assert.fail('an abandoned playlist request must not save'), undefined, interrupted.signal)
+interrupted.abort()
+pending.at(-1).reject(new Error('late offline response'))
+await abandonedSave
+assert.equal(store.open, false)
+
+const owned = new AbortController()
+const ownedSave = store.requestCollection(tracks[1], () => assert.fail('an abandoned scope must not save'), undefined, owned.signal)
+pending.at(-1).resolve(info)
+await ownedSave
+assert.equal(store.open, true)
+owned.abort()
+assert.equal(store.open, false, 'unmounting the owner closes its already-open chooser')
+
+const supersededOwner = new AbortController()
+await store.requestCollection(tracks[1], () => assert.fail('superseded request must not save'), undefined, supersededOwner.signal)
+await store.requestCollection(tracks[2], () => {})
+supersededOwner.abort()
+assert.equal(store.collection.partNumber, 3, 'an unrelated chooser must survive the original owner unmounting')
+store.close()
+
+favorites.push(
+  { id: 'bilibili:114', album: '', playlist_key: 'offline-whole' },
+  { id: 'bilibili:114', album: offlineTracks[0].album, playlist_key: 'offline-sibling' },
+  { id: 'bilibili:114', album: offlinePart.album, playlist_key: 'offline-current' },
+)
+await liked.loadLikedPlaylist()
+async function toggleWithoutDetails() {
+  liked.requestToggleTrack(offlinePart)
+  pending.at(-1).reject(new Error('Bilibili unavailable'))
+  await new Promise(setImmediate)
+}
+await toggleWithoutDetails()
+assert.equal(removals.at(-1), 'offline-current', 'offline removal prefers the exact CID when the entire video is also saved')
+assert.ok(favorites.some(item => item.playlist_key === 'offline-sibling'))
+await toggleWithoutDetails()
+assert.equal(removals.at(-1), 'offline-whole', 'the heart can remove a saved whole video offline')
+const readsBeforeAdd = favoriteReads
+await toggleWithoutDetails()
+assert.equal(addedFavorites.length, 1)
+assert.ok(favoriteReads >= readsBeforeAdd + 2, 'a successful add must refresh the backend playlist key')
+await toggleWithoutDetails()
+assert.equal(removals.at(-1), 'authoritative-part', 'only the newly saved CID is removed by its backend key')
+assert.ok(favorites.some(item => item.playlist_key === 'offline-sibling'))
+
+failReadsAfterAdd = true
+await toggleWithoutDetails()
+const removalsBeforeFailedRead = removals.length
+await toggleWithoutDetails()
+assert.equal(removals.length, removalsBeforeFailedRead, 'a failed refresh cannot remove favorites by their shared video id')
+failReadsAfterAdd = false
+await toggleWithoutDetails()
+assert.equal(removals.at(-1), 'authoritative-part')
+assert.ok(favorites.some(item => item.playlist_key === 'offline-sibling'))
+
+const removalsBeforeRemovedPage = removals.length
+const additionsBeforeRemovedPage = addedFavorites.length
+liked.requestToggleTrack(offlinePart)
+pending.at(-1).resolve({ ...offlineInfo, pages: [offlineInfo.pages[0]] })
+await new Promise(setImmediate)
+assert.equal(addedFavorites.length, additionsBeforeRemovedPage + 1, 'an unavailable P2 remains a valid local favorite')
+assert.equal(removals.length, removalsBeforeRemovedPage, 'a video reduced to one page must not remove its remaining P when saving another CID')
+assert.ok(favorites.some(item => item.playlist_key === 'offline-sibling'))
+
+const unboundSingle = { ...parent, id: 'bilibili:BV1offline' }
+liked.requestToggleTrack(unboundSingle)
+pending.at(-1).resolve({ ...offlineInfo, pages: [offlineInfo.pages[0]] })
+await new Promise(setImmediate)
+assert.equal(removals.at(-1), 'offline-sibling', 'a single-page video without a runtime CID must match the confirmed page')
+assert.ok(favorites.some(item => item.playlist_key === 'authoritative-part'))
 
 const artistFirstLoading = store.request(artistFirstParent, () => fallback++)
 pending.at(-1).resolve(artistFirstInfo)
