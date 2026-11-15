@@ -25,8 +25,7 @@ import { HISTORY_CHANGED_EVENT } from '@/stores/history'
 import { useLikedSongsStore } from '@/stores/likedSongs'
 import { useDownloadStore } from '@/stores/download'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { invoke } from '@tauri-apps/api/core'
-import { convertFileSrc } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import AppBackgroundImage from '@/components/AppBackgroundImage.vue'
 import MiniPlayer from '@/components/MiniPlayer.vue'
@@ -491,6 +490,9 @@ onMounted(async () => {
   const authStore = useAuthStore()
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('pagehide', handleBeforeUnload)
+  // 播放统计和媒体键在首曲之前接入，托盘也可以启动刚恢复的队列
+  usePlaybackStatsStore().attach()
+  if (isTauri()) player.initEvents()
   try {
     unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested)
   } catch {
@@ -498,8 +500,6 @@ onMounted(async () => {
   }
 
   // Rust 配置是启动后的规范来源，本地影子只负责首屏快速显示
-  // 播放统计要在任何播放发生之前接上，否则首曲不计数
-  usePlaybackStatsStore().attach()
   const shortcutActions: ShortcutActions = {
     togglePlay: () => void player.togglePlayPause(),
     next: () => void player.next(),

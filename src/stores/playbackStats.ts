@@ -133,9 +133,11 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
       () => tracker.onManualSeek(player.positionMs),
     ))
 
-    void listen('player:track-ended', () => {
-      void submit(tracker.onTrackEnded())
-    }).then(un => { if (attached) unlistens.push(un); else un() })
+    watchStops.push(watch(
+      () => player.nativeTrackEndCount,
+      () => void submit(tracker.onTrackEnded()),
+      { flush: 'sync' },
+    ))
 
     // 周期落盘：崩溃或强杀最多只丢一个窗口的收听时长
     flushTimer = setInterval(() => {

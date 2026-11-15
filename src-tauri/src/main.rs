@@ -233,8 +233,7 @@ fn main() {
             // 后台定时器：每 200ms 推送播放位置 + 媒体会话同步
             let handle_ticker = handle.clone();
             std::thread::spawn(move || {
-                let mut last_ended = false;
-                let mut last_stalled = false;
+                let mut last_stalled = None;
                 let mut media_update_counter: u32 = 0;
                 // 缓存上次发送给 media session 的元数据 ID，避免重复设置
                 let mut last_media_track_id = String::new();
@@ -287,6 +286,7 @@ fn main() {
                                 player.position_ms(),
                                 player.duration_ms,
                                 player.loaded_generation().unwrap_or(0),
+                                player.ended_transition(),
                                 player.shared_audio_level.clone(),
                             )
                         })
@@ -298,10 +298,10 @@ fn main() {
                         snapshot.as_ref().is_some_and(|snapshot| snapshot.0),
                     );
 
-                    let Some((snap_playing, snap_pos, snap_dur, snap_generation, shared_level)) =
+                    let Some((snap_playing, snap_pos, snap_dur, snap_generation, ended_transition, shared_level)) =
                         snapshot
                     else {
-                        last_ended = false;
+                        last_stalled = None;
                         // 空闲时也更新 media session 状态
                         if !last_media_track_id.is_empty() {
                             if let Some(ref ms) = media_session {
@@ -321,6 +321,8 @@ fn main() {
                                 "durationMs": snap_dur,
                                 "isPlaying": snap_playing,
                                 "requestGeneration": snap_generation,
+                                // 曲终事件只发一次，位置快照可让主页面在漏收后补处理
+                                "endedTransition": ended_transition,
                             }),
                         );
                     }
@@ -368,14 +370,16 @@ fn main() {
                     // 每 tick 持锁满 100ms，阻塞 pause/get_player_state 等命令
                     // 中段解码饿死/虚拟 body 落点失败不能当「播完」——只在接近曲尾才 emit track-ended
                     {
-                        let (finished_rx, position_ms, duration_ms, was_playing, queried_generation) = {
+                        let (
+                            finished_rx, position_ms, duration_ms, queried_generation, queried_transition,
+                        ) = {
                             let player = state.player.lock();
                             (
                                 player.begin_finished_query(),
                                 player.position_ms(),
                                 player.duration_ms,
-                                player.is_playing,
                                 player.loaded_generation(),
+                                player.transition_generation(),
                             )
                         }; // <- 锁在此释放，下面的等待不再挡住其他 player 命令
                         let finished_flag = finished_rx
@@ -387,24 +391,25 @@ fn main() {
                             let mut player = state.player.lock();
                             let finish_state = classify_playback_finish(
                                 finished_flag,
-                                was_playing,
+                                player.is_playing
+                                    && player.transition_generation() == queried_transition,
                                 position_ms,
                                 duration_ms,
                                 queried_generation,
                                 player.loaded_generation(),
                             );
                             // 等待期间可能已经加载新歌，校验与结束标记必须共用这次锁
-                            if finish_state == PlaybackFinishState::Ended && !last_ended {
-                                player.mark_ended();
+                            if finish_state == PlaybackFinishState::Ended {
+                                player.mark_ended(queried_transition);
                             }
                             finish_state
                         };
                         let finished = finish_state == PlaybackFinishState::Ended;
                         // 曲中断流/解码饿死/DeviceLost 重建失败不能当播完静默卡死，
                         // 发独立 stalled 事件让前端从当前位置重试
-                        let stalled = finish_state == PlaybackFinishState::Stalled;
-                        if stalled && !last_stalled {
-                            last_stalled = true;
+                        let stalled = (finish_state == PlaybackFinishState::Stalled)
+                            .then_some((queried_generation, queried_transition));
+                        if stalled.is_some() && stalled != last_stalled {
                             let _ = handle_ticker.emit(
                                 "player:playback-stalled",
                                 serde_json::json!({
@@ -412,19 +417,18 @@ fn main() {
                                     "requestGeneration": queried_generation.unwrap_or(0),
                                 }),
                             );
-                        } else if !stalled {
-                            last_stalled = false;
                         }
-                        if finished && !last_ended {
-                            last_ended = true;
+                        last_stalled = stalled;
+                        if finished {
                             let _ = handle_ticker.emit(
                                 "player:track-ended",
                                 serde_json::json!({
                                     "requestGeneration": queried_generation.unwrap_or(0),
+                                    "endedTransition": queried_transition,
+                                    "positionMs": position_ms,
+                                    "durationMs": duration_ms,
                                 }),
                             );
-                        } else if !finished {
-                            last_ended = false;
                         }
                     }
                 }
