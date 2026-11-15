@@ -1,51 +1,41 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, shallowRef } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useListenTogetherStore } from '@/stores/listenTogether'
 import { useToastStore } from '@/stores/toast'
 import i18n from '@/i18n'
-import { buildBiliPartTracks, type BiliPartNameOrder, type BiliVideoInfo } from '@/modules/playback/biliVideoParts'
-import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid, resolveBiliVideoSkipCid } from '@/modules/playback/biliVideoSkip'
-import { createLogger } from '@/utils/logger'
+import {
+  buildBiliPartTracks, readBiliPartNameOrder, resolveBiliPartCid, resolveBiliVideoReference, saveBiliPartNameOrder,
+  type BiliPartNameOrder, type BiliVideoInfo,
+} from '@/modules/playback/biliVideoParts'
+import { isBiliVideoSkipTrack } from '@/modules/playback/biliVideoSkip'
 
-const log = createLogger('bili-video-parts')
-const NAME_ORDER_STORAGE_PREFIX = 'neri:bili-part-name-order:v1:'
+type PlayParts = (tracks: TrackInfo[], startTrackId: string) => void
+type CollectionScope = 'whole' | 'part'
+type VideoReference = NonNullable<ReturnType<typeof resolveBiliVideoReference>>
+type CollectionSave = (track: TrackInfo, video?: VideoReference, isSingleVideo?: boolean) => void
 
-function readNameOrder(bvid: string): BiliPartNameOrder {
-  try {
-    return localStorage.getItem(`${NAME_ORDER_STORAGE_PREFIX}${bvid}`) === 'artist-first'
-      ? 'artist-first'
-      : 'title-first'
-  } catch (error) {
-    log.warn('Failed to read part name order:', error)
-    return 'title-first'
-  }
-}
-
-function saveNameOrder(bvid: string, order: BiliPartNameOrder) {
-  try {
-    const key = `${NAME_ORDER_STORAGE_PREFIX}${bvid}`
-    if (order === 'artist-first') localStorage.setItem(key, order)
-    else localStorage.removeItem(key)
-  } catch (error) {
-    log.warn('Failed to save part name order:', error)
-  }
+interface CollectionChoice {
+  whole: TrackInfo
+  part: TrackInfo
+  partNumber: number
+  isLiked?: (track: TrackInfo) => boolean
+  save: (track: TrackInfo) => void
 }
 
 export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
   const player = usePlayerStore()
-  const open = ref(false)
-  const loading = ref(false)
-  const failed = ref(false)
-  const info = ref<BiliVideoInfo | null>(null)
-  const track = ref<TrackInfo | null>(null)
+  const info = shallowRef<BiliVideoInfo | null>(null)
+  const collection = shallowRef<CollectionChoice | null>(null)
+  const open = computed(() => !!(info.value || collection.value))
+  const selection = shallowRef<{ parent: TrackInfo; playParts: PlayParts } | null>(null)
   const nameOrder = ref<BiliPartNameOrder>('title-first')
-  const tracks = computed(() => info.value && track.value
-    ? buildBiliPartTracks(info.value, track.value, nameOrder.value)
+  const tracks = computed(() => info.value && selection.value
+    ? buildBiliPartTracks(info.value, selection.value.parent, nameOrder.value)
     : [])
   let generation = 0
-  let fallback: (() => void) | null = null
+  let lastDetail: BiliVideoInfo | null = null
 
   function blockedByRoom(): boolean {
     const restriction = useListenTogetherStore().localControlRestriction
@@ -58,76 +48,128 @@ export const useBiliVideoPartsStore = defineStore('biliVideoParts', () => {
 
   function close() {
     generation++
-    open.value = false
-    loading.value = false
-    failed.value = false
     info.value = null
-    track.value = null
+    collection.value = null
+    selection.value = null
     nameOrder.value = 'title-first'
-    fallback = null
   }
 
-  async function request(parent: TrackInfo, play: () => void) {
+  async function loadDetail({ bvid, avid }: VideoReference) {
+    const detail = await invoke<BiliVideoInfo>('get_bili_video_info', { bvid, avid: bvid ? null : avid })
+    if (!detail.bvid || !detail.aid || !detail.pages.length) throw new Error('Missing video parts')
+    return detail
+  }
+
+  function notifyLoadFailed() {
+    useToastStore().error(i18n.global.t('player.bili_parts_load_failed'))
+  }
+
+  async function request(parent: TrackInfo, play: () => void, playParts: PlayParts = player.playAll) {
     close()
-    const isBili = isBiliVideoSkipTrack(parent)
-    if (isBili && blockedByRoom()) return
-    if (!isBili || resolveBiliVideoSkipCid(parent)) {
-      play()
-      return
-    }
-    const bvid = resolveBiliVideoSkipBvid(parent)
-    const audioId = String(parent.syncPayload?.audioId ?? parent.syncPayload?.audio_id
-      ?? parent.id.replace(/^bilibili:/i, '').split(':')[0] ?? '')
-    const avid = /^\d+$/.test(audioId) ? Number(audioId) : null
-    if (!bvid && (!avid || !Number.isSafeInteger(avid))) {
+    if (isBiliVideoSkipTrack(parent) && blockedByRoom()) return
+    const reference = resolveBiliVideoReference(parent)
+    if (!reference || resolveBiliPartCid(parent)) {
       play()
       return
     }
     const token = generation
     const previousTrack = player.currentTrack
-    track.value = parent
-    fallback = play
-    open.value = true
-    loading.value = true
+    let detail: BiliVideoInfo
     try {
-      const detail = await invoke<BiliVideoInfo>('get_bili_video_info', { bvid, avid: bvid ? null : avid })
-      if (token !== generation) return
-      if (player.currentTrack !== previousTrack || blockedByRoom()) {
-        close()
-        return
-      }
-      if (!detail.bvid || !detail.aid || !detail.pages.length) throw new Error('Missing video parts')
-      if (detail.pages.length === 1) {
-        close()
-        play()
-        return
-      }
-      nameOrder.value = readNameOrder(detail.bvid)
-      info.value = detail
+      detail = await loadDetail(reference)
     } catch {
-      if (token === generation) failed.value = true
-    } finally {
-      if (token === generation) loading.value = false
+      // 音频仍可能已下载或缓存，交给播放器沿用原来的取流和错误处理
+      if (token === generation && player.currentTrack === previousTrack && !blockedByRoom()) play()
+      return
     }
+    if (token !== generation || player.currentTrack !== previousTrack || blockedByRoom()) return
+    lastDetail = detail
+    if (detail.pages.length === 1) {
+      play()
+      return
+    }
+    selection.value = { parent, playParts }
+    nameOrder.value = readBiliPartNameOrder(detail.bvid)
+    info.value = detail
   }
 
   function choose(cid: number) {
-    if (!info.value || !track.value || loading.value) return
+    if (!info.value || !selection.value) return
     if (blockedByRoom()) {
       close()
       return
     }
+    const { playParts } = selection.value
     const queue = tracks.value
-    const selected = queue.find(item => item.syncPayload?.subAudioId === String(cid))
+    const selected = queue.find(item => resolveBiliPartCid(item) === cid)
     if (!selected) return
-    saveNameOrder(info.value.bvid, nameOrder.value)
+    saveBiliPartNameOrder(info.value.bvid, nameOrder.value)
     close()
-    player.playAll(queue, selected.id)
+    playParts(queue, selected.id)
   }
 
-  function retry() {
-    if (track.value && fallback) return request(track.value, fallback)
+  async function requestCollection(track: TrackInfo, save: CollectionSave, isLiked?: (track: TrackInfo, video: VideoReference) => boolean) {
+    close()
+    const reference = resolveBiliVideoReference(track)
+    if (!reference) {
+      save(track)
+      return
+    }
+    const token = generation
+    let detail: BiliVideoInfo
+    try {
+      const cached = lastDetail
+      detail = cached && (reference.bvid ? cached.bvid === reference.bvid : cached.aid === reference.avid)
+        ? cached : await loadDetail(reference)
+    } catch {
+      if (token === generation) notifyLoadFailed()
+      return
+    }
+    if (token !== generation) return
+    lastDetail = detail
+    const video = { bvid: detail.bvid, avid: detail.aid }
+    if (detail.pages.length === 1) {
+      save(track, video, true)
+      return
+    }
+    const fixedCid = resolveBiliPartCid(track)
+    const cid = fixedCid ?? detail.cid
+    const page = detail.pages.find(item => item.cid === cid)
+    if (!page) {
+      notifyLoadFailed()
+      return
+    }
+    const [part] = buildBiliPartTracks({ ...detail, pages: [page] }, track, readBiliPartNameOrder(detail.bvid))
+    if (!part) return
+    // 批量播放时，视频条目可能带着整集的标题和时长，但已被播放器补上了 CID
+    const hasWholeVideoMetadata = track.title === detail.title && track.durationMs === detail.duration * 1000
+    collection.value = {
+      whole: {
+        id: `bilibili:${detail.bvid}`, title: detail.title, artist: detail.owner, coverUrl: detail.cover,
+        durationMs: detail.duration * 1000, album: '', source: 'bilibili', audioUrl: '',
+      },
+      part: fixedCid && !hasWholeVideoMetadata ? {
+        ...track,
+        id: part.id,
+        title: track.title.trim() || part.title,
+        artist: track.artist.trim() || part.artist,
+        coverUrl: track.coverUrl.trim() || part.coverUrl,
+        durationMs: track.durationMs || part.durationMs,
+        album: part.album,
+        syncPayload: { ...part.syncPayload, ...track.syncPayload, album: part.album },
+      } : part,
+      partNumber: page.page,
+      isLiked: isLiked && (target => isLiked(target, video)),
+      save: target => save(target, video),
+    }
   }
 
-  return { open, loading, failed, info, track, nameOrder, tracks, request, choose, close, retry }
+  function chooseCollection(scope: CollectionScope) {
+    const choice = collection.value
+    if (!choice) return
+    close()
+    choice.save(choice[scope])
+  }
+
+  return { open, info, collection, nameOrder, tracks, request, choose, requestCollection, chooseCollection, close }
 })

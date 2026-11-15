@@ -33,6 +33,10 @@ const { resolvePlaybackQueueStartIndex } = evaluate(queueSource, { exports: {} }
 const playerSource = await readFile(new URL('src/stores/player.ts', root), 'utf8')
 const exploreSource = await readFile(new URL('src/views/ExploreView.vue', root), 'utf8')
 const exploreScript = exploreSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+const menuSource = await readFile(new URL('src/components/TrackContextMenu.vue', root), 'utf8')
+const menuScript = menuSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+const addSource = await readFile(new URL('src/components/AddToPlaylistDialog.vue', root), 'utf8')
+const addScript = addSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
 
 const song = (source, suffix, title) => ({
   kind: 'song', id: `${source}:${suffix}`, title, artist: `artist ${suffix}`,
@@ -130,5 +134,48 @@ test('explicit play all retains every selected playlist track', () => {
   assert.equal(state.currentTrack.value.id, 'netease:next')
   assert.equal(state.queueIndex.value, 1)
 })
+
+const menu = ref({ open: false, x: 0, y: 0, track: null })
+const playlistDialogOpen = ref(false)
+const playlistTarget = ref(null)
+const trackMenu = evaluate(declarations(menuScript, ['open', 'openAt', 'handleClick']), {
+  menu, playlistTarget, playlistDialogOpen,
+}, ['open', 'handleClick'])
+const { openResultMenu } = evaluate(declarations(exploreScript, ['songToTrack', 'openResultMenu']), {
+  trackMenuRef: ref(trackMenu),
+}, ['openResultMenu'])
+
+openResultMenu({
+  type: 'contextmenu', clientX: 18, clientY: 42,
+  preventDefault() {}, stopPropagation() {},
+}, {
+  kind: 'song', id: 'bilibili:BV14Dn16tELC', title: '世界纯音乐100首', artist: '北流嘉措',
+  album: '', duration_ms: 21653000, source: 'bilibili', cover_url: 'https://example.test/cover.jpg',
+})
+assert.equal(menu.value.open, true)
+trackMenu.handleClick({ id: 'add-to-playlist', label: 'Add to playlist' })
+assert.equal(playlistDialogOpen.value, true)
+
+const writes = []
+const { addToPlaylist } = evaluate(declarations(addScript, ['targetTracks', 'addToPlaylist', 'toBackendTrack', 'inferSource']), {
+  props: { track: playlistTarget.value }, isSubmitting: ref(false),
+  invoke: async (command, args) => writes.push({ command, args }),
+  toast: { success() {}, error: message => assert.fail(message) },
+  log: { error: (_message, error) => { throw error } },
+  t: key => key, emit() {},
+}, ['addToPlaylist'])
+await addToPlaylist(42)
+assert.deepEqual(writes, [{
+  command: 'add_to_playlist',
+  args: {
+    playlistId: 42,
+    track: {
+      id: 'bilibili:BV14Dn16tELC', title: '世界纯音乐100首', artist: '北流嘉措', album: '',
+      duration_ms: 21653000, source: 'bilibili', url: '', cover_url: 'https://example.test/cover.jpg',
+      added_at: 0, sync_payload: null, playlist_key: null,
+    },
+  },
+}], 'search context menu must save one entire video with its metadata and no CID')
+console.log('PASS Bilibili search context menu saves the entire video as one playlist entry')
 
 assert.equal(failures, 0, `${failures} search playback regressions failed`)

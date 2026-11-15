@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import type { TrackInfo } from './player'
 import {
   LEGACY_HISTORY_DELETIONS_KEY,
@@ -7,6 +8,14 @@ import {
   persistUserData,
   preloadedUserData,
 } from '@/modules/persistence/userData'
+import {
+  buildBiliPartTracks,
+  readBiliPartNameOrder,
+  resolveBiliPartCid,
+  resolveBiliVideoReference,
+  type BiliVideoInfo,
+} from '@/modules/playback/biliVideoParts'
+import { normalizeCoverUrlForDisplay } from '@/utils/bilibiliCoverCache'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('history')
@@ -69,6 +78,31 @@ function bilibiliPage(track: Pick<TrackInfo, 'album' | 'syncPayload'>): string |
   return track.album?.match(/^Bilibili\|(\d+)/i)?.[1]
 }
 
+type HistoryMetadata = Pick<TrackInfo, 'title' | 'artist' | 'coverUrl' | 'durationMs'>
+
+function hasHistoryMetadata(track: TrackInfo): boolean {
+  return !!(track.title.trim() && track.artist.trim() && track.coverUrl.trim() && track.durationMs > 0)
+}
+
+function fillHistoryMetadata(track: TrackInfo, metadata: HistoryMetadata): TrackInfo {
+  const title = track.title.trim() ? track.title : metadata.title
+  const artist = track.artist.trim() ? track.artist : metadata.artist
+  const coverUrl = track.coverUrl.trim() ? track.coverUrl : metadata.coverUrl
+  const durationMs = track.durationMs > 0 ? track.durationMs : metadata.durationMs
+  if (title === track.title && artist === track.artist && coverUrl === track.coverUrl && durationMs === track.durationMs) return track
+  return { ...track, title, artist, coverUrl, durationMs }
+}
+
+function historyVideoMetadata(track: TrackInfo, info: BiliVideoInfo): HistoryMetadata | undefined {
+  const cid = resolveBiliPartCid(track)
+  const coverUrl = normalizeCoverUrlForDisplay(info.cover)
+  if (!cid) return { title: info.title, artist: info.owner, coverUrl, durationMs: info.duration * 1000 }
+  const page = info.pages.find(part => part.cid === cid)
+  if (!page) return undefined
+  if (info.pages.length === 1) return { title: info.title, artist: info.owner, coverUrl, durationMs: (page.duration || info.duration) * 1000 }
+  return buildBiliPartTracks({ ...info, pages: [page] }, { ...track, coverUrl }, readBiliPartNameOrder(info.bvid))[0]
+}
+
 /** 按身份去重，保留先出现的一条（调用方先按时间从新到旧排好） */
 function uniqueByIdentity<T extends { track: TrackInfo }>(items: T[]): T[] {
   const seen = new Set<string>()
@@ -119,7 +153,9 @@ async function stableSyncId(value: string): Promise<string> {
   return String(signed === 0n ? 1n : signed)
 }
 
-async function syncIdentity(track: TrackInfo): Promise<{ songId: string; album: string; mediaUri: string }> {
+type HistorySyncIdentity = { songId: string; album: string; mediaUri: string; albumAliases?: string[] }
+
+async function syncIdentity(track: TrackInfo): Promise<HistorySyncIdentity> {
   const source = inferSource(track)
   const rawId = track.id.replace(`${source}:`, '')
 
@@ -134,10 +170,14 @@ async function syncIdentity(track: TrackInfo): Promise<{ songId: string; album: 
     }
   }
   if (source === 'bilibili') {
-    const cid = track.album.match(/^Bilibili\|(.+)$/i)?.[1] ?? ''
+    const payload = track.syncPayload
+    const storedAudioId = String(payload?.audioId ?? payload?.audio_id ?? '').trim()
+    const audioId = storedAudioId || resolveBiliVideoReference(track)?.bvid || rawId.split(':')[0]
+    const cid = resolveBiliPartCid(track) ?? ''
     return {
-      songId: await stableSyncId(`bilibili|${rawId}|${cid}`),
-      album: track.album,
+      songId: await stableSyncId(`bilibili|${audioId}|${cid}`),
+      album: 'bilibili',
+      albumAliases: [track.album, String(payload?.album ?? ''), cid ? `Bilibili|${cid}` : ''].filter(Boolean),
       mediaUri: '',
     }
   }
@@ -177,6 +217,10 @@ function emitHistoryChanged(type: 'record' | 'progress' | 'remove' | 'clear' | '
 export const useHistoryStore = defineStore('history', () => {
   const entries = ref<PlayedEntry[]>([])
   const deletions = ref<HistoryDeletion[]>([])
+  const currentEntries = computed(() => new Set(entries.value))
+  const attemptedMetadata = new WeakSet<TrackInfo>()
+  const videoRequests = new Map<string, Promise<BiliVideoInfo>>()
+  let videoRequestTail = Promise.resolve()
   let mutationEpoch = 0
   // 只统计用户自己的播放/删除/清空，同步应用远端结果时据此判断快照之后有没有新的本地修改
   let localMutationEpoch = 0
@@ -237,6 +281,56 @@ export const useHistoryStore = defineStore('history', () => {
       entries.value = []
       deletions.value = []
     }
+  }
+
+  function requestBiliMetadata({ bvid, avid }: NonNullable<ReturnType<typeof resolveBiliVideoReference>>) {
+    const aliases = [bvid, avid ? `av${avid}` : null].filter((key): key is string => !!key)
+    const pending = aliases.map(key => videoRequests.get(key)).find(Boolean)
+    const request = pending ?? videoRequestTail.then(() => invoke<BiliVideoInfo>('get_bili_video_info', { bvid, avid: bvid ? null : avid }))
+    const newAliases = aliases.filter(key => !videoRequests.has(key))
+    for (const alias of newAliases) videoRequests.set(alias, request)
+    const forgetAliases = () => {
+      for (const alias of newAliases) videoRequests.delete(alias)
+    }
+    const completed = request.then(forgetAliases, forgetAliases)
+    if (!pending) videoRequestTail = completed
+    return request
+  }
+
+  async function restoreBiliMetadata(visibleEntries: readonly PlayedEntry[]) {
+    const grouped = new Map<Promise<BiliVideoInfo>, PlayedEntry[]>()
+    for (const entry of visibleEntries) {
+      const track = entry.track
+      if (attemptedMetadata.has(track) || hasHistoryMetadata(track)) continue
+      const reference = resolveBiliVideoReference(track)
+      if (!reference) continue
+      attemptedMetadata.add(track)
+      const request = requestBiliMetadata(reference)
+      const group = grouped.get(request)
+      if (group) group.push(entry)
+      else grouped.set(request, [entry])
+    }
+
+    await Promise.all([...grouped].map(async ([request, group]) => {
+      try {
+        const info = await request
+        const updates: Array<{ track: TrackInfo; playedAt: number }> = []
+        for (const entry of group) {
+          if (!currentEntries.value.has(entry)) continue
+          const metadata = historyVideoMetadata(entry.track, info)
+          if (!metadata) continue
+          const repaired = fillHistoryMetadata(entry.track, metadata)
+          if (repaired === entry.track) continue
+          entry.track = repaired
+          attemptedMetadata.add(entry.track)
+          updates.push({ track: repaired, playedAt: entry.playedAt })
+        }
+        if (updates.length) persist('update_play_history_metadata', { entries: updates })
+      } catch (error) {
+        for (const entry of group) attemptedMetadata.delete(entry.track)
+        log.warn('Bilibili history metadata lookup failed:', error)
+      }
+    }))
   }
 
   function markLocalMutation() {
@@ -390,7 +484,14 @@ export const useHistoryStore = defineStore('history', () => {
     if (!canApply()) return interrupted()
     mutationEpoch++
     // 合并结果按同步身份区分，同一曲目可能因专辑名不同出现多条，本地只留最新的一条
+    const previousBiliTracks = new Map(entries.value.filter(entry => entry.track.id.startsWith('bilibili:'))
+      .map(entry => [historyEntryKey(entry.track), entry.track]))
     entries.value = mergedEntries.filter(entry => (deletedTimes.get(historyEntryKey(entry.track)) ?? 0) < entry.playedAt)
+      .map(entry => {
+        const previous = previousBiliTracks.get(historyEntryKey(entry.track))
+        const track = previous ? fillHistoryMetadata(entry.track, previous) : entry.track
+        return track === entry.track ? entry : { ...entry, track }
+      })
     deletions.value = mergedDeletions.filter(deletion => (playedTimes.get(historyEntryKey(deletion.track)) ?? 0) <= deletion.deletedAt)
     persist('replace_play_history', {
       history: {
@@ -426,14 +527,17 @@ export const useHistoryStore = defineStore('history', () => {
       // 沿原候选顺序逐步建立索引，保留首次命中并避免重复扫描与异步哈希
       while (nextCandidate < candidates.length) {
         const candidate = candidates[nextCandidate++]!
-        const identityKey = JSON.stringify([inferSource(candidate), candidate.id, candidate.album])
+        const source = inferSource(candidate)
+        const identityKey = JSON.stringify(source === 'bilibili'
+          ? [source, historyEntryKey(candidate), candidate.album, candidate.syncPayload?.audioId, candidate.syncPayload?.audio_id, candidate.syncPayload?.album]
+          : [source, candidate.id, candidate.album])
         let identity = identities.get(identityKey)
         if (!identity) {
           identity = await syncIdentity(candidate)
           if (!isCurrent()) return undefined
           identities.set(identityKey, identity)
         }
-        for (const album of [identity.album, null]) {
+        for (const album of new Set([identity.album, ...(identity.albumAliases ?? []), null])) {
           for (const mediaUri of [identity.mediaUri, null]) {
             const key = JSON.stringify([identity.songId, album, mediaUri])
             if (!matches.has(key)) matches.set(key, candidate)
@@ -450,6 +554,7 @@ export const useHistoryStore = defineStore('history', () => {
   return {
     entries,
     deletions,
+    restoreBiliMetadata,
     record,
     rememberedPosition,
     updateResumePosition,

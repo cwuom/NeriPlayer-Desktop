@@ -20,14 +20,17 @@ function evaluate(source, dependencies) {
   return exports
 }
 
-const policy = evaluate(await readFile(new URL('src/modules/playback/biliVideoParts.ts', root), 'utf8'), {})
 const skipPolicy = evaluate(await readFile(new URL('src/modules/playback/biliVideoSkip.ts', root), 'utf8'), {})
+const warnings = []
+const policy = evaluate(await readFile(new URL('src/modules/playback/biliVideoParts.ts', root), 'utf8'), {
+  './biliVideoSkip': skipPolicy,
+  '@/utils/logger': { createLogger: () => ({ warn: (...args) => warnings.push(args) }) },
+})
 const pending = []
 const played = []
 const player = { currentTrack: null, playAll: (...args) => played.push(args) }
 const room = { localControlRestriction: null }
 const notices = []
-const warnings = []
 const savedNameOrders = new Map()
 const storageWrites = []
 let storageFailure = null
@@ -57,7 +60,6 @@ const { useBiliVideoPartsStore } = evaluate(await readFile(new URL('src/stores/b
   '@/i18n': { default: { global: { t: key => key } } },
   '@/modules/playback/biliVideoParts': policy,
   '@/modules/playback/biliVideoSkip': skipPolicy,
-  '@/utils/logger': { createLogger: () => ({ warn: (...args) => warnings.push(args) }) },
 })
 
 const info = {
@@ -175,13 +177,13 @@ assert.equal(fallback, 2)
 assert.equal(pending.length, 0, 'already selected CID must play directly')
 
 const loading = store.request(parent, () => fallback++)
-assert.equal(store.open, true)
-assert.equal(store.loading, true)
+assert.equal(store.open, false, 'the picker stays closed until a multi-part video is confirmed')
 assert.equal(played.length, 0, 'opening the picker must not replace the current queue')
 assert.deepEqual(pending[0].args, { bvid: info.bvid, avid: null })
 pending[0].resolve(info)
 await loading
 assert.equal(store.info.pages.length, 100)
+assert.equal(store.open, true)
 store.choose(info.pages[49].cid)
 assert.equal(played.length, 1)
 assert.equal(played[0][0].length, 100)
@@ -205,20 +207,19 @@ assert.equal(store.open, false, 'late video response must not reopen a dismissed
 const failed = store.request(parent, () => fallback++)
 pending[3].reject(new Error('unavailable'))
 await failed
-assert.equal(store.failed, true)
-assert.equal(store.open, true)
-assert.equal(fallback, 3, 'failure must not silently play the first part')
-const retry = store.retry()
+assert.equal(store.open, false, 'a failed lookup must not show a picker for an unconfirmed video')
+assert.equal(fallback, 4, 'a failed lookup still allows playback from a downloaded or cached copy')
+const retry = store.request(parent, () => fallback++)
 pending[4].resolve({ ...info, pages: [info.pages[0]] })
 await retry
-assert.equal(fallback, 4, 'single-part videos keep the original playback path')
+assert.equal(fallback, 5, 'single-part videos keep the original playback path')
 assert.equal(store.open, false)
 
 const superseded = store.request(parent, () => fallback++)
 player.currentTrack = { id: 'netease:new-selection' }
 pending[5].resolve({ ...info, pages: [info.pages[0]] })
 await superseded
-assert.equal(fallback, 4, 'a late single-part result must not interrupt a newer queue selection')
+assert.equal(fallback, 5, 'a late single-part result must not interrupt a newer queue selection')
 assert.equal(store.open, false)
 
 room.localControlRestriction = 'controller_offline'
@@ -236,6 +237,95 @@ assert.equal(store.open, false)
 assert.equal(notices.at(-1), 'listen_together.control_blocked_member_control')
 
 room.localControlRestriction = null
+const scopedPlayback = []
+const inPlaylist = store.request(parent, () => assert.fail('multipart should use the selected part'),
+  (items, startId) => scopedPlayback.push([items, startId]))
+pending[7].resolve(info)
+await inPlaylist
+store.choose(info.pages[69].cid)
+assert.equal(scopedPlayback[0][1], tracks[69].id)
+
+const collected = []
+const current = { ...tracks[1], title: 'My edit', artist: '', coverUrl: '', durationMs: 0 }
+await store.requestCollection(current, item => collected.push(item))
+assert.equal(store.open, true)
+assert.equal(store.collection.partNumber, 2)
+assert.equal(collected.length, 0)
+store.chooseCollection('part')
+assert.equal(collected[0].title, 'My edit')
+assert.equal(collected[0].artist, info.owner)
+assert.equal(collected[0].coverUrl, info.cover)
+assert.equal(collected[0].durationMs, 208000)
+assert.equal(collected[0].syncPayload.subAudioId, String(info.pages[1].cid))
+
+await store.requestCollection(current, item => collected.push(item))
+store.chooseCollection('whole')
+assert.deepEqual(collected[1], {
+  id: `bilibili:${info.bvid}`, title: info.title, artist: info.owner, album: '',
+  coverUrl: info.cover, durationMs: 21653000, source: 'bilibili', audioUrl: '',
+})
+
+await store.requestCollection(current, item => collected.push(item))
+store.close()
+assert.equal(collected.length, 2, 'dismissing the choice leaves the library unchanged')
+
+const resolvedParent = { ...collected[1], album: tracks[1].album, syncPayload: { name: info.title } }
+await store.requestCollection(resolvedParent, item => collected.push(item))
+store.chooseCollection('part')
+assert.equal(collected[2].id, tracks[1].id, 'selecting only the currently playing page saves a CID-specific item')
+assert.equal(collected[2].title, tracks[1].title, 'playing a full-video entry must not label the saved part with the parent title')
+
+const regular = { ...parent, id: 'bilibili:BV1regular' }
+const addRegular = store.requestCollection(regular, item => collected.push(item))
+assert.equal(store.open, false)
+pending[8].resolve({ ...info, bvid: 'BV1regular', aid: 18, pages: [info.pages[0]] })
+await addRegular
+assert.equal(store.open, false)
+assert.equal(collected[3], regular)
+
+const favorites = [
+  { id: `bilibili:${info.aid}`, album: '', playlist_key: 'whole' },
+  ...tracks.slice(0, 2).map((track, index) => ({
+    id: `bilibili:${info.aid}`, album: track.album, playlist_key: `part-${index + 1}`,
+  })),
+]
+const removals = []
+const { useLikedSongsStore } = evaluate(await readFile(new URL('src/stores/likedSongs.ts', root), 'utf8'), {
+  pinia, vue, '@tauri-apps/api/event': {},
+  '@tauri-apps/api/core': { invoke: async (command, args) => {
+    if (command === 'list_playlists') return [{ id: -1001, name: '我喜欢的音乐' }]
+    if (command === 'get_playlist_tracks') return favorites
+    assert.equal(command, 'remove_from_playlist')
+    removals.push(args.trackId)
+    favorites.splice(favorites.findIndex(item => item.playlist_key === args.trackId), 1)
+  } },
+  '@/stores/recommend': {}, '@/stores/toast': {}, '@/i18n': {},
+  '@/modules/library/localPlaylists': { FAVORITES_PLAYLIST_NAMES: ['我喜欢的音乐'], isFavoritesPlaylist: playlist => playlist.id === -1001 },
+  '@/modules/playback/biliVideoParts': policy,
+  '@/stores/biliVideoParts': { useBiliVideoPartsStore },
+  '@/utils/logger': { createLogger: () => console },
+})
+const liked = useLikedSongsStore()
+await liked.loadLikedPlaylist()
+assert.equal(liked.isTrackLiked(tracks[2]), false, 'saving a whole video must not mark every part as separately saved')
+assert.equal(liked.isTrackLiked(tracks[2], true), true, 'the player heart reflects the saved whole video')
+liked.requestToggleTrack(tracks[1])
+pending[9].resolve(info)
+await new Promise(setImmediate)
+assert.equal(store.collection.isLiked(store.collection.part), true)
+store.chooseCollection('part')
+await new Promise(setImmediate)
+assert.deepEqual(removals, ['part-2'], 'removal must target the selected CID even when imported parts share an ID')
+assert.equal(liked.isTrackLiked(tracks[0]), true)
+assert.equal(liked.isTrackLiked(tracks[1]), false)
+assert.equal(liked.isTrackLiked(tracks[1], true), true)
+liked.requestToggleTrack(tracks[1])
+assert.equal(store.collection.isLiked(store.collection.whole), true, 'the fetched AID matches a legacy whole-video favorite')
+store.chooseCollection('whole')
+await new Promise(setImmediate)
+assert.deepEqual(removals, ['part-2', 'whole'])
+assert.equal(liked.isTrackLiked(tracks[1], true), false)
+
 const artistFirstLoading = store.request(artistFirstParent, () => fallback++)
 pending.at(-1).resolve(artistFirstInfo)
 await artistFirstLoading
@@ -250,6 +340,13 @@ assert.equal(played.at(-1)[0], previewTracks, 'playback must use the tracks show
 const artistFirstKey = 'neri:bili-part-name-order:v1:BV1Mvx76YEkz'
 assert.equal(savedNameOrders.get(artistFirstKey), 'artist-first')
 
+const repairedCollection = []
+await store.requestCollection({ ...corrected[1], title: '', artist: '' },
+  item => repairedCollection.push(item))
+store.chooseCollection('part')
+assert.deepEqual(repairedCollection.map(({ title, artist }) => [title, artist]), [['双人旁', '许嵩']],
+  'saving a part with missing metadata restores its title and artist in the previously selected order')
+
 const nextVideoLoading = store.request(parent, () => fallback++)
 pending.at(-1).resolve(info)
 await nextVideoLoading
@@ -261,7 +358,7 @@ async function openParts(targetStore, detail = artistFirstInfo, input = artistFi
   const request = targetStore.request(input, () => fallback++)
   pending.at(-1).resolve(detail)
   await request
-  assert.equal(targetStore.failed, false)
+  assert.equal(targetStore.info?.bvid, detail.bvid)
   assert.equal(targetStore.open, true)
 }
 
@@ -297,7 +394,7 @@ const writesBeforeFailure = storageWrites.length
 const failedPreferenceRequest = restartedStore.request(artistFirstParent, () => fallback++)
 pending.at(-1).reject(new Error('video unavailable'))
 await failedPreferenceRequest
-assert.equal(restartedStore.failed, true)
+assert.equal(restartedStore.open, false, 'a failed lookup must not open the picker')
 assert.equal(storageWrites.length, writesBeforeFailure, 'failed video requests must not save a preference')
 restartedStore.close()
 
@@ -365,4 +462,4 @@ for (const path of ['src/views/BiliPlaylistView.vue', 'src/views/BiliArtistView.
   assert.match(await readFile(new URL(path, root), 'utf8'), /biliParts\.request\(/)
 }
 assert.match(await readFile(new URL('src/App.vue', root), 'utf8'), /<BiliVideoPartsDialog\s*\/>/)
-console.log('Bilibili multipart: metadata order, 100-part queue, explicit CID, cancellation, stale response, retry and entry points passed')
+console.log('Bilibili multipart: playback, per-video name order, collection scopes, metadata and CID-specific favorites passed')

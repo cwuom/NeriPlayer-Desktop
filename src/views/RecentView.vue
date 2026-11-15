@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayAlbum } from '@/modules/library/albumDisplay'
 import { filterAndRank, trackSearchTokens } from '@/modules/search/textMatcher'
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -38,7 +39,8 @@ const showAddToPlaylist = ref(false)
 const addToPlaylistTarget = ref<TrackInfo | null>(null)
 const addToPlaylistTargets = ref<TrackInfo[]>([])
 
-const filteredEntries = computed(() => filterAndRank(searchQuery.value, history.entries, entry => trackSearchTokens(entry.track)))
+const filteredEntries = computed(() => filterAndRank(searchQuery.value, history.entries, entry =>
+  trackSearchTokens({ ...entry.track, album: displayAlbum(entry.track.album) })))
 
 const allHistoryTracks = computed(() => history.entries.map(entry => entry.track))
 const visibleHistoryTracks = computed(() => filteredEntries.value.map(entry => entry.track))
@@ -59,6 +61,7 @@ const {
 const RENDER_CHUNK = 100
 const renderCount = ref(RENDER_CHUNK)
 const renderedEntries = computed(() => filteredEntries.value.slice(0, renderCount.value))
+watch(renderedEntries, list => { void history.restoreBiliMetadata(list) }, { immediate: true })
 let renderedQuery = searchQuery.value
 watch(filteredEntries, (list) => {
   const queryChanged = searchQuery.value !== renderedQuery
@@ -121,12 +124,22 @@ function shufflePlay() {
 }
 
 function playEntry(index: number) {
+  const target = filteredEntries.value[index]?.track
+  if (!target) return
   if (selectionMode.value) {
-    toggleSelected(historyEntryKey(filteredEntries.value[index].track))
+    toggleSelected(historyEntryKey(target))
     return
   }
   const tracks = filteredEntries.value.map(e => e.track)
-  player.playAll(tracks, tracks[index]?.id)
+  if (!target.playlistKey && tracks.some(track => track !== target && track.id === target.id)) {
+    // 旧同步条目可能共用视频 ID，播放时沿用历史条目的分 P 身份区分队列行
+    const keyedTracks = tracks.map(track => track.id === target.id && !track.playlistKey
+      ? { ...track, playlistKey: historyEntryKey(track) }
+      : track)
+    player.playAll(keyedTracks, target.id, historyEntryKey(target))
+    return
+  }
+  player.playAll(tracks, target.id, target.playlistKey)
 }
 
 function clearHistory() {
@@ -311,8 +324,8 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
             <span v-else class="material-symbols-rounded filled">music_note</span>
           </div>
           <div class="track-info">
-            <div class="track-title">{{ entry.track.title }}</div>
-            <div class="track-meta">{{ entry.track.artist }}<template v-if="entry.track.album"> · {{ entry.track.album }}</template></div>
+            <div class="track-title">{{ entry.track.title || t('stats.unknown_track') }}</div>
+            <div class="track-meta">{{ [entry.track.artist, displayAlbum(entry.track.album)].filter(Boolean).join(' · ') }}</div>
           </div>
           <div class="track-time-ago">{{ formatRelativeTime(entry.playedAt) }}</div>
           <div class="track-duration">{{ formatDuration(entry.track.durationMs) }}</div>

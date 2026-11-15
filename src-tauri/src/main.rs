@@ -659,6 +659,7 @@ fn main() {
             user_data_cmd::import_legacy_user_data,
             user_data_cmd::save_playback_state,
             user_data_cmd::record_play_history,
+            user_data_cmd::update_play_history_metadata,
             user_data_cmd::remove_play_history,
             user_data_cmd::clear_play_history,
             user_data_cmd::replace_play_history,

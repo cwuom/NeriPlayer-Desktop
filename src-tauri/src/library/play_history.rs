@@ -110,6 +110,28 @@ pub fn record(
     Ok(true)
 }
 
+/// 回填旧条目的展示信息，只有原条目仍存在且播放时间一致时才更新
+pub fn update_metadata(transaction: &Transaction<'_>, entries: &[HistoryEntry]) -> AppResult<()> {
+    let mut update = transaction.prepare_cached(
+        "UPDATE play_history SET name = ?1, artist = ?2, duration_ms = ?3, cover_url = ?4,
+             track_payload_json = ?5 WHERE identity_key = ?6 AND played_at = ?7",
+    )?;
+    for entry in entries {
+        let Some(key) = identity_key(&entry.track) else { continue };
+        let track = &entry.track;
+        update.execute(params![
+            text(track, &["title"]).unwrap_or_default(),
+            text(track, &["artist"]).unwrap_or_default(),
+            number(track, &["durationMs", "duration_ms"]),
+            text(track, &["coverUrl", "cover_url"]).filter(|url| !url.is_empty()),
+            serde_json::to_string(track)?,
+            key,
+            entry.played_at,
+        ])?;
+    }
+    Ok(())
+}
+
 /// 删除单条历史，并留下删除记录供同步传播
 pub fn remove(transaction: &Transaction<'_>, key: &str, deleted_at: i64) -> AppResult<bool> {
     let payload: Option<String> = transaction
@@ -320,6 +342,38 @@ mod tests {
         assert_eq!(identity_key(&payload_page).as_deref(), Some("bilibili:BV1xx#3"));
         assert_eq!(identity_key(&json!({"id": "bilibili:BV1xx", "album": ""})).as_deref(), Some("bilibili:BV1xx"));
         assert_eq!(identity_key(&json!({"id": "netease:1", "album": "Bilibili|9"})).as_deref(), Some("netease:1"));
+    }
+
+    #[test]
+    fn repairing_history_metadata_keeps_order_resume_and_tombstones() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        let mut original = page("1");
+        original["title"] = json!("");
+        let mut repaired = original.clone();
+        repaired["title"] = json!("Recovered part");
+        repaired["coverUrl"] = json!("https://i0.hdslb.com/bfs/archive/cover.jpg");
+        database
+            .write(|transaction| {
+                record(transaction, &original, 10, Some(800))?;
+                record(transaction, &page("2"), 10, Some(400))?;
+                record(transaction, &page("3"), 20, None)?;
+                remove(transaction, "bilibili:BV1xx#3", 30)?;
+                update_metadata(transaction, &[
+                    HistoryEntry { track: repaired.clone(), played_at: 10, resume_position_ms: None },
+                    HistoryEntry { track: page("2"), played_at: 11, resume_position_ms: None },
+                    HistoryEntry { track: page("3"), played_at: 20, resume_position_ms: None },
+                ])?;
+                Ok(())
+            })
+            .unwrap();
+        let history = database.read(load_from).unwrap();
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(history.entries[0].track, page("2"));
+        assert_eq!(history.entries[1].track, repaired);
+        assert_eq!(history.entries[1].played_at, 10);
+        assert_eq!(history.entries[1].resume_position_ms, Some(800));
+        assert_eq!(history.deletions.len(), 1);
+        assert_eq!(history.deletions[0].deleted_at, 30);
     }
 
     #[test]

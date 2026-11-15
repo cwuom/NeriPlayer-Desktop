@@ -542,7 +542,7 @@ onMounted(async () => {
     toggleShuffle: () => player.toggleShuffle(),
     cycleRepeat: () => player.toggleRepeatMode(),
     toggleLike: () => {
-      if (player.currentTrack) void likedSongs.toggleTrack(player.currentTrack)
+      likedSongs.requestToggleTrack(player.currentTrack)
     },
     toggleDesktopLyrics: () => {
       const toggle = desktopLyricsOpen.value ? closeDesktopLyricsWindow() : openDesktopLyricsWindow()

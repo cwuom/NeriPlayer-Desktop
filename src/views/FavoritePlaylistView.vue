@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
@@ -24,6 +25,7 @@ const log = createLogger('favorite-playlist-view')
 const route = useRoute()
 const router = useRouter()
 const player = usePlayerStore()
+const biliParts = useBiliVideoPartsStore()
 const { onTrackClick, onTrackDoubleClick } = useTrackActivation()
 const { t } = useI18n()
 
@@ -74,15 +76,19 @@ async function load() {
 }
 
 function playAll() {
-  if (tracks.value.length) player.playAll(tracks.value)
+  if (tracks.value.length) player.playAll(tracks.value.map(track => ({ ...track })))
 }
 
 function shufflePlay() {
-  if (tracks.value.length) player.shufflePlay(tracks.value)
+  if (tracks.value.length) player.shufflePlay(tracks.value.map(track => ({ ...track })))
 }
 
 function playTrack(index: number) {
-  player.playAll(tracks.value, tracks.value[index]?.id)
+  const playlistTracks = tracks.value
+  const track = playlistTracks[index]
+  if (!track) return
+  // 播放解析会在队列里记录实际播出的 CID
+  void biliParts.request(track, () => player.playAll(playlistTracks.map(item => ({ ...item })), track.id, track.playlistKey))
 }
 
 // 行上右键：光标处弹出（对齐其它列表页）
@@ -114,10 +120,10 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   if (!track) return
   switch (item.id) {
     case 'play-next':
-      player.addToQueueNext(track)
+      player.addToQueueNext({ ...track })
       break
     case 'add-to-queue':
-      player.addToQueueEnd(track)
+      player.addToQueueEnd({ ...track })
       break
     case 'download':
       void downloadFromMenu()

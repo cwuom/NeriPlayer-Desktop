@@ -340,10 +340,11 @@ fn history_deletions_to_sync(
         .filter(|deletion| deletion.track.source != TrackSource::Local && !deletion.track.id.is_empty())
         .map(|deletion| {
             let song = track_to_sync_song(&deletion.track);
+            let identity = song_deletion_identity(&song);
             SyncRecentPlayDeletion {
-                song_id: song.id,
-                album: song.album,
-                media_uri: song.media_uri,
+                song_id: identity.id,
+                album: identity.album,
+                media_uri: identity.media_uri,
                 deleted_at: deletion.deleted_at.max(0),
                 device_id: device_id.to_string(),
             }
@@ -361,9 +362,17 @@ fn with_history(mut result: SyncResult, data: &SyncData) -> SyncResult {
             resume_position_ms: Some(entry.resume_position_ms.max(0)),
         })
         .collect();
+    let deletions: Vec<_> = data.recent_play_deletions.iter().map(|deletion| {
+        let mut payload = serde_json::json!(deletion);
+        // B 站分 P 身份使用 i64 哈希，传给前端时保留精确值
+        if deletion.album.eq_ignore_ascii_case("bilibili") || bilibili_cid_from_album(&deletion.album).is_some() {
+            payload["songId"] = serde_json::Value::String(deletion.song_id.clone());
+        }
+        payload
+    }).collect();
     result.history = Some(serde_json::json!({
         "entries": entries,
-        "deletions": &data.recent_play_deletions,
+        "deletions": deletions,
     }));
     result
 }
@@ -485,21 +494,34 @@ pub fn track_to_playlist_song_deletion_pub(
     device_id: String,
 ) -> SyncPlaylistSongDeletion {
     let song = track_to_sync_song(track);
+    let identity = song_deletion_identity(&song);
     SyncPlaylistSongDeletion {
         playlist_id: playlist_id.to_string(),
-        song_id: song.id,
-        album: song.album,
-        media_uri: if song.media_uri.is_empty() { None } else { Some(song.media_uri) },
+        song_id: identity.id,
+        album: identity.album,
+        media_uri: if identity.media_uri.is_empty() { None } else { Some(identity.media_uri) },
         deleted_at: chrono::Utc::now().timestamp_millis(),
         device_id,
         removed_membership_tokens: song.sync_membership_tokens,
     }
 }
 
+fn song_deletion_identity(song: &SyncSong) -> SongIdentity {
+    let identity = song.identity();
+    // 旧 B 站载荷的 album 可能为空，墓碑使用分 P 身份以匹配回填前后的记录
+    if identity.album == "bilibili" { identity } else { song.raw_identity() }
+}
+
 /// TrackInfo -> SyncSong 转换（内部使用）
 pub(crate) fn track_to_sync_song(track: &TrackInfo) -> SyncSong {
     if let Some(payload) = &track.sync_payload {
         let mut preserved = payload.normalized_for_sync();
+        if track.source == TrackSource::Bilibili
+            || track.id.starts_with("bilibili:")
+            || preserved.channel_id.as_deref().is_some_and(|channel| channel.eq_ignore_ascii_case("bilibili"))
+        {
+            fill_bilibili_sync_metadata(track, &mut preserved);
+        }
         preserved.added_at = track.added_at.max(0);
         // 有完整载荷时标记为 CURRENT, 对齐 Android SyncSong.fromSongItem
         if preserved.sync_metadata_version < CURRENT_SYNC_METADATA_VERSION {
@@ -554,6 +576,34 @@ pub(crate) fn track_to_sync_song(track: &TrackInfo) -> SyncSong {
     }
 }
 
+fn fill_bilibili_sync_metadata(track: &TrackInfo, song: &mut SyncSong) {
+    // 分 P 曲目的载荷可能只有平台身份，显示信息仍在外层曲目上
+    if song.name.trim().is_empty() {
+        song.name.clone_from(&track.title);
+    }
+    if song.artist.trim().is_empty() {
+        song.artist.clone_from(&track.artist);
+    }
+    if song.cover_url.trim().is_empty() {
+        song.cover_url = track.cover_url.clone().unwrap_or_default();
+    }
+    if song.duration_ms <= 0 {
+        song.duration_ms = track.duration_ms.try_into().unwrap_or(i64::MAX);
+    }
+    if song.album.trim().is_empty() {
+        song.album.clone_from(&track.album);
+    }
+    if bilibili_bvid_from_album(&song.album).is_none() {
+        let cid = song.sub_audio_id.as_deref().or_else(|| bilibili_cid_from_album(&song.album));
+        let bvid = bilibili_bvid_from_album(&track.album)
+            .or_else(|| song.audio_id.as_deref().and_then(bilibili_bvid_from_audio_id))
+            .or_else(|| track.id.strip_prefix("bilibili:").and_then(bilibili_bvid_from_audio_id));
+        if let (Some(cid), Some(bvid)) = (cid, bvid) {
+            song.album = format!("Bilibili|{cid}|{bvid}");
+        }
+    }
+}
+
 struct SyncPlatformIdentity {
     id: String,
     media_uri: Option<String>,
@@ -595,15 +645,15 @@ fn sync_platform_identity(track: &TrackInfo) -> SyncPlatformIdentity {
 
     if let Some(bili_id) = track.id.strip_prefix("bilibili:") {
         let audio_id = bilibili_bvid_from_album(&track.album)
-            .unwrap_or_else(|| bili_id.split(':').next().unwrap_or(bili_id).trim().to_string());
+            .unwrap_or_else(|| bili_id.split(':').next().unwrap_or(bili_id).trim());
         let sub_audio_id = bilibili_cid_from_album(&track.album);
-        let sub_audio = sub_audio_id.as_deref().unwrap_or("");
+        let sub_audio = sub_audio_id.unwrap_or("");
         return SyncPlatformIdentity {
-            id: stable_remote_android_id("bilibili", &audio_id, sub_audio).to_string(),
+            id: stable_remote_android_id("bilibili", audio_id, sub_audio).to_string(),
             media_uri: None,
             channel_id: Some("bilibili".into()),
-            audio_id: Some(audio_id),
-            sub_audio_id,
+            audio_id: Some(audio_id.to_owned()),
+            sub_audio_id: sub_audio_id.map(str::to_owned),
         };
     }
 
@@ -627,22 +677,29 @@ fn numeric_id_or_zero(value: &str) -> i64 {
     value.parse::<i64>().unwrap_or(0)
 }
 
-fn bilibili_cid_from_album(album: &str) -> Option<String> {
+fn bilibili_cid_from_album(album: &str) -> Option<&str> {
     album
         .strip_prefix("Bilibili|")
         .and_then(|identity| identity.split('|').next())
         .map(str::trim)
         .filter(|cid| !cid.is_empty())
-        .map(String::from)
 }
 
-fn bilibili_bvid_from_album(album: &str) -> Option<String> {
+fn bilibili_bvid_from_album(album: &str) -> Option<&str> {
     album
         .strip_prefix("Bilibili|")
         .and_then(|identity| identity.split('|').nth(1))
         .map(str::trim)
         .filter(|bvid| !bvid.is_empty())
-        .map(String::from)
+}
+
+fn bilibili_bvid_from_audio_id(audio_id: &str) -> Option<&str> {
+    let bvid = audio_id.split(':').next()?.trim();
+    let (prefix, suffix) = bvid.split_at_checked(2)?;
+    (prefix.eq_ignore_ascii_case("BV")
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .then_some(bvid)
 }
 
 /// SyncSong -> TrackInfo 转换
@@ -703,11 +760,19 @@ fn sync_song_to_track(song: &SyncSong) -> TrackInfo {
         .cloned()
         .or_else(|| (!song.cover_url.is_empty()).then(|| song.cover_url.clone()));
     let playback_album = if is_bilibili {
-        song.sub_audio_id
+        let cid = song.sub_audio_id
             .as_deref()
-            .filter(|cid| !cid.trim().is_empty())
-            .map(|cid| format!("Bilibili|{}", cid.trim()))
-            .unwrap_or_else(|| song.album.clone())
+            .map(str::trim)
+            .filter(|cid| !cid.is_empty())
+            .or_else(|| bilibili_cid_from_album(&song.album));
+        let bvid = bilibili_bvid_from_album(&song.album)
+            .or_else(|| song.audio_id.as_deref().and_then(bilibili_bvid_from_audio_id))
+            .or_else(|| bilibili_bvid_from_audio_id(&song.id));
+        match (cid, bvid) {
+            (Some(cid), Some(bvid)) => format!("Bilibili|{cid}|{bvid}"),
+            (Some(cid), None) => format!("Bilibili|{cid}"),
+            _ => song.album.clone(),
+        }
     } else {
         song.album.clone()
     };
@@ -1450,6 +1515,70 @@ mod tests {
     }
 
     #[test]
+    fn bilibili_partial_payload_keeps_part_metadata_and_existing_sync_identity() {
+        let mut selected = track("bilibili:12529502280002:987654", 100);
+        selected.source = TrackSource::Bilibili;
+        selected.album = "Bilibili|987654|BV1actual".into();
+        selected.cover_url = Some("https://example.com/bili.jpg".into());
+        let payload = SyncSong {
+            id: "-123456".into(),
+            name: " ".into(),
+            album: "Bilibili|987654".into(),
+            channel_id: Some("bilibili".into()),
+            audio_id: Some("12529502280002".into()),
+            sub_audio_id: Some("987654".into()),
+            matched_lyric: Some("[00:00.00]Part song".into()),
+            sync_membership_tokens: vec![SyncCausalToken { device_id: "desktop".into(), counter: 1 }],
+            ..Default::default()
+        };
+        selected.sync_payload = Some(payload.clone());
+
+        let song = track_to_sync_song(&selected);
+        assert_eq!(song.name, "Song");
+        assert_eq!(song.artist, "Artist");
+        assert_eq!(song.album, "Bilibili|987654|BV1actual");
+        assert_eq!(song.cover_url, "https://example.com/bili.jpg");
+        assert_eq!(song.duration_ms, 1_000);
+        assert_eq!(song.id, payload.id);
+        assert_eq!(song.identity(), payload.identity());
+        assert_eq!(song.matched_lyric, payload.matched_lyric);
+        assert_eq!(song.sync_membership_tokens, payload.sync_membership_tokens);
+
+        let imported = sync_song_to_track(&song);
+        assert_eq!(imported.id, "bilibili:12529502280002");
+        assert_eq!(imported.album, selected.album);
+        assert_eq!(imported.artist, selected.artist);
+        assert_eq!(imported.cover_url, selected.cover_url);
+    }
+
+    #[test]
+    fn bilibili_part_deletions_match_the_same_song_before_album_was_restored() {
+        let legacy = SyncSong {
+            id: "0".into(),
+            channel_id: Some("bilibili".into()),
+            audio_id: Some("114".into()),
+            sub_audio_id: Some("1002".into()),
+            ..Default::default()
+        };
+        let selected = sync_song_to_track(&legacy);
+        assert_eq!(selected.album, "Bilibili|1002");
+        let membership = track_to_playlist_song_deletion_pub(17, &selected, "desktop".into());
+        assert!(membership.matches_song("17", &legacy));
+        let deletions = history_deletions_to_sync(
+            &[SyncHistoryDeletion { track: selected, deleted_at: 500 }],
+            "desktop",
+        );
+        assert_eq!(deletions[0].identity(), legacy.identity());
+        let other_part = SyncSong { sub_audio_id: Some("1001".into()), ..legacy.clone() };
+        assert!(!membership.matches_song("17", &other_part));
+        assert_ne!(deletions[0].identity(), other_part.identity());
+
+        let data = SyncData { recent_play_deletions: deletions, ..Default::default() };
+        let payload = with_history(SyncResult::default(), &data).history.unwrap();
+        assert_eq!(payload["deletions"][0]["songId"].as_str(), Some(legacy.identity().id.as_str()));
+    }
+
+    #[test]
     fn sync_song_conversion_restores_bilibili_cid_for_playback() {
         let imported = sync_song_to_track(&SyncSong {
             id: "-123456".into(),
@@ -1462,7 +1591,7 @@ mod tests {
         });
 
         assert_eq!(imported.id, "bilibili:BV1sync");
-        assert_eq!(imported.album, "Bilibili|987654");
+        assert_eq!(imported.album, "Bilibili|987654|BV1sync");
         assert_eq!(
             imported
                 .sync_payload
@@ -1470,6 +1599,20 @@ mod tests {
                 .and_then(|payload| payload.sub_audio_id.as_deref()),
             Some("987654")
         );
+    }
+
+    #[test]
+    fn sync_song_conversion_accepts_legacy_bilibili_album_without_bvid() {
+        let imported = sync_song_to_track(&SyncSong {
+            id: "-1".into(),
+            name: "Legacy part".into(),
+            album: "Bilibili|987654".into(),
+            channel_id: Some("bilibili".into()),
+            audio_id: Some("12529502280002".into()),
+            ..Default::default()
+        });
+        assert_eq!(imported.id, "bilibili:12529502280002");
+        assert_eq!(imported.album, "Bilibili|987654");
     }
 
     #[test]

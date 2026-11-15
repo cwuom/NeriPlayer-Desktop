@@ -7,6 +7,8 @@ import { useRecommendStore } from '@/stores/recommend'
 import { useToastStore } from '@/stores/toast'
 import i18n from '@/i18n'
 import { FAVORITES_PLAYLIST_NAMES, isFavoritesPlaylist } from '@/modules/library/localPlaylists'
+import { resolveBiliPartCid, resolveBiliVideoReference } from '@/modules/playback/biliVideoParts'
+import { useBiliVideoPartsStore } from '@/stores/biliVideoParts'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('liked-songs')
@@ -17,11 +19,13 @@ interface PlaylistInfo {
   track_count?: number
 }
 
+type LikedTrack = Pick<TrackInfo, 'id' | 'album' | 'source' | 'syncPayload' | 'playlistKey'>
+
 const DEFAULT_LIKED_PLAYLIST_NAME = FAVORITES_PLAYLIST_NAMES[0]
 
 export const useLikedSongsStore = defineStore('likedSongs', () => {
   const likedPlaylistId = ref<number | null>(null)
-  const likedTrackIds = ref<Set<string>>(new Set())
+  const likedTracks = ref<LikedTrack[]>([])
   const isLoading = ref(false)
   const isReady = ref(false)
 
@@ -58,14 +62,12 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
     return Number.isFinite(id) ? id : null
   }
 
-  function setTrackLiked(trackId: string, liked: boolean) {
-    const next = new Set(likedTrackIds.value)
-    if (liked) {
-      next.add(trackId)
-    } else {
-      next.delete(trackId)
-    }
-    likedTrackIds.value = next
+  async function readLikedTracks(id: number) {
+    const tracks = await invoke<Array<{ id: string; album: string; source?: string; sync_payload?: TrackInfo['syncPayload']; playlist_key?: string }>>('get_playlist_tracks', { id })
+    likedTracks.value = tracks.map(track => ({
+      id: track.id, album: track.album, source: track.source,
+      syncPayload: track.sync_payload, playlistKey: track.playlist_key,
+    }))
   }
 
   async function loadLikedPlaylist() {
@@ -78,13 +80,12 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
         const liked = playlists.find(isFavoritesPlaylist)
         if (!liked) {
           likedPlaylistId.value = null
-          likedTrackIds.value = new Set()
+          likedTracks.value = []
           return
         }
 
         likedPlaylistId.value = liked.id
-        const tracks = await invoke<Array<{ id?: string }>>('get_playlist_tracks', { id: liked.id })
-        likedTrackIds.value = new Set(tracks.map(t => t.id || '').filter(Boolean))
+        await readLikedTracks(liked.id)
       } catch (e) {
         log.error('loadLikedPlaylist:', e)
       } finally {
@@ -106,37 +107,55 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
     likedPlaylistId.value = favorites.id
     // 期间完成的同步可能已经带来了收藏，有曲目时重新读取，免得已收藏的歌显示成未收藏
     if (favorites.track_count) {
-      const tracks = await invoke<Array<{ id?: string }>>('get_playlist_tracks', { id: favorites.id })
-      likedTrackIds.value = new Set(tracks.map(t => t.id || '').filter(Boolean))
+      await readLikedTracks(favorites.id)
     } else {
-      likedTrackIds.value = new Set()
+      likedTracks.value = []
     }
     return favorites.id
   }
 
-  function isTrackLiked(track?: TrackInfo | null) {
-    if (!track?.id) return false
-    return likedTrackIds.value.has(track.id)
+  function findLikedTrack(track: LikedTrack, scope: 'exact' | 'part-or-whole' | 'single-video' = 'exact', video = resolveBiliVideoReference(track)) {
+    if (!video) return likedTracks.value.find(item => item.id === track.id)
+    const cid = resolveBiliPartCid(track)
+    return likedTracks.value.find(item => {
+      const itemCid = resolveBiliPartCid(item)
+      if (scope !== 'single-video' && itemCid !== cid && !(scope === 'part-or-whole' && itemCid === null)) return false
+      const candidate = resolveBiliVideoReference(item)
+      return !!candidate && ((video.bvid != null && video.bvid === candidate.bvid)
+        || (video.avid != null && video.avid === candidate.avid))
+    })
   }
 
-  async function toggleTrack(track?: TrackInfo | null) {
-    if (!track?.id) return false
+  function isTrackLiked(track?: TrackInfo | null, includeWhole = false) {
+    return !!track && !!findLikedTrack(track, includeWhole ? 'part-or-whole' : 'exact')
+  }
+
+  function requestToggleTrack(track?: TrackInfo | null) {
+    if (!track?.id) return
+    void useBiliVideoPartsStore().requestCollection(track, (target, video, isSingleVideo) => {
+      void toggleTrack(target, isSingleVideo, video)
+    }, (target, video) => !!findLikedTrack(target, 'exact', video))
+  }
+
+  async function toggleTrack(track: TrackInfo, isSingleVideo = false, video?: ReturnType<typeof resolveBiliVideoReference>) {
 
     await loadLikedPlaylist()
-    const shouldLike = !isTrackLiked(track)
+    const existing = findLikedTrack(track, isSingleVideo ? 'single-video' : 'exact', video)
+    const shouldLike = !existing
     const neteaseSongId = getNeteaseSongId(track)
 
     try {
       if (shouldLike) {
         const playlistId = await ensureLikedPlaylist()
         await invoke('add_to_playlist', { playlistId, track: toBackendTrack(track) })
-        setTrackLiked(track.id, true)
+        if (!findLikedTrack(track)) likedTracks.value = [...likedTracks.value, track]
       } else if (likedPlaylistId.value !== null) {
         await invoke('remove_from_playlist', {
           playlistId: likedPlaylistId.value,
-          trackId: track.id,
+          trackId: existing.playlistKey || existing.id,
         })
-        setTrackLiked(track.id, false)
+        likedTracks.value = likedTracks.value.filter(item => item.playlistKey && existing.playlistKey
+          ? item.playlistKey !== existing.playlistKey : item.id !== existing.id || resolveBiliPartCid(item) !== resolveBiliPartCid(existing))
       }
       if (neteaseSongId !== null) {
         // 网易云端红心上报失败（会话失效/业务码非 200）不能静默：本地已收藏但云端未同步，
@@ -188,12 +207,11 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
 
   return {
     likedPlaylistId,
-    likedTrackIds,
     isLoading,
     isReady,
     loadLikedPlaylist,
     isTrackLiked,
-    toggleTrack,
+    requestToggleTrack,
     start,
     stop,
   }

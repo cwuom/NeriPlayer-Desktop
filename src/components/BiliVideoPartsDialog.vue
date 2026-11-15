@@ -9,9 +9,23 @@ import { formatTrackDuration } from '@/utils/timeFormat'
 const { t } = useI18n()
 const parts = useBiliVideoPartsStore()
 const selectedCid = ref<number | null>(null)
+const scope = ref<'whole' | 'part'>('whole')
 const previewIndex = computed(() => parts.info?.pages.findIndex(page => hasBiliPartNameSeparator(page.part)) ?? -1)
 const previewTrack = computed(() => parts.tracks[previewIndex.value])
 watch(() => parts.info, () => { selectedCid.value = parts.info?.pages[0]?.cid ?? null })
+watch(() => parts.collection, () => { scope.value = 'whole' })
+
+const confirmText = computed(() => {
+  const collection = parts.collection
+  if (!collection) return t('player.play_track')
+  if (!collection.isLiked) return t('common.confirm')
+  return t(collection.isLiked(collection[scope.value]) ? 'player.bili_collect_remove' : 'player.bili_collect_save')
+})
+
+function confirm() {
+  if (parts.collection) parts.chooseCollection(scope.value)
+  else if (selectedCid.value !== null) parts.choose(selectedCid.value)
+}
 
 function handleNameOrderKeydown(event: KeyboardEvent) {
   if (event.key !== 'Tab' && event.key !== 'Escape') event.stopPropagation()
@@ -21,19 +35,30 @@ function handleNameOrderKeydown(event: KeyboardEvent) {
 <template>
   <M3Dialog
     :open="parts.open"
-    :title="t('player.bili_parts_title')"
-    :confirm-text="t('player.play_track')"
-    :confirm-disabled="parts.loading || selectedCid === null || parts.failed"
+    :title="t(parts.collection ? 'player.bili_collect_scope' : 'player.bili_parts_title')"
+    :confirm-text="confirmText"
+    :confirm-disabled="!parts.collection && selectedCid === null"
     @update:open="parts.close()"
-    @confirm="selectedCid !== null && parts.choose(selectedCid)"
+    @confirm="confirm"
   >
-    <p class="video-title">{{ parts.info?.title || parts.track?.title }}</p>
-    <p v-if="parts.loading" role="status">{{ t('common.loading') }}</p>
-    <div v-else-if="parts.failed" class="load-error" role="alert">
-      <p>{{ t('player.bili_parts_load_failed') }}</p>
-      <button type="button" class="retry-button" @click="parts.retry()">{{ t('player.retry') }}</button>
+    <div v-if="parts.collection" class="part-list" role="group" :aria-label="t('player.bili_collect_scope')">
+      <button
+        type="button" class="part-row scope-row" :class="{ selected: scope === 'whole' }"
+        :aria-pressed="scope === 'whole'" @click="scope = 'whole'"
+      >
+        <strong>{{ t('player.bili_collect_whole') }}</strong>
+        <span>{{ parts.collection.whole.title }}</span>
+      </button>
+      <button
+        type="button" class="part-row scope-row" :class="{ selected: scope === 'part' }"
+        :aria-pressed="scope === 'part'" @click="scope = 'part'"
+      >
+        <strong>{{ t('player.bili_collect_part', { page: parts.collection.partNumber }) }}</strong>
+        <span>{{ parts.collection.part.title }}</span>
+      </button>
     </div>
     <template v-else-if="parts.info">
+      <p class="video-title">{{ parts.info.title }}</p>
       <p class="hint">{{ t('player.bili_parts_hint', { count: parts.info.pages.length }) }}</p>
       <fieldset v-if="previewIndex >= 0" class="name-order" @keydown="handleNameOrderKeydown">
         <legend>{{ t('player.bili_parts_name_order') }}</legend>
@@ -112,5 +137,6 @@ function handleNameOrderKeydown(event: KeyboardEvent) {
 .part-number { min-width: 28px; font-size: 12px; opacity: 0.75; }
 .part-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .part-duration { flex-shrink: 0; font-size: 12px; opacity: 0.75; }
-.retry-button { border: 0; border-radius: 16px; padding: 8px 16px; background: var(--md-secondary-container); color: var(--md-on-secondary-container); font: inherit; cursor: pointer; }
+.scope-row { flex-direction: column; align-items: flex-start; gap: 2px; padding-inline: 12px; }
+.scope-row span { font-size: 12px; overflow-wrap: anywhere; }
 </style>

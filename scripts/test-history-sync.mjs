@@ -5,11 +5,18 @@ import ts from 'typescript'
 import * as pinia from 'pinia'
 import * as vue from 'vue'
 
-const source = await readFile(new URL('../src/stores/history.ts', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText
+async function loadModule(path, resolve = name => { throw new Error(`Unexpected dependency: ${name}`) }) {
+  const source = await readFile(new URL(path, import.meta.url), 'utf8')
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const result = {}
+  new Function('require', 'exports', compiled)(resolve, result)
+  return result
+}
+
 const persisted = []
+const detailsRequests = []
 let preloaded = null
 const userData = {
   LEGACY_HISTORY_KEY: 'neri:play-history',
@@ -18,14 +25,27 @@ const userData = {
   // Tauri invoke 以 JSON 序列化参数，响应式代理同样能序列化
   persistUserData: async (command, args) => { persisted.push([command, JSON.parse(JSON.stringify(args))]) },
 }
-const exports = {}
-new Function('require', 'exports', compiled)(name => {
+const biliVideoSkip = await loadModule('../src/modules/playback/biliVideoSkip.ts')
+const coverCache = await loadModule('../src/utils/bilibiliCoverCache.ts')
+const logger = { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
+const biliVideoParts = await loadModule('../src/modules/playback/biliVideoParts.ts', name => {
+  if (name.endsWith('biliVideoSkip')) return biliVideoSkip
+  if (name.endsWith('bilibiliCoverCache')) return coverCache
+  if (name === '@/utils/logger') return logger
+  throw new Error(`Unexpected Bilibili parts dependency: ${name}`)
+})
+const exports = await loadModule('../src/stores/history.ts', name => {
   if (name === 'pinia') return pinia
   if (name === 'vue') return vue
+  if (name === '@tauri-apps/api/core') return { invoke: (command, args) => new Promise((resolve, reject) => {
+    detailsRequests.push({ command, args, resolve, reject })
+  }) }
   if (name === '@/modules/persistence/userData') return userData
-  if (name === '@/utils/logger') return { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
+  if (name === '@/modules/playback/biliVideoParts') return biliVideoParts
+  if (name === '@/utils/bilibiliCoverCache') return coverCache
+  if (name === '@/utils/logger') return logger
   throw new Error(`Unexpected history dependency: ${name}`)
-}, exports)
+})
 
 const storage = new Map()
 let writes = 0
@@ -263,6 +283,7 @@ async function databaseRegression(name, run) {
   writes = 0
   events.length = 0
   persisted.length = 0
+  detailsRequests.length = 0
   digestQueue.length = 0
   digestCalls = 0
   now = 1_000
@@ -319,6 +340,129 @@ await databaseRegression('bilibili pages of one video are separate history entri
   assert.deepEqual(store.entries.map(item => item.track.title), ['P1', 'netease:stored'])
   assert.deepEqual(store.deletions.map(item => item.track.title), ['P2'])
   assert.deepEqual(persisted, [['remove_play_history', { identityKey: 'bilibili:BV1xx#2', deletedAt: 4_000 }]])
+})
+
+const latestBiliDetail = {
+  bvid: 'BV14Dn16tELC', aid: 114, title: '音乐现场', owner: '原上传者', cover: 'https://i0.hdslb.com/bfs/archive/parent.jpg',
+  cid: 1001, duration: 86,
+  pages: [
+    { cid: 1001, page: 1, part: '01.曲目一 - 歌手一', duration: 51 },
+    { cid: 1002, page: 2, part: '02.曲目二', duration: 35 },
+  ],
+}
+
+function missingBiliPage(cid, overrides = {}) {
+  return {
+    id: 'bilibili:114', title: '', artist: '', album: `Bilibili|${cid}`, durationMs: 0, coverUrl: '', audioUrl: '',
+    source: 'bilibili', syncPayload: { channelId: 'bilibili', audioId: '114', subAudioId: String(cid) },
+    ...overrides,
+  }
+}
+
+await databaseRegression('old Bilibili history restores each exact part using one lookup and keeps edits and progress', async store => {
+  await store.applySyncPayload({ entries: [
+    { track: missingBiliPage(1001), playedAt: 90, resumePositionMs: 3100 },
+    { track: missingBiliPage(1002, { title: '自己的标题', album: 'Bilibili|1002|BV14Dn16tELC' }), playedAt: 80 },
+    { track: missingBiliPage(1003), playedAt: 70 },
+  ] })
+  persisted.length = 0
+
+  const first = store.restoreBiliMetadata(store.entries.slice(0, 1))
+  const rest = store.restoreBiliMetadata(store.entries.slice(1))
+  await Promise.resolve()
+  assert.equal(detailsRequests.length, 1)
+  assert.equal(detailsRequests[0].command, 'get_bili_video_info')
+  assert.deepEqual(detailsRequests[0].args, { bvid: null, avid: 114 })
+  detailsRequests[0].resolve(latestBiliDetail)
+  await first
+  // 给未去重版本的串行请求返回数据，确保断言命中重复请求而不是卡在等待
+  detailsRequests[1]?.resolve(latestBiliDetail)
+  await rest
+  assert.equal(detailsRequests.length, 1)
+
+  assert.deepEqual(store.entries.map(({ track, playedAt, resumePositionMs }) => [
+    track.id, track.title, track.artist, track.coverUrl, track.durationMs, track.album, playedAt, resumePositionMs,
+  ]), [
+    ['bilibili:114', '曲目一', '歌手一', latestBiliDetail.cover, 51_000, 'Bilibili|1001', 90, 3100],
+    ['bilibili:114', '自己的标题', '原上传者', latestBiliDetail.cover, 35_000, 'Bilibili|1002|BV14Dn16tELC', 80, undefined],
+    ['bilibili:114', '', '', '', 0, 'Bilibili|1003', 70, undefined],
+  ])
+  assert.ok(persisted.every(([command]) => command === 'update_play_history_metadata'))
+  assert.deepEqual(persisted.flatMap(([, args]) => args.entries.map(entry => entry.playedAt)), [90, 80])
+
+  await store.applySyncPayload({ entries: [
+    { track: missingBiliPage(1001, { title: '远端的新标题' }), playedAt: 100 },
+  ] })
+  assert.equal(store.entries[0].track.title, '远端的新标题')
+  assert.equal(store.entries[0].track.artist, '歌手一')
+  assert.equal(store.entries[0].track.coverUrl, latestBiliDetail.cover)
+  assert.equal(store.entries[0].track.durationMs, 51_000)
+})
+
+await databaseRegression('Bilibili history restoration follows the saved artist-first title order', async store => {
+  const key = `neri:bili-part-name-order:v1:${latestBiliDetail.bvid}`
+  storage.set(key, 'artist-first')
+  try {
+    store.record(missingBiliPage(1001))
+    const repair = store.restoreBiliMetadata(store.entries)
+    await Promise.resolve()
+    detailsRequests[0].resolve({
+      ...latestBiliDetail,
+      pages: [{ ...latestBiliDetail.pages[0], part: '01. 歌手一 - 曲目一' }, latestBiliDetail.pages[1]],
+    })
+    await repair
+    assert.equal(store.entries[0].track.title, '曲目一')
+    assert.equal(store.entries[0].track.artist, '歌手一')
+  } finally {
+    storage.delete(key)
+  }
+})
+
+for (const album of ['Bilibili|1002', 'bilibili']) {
+  await databaseRegression(`Bilibili part tombstones with album ${album} match BV-enriched history`, async store => {
+    const otherPage = missingBiliPage(1001)
+    const deletedPage = missingBiliPage(1002, {
+      id: 'bilibili:114:1002',
+      album: 'Bilibili|1002|BV14Dn16tELC',
+    })
+    const [deleted, survivor] = [deletedPage, otherPage].map(track => ({ track, playedAt: 100 }))
+    store.entries = [deleted, survivor]
+    const signed = new DataView(digestBytes('bilibili|114|1002')).getBigInt64(0)
+    await store.applySyncPayload({
+      entries: [survivor],
+      deletions: [{ songId: String(signed), album, deletedAt: 200 }],
+    })
+    assert.equal(store.deletions[0]?.track.album, 'Bilibili|1002|BV14Dn16tELC')
+    assert.deepEqual(store.entries.map(entry => entry.track.album), ['Bilibili|1001'])
+  })
+}
+
+await databaseRegression('late Bilibili metadata does not recreate a deleted history entry', async store => {
+  now = 2_000
+  store.record(missingBiliPage(1001))
+  const repair = store.restoreBiliMetadata(store.entries)
+  await Promise.resolve()
+  store.remove('bilibili:114#1001')
+  persisted.length = 0
+  detailsRequests[0].resolve(latestBiliDetail)
+  await repair
+  assert.deepEqual(store.entries.map(entry => entry.track.id), ['netease:stored'])
+  assert.equal(store.deletions.length, 1)
+  assert.equal(persisted.length, 0)
+})
+
+await databaseRegression('opening history after a failed Bilibili lookup can retry recovery', async store => {
+  store.record(missingBiliPage(1002))
+  const first = store.restoreBiliMetadata(store.entries)
+  await Promise.resolve()
+  detailsRequests[0].reject(new Error('temporarily unavailable'))
+  await first
+  const retry = store.restoreBiliMetadata(store.entries)
+  await Promise.resolve()
+  assert.equal(detailsRequests.length, 2)
+  detailsRequests[1].resolve(latestBiliDetail)
+  await retry
+  assert.equal(store.entries[0].track.title, '曲目二')
 })
 
 await databaseRegression('history is not capped and clearing keeps every tombstone', async store => {
