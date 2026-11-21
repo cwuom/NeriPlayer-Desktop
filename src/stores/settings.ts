@@ -794,6 +794,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const isHydrated = ref(false)
   let hydrationPromise: Promise<void> | null = null
   let persistTimer: ReturnType<typeof setTimeout> | null = null
+  // 最近一次与后端一致的设置；applySnapshot 换掉对象型设置会触发 deep watch，内容没变时不再重复保存
+  let syncedSnapshot: AppSettings | null = null
 
   function snapshot(): AppSettings {
     const result = { formatVersion: SETTINGS_FORMAT_VERSION } as AppSettings
@@ -821,8 +823,9 @@ export const useSettingsStore = defineStore('settings', () => {
     writeLegacyShadow(next)
     try {
       const saved = await invoke<AppSettings | undefined>('save_settings', { settings: next })
+      syncedSnapshot = saved ? normalizeSnapshot(saved) : next
       // Rust 会再规整一遍（去空白、夹范围）；保存期间没有新改动时采用它，两边不必等到重启才一致
-      if (saved && sameSnapshot(snapshot(), next) && !sameSnapshot(normalizeSnapshot(saved), next)) {
+      if (saved && sameSnapshot(snapshot(), next) && !sameSnapshot(syncedSnapshot, next)) {
         applySnapshot(saved)
       }
     } catch (error) {
@@ -836,6 +839,7 @@ export const useSettingsStore = defineStore('settings', () => {
     if (persistTimer) clearTimeout(persistTimer)
     persistTimer = setTimeout(() => {
       persistTimer = null
+      if (syncedSnapshot && sameSnapshot(snapshot(), syncedSnapshot)) return
       void persistNow()
     }, 180)
   }
@@ -850,11 +854,16 @@ export const useSettingsStore = defineStore('settings', () => {
         applySnapshot(loaded.persisted ? loaded.settings : legacy)
         isHydrated.value = true
         if (shouldMigrate || !loaded.persisted) await persistNow()
-        else writeLegacyShadow(snapshot())
+        else {
+          syncedSnapshot = snapshot()
+          writeLegacyShadow(syncedSnapshot)
+        }
       } catch {
         applySnapshot(readLegacySnapshot())
         isHydrated.value = true
-        writeLegacyShadow(snapshot())
+        // 没有后端时只维护 localStorage 影子，读入本身不算改动
+        syncedSnapshot = snapshot()
+        writeLegacyShadow(syncedSnapshot)
       }
     })()
     return hydrationPromise

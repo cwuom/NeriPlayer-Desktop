@@ -235,6 +235,34 @@ describe('settings store', () => {
       expect(storage.getItem('theme-mode')).toBe('dark')
     })
 
+    // 回归：applySnapshot 换掉对象型设置会触发 deep watch，读入后 180ms 曾再写一次未改动的设置
+    it('does not write persisted settings back after the debounce', async () => {
+      router.on('get_settings', () => ({
+        persisted: true,
+        settings: { darkMode: 'light', equalizerBands: [1, 2, 3, 4, 5] },
+      }))
+      const settings = useSettingsStore()
+
+      await settings.hydrate()
+      await flushPromises()
+      vi.advanceTimersByTime(PERSIST_DEBOUNCE_MS * 2)
+      await flushPromises()
+
+      expect(router.callsOf('save_settings')).toHaveLength(0)
+    })
+
+    it('writes first-launch settings exactly once, including after the debounce', async () => {
+      router.on('get_settings', () => ({ persisted: false, settings: {} }))
+      const settings = useSettingsStore()
+
+      await settings.hydrate()
+      await flushPromises()
+      vi.advanceTimersByTime(PERSIST_DEBOUNCE_MS * 2)
+      await flushPromises()
+
+      expect(router.callsOf('save_settings')).toHaveLength(1)
+    })
+
     it('loads only once for concurrent callers', async () => {
       router.on('get_settings', () => ({ persisted: true, settings: {} }))
       const settings = useSettingsStore()
