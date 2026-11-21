@@ -1,0 +1,51 @@
+{
+  "commands_dir": "src-tauri/src/commands",
+  "handler_file": "src-tauri/src/main.rs",
+  "frontend_root": "src",
+  "dynamic_invocations": {
+    "src/stores/auth.ts": [
+      "login_netease",
+      "login_bilibili",
+      "login_youtube"
+    ]
+  },
+  "invoke_wrappers": [
+    {
+      "name": "persistUserData",
+      "file": "src/modules/persistence/userData.ts",
+      "scope": "global"
+    },
+    {
+      "name": "persist",
+      "file": "src/stores/history.ts",
+      "scope": "file"
+    },
+    {
+      "name": "persistOffsets",
+      "file": "src/stores/lyricOffset.ts",
+      "scope": "file"
+    }
+  ],
+  "unreferenced_baseline": [
+    "audio_engine_stats",
+    "cancel_local_scan",
+    "crossfade_url",
+    "get_bili_video_skip_rules",
+    "get_playback_stats",
+    "list_downloads",
+    "load_lyrics_file",
+    "next_track",
+    "play_cached_audio",
+    "play_url",
+    "playback_stats_identity_key",
+    "prev_track",
+    "record_playback_sessions",
+    "resolve_bili_uploader",
+    "scan_local_files",
+    "scan_music_directory",
+    "set_queue",
+    "stop",
+    "toggle_play_pause",
+    "toggle_shuffle"
+  ]
+}

@@ -78,8 +78,175 @@ jobs:
       - name: Setup Rust for configuration interoperability tests
         uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
 
-      - name: Type-check and build frontend
-        run: pnpm test && pnpm build
+      - name: Type-check app and tests
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      # 回归脚本 + Vitest 单测
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Unit test coverage
+        run: pnpm unit:coverage
+
+      # 与 Android 仓库相同的 CRAP 门禁：受检范围内函数 CRAP > 9 失败，范围外超标数只能下降
+      - name: CRAP gate
+        run: |
+          node --test tools/quality/*.test.mjs
+          python3 -B tools/quality/crap_report.py
+
+      - name: Publish frontend coverage summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f coverage/coverage-summary.json ]]; then
+            node --input-type=module -e "
+              import fs from 'node:fs'
+              const total = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8')).total
+              const row = (key) => '| ' + key + ' | ' + total[key].pct + '% | ' + total[key].covered + '/' + total[key].total + ' |'
+              const lines = ['### Frontend unit coverage', '', '| Metric | % | Covered |', '| --- | --- | --- |',
+                ...['lines', 'statements', 'functions', 'branches'].map(row)]
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\\n') + '\\n')
+            "
+          fi
+
+      - name: Build frontend
+        run: pnpm build
+
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # 门禁脚本只用 Python 3.11+ 标准库（tomllib），ubuntu-24.04 自带 3.12
+      - name: Test quality tooling
+        run: python3 -B -m unittest discover -s tools/quality -p 'test_*.py'
+
+      - name: Check module boundaries
+        run: python3 -B tools/quality/module_boundaries.py
+
+      - name: Check IPC contract
+        run: python3 -B tools/quality/ipc_contract.py
+
+  rust-lint:
+    name: Rust lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+          shared-key: lint
+
+      - name: Check formatting
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+
+      - name: Clippy (debug)
+        working-directory: src-tauri
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      # 凭据存储等模块按 debug_assertions 切换实现，release 配置要单独检查
+      - name: Clippy (release)
+        working-directory: src-tauri
+        run: cargo clippy --locked --workspace --all-targets --release -- -D warnings
+
+  rust-coverage:
+    name: Rust tests and coverage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          components: llvm-tools-preview
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+          shared-key: coverage
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked --version 0.9.2
+
+      # 全量 workspace 测试在插桩下运行一次，同时产出覆盖率。
+      # 下限只升不降：macOS 实测行覆盖率 66.1%，Linux 的 cfg 分支不同，留出余量
+      - name: Run workspace tests with coverage
+        working-directory: src-tauri
+        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info --fail-under-lines 60
+
+      - name: Publish Rust coverage summary
+        if: always()
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f lcov.info ]]; then
+            {
+              echo '### Rust coverage (per crate)'
+              echo
+              echo '```'
+              cargo llvm-cov report --summary-only
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Rust coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-lcov
+          path: src-tauri/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14
 
   rust:
     name: Rust (${{ matrix.target }})
@@ -126,13 +293,13 @@ jobs:
 
       - name: Check Rust backend
         working-directory: src-tauri
-        run: cargo check --locked --target ${{ matrix.target }}
+        run: cargo check --locked --workspace --all-targets --target ${{ matrix.target }}
 
       - name: Test native configuration backups and authentication
         if: ${{ (runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')) }}
         working-directory: src-tauri
         run: |
-          cargo test --locked --target ${{ matrix.target }} --lib -- config_backup::tests auth:: commands::auth_cmd::tests commands::sync_cmd::tests api::youtube::account::tests api::youtube::client::tests api::youtube::session::tests api::bilibili:: settings::store:: --test-threads=1
+          cargo test --locked --workspace --target ${{ matrix.target }} --lib -- config_backup::tests auth:: commands::auth_cmd::tests commands::sync_cmd::tests api::youtube::account::tests api::youtube::client::tests api::youtube::session::tests api::bilibili:: settings::store:: --test-threads=1
 
   ffmpeg:
     name: FFmpeg
@@ -196,4 +363,5 @@ jobs:
         env:
           NERI_FFMPEG_DIR: ${{ github.workspace }}/.cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
           NERI_REQUIRE_FFMPEG: '1'
-        run: cargo test --locked --target ${{ matrix.target }} --lib -- audio::ffmpeg audio::decoder
+        run: |
+          cargo test --locked --target ${{ matrix.target }} -p neri-playback --lib -- ffmpeg:: decoder::
