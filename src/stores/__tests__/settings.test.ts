@@ -352,6 +352,36 @@ describe('settings store', () => {
       expect(settings.volume).toBe(0.25)
     })
 
+    // 回归（PR #69 评审）：保存还在进行时改回已同步的值，不能因为与旧快照相同就跳过，否则在途保存会把旧改动写进后端
+    it('saves a value restored to the synced one while an earlier save is still pending', async () => {
+      const settings = await hydrated()
+      const original = settings.volume
+      const firstSave = deferred<unknown>()
+      router.set('save_settings', (args) => {
+        saved.push(args?.settings as AppSettings)
+        return saved.length === 1 ? firstSave.promise : args?.settings
+      })
+
+      settings.volume = original / 2
+      await flushPromises()
+      vi.advanceTimersByTime(PERSIST_DEBOUNCE_MS)
+      await flushPromises()
+      expect(saved).toHaveLength(1)
+
+      settings.volume = original
+      await flushPromises()
+      vi.advanceTimersByTime(PERSIST_DEBOUNCE_MS)
+      await flushPromises()
+      firstSave.resolve({ ...saved[0] })
+      await flushPromises()
+      vi.advanceTimersByTime(PERSIST_DEBOUNCE_MS * 2)
+      await flushPromises()
+
+      expect(saved).toHaveLength(2)
+      expect(saved[1].volume).toBe(original)
+      expect(settings.volume).toBe(original)
+    })
+
     it('keeps local changes and the localStorage shadow when saving fails', async () => {
       const settings = await hydrated()
       router.set('save_settings', () => { throw new Error('disk full') })

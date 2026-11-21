@@ -796,6 +796,10 @@ export const useSettingsStore = defineStore('settings', () => {
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   // 最近一次与后端一致的设置；applySnapshot 换掉对象型设置会触发 deep watch，内容没变时不再重复保存
   let syncedSnapshot: AppSettings | null = null
+  // 已发出但尚未完成的保存；完成后后端会是这个值，跳过判断要以它为准
+  let pendingSnapshot: AppSettings | null = null
+  // 保存串行执行，后发出的写入一定后落盘
+  let persistChain: Promise<void> = Promise.resolve()
 
   function snapshot(): AppSettings {
     const result = { formatVersion: SETTINGS_FORMAT_VERSION } as AppSettings
@@ -818,9 +822,16 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  async function persistNow() {
+  function persistNow(): Promise<void> {
     const next = snapshot()
+    pendingSnapshot = next
     writeLegacyShadow(next)
+    const run = persistChain.then(() => save(next))
+    persistChain = run.catch(() => undefined)
+    return run
+  }
+
+  async function save(next: AppSettings) {
     try {
       const saved = await invoke<AppSettings | undefined>('save_settings', { settings: next })
       syncedSnapshot = saved ? normalizeSnapshot(saved) : next
@@ -831,6 +842,8 @@ export const useSettingsStore = defineStore('settings', () => {
     } catch (error) {
       // 浏览器开发模式没有 Rust bridge 时仍保留 localStorage 兼容缓存
       if (hasTauriBridge()) log.error('save_settings failed:', error)
+    } finally {
+      if (pendingSnapshot === next) pendingSnapshot = null
     }
   }
 
@@ -839,7 +852,8 @@ export const useSettingsStore = defineStore('settings', () => {
     if (persistTimer) clearTimeout(persistTimer)
     persistTimer = setTimeout(() => {
       persistTimer = null
-      if (syncedSnapshot && sameSnapshot(snapshot(), syncedSnapshot)) return
+      const expected = pendingSnapshot ?? syncedSnapshot
+      if (expected && sameSnapshot(snapshot(), expected)) return
       void persistNow()
     }, 180)
   }
