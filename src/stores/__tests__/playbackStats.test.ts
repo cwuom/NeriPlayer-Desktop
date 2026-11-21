@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   statsListener: null as (() => void) | null,
   listenReady: null as Promise<void> | null,
   unlistened: 0,
+  activeListeners: new Set<() => void>(),
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -29,8 +30,10 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: async (_event: string, handler: () => void) => {
     await mocks.listenReady
     mocks.statsListener = handler
+    mocks.activeListeners.add(handler)
     return () => {
       mocks.unlistened++
+      mocks.activeListeners.delete(handler)
       if (mocks.statsListener === handler) mocks.statsListener = null
     }
   },
@@ -91,6 +94,7 @@ describe('playbackStats store', () => {
     mocks.statsListener = null
     mocks.listenReady = Promise.resolve()
     mocks.unlistened = 0
+    mocks.activeListeners.clear()
     setActivePinia(createPinia())
   })
 
@@ -259,6 +263,43 @@ describe('playbackStats store', () => {
       await flushPromises()
 
       expect(stats.summaries.all.totalPlayCount).toBe(7)
+    })
+
+    // 回归：旧注册在重新 attach 之后才完成时曾被保留，一次后端事件触发两次刷新（MK-05）
+    it('keeps a single listener across attach, detach, and attach before registration finishes', async () => {
+      router.on('get_playback_stats_overview', () => [summary('all', 3)])
+      const ready: Deferred<void> = deferred<void>()
+      mocks.listenReady = ready.promise
+      const stats = usePlaybackStatsStore()
+
+      stats.attach()
+      stats.detach()
+      stats.attach()
+      ready.resolve()
+      await flushPromises()
+
+      expect(mocks.activeListeners.size).toBe(1)
+      for (const handler of mocks.activeListeners) handler()
+      await flushPromises()
+      expect(router.callsOf('get_playback_stats_overview')).toHaveLength(1)
+    })
+
+    it('keeps the newest overview when refresh responses arrive out of order', async () => {
+      const first: Deferred<StatsSummary[]> = deferred<StatsSummary[]>()
+      const second: Deferred<StatsSummary[]> = deferred<StatsSummary[]>()
+      router.on('get_playback_stats_overview', () => first.promise, () => second.promise)
+      const stats = usePlaybackStatsStore()
+
+      const older = stats.refresh()
+      const newer = stats.refresh()
+      second.resolve([summary('all', 2)])
+      await newer
+      expect(stats.loading).toBe(false)
+      first.resolve([summary('all', 1)])
+      await older
+
+      expect(stats.summaries.all.totalPlayCount).toBe(2)
+      expect(stats.loading).toBe(false)
     })
 
     it('drops a listener that finished registering after detach', async () => {
