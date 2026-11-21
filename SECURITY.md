@@ -12,6 +12,7 @@
 请**不要**在公开 Issue、Discussions 或 PR 中披露安全问题。
 
 - 通过 [私密安全报告](https://github.com/cwuom/NeriPlayer-Desktop/security/advisories/new) 提交
+- 如果该页面提示仓库未开启私密报告，请新建一个标题为「请求私下报告安全问题」的 Issue，正文**不写任何细节**；维护者会回复私下沟通方式
 - 请说明影响范围、复现步骤与受影响的版本（设置 → 关于中的构建版本）
 - 附件中请移除真实的 Cookie、Token、密码与个人信息，使用测试账号或打码数据
 
@@ -39,6 +40,7 @@
 Please **do not** disclose security issues in public issues, discussions, or pull requests.
 
 - Submit a [private security advisory](https://github.com/cwuom/NeriPlayer-Desktop/security/advisories/new)
+- If that page says private reporting is not enabled, open an issue titled "Request to report a security issue privately" **without any details**; a maintainer will reply with a private channel
 - Describe the impact, reproduction steps, and affected build (Settings → About)
 - Remove real cookies, tokens, passwords, and personal data from attachments; use test accounts or redacted data
 
