@@ -1,0 +1,164 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: zh-CN
+early_access: false
+tone_instructions: >-
+  Use concise Simplified Chinese. Report only confirmed, actionable defects with
+  a concrete user, security, compatibility, or data-integrity impact.
+
+reviews:
+  # 评论只留给正确性、安全、兼容性、数据丢失与可观察的回归；格式与推测性建议是噪音
+  profile: quiet
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_instructions: >-
+    Summarize only the user-visible behavior, compatibility impact, and tests
+    actually changed or added. Do not invent release notes or repeat file names.
+  review_status: false
+  review_details: false
+  review_progress: false
+  commit_status: false
+  collapse_walkthrough: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: false
+  slop_detection:
+    enabled: false
+
+  path_filters:
+    - "!**/.DS_Store"
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/coverage/**"
+    - "!src-tauri/target/**"
+    - "!src-tauri/gen/**"
+    - "!src-tauri/icons/**"
+    - "!vendor/**"
+    - "!**/.idea/**"
+    - "!**/.report/**"
+    - "!**/docs-private/**"
+    - "!**/*.png"
+    - "!**/*.ico"
+    - "!**/*.icns"
+    - "!**/*.woff2"
+    - "!pnpm-lock.yaml"
+    - "!src-tauri/Cargo.lock"
+    - "!src-tauri/crates/neri-platform/src/api/youtube/assets/*.min.js"
+    - "!**/*.md"
+    - "!.github/ISSUE_TEMPLATE/**"
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ".*"
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 2
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "[skip review]"
+    labels:
+      - "!do-not-review"
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+      - "github-actions[bot]"
+
+  path_instructions:
+    - path: "src-tauri/**/*.rs"
+      instructions: |
+        Review only concrete defects with an observable impact.
+        Prioritize lock ordering and blocking inside async commands, task and
+        thread lifetime, panics on the audio/decode threads, resource leaks,
+        data loss in sync/merge and atomic file writes, secret handling, and
+        cross-platform cfg branches (including cfg(debug_assertions)).
+        Crates under src-tauri/crates must stay free of Tauri dependencies.
+        ProtoBuf field tags in neri-model must stay aligned with Android.
+        Do not comment on style, naming, formatting, optional refactors, or
+        hypothetical edge cases without a reproducible execution path.
+    - path: "src/**/*.{ts,vue}"
+      instructions: |
+        Focus on IPC argument/return mismatches with Rust commands, stale async
+        results overwriting newer state, leaked listeners or timers, reactivity
+        bugs, and UI state changes without transitions. Logic layers
+        (src/types, src/utils, src/modules) must not import stores or views.
+        Ignore stylistic preferences unless they cause a real defect.
+    - path: "src/**/__tests__/**"
+      instructions: |
+        Flag a test only when it can pass despite a user-visible regression,
+        is nondeterministic, or leaks shared state (mocks, globals, timers).
+        Do not prescribe alternate test styles.
+    - path: ".github/workflows/**"
+      instructions: |
+        Flag only trigger gaps, permission escalation, secret exposure,
+        ineffective concurrency, invalid GitHub Actions syntax, or CI commands
+        that cannot run in the declared environment. Preserve intentional
+        branch and path filtering and SHA-pinned actions.
+    - path: "{src-tauri/**/Cargo.toml,package.json,tools/quality/**,config/quality/**}"
+      instructions: |
+        Flag dependency resolution failures, broken workspace wiring, loosened
+        quality baselines without justification, or release reproducibility
+        regressions. Do not suggest version upgrades unless the PR itself
+        creates a concrete incompatibility or vulnerability.
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+
+  tools:
+    # clippy、vue-tsc、ESLint、Vitest 与质量门禁是唯一事实来源，关闭重复或纯风格类工具
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+    github-checks:
+      enabled: false
+    shellcheck:
+      enabled: false
+    actionlint:
+      enabled: false
+    zizmor:
+      enabled: false
+    biome:
+      enabled: false
+    eslint:
+      enabled: false
+    clippy:
+      enabled: false
+
+chat:
+  art: false
+  auto_reply: false
+
+knowledge_base:
+  web_search:
+    enabled: false
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "CONTRIBUTING.md"
+      - "docs/implementation.md"
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
+    auto_planning:
+      enabled: false
