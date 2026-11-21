@@ -8,6 +8,9 @@ const reapplyDynamicColorForTheme = vi.hoisted(() => vi.fn<(isDark: boolean) => 
 
 // colorExtractor 依赖 Tauri invoke 与 canvas，这里只关心 theme 是否把深浅色交给它重算
 vi.mock('@/utils/colorExtractor', () => ({ reapplyDynamicColorForTheme }))
+// 是否启用 View Transition 在模块加载时按平台决定，happy-dom 的 navigator 随宿主变化；
+// 固定为非 Linux，Linux 降级分支由 themeLinux.test.ts 单独覆盖
+vi.mock('@/utils/platform', () => ({ detectPlatform: () => 'mac' }))
 
 class FakeMediaQueryList extends EventTarget implements MediaQueryList {
   onchange: ((this: MediaQueryList, ev: MediaQueryListEvent) => unknown) | null = null

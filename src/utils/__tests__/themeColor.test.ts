@@ -15,6 +15,10 @@ import {
 } from '@/utils/themeColor'
 import { installMemoryStorage, type MemoryStorage } from './memoryStorage'
 
+// 是否启用 View Transition 在模块加载时按平台决定，happy-dom 的 navigator 随宿主变化；
+// 固定为非 Linux，Linux 降级分支由 themeLinux.test.ts 单独覆盖
+vi.mock('@/utils/platform', () => ({ detectPlatform: () => 'mac' }))
+
 const SURFACE_PROPS = [
   '--md-surface',
   '--md-background',
