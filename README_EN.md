@@ -41,11 +41,6 @@ Development focuses on multi-source discovery, native playback, local control, a
 
 </div>
 
-> [!CAUTION]
-> **Project status**: a good part of the documentation is placeholder text and many features are incomplete.
-> In edge cases local data may be damaged, so back it up first. The repository may become unmaintained at any
-> time; the desktop app is meant to move forward through community contributions.
-
 > [!WARNING]
 > This project is for learning and research only. Do not use it for illegal purposes.
 > Access, play, or save content only where you have the necessary rights or authorization, or where the source platform permits it.
@@ -72,16 +67,7 @@ Development focuses on multi-source discovery, native playback, local control, a
 
 ---
 
-## Start here
-
-To try the app, see [Getting Started](#getting-started).
-To learn what it offers, see [Why it stands out](#why-it-stands-out)
-and [Key Features](#key-features).
-To contribute code, start with [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md).
-To host a Listen Together server, see
-[Listen Together Deployment](#listen-together-deployment).
-Before using multiple devices, read the compatibility notes in
-[GitHub Sync](#github-sync) and [WebDAV Sync](#webdav-sync).
+## About
 
 ```text
 NeriPlayer Desktop
@@ -89,10 +75,8 @@ NeriPlayer Desktop
 ├── Local-first data: library, downloads, playlists, history, queue, and stats
 ├── Optional user-controlled sync: GitHub / WebDAV metadata sync
 ├── Desktop playback: native audio, word-synced lyrics, effects, tray, media keys, and desktop lyrics
-└── Diagnostics and feedback: live logs, file logs, crash reports, and connectivity probes
+└── Diagnostics and feedback: recent logs, file logs, crash reports, and connectivity probes
 ```
-
-## About
 
 NeriPlayer Desktop uses **Vue 3 + TypeScript** for its interface,
 **Rust** for platform requests, audio decoding, playback, storage, and sync,
@@ -144,7 +128,7 @@ The current scope:
   independent desktop lyrics, the system tray, close-to-tray behavior, media keys, system media sessions,
   configurable in-app and global shortcuts, and macOS menu bar lyrics.
 - **Diagnostics available on demand**:
-  developer mode provides live logs, crash reports, and connectivity probes.
+  developer mode provides auto-refreshing recent logs, crash reports, and connectivity probes.
   File logging can be enabled separately, and reports can identify the exact build.
 
 ---
@@ -215,11 +199,11 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
 ## Key Features
 
 - **Home and Explore**: recent plays, frequently opened playlists, recommendations by section,
-  NetEase/Bilibili/YouTube Music search, and manageable search history.
+  NetEase/Bilibili/YouTube Music search, and search history that can be cleared or turned off.
   International mode supports YouTube Music home shelves for signed-in accounts.
 - **Library and artists**: local playlists, favorite playlists and artists, downloads,
   NetEase playlists/albums, Bilibili favorites, and YouTube Music playlists;
-  category search, pagination, multi-selection, drag-and-drop, and context menus.
+  category search, load-more lists, multi-selection, drag-and-drop, and context menus.
 - **Queue and resume**: shuffle, repeat, reordering, saved playback progress, and long-form resume.
   Shuffle shows the actual playback order; switch to the original order to drag tracks into place.
 - **Native audio and effects**: output devices, channel balance, 0.1x–4x speed, 0.25x–2x independent pitch,
@@ -270,7 +254,7 @@ A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shar
   light/dark themes, cover colors, custom/fluid backgrounds, interface/lyric fonts,
   interface scaling, and settings search.
 - **Desktop integration and diagnostics**: tray, close to tray, single instance, system media sessions,
-  media keys, in-app/global shortcuts, macOS menu bar lyrics, live logs, and diagnostic reports.
+  media keys, in-app/global shortcuts, macOS menu bar lyrics, recent logs, and diagnostic reports.
 
 ### Default shortcuts
 
@@ -309,45 +293,13 @@ Text fields and active controls take priority over the relevant keys.
 | QQ Music | Backend search, streaming within guest API availability, downloads, lyrics/metadata matching | Depends on guest API and content availability |
 | Local audio | Multi-folder scans, direct playback, playlist and artist management, tags and lyrics | Paths must exist on the current device; formats depend on available decoders |
 
-The desktop app combines native audio output, device selection, and DSP effects with independent desktop lyrics,
-tray controls, system media sessions, media keys, and configurable shortcuts for in-window and background playback control.
-
 ---
 
 ## Implementation Notes
 
-### Build and versions
-
-- Stack: Tauri 2, Vue 3, TypeScript, Pinia, Vite, Rust, and C++17
-- Package manager: `pnpm@9.15.9`; Rust toolchain: `1.95.0`; CI Node.js: `20`
-- In-app version: `<git-short-hash>.<MMddHHmm>`, with build time and UUID also available
-- Native configuration: `src-tauri/tauri.conf.json`; release matrix: `.github/workflows/release.yml`
-- Lyrics component: the `vendor/applemusic-like-lyrics` Git submodule
-- Packages with extended decoding require an additional FFmpeg resource configuration; local development does not require FFmpeg development packages
-
-### Module layout
-
-The Rust backend is a Cargo workspace: `src-tauri/src/` is the Tauri app shell, and business logic lives in six
-Tauri-free crates under `src-tauri/crates/`. Dependency rules and host injection are described in the
-[implementation overview](docs/implementation_EN.md).
-
-| Path | Responsibility |
-| --- | --- |
-| `src/views/`, `src/components/` | Pages, player, lyrics, menus, and settings |
-| `src/stores/`, `src/modules/`, `src/integrations/` | Frontend state, playback coordination, lyrics, shortcuts, Listen Together, and host integration |
-| `src-tauri/src/` | Tauri commands, windows and tray, settings, logging, credential persistence |
-| `src-tauri/crates/neri-platform/` | Platform requests, login state, signing, and sessions |
-| `src-tauri/crates/neri-playback/` | Native playback, decoding, output, FFmpeg, and DSP (including `native/`) |
-| `src-tauri/crates/neri-library/` | SQLite, library, lyrics, stats, download metadata, sync models, merging, and V4 archives |
-| `src-tauri/crates/neri-listentogether/` | Listen Together WebSocket sessions and protocol |
-| `src-tauri/crates/neri-common/`, `neri-model/` | Errors, atomic writes, credential storage, shared data models |
-| `scripts/`, `tools/quality/`, `.github/workflows/` | Regression checks, quality gates, builds, packaging, and CI |
-
-### Entry point and navigation
-
-The main interface includes Home, Explore, Library, Settings, and a Debug page in developer mode.
-Mini Player, Now Playing, the queue, and comments panels work with shared playback state.
-Desktop lyrics and the tray popup use separate windows synchronized through native commands and events.
+This section covers user-facing behavior only. For code layout, crate boundaries, and quality gates, see the
+[implementation overview](docs/implementation_EN.md); for the development environment, extension points, and
+validation commands, see [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md).
 
 ### Playback, cache, and service
 
@@ -392,8 +344,6 @@ check live performances, covers, and edited versions manually.
 - Configuration import accepts Android plaintext and password-encrypted backups. Android imports warn that some settings may not transfer before applying supported settings and any included login state. Android-only features and device paths may not transfer.
 - Backup encryption uses the same PBKDF2-HMAC-SHA256 / AES-256-GCM envelope as Android. Passwords are not stored with the file and cannot be recovered. Desktop versions that only support plaintext must be updated before opening encrypted backups.
 - Imported cookies remain subject to platform expiry, network access, and risk controls. YouTube cookie import checks local format and does not guarantee valid account authorization. Android backups containing only an Authorization header without cookies require signing in again.
-
-See [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md) for implementation paths, extension points, and validation commands.
 
 ---
 
@@ -523,7 +473,7 @@ They have no fixed schedule.
 ## Bug Report
 
 1. Copy the build version from Settings → About, and record your OS, architecture, and reproduction steps
-2. Click the **version number seven times** in Settings to enable developer mode, then open Debug for live logs, crash reports, or diagnostic report export
+2. Click the **version number seven times** in Settings to enable developer mode, then open Debug for recent logs, crash reports, or diagnostic report export
 3. For persistent logs, enable file logging in Settings and restart the app before reproducing the issue. The file logging switch takes effect after restart; log-level changes apply immediately
 4. Open [Issues](https://github.com/cwuom/NeriPlayer-Desktop/issues) and use the appropriate template
 
@@ -621,21 +571,6 @@ do not attach full configuration exports or databases.
 
 ---
 
-## Update Cycle
-
-- The project is under active Preview development. Releases follow feature work and maintenance needs.
-- Core playback, local data, lyrics, sync, and cross-platform compatibility remain under maintenance.
-- CI builds let you try work in progress. Refer to the relevant commit and release notes for changes and known issues.
-
----
-
-## Support
-
-- The project and its maintainers do not accept sponsorships, donations, or commercial funding.
-- Support the project with reproducible Issues, PRs, documentation improvements, or Preview validation.
-
----
-
 ## License
 
 NeriPlayer Desktop is released under **GPL-3.0-or-later**. See [LICENSE](./LICENSE) for the terms.
@@ -651,10 +586,10 @@ NeriPlayer Desktop is released under **GPL-3.0-or-later**. See [LICENSE](./LICEN
 
 ---
 
-# Contributing to NeriPlayer Desktop
+## Contributing
 
-Before contributing, read the full [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md) and follow the
-[Code of Conduct](./CODE_OF_CONDUCT.md).
+Reproducible Issues, PRs, documentation improvements, and Preview validation are all welcome.
+Before contributing, read [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md) and follow the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ---
 

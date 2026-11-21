@@ -6,11 +6,6 @@ Thank you for contributing to NeriPlayer Desktop.
 This guide describes **the current desktop implementation**. Keep it aligned with source code and runtime behavior.
 The project is in preview; use recoverable copies of your data for development and testing.
 
-> [!CAUTION]
-> 🚧 **Work in progress**: a good part of the documentation is placeholder text and many features are incomplete;
-> in edge cases local data may be damaged. The repository may become unmaintained at any time, and desktop
-> development relies mainly on community contributions.
-
 ---
 
 ### Scope
