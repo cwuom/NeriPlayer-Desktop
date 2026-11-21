@@ -79,7 +79,7 @@ for (const [query, expected] of [
 }
 
 // Render the child component and exercise the parent's real search-focus function.
-const subtitleSource = await read('../src/components/BiliSubtitleSettings.vue')
+const subtitleSource = await read('../src/components/bilibili/BiliSubtitleSettings.vue')
 const subtitleScript = compileScript(parse(subtitleSource).descriptor, {
   id: 'subtitle-search', genDefaultAs: 'component', inlineTemplate: true,
 })

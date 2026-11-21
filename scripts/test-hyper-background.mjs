@@ -4,7 +4,7 @@ import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
 
-const componentSource = await readFile(new URL('../src/components/HyperBackground.vue', import.meta.url), 'utf8')
+const componentSource = await readFile(new URL('../src/components/background/HyperBackground.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(componentSource).descriptor, { id: 'hyper-background-test', genDefaultAs: 'component' })
 const compile = source => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

@@ -126,7 +126,7 @@
     "legacy_oversized": {},
     "ui_invoke_baseline": {
       "src/components/AddToPlaylistDialog.vue": 6,
-      "src/components/BiliVideoSkipDialog.vue": 1,
+      "src/components/bilibili/BiliVideoSkipDialog.vue": 1,
       "src/components/CommentsPanel.vue": 5,
       "src/components/NowPlaying.vue": 4,
       "src/components/TrackContextMenu.vue": 1,
@@ -149,8 +149,6 @@
       "src/views/YouTubeArtistView.vue": 2,
       "src/views/YouTubePlaylistView.vue": 1
     },
-    "legacy_crowded_directories": {
-      "src/components": 28
-    }
+    "legacy_crowded_directories": {}
   }
 }

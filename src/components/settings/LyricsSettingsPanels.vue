@@ -2,7 +2,7 @@
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import DesktopLyricsStage from '@/components/desktopLyrics/DesktopLyricsStage.vue'
-import BiliSubtitleSettings from '@/components/BiliSubtitleSettings.vue'
+import BiliSubtitleSettings from '@/components/bilibili/BiliSubtitleSettings.vue'
 import EditableRangeValue from '@/components/ui/EditableRangeValue.vue'
 import CustomSelect from '@/components/ui/CustomSelect.vue'
 import { desktopLyricsOpen } from '@/modules/desktopLyrics/bridge'

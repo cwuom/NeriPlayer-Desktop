@@ -5,7 +5,7 @@ import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
 import { loadModule, subtitle, deferred, flush } from './bili-subtitle-test-loader.mjs'
 
-const source = readFileSync(new URL('../src/components/BiliSubtitleSettings.vue', import.meta.url), 'utf8')
+const source = readFileSync(new URL('../src/components/bilibili/BiliSubtitleSettings.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(source).descriptor, { id: 'bili-subtitle-settings-test', genDefaultAs: 'component' })
 const compiled = ts.transpileModule(script.content, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
 const renderer = vue.createRenderer({
