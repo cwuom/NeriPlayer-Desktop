@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     outputs:
+      app_version: ${{ steps.build_metadata.outputs.app_version }}
       build_epoch: ${{ steps.build_metadata.outputs.build_epoch }}
       build_git_sha: ${{ steps.build_metadata.outputs.build_git_sha }}
       build_uuid: ${{ steps.build_metadata.outputs.build_uuid }}
@@ -43,6 +44,11 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+
       - name: Generate shared build metadata
         id: build_metadata
         shell: bash
@@ -55,13 +61,15 @@ jobs:
           build_version="${build_git_sha:0:7}.${build_timestamp}"
           build_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            release_tag="NeriPlayer-${build_git_sha:0:7}.${build_timestamp}"
-            release_title="$release_tag"
+            app_version="$(node scripts/release/version.mjs compute "$build_epoch" | sed -n 's/^app_version=//p')"
+            release_tag="NeriPlayer-${app_version}"
+            release_title="NeriPlayer ${app_version}"
             is_tag_release=false
             previous_tag_pattern='refs/tags/NeriPlayer-*'
           else
             release_tag="${{ github.ref_name }}"
-            release_title="NeriPlayer ${release_tag#v}"
+            app_version="${release_tag#v}"
+            release_title="NeriPlayer ${app_version}"
             is_tag_release=true
             previous_tag_pattern='refs/tags/v*'
           fi
@@ -69,9 +77,11 @@ jobs:
             --format='%(refname:short)' "$previous_tag_pattern" \
             | grep -Fvx "$release_tag" | head -n 1 || true)"
           [[ "$build_version" =~ ^[0-9a-f]{7}\.[0-9]{8}$ ]]
+          [[ -n "$app_version" ]]
           [[ "$build_uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
 
           {
+            echo "app_version=$app_version"
             echo "build_epoch=$build_epoch"
             echo "build_git_sha=$build_git_sha"
             echo "build_uuid=$build_uuid"
@@ -83,11 +93,13 @@ jobs:
             echo "target_sha=$target_sha"
           } >> "$GITHUB_OUTPUT"
 
+          echo "App version: $app_version"
           echo "Build version: $build_version"
           echo "Build UUID: $build_uuid"
           {
             echo "### Build metadata"
             echo ""
+            echo "- App version: \`$app_version\`"
             echo "- Build UUID: \`$build_uuid\`"
             echo "- Build version: \`$build_version\`"
             echo "- Git SHA: \`$build_git_sha\`"
@@ -101,6 +113,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           {
+            echo "app_version=${{ steps.build_metadata.outputs.app_version }}"
             echo "build_uuid=${{ steps.build_metadata.outputs.build_uuid }}"
             echo "build_version=${{ steps.build_metadata.outputs.build_version }}"
             echo "build_git_sha=${{ steps.build_metadata.outputs.build_git_sha }}"
@@ -122,11 +135,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: 20
 
       - name: Check version consistency
         env:
@@ -267,6 +275,23 @@ jobs:
           name: ffmpeg-${{ matrix.ffmpeg_target }}
           path: .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
 
+      # 手动发布把时间戳版本写进 package.json 与 Cargo，安装包文件名和系统里看到的版本随之更新；
+      # tag 发布的版本已由 validate 核对，只生成空配置
+      - name: Stamp release version
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+          IS_TAG_RELEASE: ${{ needs.validate.outputs.is_tag_release }}
+        run: |
+          set -euo pipefail
+          if [[ "$IS_TAG_RELEASE" == "true" ]]; then
+            mkdir -p .cache/release
+            echo '{}' > .cache/release/tauri.version.json
+          else
+            node scripts/release/version.mjs stamp "$APP_VERSION" .cache/release/tauri.version.json
+          fi
+          cat .cache/release/tauri.version.json
+
       # 核对动态库与 BUILDINFO.txt 一致，生成合并进安装包的配置
       - name: Prepare FFmpeg bundle config
         run: node scripts/ffmpeg/bundle-config.mjs ${{ matrix.ffmpeg_target }}
@@ -278,6 +303,7 @@ jobs:
           --target ${{ matrix.target }}
           --bundles "${{ matrix.bundles }}"
           --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
+          --config .cache/release/tauri.version.json
           -- --locked
 
       - name: Build ad-hoc signed macOS package
@@ -290,6 +316,7 @@ jobs:
           --target ${{ matrix.target }}
           --bundles dmg
           --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
+          --config .cache/release/tauri.version.json
           --config '{"bundle":{"macOS":{"minimumSystemVersion":"${{ matrix.deployment_target }}"}}}'
           -- --locked
 
@@ -474,6 +501,11 @@ jobs:
           ref: ${{ needs.validate.outputs.target_sha }}
           fetch-depth: 0
 
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -541,6 +573,7 @@ jobs:
           REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target_sha }}
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
           BUILD_UUID: ${{ needs.validate.outputs.build_uuid }}
           BUILD_VERSION: ${{ needs.validate.outputs.build_version }}
         shell: bash
@@ -558,12 +591,22 @@ jobs:
           fi
           gh api "${api_args[@]}" --jq '.body' > generated-release-notes.md
 
-          cat macOS-install.txt > release-notes.md
+          node scripts/release/download-table.mjs \
+            "$REPO" "$RELEASE_TAG" release-assets "$PREVIOUS_TAG" > release-notes.md
+          {
+            echo
+            echo "## macOS first launch"
+            echo
+            echo '```text'
+            cat macOS-install.txt
+            echo '```'
+          } >> release-notes.md
           {
             echo
             echo
             echo "## Build metadata"
             echo
+            echo "- App version: \`${APP_VERSION}\`"
             echo "- Build UUID: \`${BUILD_UUID}\`"
             echo "- Build version: \`${BUILD_VERSION}\`"
             echo "- Target commit: \`${TARGET_SHA}\`"
