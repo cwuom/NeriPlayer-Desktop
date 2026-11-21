@@ -1,4 +1,4 @@
-import type { LyricLine } from '@/stores/player'
+import type { LyricLine } from '@/types/track'
 import { normalizeDesktopLyricsStyle, type DesktopLyricsStyle } from './style'
 import { activeLineIndex } from './timeline'
 

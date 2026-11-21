@@ -4,6 +4,9 @@
 // 数据按数据域导入一次。写入经串行队列发出，先发出的命令一定先落库
 import { invoke } from '@tauri-apps/api/core'
 import type { BiliVideoSkipRule } from '@/modules/playback/biliVideoSkip'
+import { createLogger } from '@/utils/logger'
+
+const log = createLogger('user-data')
 
 export const LEGACY_PLAYER_STATE_KEY = 'neri:player-state'
 export const LEGACY_HISTORY_KEY = 'neri:play-history'
@@ -155,7 +158,7 @@ export async function preloadUserData(storage: StorageLike | undefined = globalT
     snapshot = loaded
     return true
   } catch (error) {
-    console.warn('[user-data] database unavailable, falling back to localStorage:', error)
+    log.warn('database unavailable, falling back to localStorage:', error)
     snapshot = null
     return false
   }

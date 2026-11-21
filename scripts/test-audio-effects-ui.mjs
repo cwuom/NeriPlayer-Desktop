@@ -73,7 +73,7 @@ async function component(path, dependencyOverrides = {}) {
   }).outputText}\nreturn component`)(name => { assert.ok(name in dependencies, `unexpected dependency: ${name}`); return dependencies[name] }, {})
 }
 
-let focusedInput = null
+const focusCalls = []
 class TestElement {
   constructor(type) { this.type = type; this.tagName = type.toUpperCase(); this.children = []; this.props = {}; this.style = { display: '' }; this.listeners = new Map() }
   get parentElement() { return this.parent instanceof TestElement ? this.parent : null }
@@ -83,14 +83,14 @@ class TestElement {
     return this.type === selector
   }
   closest(selector) {
-    for (let node = this; node; node = node.parentElement) if (selector.split(',').some(part => node.matches(part.trim()))) return node
-    return null
+    if (selector.split(',').some(part => this.matches(part.trim()))) return this
+    return this.parentElement?.closest(selector) ?? null
   }
   querySelectorAll(selector) { return findAll(this, node => node instanceof TestElement && node.matches(selector)) }
   getRootNode() { return globalThis.document }
   addEventListener(name, callback) { const callbacks = this.listeners.get(name) ?? new Set(); callbacks.add(callback); this.listeners.set(name, callbacks) }
   removeEventListener(name, callback) { this.listeners.get(name)?.delete(callback) }
-  focus() { focusedInput = this }
+  focus() { focusCalls.push(this) }
   select() {}
 }
 class TestInputElement extends TestElement {}
@@ -98,7 +98,7 @@ globalThis.Element = TestElement
 globalThis.HTMLInputElement = TestInputElement
 globalThis.Document = class { activeElement = null }
 globalThis.ShadowRoot = class {}
-globalThis.document = new Document()
+globalThis.document = new globalThis.Document()
 const renderer = vue.createRenderer({
   createElement: type => type === 'input' ? new TestInputElement(type) : new TestElement(type),
   createText: text => ({ text }), createComment: text => ({ text }),
@@ -280,7 +280,7 @@ try {
     const editors = findAll(detailTree, node => node instanceof TestElement && node.matches('.editable-range-input'))
     assert.equal(editors.length, 1, 'a label opens only its own number editor')
     assert.equal(editors[0].closest('.setting-card'), band)
-    assert.equal(vue.toRaw(focusedInput), editors[0])
+    assert.equal(vue.toRaw(focusCalls.at(-1)), editors[0])
     editors[0].props.onKeydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); await vue.nextTick()
   }
   console.log('PASS full DSP parameter wiring, A/B, PEQ, AutoEQ, named presets, per-output settings and independent real editors')
@@ -297,7 +297,7 @@ for (const key of ['player.playback_speed', 'player.pitch', 'player.vinyl_effect
 for (const locale of ['zh-CN', 'zh-TW', 'en', 'ja']) {
   const messages = JSON.parse(await read(`../src/i18n/${locale}.json`))
   assert.ok(messages.dsp.simple_mode && messages.dsp.expert_mode)
-  assert.ok(Object.values(messages.dsp.speaker_sizes).every(value => !/[\/]/.test(value)))
+  assert.ok(Object.values(messages.dsp.speaker_sizes).every(value => !/[/]/.test(value)))
   for (const control of listening.LISTENING_CONTROLS) for (const key of ['title', 'help', 'left', 'right']) assert.ok(messages.dsp.listening[control.key][key])
   for (const preset of model.AUDIO_EFFECT_PRESETS) assert.ok(messages.dsp.preset_notes[preset.id])
   assert.ok(messages.player.vinyl_effect)

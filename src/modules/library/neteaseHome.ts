@@ -1,4 +1,4 @@
-import type { TrackInfo } from '@/stores/player'
+import type { TrackInfo } from '@/types/track'
 import { COVER_SIZE_LIST, withCoverSize } from '@/utils/trackCover'
 
 export const NETEASE_HOME_SECTIONS = [

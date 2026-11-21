@@ -29,7 +29,6 @@ const locked = computed(() => lockedByEvent.value ?? style.value.locked)
 const hovered = computed(() => (locked.value ? lockedHover.value : pointerInside.value))
 const showToolbar = computed(() => hovered.value && !locked.value)
 const showPanel = computed(() => style.value.background === 'always' || (style.value.background === 'hover' && showToolbar.value))
-const hasLyrics = computed(() => frame.value.lines.length > 0)
 /** 前奏或没有歌词时显示「歌名 - 歌手」 */
 const placeholder = computed(() => {
   if (!frame.value.trackId) return 'NeriPlayer'

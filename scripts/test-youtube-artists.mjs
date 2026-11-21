@@ -2,8 +2,12 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-const source = await readFile(new URL('../src/modules/library/youtubeArtistDetail.ts', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText
+const compileOptions = { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }
+const jsonSource = await readFile(new URL('../src/utils/json.ts', import.meta.url), 'utf8')
+const jsonUrl = `data:text/javascript;base64,${Buffer.from(ts.transpileModule(jsonSource, compileOptions).outputText).toString('base64')}`
+const source = (await readFile(new URL('../src/modules/library/youtubeArtistDetail.ts', import.meta.url), 'utf8'))
+  .replace("from '@/utils/json'", `from ${JSON.stringify(jsonUrl)}`)
+const compiled = ts.transpileModule(source, compileOptions).outputText
 const { parseYouTubeArtistDetail, parseYouTubeArtistItems, youtubeArtistItemTrack } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const responsive = { musicResponsiveListItemRenderer: {
   playlistItemData: { videoId: 'song1' },

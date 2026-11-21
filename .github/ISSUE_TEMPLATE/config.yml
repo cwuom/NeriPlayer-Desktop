@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / 使用咨询
+    url: https://github.com/cwuom/NeriPlayer-Desktop/discussions/categories/q-a
+    about: 使用方法、设置和兼容性问题请前往 Discussions 的 Q&A / Ask usage, settings, and compatibility questions in Q&A discussions
+  - name: Android app / Android 端问题
+    url: https://github.com/cwuom/NeriPlayer/issues
+    about: Android 端的问题请提交到主仓库 / Report Android app issues in the main repository
+  - name: Security issue / 安全问题
+    url: https://github.com/cwuom/NeriPlayer-Desktop/blob/main/SECURITY.md
+    about: 涉及 Cookie、Token 或凭据泄露的安全问题请按安全策略私下报告，不要公开细节 / Follow the security policy to report credential or token leaks privately without public details

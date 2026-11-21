@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import ts from 'typescript'
 import { ref, reactive, computed, watch, nextTick, effectScope } from 'vue'
 import { loadAudioEffectsModel, loadListeningTuning } from './audio-effects-model-loader.mjs'
@@ -7,7 +7,11 @@ const model = await loadAudioEffectsModel()
 const listening = await loadListeningTuning()
 
 const read = path => readFile(new URL(path, import.meta.url), 'utf8')
-const playerSource = await read('../src/stores/player.ts')
+// player store 拆成 player.ts 与 player/ 下的切片，均衡器预设下沉到 modules，拼接后按名称查找实现
+const playerDir = new URL('../src/stores/player/', import.meta.url)
+const playerFiles = ['../src/stores/player.ts', '../src/modules/audioEffects/eqPresets.ts',
+  ...(await readdir(playerDir)).filter(name => name.endsWith('.ts')).sort().map(name => `../src/stores/player/${name}`)]
+const playerSource = (await Promise.all(playerFiles.map(read))).join('\n')
 const settingsSource = await read('../src/stores/settings.ts')
 const parse = (name, source) => ts.createSourceFile(name, source, ts.ScriptTarget.ES2022, true)
 const playerTree = parse('player.ts', playerSource)

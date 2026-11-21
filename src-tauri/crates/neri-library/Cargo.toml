@@ -1,0 +1,46 @@
+[package]
+name = "neri-library"
+description = "本地曲库、歌单与收藏、歌词、统计、下载元数据与云同步引擎"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+neri-common.workspace = true
+neri-model.workspace = true
+neri-platform.workspace = true
+neri-playback.workspace = true
+base64.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+fast2s.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+image.workspace = true
+lofty.workspace = true
+log.workspace = true
+md-5.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+quick-xml.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+symphonia.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+unicode-normalization.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+whoami.workspace = true
+zstd.workspace = true

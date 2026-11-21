@@ -13,7 +13,7 @@ assert.ok(existsSync(componentUrl), 'Cookie login dialog must exist before it ca
 const listeners = new Set()
 globalThis.Document = class Document {}
 globalThis.ShadowRoot = class ShadowRoot {}
-globalThis.document = Object.assign(new Document(), {
+globalThis.document = Object.assign(new globalThis.Document(), {
   activeElement: null,
   addEventListener(type, listener) { assert.equal(type, 'keydown'); listeners.add(listener) },
   removeEventListener(type, listener) { assert.equal(type, 'keydown'); listeners.delete(listener) },

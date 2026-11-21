@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { ref, watch } from 'vue'
 import ts from 'typescript'
 
@@ -26,7 +26,11 @@ const timelineModule = await loadModule('../src/modules/desktopLyrics/timeline.t
 const frameModule = await loadModule('../src/modules/desktopLyrics/frame.ts', {
   './style': styleModule, './timeline': timelineModule,
 })
-const playerSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+// player store 拆成 player.ts 与 player/ 下的切片，拼接全部源码后按名称查找实现
+const playerDir = new URL('../src/stores/player/', import.meta.url)
+const playerFiles = [new URL('../src/stores/player.ts', import.meta.url),
+  ...(await readdir(playerDir)).filter(name => name.endsWith('.ts')).sort().map(name => new URL(name, playerDir))]
+const playerSource = (await Promise.all(playerFiles.map(file => readFile(file, 'utf8')))).join('\n')
 const parsedPlayer = ts.createSourceFile('player.ts', playerSource, ts.ScriptTarget.ES2022, true)
 const playerFunctions = new Map()
 function visit(node) {
@@ -98,8 +102,9 @@ async function withRuntime(run, { playing = true, speed = 1 } = {}) {
   }
   let dispose
   try {
-    const bridge = await loadModule('../src/modules/desktopLyrics/bridge.ts', {
-      vue: { ref, watch },
+    const bridgeModule = await loadModule('../src/modules/desktopLyrics/bridge.ts', { vue: { ref } })
+    const integration = await loadModule('../src/integrations/desktopLyrics.ts', {
+      vue: { watch },
       '@tauri-apps/api/core': { invoke: async (command, args) => {
         if (command === 'publish_desktop_lyrics') frames.push(args.frame)
       } },
@@ -108,14 +113,15 @@ async function withRuntime(run, { playing = true, speed = 1 } = {}) {
       '@/stores/settings': { useSettingsStore: () => ({ desktopLyrics: undefined }) },
       '@/stores/lyricOffset': { useLyricOffsetStore: () => ({ effectiveOffsetMs: () => 0 }) },
       '@/stores/currentLyrics': { useCurrentLyricsStore: () => currentLyrics },
-      './frame': frameModule,
-      './style': styleModule,
-      './timeline': timelineModule,
+      '@/modules/desktopLyrics/bridge': bridgeModule,
+      '@/modules/desktopLyrics/frame': frameModule,
+      '@/modules/desktopLyrics/style': styleModule,
+      '@/modules/desktopLyrics/timeline': timelineModule,
       '@/utils/logger': { createLogger: () => ({ warn() {} }) },
       '@/utils/logSanitizer': { summarizeLogError: String },
     })
-    dispose = bridge.installDesktopLyricsBridge()
-    await bridge.openDesktopLyricsWindow()
+    dispose = integration.installDesktopLyricsBridge()
+    await bridgeModule.openDesktopLyricsWindow()
     await flush()
     const runtime = {
       clock, frames,

@@ -2,11 +2,15 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
+import { asArray, dig } from '@/utils/json'
 import { createLogger } from '@/utils/logger'
 import { resolveNeteaseCover } from '@/utils/neteaseCover'
 import { parseYouTubeLibraryPlaylists as parseYouTubeLibraryPlaylistsShared, parseYouTubeHomeFeed } from '@/modules/youtube/youtubePlaylistParse'
+import type { HomeFeedItem, HomeFeedShelf } from '@/modules/youtube/youtubeHomeLayout'
 
 const log = createLogger('recommend')
+
+export type { HomeFeedItem, HomeFeedShelf }
 
 export interface PlaylistInfo {
   id: string | number
@@ -15,21 +19,6 @@ export interface PlaylistInfo {
   trackCount: number
   description?: string
   creator?: string
-}
-
-export interface HomeFeedShelf {
-  title: string
-  items: HomeFeedItem[]
-}
-
-export interface HomeFeedItem {
-  title: string
-  subtitle: string
-  coverUrl: string
-  browseId?: string
-  videoId?: string
-  pageType?: string
-  durationMs?: number
 }
 
 export interface HomeRecommendationSong {
@@ -46,6 +35,15 @@ export interface HomeSongSection {
   items: HomeRecommendationSong[]
   loading: boolean
   error: string | null
+}
+
+/** 网易云收藏专辑摘要（由 get_user_stared_albums 的原始响应映射） */
+export interface NeteaseUserAlbum {
+  id: string | number
+  name: string
+  coverUrl: string
+  artist: string
+  trackCount: number
 }
 
 /** 云端列表（用户歌单、收藏专辑）的拉取状态；有缓存时 loading 表示在后台刷新 */
@@ -67,6 +65,25 @@ const HOME_SEARCH_KEYWORDS: Record<HomeSongSectionKey, string> = {
   radar: '私人雷达',
 }
 
+/** 平台原始 id：数字原样保留，其它值转成字符串 */
+function platformId(value: unknown): string | number {
+  return typeof value === 'number' ? value : String(value ?? '')
+}
+
+/** 平台原始 JSON 的文本字段，缺省为空串 */
+function rawText(value: unknown): string {
+  return String(value ?? '')
+}
+
+function neteasePlaylistInfo(raw: unknown, coverFields: readonly [string, string]): PlaylistInfo {
+  return {
+    id: platformId(dig(raw, 'id')),
+    name: rawText(dig(raw, 'name')),
+    coverUrl: resolveNeteaseCover(dig(raw, coverFields[0]), dig(raw, coverFields[1])),
+    trackCount: Number(dig(raw, 'trackCount')) || 0,
+  }
+}
+
 const emptyHomeSongSection = (): HomeSongSection => ({
   items: [],
   loading: false,
@@ -76,7 +93,7 @@ const emptyHomeSongSection = (): HomeSongSection => ({
 export const useRecommendStore = defineStore('recommend', () => {
   // 网易云推荐歌单
   const recommendedPlaylists = ref<PlaylistInfo[]>([])
-  const recommendedSongs = ref<any[]>([])
+  const recommendedSongs = ref<unknown[]>([])
   const homeHotSongs = ref<HomeSongSection>(emptyHomeSongSection())
   const homeRadarSongs = ref<HomeSongSection>(emptyHomeSongSection())
 
@@ -90,7 +107,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   const userPlaylistsStatus = ref<Record<string, CloudListStatus>>({})
 
   // 用户收藏专辑（网易云）
-  const userAlbums = ref<any[]>([])
+  const userAlbums = ref<NeteaseUserAlbum[]>([])
   const userAlbumsStatus = ref<CloudListStatus>({ loading: false, error: null })
 
   // 同一平台同时只发一个请求；登录态变化时代际递增，换账号前发出的请求回来也不写入
@@ -236,18 +253,14 @@ export const useRecommendStore = defineStore('recommend', () => {
     isLoading.value = true
     error.value = null
     try {
-      const data = await invoke<any>('get_recommended_playlists', { limit })
-      const result = data?.result || []
-      recommendedPlaylists.value = result.map((p: any) => ({
-        id: p.id,
-        name: p.name,
-        coverUrl: resolveNeteaseCover(p.picUrl, p.coverImgUrl),
-        trackCount: p.trackCount || 0,
-        description: p.copywriter || '',
+      const data = await invoke<unknown>('get_recommended_playlists', { limit })
+      recommendedPlaylists.value = asArray(dig(data, 'result')).map(p => ({
+        ...neteasePlaylistInfo(p, ['picUrl', 'coverImgUrl']),
+        description: rawText(dig(p, 'copywriter') || ''),
       }))
       saveCache()
-    } catch (e: any) {
-      error.value = e?.toString() || 'Failed to fetch recommendations'
+    } catch (e) {
+      error.value = String(e ?? '') || 'Failed to fetch recommendations'
       log.error('fetchRecommendedPlaylists:', e)
     } finally {
       isLoading.value = false
@@ -258,8 +271,8 @@ export const useRecommendStore = defineStore('recommend', () => {
   async function fetchRecommendedSongs() {
     isLoading.value = true
     try {
-      const data = await invoke<any>('get_recommended_songs')
-      recommendedSongs.value = data?.data?.dailySongs || []
+      const data = await invoke<unknown>('get_recommended_songs')
+      recommendedSongs.value = asArray(dig(data, 'data', 'dailySongs'))
     } catch (e) {
       log.error('fetchRecommendedSongs:', e)
     } finally {
@@ -285,11 +298,11 @@ export const useRecommendStore = defineStore('recommend', () => {
         error: null,
       }
       saveCache()
-    } catch (e: any) {
+    } catch (e) {
       target.value = {
         items: target.value.items,
         loading: false,
-        error: e?.toString() || 'Failed to fetch home recommendations',
+        error: String(e ?? '') || 'Failed to fetch home recommendations',
       }
       log.error(`fetchHomeSearchSection(${section}):`, e)
     } finally {
@@ -333,25 +346,20 @@ export const useRecommendStore = defineStore('recommend', () => {
   async function requestUserPlaylists(platform: string): Promise<PlaylistInfo[]> {
     isLoading.value = true
     try {
-      const data = await invoke<any>('get_user_playlists', { platform })
+      const data = await invoke<unknown>('get_user_playlists', { platform })
 
       let playlists: PlaylistInfo[] = []
       if (platform === 'netease') {
-        const list = data?.playlist || []
-        playlists = list.map((p: any) => ({
-          id: p.id,
-          name: p.name,
-          coverUrl: resolveNeteaseCover(p.coverImgUrl, p.picUrl),
-          trackCount: p.trackCount || 0,
-          creator: p.creator?.nickname || '',
+        playlists = asArray(dig(data, 'playlist')).map(p => ({
+          ...neteasePlaylistInfo(p, ['coverImgUrl', 'picUrl']),
+          creator: rawText(dig(p, 'creator', 'nickname') || ''),
         }))
       } else if (platform === 'bilibili') {
-        const list = data?.data?.list || []
-        playlists = list.map((f: any) => ({
-          id: f.id,
-          name: f.title,
-          coverUrl: f.cover || '',
-          trackCount: f.media_count || 0,
+        playlists = asArray(dig(data, 'data', 'list')).map(f => ({
+          id: platformId(dig(f, 'id')),
+          name: rawText(dig(f, 'title')),
+          coverUrl: rawText(dig(f, 'cover') || ''),
+          trackCount: Number(dig(f, 'media_count')) || 0,
         }))
 
         // For folders missing cover, fetch from folder info API
@@ -360,8 +368,8 @@ export const useRecommendStore = defineStore('recommend', () => {
           await Promise.allSettled(
             needCover.map(async (p) => {
               try {
-                const info = await invoke<any>('get_bili_fav_folder_info', { mediaId: p.id })
-                const cover = info?.data?.cover || ''
+                const info = await invoke<unknown>('get_bili_fav_folder_info', { mediaId: p.id })
+                const cover = rawText(dig(info, 'data', 'cover') || '')
                 if (cover) {
                   p.coverUrl = cover
                 }
@@ -387,7 +395,7 @@ export const useRecommendStore = defineStore('recommend', () => {
     homeFeedLoading.value = true
     isLoading.value = true
     try {
-      const data = await invoke<any>('get_home_feed')
+      const data = await invoke<unknown>('get_home_feed')
       if (requestGeneration !== homeFeedRequestGeneration) return
       homeFeedShelves.value = parseYouTubeHomeFeed(data)
       saveCache()
@@ -402,18 +410,14 @@ export const useRecommendStore = defineStore('recommend', () => {
   }
 
   /** 获取精品歌单 */
-  async function fetchHighQualityPlaylists(cat?: string, limit = 30) {
+  async function fetchHighQualityPlaylists(cat?: string, limit = 30): Promise<PlaylistInfo[]> {
     isLoading.value = true
     try {
-      const data = await invoke<any>('get_high_quality_playlists', { cat, limit })
-      const list = data?.playlists || []
-      return list.map((p: any) => ({
-        id: p.id,
-        name: p.name,
-        coverUrl: resolveNeteaseCover(p.coverImgUrl, p.picUrl),
-        trackCount: p.trackCount || 0,
-        description: p.description || '',
-        creator: p.creator?.nickname || '',
+      const data = await invoke<unknown>('get_high_quality_playlists', { cat, limit })
+      return asArray(dig(data, 'playlists')).map(p => ({
+        ...neteasePlaylistInfo(p, ['coverImgUrl', 'picUrl']),
+        description: rawText(dig(p, 'description') || ''),
+        creator: rawText(dig(p, 'creator', 'nickname') || ''),
       }))
     } catch (e) {
       log.error('fetchHighQualityPlaylists:', e)
@@ -426,9 +430,8 @@ export const useRecommendStore = defineStore('recommend', () => {
   /** 获取精品歌单分类标签 */
   async function fetchHighQualityTags(): Promise<string[]> {
     try {
-      const data = await invoke<any>('get_high_quality_tags')
-      const tags = data?.tags || []
-      return tags.map((t: any) => t.name || t)
+      const data = await invoke<unknown>('get_high_quality_tags')
+      return asArray(dig(data, 'tags')).map(tag => rawText(dig(tag, 'name') || tag))
     } catch (e) {
       log.error('fetchHighQualityTags:', e)
       return []
@@ -438,8 +441,8 @@ export const useRecommendStore = defineStore('recommend', () => {
   /** 获取用户喜欢的歌曲 ID 列表 */
   async function fetchLikedSongIds() {
     try {
-      const data = await invoke<any>('get_liked_song_ids')
-      const ids: number[] = data?.ids || []
+      const data = await invoke<unknown>('get_liked_song_ids')
+      const ids = asArray(dig(data, 'ids')).filter((id): id is number => typeof id === 'number')
       likedSongIds.value = new Set(ids)
     } catch (e) {
       log.error('fetchLikedSongIds:', e)
@@ -449,8 +452,8 @@ export const useRecommendStore = defineStore('recommend', () => {
   /** 喜欢/取消喜欢歌曲 */
   async function toggleLikeSong(songId: number, like: boolean): Promise<boolean> {
     try {
-      const data = await invoke<any>('like_song', { songId, like })
-      if (data?.code === 200) {
+      const data = await invoke<unknown>('like_song', { songId, like })
+      if (dig(data, 'code') === 200) {
         if (like) {
           likedSongIds.value.add(songId)
         } else {
@@ -468,7 +471,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   /** 获取专辑详情 */
   async function fetchAlbumDetail(albumId: number) {
     try {
-      return await invoke<any>('get_album_detail', { albumId })
+      return await invoke<unknown>('get_album_detail', { albumId })
     } catch (e) {
       log.error('fetchAlbumDetail:', e)
       return null
@@ -482,14 +485,13 @@ export const useRecommendStore = defineStore('recommend', () => {
       (status) => { userAlbumsStatus.value = status },
       () => userAlbums.value.length > 0,
       async () => {
-        const data = await invoke<any>('get_user_stared_albums', {})
-        const list = data?.data || []
-        const albums = list.map((a: any) => ({
-          id: a.id,
-          name: a.name,
-          coverUrl: resolveNeteaseCover(a.picUrl, a.blurPicUrl),
-          artist: a.artists?.map((ar: any) => ar.name).join(', ') || '',
-          trackCount: a.size || 0,
+        const data = await invoke<unknown>('get_user_stared_albums', {})
+        const albums = asArray(dig(data, 'data')).map((a): NeteaseUserAlbum => ({
+          id: platformId(dig(a, 'id')),
+          name: rawText(dig(a, 'name')),
+          coverUrl: resolveNeteaseCover(dig(a, 'picUrl'), dig(a, 'blurPicUrl')),
+          artist: asArray(dig(a, 'artists')).map(ar => dig(ar, 'name')).join(', ') || '',
+          trackCount: Number(dig(a, 'size')) || 0,
         }))
         return () => { userAlbums.value = albums }
       },
@@ -506,7 +508,7 @@ export const useRecommendStore = defineStore('recommend', () => {
   /** 获取 B站收藏夹内容 */
   async function fetchBiliFavoriteItems(mediaId: number, page = 1) {
     try {
-      return await invoke<any>('get_bili_favorite_items', { mediaId, page })
+      return await invoke<unknown>('get_bili_favorite_items', { mediaId, page })
     } catch (e) {
       log.error('fetchBiliFavoriteItems:', e)
       return null

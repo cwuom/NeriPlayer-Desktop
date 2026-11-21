@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { TrackInfo } from '@/stores/player'
+import type { TrackInfo } from '@/types/track'
 import type { BiliVideoSkipTarget } from './biliVideoSkip'
-import { trustedInboundStreamUrls } from '@/stores/listenTogether/mapper'
+import { trustedInboundStreamUrls } from './streamTrust'
 import {
   BILI_VIDEO_INFO_UNAVAILABLE,
   PlaybackFailure,

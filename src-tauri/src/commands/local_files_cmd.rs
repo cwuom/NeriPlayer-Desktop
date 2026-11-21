@@ -1,14 +1,17 @@
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock};
+use crate::state::TrackInfo;
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::properties::FileProperties;
+use neri_common::error::{AppError, AppResult};
+use neri_library::library::scanner;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use tauri::{AppHandle, Emitter, Manager};
-use crate::error::{AppError, AppResult};
-use crate::library::scanner;
-use crate::state::TrackInfo;
 
 static SCANS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
@@ -20,7 +23,10 @@ struct ScanSession(String);
 
 impl Drop for ScanSession {
     fn drop(&mut self) {
-        scans().lock().unwrap_or_else(|error| error.into_inner()).remove(&self.0);
+        scans()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.0);
     }
 }
 
@@ -83,16 +89,20 @@ fn read_local_audio_info(path: &Path) -> AppResult<LocalAudioInfo> {
         return Err(AppError::Metadata("音频路径不是文件".into()));
     }
     // 容器不能确定具体编码时只返回格式，避免把 MP4 中的 ALAC 当成 AAC
-    let audio = Probe::open(path).map_err(|error| AppError::Metadata(error.to_string()))?
+    let audio = Probe::open(path)
+        .map_err(|error| AppError::Metadata(error.to_string()))?
         .options(ParseOptions::new().read_tags(false).read_cover_art(false))
-        .guess_file_type()?.read().map_err(|error| AppError::Metadata(error.to_string()))?;
+        .guess_file_type()?
+        .read()
+        .map_err(|error| AppError::Metadata(error.to_string()))?;
     Ok(local_audio_info(audio.file_type(), audio.properties()))
 }
 
 #[tauri::command]
 pub async fn get_local_audio_info(path: String) -> AppResult<LocalAudioInfo> {
     tokio::task::spawn_blocking(move || read_local_audio_info(Path::new(&path)))
-        .await.map_err(|error| AppError::Other(error.to_string()))?
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
 }
 
 #[tauri::command]
@@ -116,25 +126,42 @@ pub async fn scan_local_files(
     let session = ScanSession(session_id.clone());
     tokio::task::spawn_blocking(move || {
         let _session = session;
-        scanner::scan_directory_with_control(&dir, name_template.as_deref(), &cancelled, |visited_entries, tracks, skipped, path| {
-            let _ = app.emit("local-scan-progress", LocalScanProgress {
-                session_id: session_id.clone(), visited_entries, tracks, skipped,
-                current_path: path.display().to_string(),
-            });
-        })
-    }).await.map_err(|error| AppError::Other(error.to_string()))?
+        scanner::scan_directory_with_control(
+            &dir,
+            name_template.as_deref(),
+            &cancelled,
+            |visited_entries, tracks, skipped, path| {
+                let _ = app.emit(
+                    "local-scan-progress",
+                    LocalScanProgress {
+                        session_id: session_id.clone(),
+                        visited_entries,
+                        tracks,
+                        skipped,
+                        current_path: path.display().to_string(),
+                    },
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))?
 }
 
 #[tauri::command]
 pub fn cancel_local_scan(session_id: String) -> bool {
-    if let Some(cancelled) = scans().lock().unwrap_or_else(|error| error.into_inner()).get(&session_id) {
+    if let Some(cancelled) = scans()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&session_id)
+    {
         cancelled.store(true, Ordering::Release);
         return true;
     }
     false
 }
 
-use crate::library::local_index::{self, LocalLibrarySnapshot};
+use neri_library::library::local_index::{self, LocalLibrarySnapshot};
 
 #[tauri::command]
 pub fn local_library_snapshot(name_template: Option<String>) -> LocalLibrarySnapshot {
@@ -143,7 +170,10 @@ pub fn local_library_snapshot(name_template: Option<String>) -> LocalLibrarySnap
 }
 
 #[tauri::command]
-pub async fn local_library_add_folder(path: String, name_template: Option<String>) -> AppResult<LocalLibrarySnapshot> {
+pub async fn local_library_add_folder(
+    path: String,
+    name_template: Option<String>,
+) -> AppResult<LocalLibrarySnapshot> {
     local_index::set_name_template(name_template);
     tokio::task::spawn_blocking(move || local_index::add_folder(&path))
         .await
@@ -158,7 +188,10 @@ pub async fn local_library_remove_folder(path: String) -> AppResult<LocalLibrary
 }
 
 #[tauri::command]
-pub fn local_library_rescan(full: Option<bool>, name_template: Option<String>) -> LocalLibrarySnapshot {
+pub fn local_library_rescan(
+    full: Option<bool>,
+    name_template: Option<String>,
+) -> LocalLibrarySnapshot {
     local_index::set_name_template(name_template);
     local_index::rescan(full.unwrap_or(false))
 }
@@ -170,25 +203,36 @@ pub fn local_library_cancel_scan() {
 
 #[tauri::command]
 pub async fn get_local_playlist_tracks() -> AppResult<Vec<TrackInfo>> {
-    tokio::task::spawn_blocking(|| crate::library::playlist::load_all_tracks(None))
+    tokio::task::spawn_blocking(|| neri_library::library::playlist::load_all_tracks(None))
         .await
         .map_err(|error| AppError::Other(error.to_string()))?
 }
 
 #[tauri::command]
-pub async fn edit_local_file_tags(app: AppHandle, scan_root: String, file_path: String, title: String, artist: String, album: String) -> AppResult<()> {
+pub async fn edit_local_file_tags(
+    app: AppHandle,
+    scan_root: String,
+    file_path: String,
+    title: String,
+    artist: String,
+    album: String,
+) -> AppResult<()> {
     super::player_cmd::release_player_file(
-        Arc::clone(&app.state::<crate::state::AppState>().player), file_path.clone(),
-    ).await?;
+        Arc::clone(&app.state::<crate::state::AppState>().player),
+        file_path.clone(),
+    )
+    .await?;
     tokio::task::spawn_blocking(move || {
         let root = std::path::Path::new(&scan_root);
         let audio = std::path::Path::new(&file_path);
         super::download_cmd::edit_download_metadata(&app, audio, &title, &artist, &album, || {
-            crate::library::local_file_tags::edit_tags(root, audio, &title, &artist, &album)
+            neri_library::library::local_file_tags::edit_tags(root, audio, &title, &artist, &album)
         })?;
         local_index::update_track_tags(&file_path, &title, &artist, &album);
         Ok(())
-    }).await.map_err(|error| AppError::Other(error.to_string()))?
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))?
 }
 
 #[cfg(test)]
@@ -237,15 +281,35 @@ mod tests {
     #[test]
     fn local_audio_info_missing_file_and_directory_return_errors() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(matches!(read_local_audio_info(&directory.path().join("missing.wav")), Err(AppError::Io(_))));
-        assert!(matches!(read_local_audio_info(directory.path()), Err(AppError::Metadata(_))));
+        assert!(matches!(
+            read_local_audio_info(&directory.path().join("missing.wav")),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            read_local_audio_info(directory.path()),
+            Err(AppError::Metadata(_))
+        ));
     }
 
     #[test]
     fn local_audio_info_omits_missing_properties_and_does_not_guess_mp4_codec() {
         let info = local_audio_info(FileType::Mp4, &FileProperties::default());
-        assert_eq!(serde_json::to_value(info).unwrap(), serde_json::json!({ "format": "mp4" }));
-        let zero = FileProperties::new(std::time::Duration::ZERO, None, Some(0), Some(0), Some(0), Some(0), None);
-        assert_eq!(serde_json::to_value(local_audio_info(FileType::Wav, &zero)).unwrap(), serde_json::json!({ "format": "wav" }));
+        assert_eq!(
+            serde_json::to_value(info).unwrap(),
+            serde_json::json!({ "format": "mp4" })
+        );
+        let zero = FileProperties::new(
+            std::time::Duration::ZERO,
+            None,
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(local_audio_info(FileType::Wav, &zero)).unwrap(),
+            serde_json::json!({ "format": "wav" })
+        );
     }
 }

@@ -176,14 +176,14 @@ export const useLikedSongsStore = defineStore('likedSongs', () => {
           .then((ok) => {
             if (!ok) {
               useToastStore().show(
-                (i18n.global as any).t('player.like_cloud_sync_failed'),
+                i18n.global.t('player.like_cloud_sync_failed'),
                 'info',
               )
             }
           })
           .catch(() => {
             useToastStore().show(
-              (i18n.global as any).t('player.like_cloud_sync_failed'),
+              i18n.global.t('player.like_cloud_sync_failed'),
               'info',
             )
           })

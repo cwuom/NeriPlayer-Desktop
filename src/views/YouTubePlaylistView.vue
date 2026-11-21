@@ -111,7 +111,7 @@ const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCu
 })
 
 // 解析 InnerTube browse 响应, 复用共享解析器统一多端布局
-function parsePlaylistTracks(data: any): TrackInfo[] {
+function parsePlaylistTracks(data: unknown): TrackInfo[] {
   const meta = parseYouTubePlaylistMeta(data)
   if (meta.playlistName) playlistName.value = meta.playlistName
   if (meta.subtitle) subtitle.value = meta.subtitle
@@ -133,7 +133,7 @@ async function loadDetail() {
   })
 
   try {
-    const data = await invoke<any>('get_youtube_playlist_detail', { browseId })
+    const data = await invoke<unknown>('get_youtube_playlist_detail', { browseId })
     cached.markFresh()
     tracks.value = parsePlaylistTracks(data)
     // header 封面偶发缺失时用首曲封面兜底, 避免大图占位空白
@@ -143,9 +143,9 @@ async function loadDetail() {
     }
     saveDetailCache(cacheKey)
     recordOpen(browseId)
-  } catch (e: any) {
+  } catch (e) {
     if (await cached.shown()) recordOpen(browseId)
-    else error.value = e?.toString() || t('player.load_failed')
+    else error.value = String(e ?? '') || t('player.load_failed')
   } finally {
     isLoading.value = false
   }

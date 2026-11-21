@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { useToastStore } from './toast'
-import { useHistoryStore } from './history'
+import { useHistoryStore, type HistorySyncPayload } from './history'
 import { useLyricOffsetStore } from './lyricOffset'
 import { useBiliVideoSkipStore } from './biliVideoSkip'
 import type { BiliVideoSkipRule } from '@/modules/playback/biliVideoSkip'
@@ -10,13 +10,14 @@ import { useSettingsStore } from './settings'
 import { useAuthStore } from './auth'
 import i18n from '@/i18n'
 import { setLocale } from '@/i18n'
+import { asString, dig } from '@/utils/json'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('sync')
 
 // 全局 i18n 翻译（非组件上下文）
-const t = (key: string, params?: Record<string, any>) =>
-  (i18n.global as any).t(key, params)
+const t = (key: string, params?: Record<string, unknown>) =>
+  i18n.global.t(key, params ?? {})
 
 export interface SyncConfig {
   configured: boolean
@@ -33,6 +34,90 @@ export interface ConfigImportOptions {
   filePath?: string
   password?: string
   confirmedAndroid?: boolean
+}
+
+/** 判别联合里其它成员没有的字段标成 undefined，调用方才能直接按字段收窄 */
+type Absent<K extends string> = { [P in K]?: undefined }
+
+/** 用户在文件对话框里取消（Rust 侧 `{ success: false, reason: "cancelled" }`） */
+type ConfigTransferCancelled = { success: false; reason: 'cancelled' }
+
+/** export_config 的返回（commands/sync_cmd/config_file.rs），失败时由 store 附上本地化错误 */
+export type ConfigExportResult =
+  | (Absent<'error'> & { success: true; platform: 'pc'; platformName: string })
+  | (Absent<'error'> & ConfigTransferCancelled)
+  | { success: false; error: string }
+
+/** import_config 的返回：需要密码或 Android 确认时带回已选文件路径，失败时由 store 附上本地化错误 */
+export type ConfigImportResult =
+  | (Absent<'requiresPassword' | 'requiresConfirmation' | 'filePath' | 'error'> & {
+    success: true
+    /** 设置快照，交给 settings.applySnapshot 校验 */
+    settings: unknown
+    listenTogetherUserUuid: string
+    platform: 'pc' | 'android'
+    changedAuthPlatforms?: string[]
+  })
+  | (Absent<'requiresConfirmation' | 'error'> & { success: false; requiresPassword: true; filePath: string })
+  | (Absent<'requiresPassword' | 'error'> & { success: false; requiresConfirmation: true; filePath: string; platform: 'android' })
+  | (Absent<'requiresPassword' | 'requiresConfirmation' | 'filePath' | 'error'> & ConfigTransferCancelled)
+  | (Absent<'requiresPassword' | 'requiresConfirmation' | 'filePath'> & { success: false; error: string })
+
+/** get_github_sync_config 的返回；字段缺省时按未配置处理（兼容旧后端） */
+interface BackendGitHubSyncConfig {
+  configured?: boolean
+  owner?: string
+  repo?: string
+  autoSync?: boolean
+  lastSyncTime?: number
+  dataSaver?: boolean
+  silentFailures?: boolean
+  historyUpdateMode?: string
+}
+
+/** get_webdav_sync_config 的返回 */
+interface BackendWebDavSyncConfig {
+  configured?: boolean
+  serverUrl?: string
+  basePath?: string
+  autoSync?: boolean
+  lastSyncTime?: number
+  historyUpdateMode?: string
+}
+
+/** create_github_repo / use_existing_github_repo / configure_github_sync 的返回 */
+interface BackendGitHubRepo {
+  success: boolean
+  owner: string
+  repo: string
+}
+
+/** sync_github / sync_webdav 的返回（neri_model::sync::SyncResult，camelCase；旧后端为 snake_case） */
+interface BackendSyncResult {
+  success: boolean
+  message: string
+  playlistsAdded?: number
+  playlistsUpdated?: number
+  playlistsDeleted?: number
+  songsAdded?: number
+  songsRemoved?: number
+  playlists_added?: number
+  playlists_updated?: number
+  playlists_deleted?: number
+  songs_added?: number
+  songs_removed?: number
+  history?: HistorySyncPayload
+  lyricOffsets?: Record<string, number>
+  biliVideoSkipRules?: BiliVideoSkipRule[]
+  deferred?: boolean
+}
+
+/** export_playlists / import_playlists 的返回，取消选择文件时 success 为 false */
+interface BackendPlaylistTransfer {
+  success: boolean
+  count?: number
+  imported?: number
+  reason?: string
 }
 
 function configTransferError(error: unknown, fallback: string): string {
@@ -169,7 +254,7 @@ function isWebDavFailure(failure: SyncFailure | null): failure is { code: WebDav
 }
 
 function formatRetryTime(at: number): string {
-  const locale = String((i18n.global as any).locale?.value ?? '') || undefined
+  const locale = String(i18n.global.locale?.value ?? '') || undefined
   return new Date(at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
 }
 
@@ -299,7 +384,7 @@ export const useSyncStore = defineStore('sync', () => {
     const currentPreferenceGeneration = preferenceGeneration
     let legacyFrequency: SyncFrequency | undefined
     try {
-      const gh = await invoke<any>('get_github_sync_config')
+      const gh = await invoke<BackendGitHubSyncConfig>('get_github_sync_config')
       if (isCurrentConfiguration('github', generations.github) && reads.github === configurationReads.github) {
         legacyFrequency = normalizeSyncFrequency(gh.historyUpdateMode)
         applyLoadedConfig(() => {
@@ -322,7 +407,7 @@ export const useSyncStore = defineStore('sync', () => {
     }
 
     try {
-      const wd = await invoke<any>('get_webdav_sync_config')
+      const wd = await invoke<BackendWebDavSyncConfig>('get_webdav_sync_config')
       if (isCurrentConfiguration('webdav', generations.webdav) && reads.webdav === configurationReads.webdav) {
         applyLoadedConfig(() => {
           webdav.value = {
@@ -339,14 +424,14 @@ export const useSyncStore = defineStore('sync', () => {
     }
 
     try {
-      const preferences = await invoke<any>('get_sync_preferences')
+      const preferences = await invoke<{ historyUpdateMode?: string }>('get_sync_preferences')
       if (currentPreferenceRead === preferenceRead && currentPreferenceGeneration === preferenceGeneration) {
         applyLoadedConfig(() => {
           syncFrequency.value = normalizeSyncFrequency(preferences.historyUpdateMode)
           github.value.historyUpdateMode = syncFrequency.value
         })
       }
-    } catch (e) {
+    } catch {
       // 兼容浏览器开发模式和未升级的后端，回退到旧 GitHub 字段
       if (legacyFrequency !== undefined && currentPreferenceRead === preferenceRead
         && currentPreferenceGeneration === preferenceGeneration) {
@@ -421,12 +506,12 @@ export const useSyncStore = defineStore('sync', () => {
   async function validateGitHubToken(token: string): Promise<string | null> {
     const generation = beginConfiguration('github')
     try {
-      const result = await invoke<any>('validate_github_token', { token })
+      const result = await invoke<{ success: boolean; username: string }>('validate_github_token', { token })
       if (!isCurrentConfiguration('github', generation)) return null
       await loadConfigs({ github: generation, webdav: configurationGeneration.webdav })
       if (!isCurrentConfiguration('github', generation)) return null
-      return result.username as string
-    } catch (e: any) {
+      return result.username
+    } catch (e) {
       configurationFailed('github', generation, e, 'Token validation failed')
       return null
     }
@@ -437,7 +522,7 @@ export const useSyncStore = defineStore('sync', () => {
     const started = { ...githubPreferenceRevision }
     const generation = beginConfiguration('github')
     try {
-      const result = await invoke<any>('create_github_repo', { repoName })
+      const result = await invoke<BackendGitHubRepo>('create_github_repo', { repoName })
       if (!isCurrentConfiguration('github', generation)) return false
       clearProtocolUpgrade('github')
       applyLoadedConfig(() => {
@@ -448,7 +533,7 @@ export const useSyncStore = defineStore('sync', () => {
         }
       })
       return true
-    } catch (e: any) {
+    } catch (e) {
       configurationFailed('github', generation, e, 'Failed to create repository')
       return false
     }
@@ -459,7 +544,7 @@ export const useSyncStore = defineStore('sync', () => {
     const started = { ...githubPreferenceRevision }
     const generation = beginConfiguration('github')
     try {
-      const result = await invoke<any>('use_existing_github_repo', { owner, repo })
+      const result = await invoke<BackendGitHubRepo>('use_existing_github_repo', { owner, repo })
       if (!isCurrentConfiguration('github', generation)) return false
       clearProtocolUpgrade('github')
       applyLoadedConfig(() => {
@@ -470,7 +555,7 @@ export const useSyncStore = defineStore('sync', () => {
         }
       })
       return true
-    } catch (e: any) {
+    } catch (e) {
       configurationFailed('github', generation, e, 'Repository not found or inaccessible')
       return false
     }
@@ -481,7 +566,7 @@ export const useSyncStore = defineStore('sync', () => {
     const started = { ...githubPreferenceRevision }
     const generation = beginConfiguration('github')
     try {
-      const result = await invoke<any>('configure_github_sync', { token, repo })
+      const result = await invoke<BackendGitHubRepo>('configure_github_sync', { token, repo })
       if (!isCurrentConfiguration('github', generation)) return false
       clearProtocolUpgrade('github')
       applyLoadedConfig(() => {
@@ -492,7 +577,7 @@ export const useSyncStore = defineStore('sync', () => {
         }
       })
       return true
-    } catch (e: any) {
+    } catch (e) {
       configurationFailed('github', generation, e, 'Failed to configure GitHub sync')
       return false
     }
@@ -509,7 +594,7 @@ export const useSyncStore = defineStore('sync', () => {
     try {
       const historyEpoch = history.syncSnapshotEpoch()
       const historySnapshot = history.getSyncSnapshot()
-      const result = await invoke<any>('sync_github', {
+      const result = await invoke<BackendSyncResult>('sync_github', {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
@@ -542,7 +627,7 @@ export const useSyncStore = defineStore('sync', () => {
         toast.success(t('settings.github_sync_success'))
       }
       await loadConfigs()
-    } catch (e: any) {
+    } catch (e) {
       if (!isCurrentConfiguration('github', generation)) return
       const upgrade = parseSyncProtocolUpgrade(e)
       if (upgrade) {
@@ -612,7 +697,7 @@ export const useSyncStore = defineStore('sync', () => {
         }
       })
       return true
-    } catch (e: any) {
+    } catch (e) {
       configurationFailed('webdav', generation, e, 'Failed to configure WebDAV sync')
       return false
     }
@@ -630,7 +715,7 @@ export const useSyncStore = defineStore('sync', () => {
     try {
       const historyEpoch = history.syncSnapshotEpoch()
       const historySnapshot = history.getSyncSnapshot()
-      const result = await invoke<any>('sync_webdav', {
+      const result = await invoke<BackendSyncResult>('sync_webdav', {
         historyEntries: historySnapshot.entries,
         historyDeletions: historySnapshot.deletions,
       })
@@ -664,7 +749,7 @@ export const useSyncStore = defineStore('sync', () => {
         toast.success(t('settings.webdav_sync_success'))
       }
       await loadConfigs()
-    } catch (e: any) {
+    } catch (e) {
       if (!isCurrentConfiguration('webdav', generation)) return
       const upgrade = parseSyncProtocolUpgrade(e)
       if (upgrade) {
@@ -793,12 +878,12 @@ export const useSyncStore = defineStore('sync', () => {
   async function exportPlaylists() {
     const toast = useToastStore()
     try {
-      const result = await invoke<any>('export_playlists')
+      const result = await invoke<BackendPlaylistTransfer>('export_playlists')
       if (result.success) {
         toast.success(t('settings.export_success', { count: result.count }))
       }
-    } catch (e: any) {
-      toast.error(e?.toString() || t('settings.export_failed'))
+    } catch (e) {
+      toast.error(String(e ?? '') || t('settings.export_failed'))
     }
   }
 
@@ -806,20 +891,20 @@ export const useSyncStore = defineStore('sync', () => {
   async function importPlaylists() {
     const toast = useToastStore()
     try {
-      const result = await invoke<any>('import_playlists')
+      const result = await invoke<BackendPlaylistTransfer>('import_playlists')
       if (result.success) {
         toast.success(t('settings.import_success', { count: result.imported }))
       }
-    } catch (e: any) {
-      toast.error(e?.toString() || t('settings.import_failed'))
+    } catch (e) {
+      toast.error(String(e ?? '') || t('settings.import_failed'))
     }
   }
 
-  async function exportConfig(options: ConfigExportOptions = {}) {
+  async function exportConfig(options: ConfigExportOptions = {}): Promise<ConfigExportResult> {
     const toast = useToastStore()
     const settings = useSettingsStore()
     try {
-      const result = await invoke<any>('export_config', {
+      const result = await invoke<Exclude<ConfigExportResult, { error: string }>>('export_config', {
         settings: settings.snapshot(),
         listenTogetherUserUuid: localStorage.getItem('neri:lt-uuid') || '',
         password: options.password,
@@ -829,20 +914,20 @@ export const useSyncStore = defineStore('sync', () => {
         toast.success(t('settings.export_config_success'))
       }
       return result
-    } catch (e: any) {
+    } catch (e) {
       const error = configTransferError(e, 'settings.export_config_failed')
       toast.error(error)
       return { success: false, error }
     }
   }
 
-  async function importConfig(options: ConfigImportOptions = {}) {
+  async function importConfig(options: ConfigImportOptions = {}): Promise<ConfigImportResult> {
     const generations = { ...configurationGeneration }
     const toast = useToastStore()
     const settings = useSettingsStore()
     const auth = useAuthStore()
     try {
-      const result = await invoke<any>('import_config', { ...options })
+      const result = await invoke<Exclude<ConfigImportResult, { error: string }>>('import_config', { ...options })
       if (!result.success) return result
       // 预检不取消配置请求，等待期间的新配置也不能被旧导入覆盖
       for (const backend of ['github', 'webdav'] as const) {
@@ -856,13 +941,14 @@ export const useSyncStore = defineStore('sync', () => {
       } else {
         localStorage.removeItem('neri:lt-uuid')
       }
-      if (result.settings?.locale) setLocale(result.settings.locale, false)
+      const locale = asString(dig(result.settings, 'locale'))
+      if (locale) setLocale(locale, false)
       await auth.checkStatus({ invalidatePending: result.changedAuthPlatforms ?? [] })
       for (const platform of ['netease', 'bilibili', 'youtube']) auth.notifyAuthChanged(platform)
       await loadConfigs(generations)
       toast.success(t('settings.import_config_success'))
       return result
-    } catch (e: any) {
+    } catch (e) {
       const error = configTransferError(e, 'settings.import_config_failed')
       toast.error(error)
       return { success: false, error }

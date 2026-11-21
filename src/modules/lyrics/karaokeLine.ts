@@ -2,7 +2,7 @@
  * KaraokeLine - DOM 逐字渲染
  */
 
-import type { LyricWord } from '@/stores/player'
+import type { LyricWord } from '@/types/track'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('karaoke-line')

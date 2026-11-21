@@ -9,8 +9,11 @@ const compiled = ts.transpileModule(source, {
 
 function loadModule(invoke) {
   const exports = {}
+  // userData 通过作用域 logger 报告降级；桩与真实 logger 一样写到 console
+  const logger = { createLogger: () => ({ warn: (...args) => console.warn(...args) }) }
   new Function('require', 'exports', compiled)((name) => {
     if (name === '@tauri-apps/api/core') return { invoke }
+    if (name === '@/utils/logger') return logger
     throw new Error(`Unexpected dependency: ${name}`)
   }, exports)
   return exports
@@ -25,12 +28,14 @@ function memoryStorage(entries = {}) {
   }
 }
 
-const emptySnapshot = (migrated) => ({
-  playbackState: null,
-  history: { entries: [], deletions: [] },
-  lyricOffsets: {},
-  migrated,
-})
+function emptySnapshot(migrated) {
+  return {
+    playbackState: null,
+    history: { entries: [], deletions: [] },
+    lyricOffsets: {},
+    migrated,
+  }
+}
 
 {
   const { normalizeLegacyPlaybackState } = loadModule(async () => undefined)

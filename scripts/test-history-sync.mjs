@@ -27,6 +27,7 @@ const userData = {
 }
 const biliVideoSkip = await loadModule('../src/modules/playback/biliVideoSkip.ts')
 const coverCache = await loadModule('../src/utils/bilibiliCoverCache.ts')
+const json = await loadModule('../src/utils/json.ts')
 const logger = { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }
 const biliVideoParts = await loadModule('../src/modules/playback/biliVideoParts.ts', name => {
   if (name.endsWith('biliVideoSkip')) return biliVideoSkip
@@ -43,6 +44,7 @@ const exports = await loadModule('../src/stores/history.ts', name => {
   if (name === '@/modules/persistence/userData') return userData
   if (name === '@/modules/playback/biliVideoParts') return biliVideoParts
   if (name === '@/utils/bilibiliCoverCache') return coverCache
+  if (name === '@/utils/json') return json
   if (name === '@/utils/logger') return logger
   throw new Error(`Unexpected history dependency: ${name}`)
 })
@@ -61,7 +63,7 @@ if (!globalThis.CustomEvent) {
     constructor(type, options) { super(type); this.detail = options.detail }
   }
 }
-window.addEventListener(exports.HISTORY_CHANGED_EVENT, event => events.push(event.detail.type))
+globalThis.window.addEventListener(exports.HISTORY_CHANGED_EVENT, event => events.push(event.detail.type))
 Date.now = () => now
 
 const digestQueue = []

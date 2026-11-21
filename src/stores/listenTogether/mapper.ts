@@ -6,6 +6,7 @@ import type { TrackInfo } from '@/stores/player'
 import { LtChannels, type ListenTogetherTrack } from './protocol'
 import { setLtQueueReference } from './queue'
 import { orderLtStreamUrlsForPreference } from './streamQuality'
+import { trustedInboundStreamUrls } from '@/modules/playback/streamTrust'
 
 type PayloadRecord = Record<string, unknown>
 
@@ -75,60 +76,6 @@ function sanitizeOutboundMediaUri(mediaUri?: string): string | undefined {
     return undefined
   }
   return v
-}
-
-// 入站 streamUrl 白名单：除 http(s) 外还要匹配曲目来源的 CDN 域名，
-// 否则任意房间成员都能把第三方 URL 伪装成音频直链投递到播放器
-export function isTrustedInboundStreamUrl(url?: string, channelId?: string): boolean {
-  if (!url) return false
-  const v = url.trim()
-  if (!v) return false
-  let parsed: URL
-  try {
-    parsed = new URL(v)
-  } catch {
-    return false
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
-  const host = parsed.hostname.toLowerCase()
-  if (!host) return false
-  switch (channelId) {
-    case LtChannels.NETEASE:
-      return host === 'music.126.net' || host.endsWith('.music.126.net')
-    case LtChannels.BILIBILI:
-      return host === 'bilivideo.com'
-        || host.endsWith('.bilivideo.com')
-        || host === 'bilivideo.cn'
-        || host.endsWith('.bilivideo.cn')
-        || host === 'hdslb.com'
-        || host.endsWith('.hdslb.com')
-        || host === 'mountaintoys.cn'
-        || host.endsWith('.mountaintoys.cn')
-    case LtChannels.YOUTUBE_MUSIC:
-      return host === 'googlevideo.com'
-        || host.endsWith('.googlevideo.com')
-        || host === 'youtube.com'
-        || host.endsWith('.youtube.com')
-        || host === 'youtube-nocookie.com'
-        || host.endsWith('.youtube-nocookie.com')
-    default:
-      return false
-  }
-}
-
-export function trustedInboundStreamUrls(
-  channelId: string,
-  streamUrls?: readonly string[] | null,
-  legacyStreamUrl?: string | null,
-): string[] {
-  const limit = channelId === LtChannels.BILIBILI ? 2
-    : channelId === LtChannels.YOUTUBE_MUSIC ? 1 : 3
-  const candidates = [...(streamUrls || []), legacyStreamUrl]
-  const trusted = candidates
-    .filter((url): url is string => typeof url === 'string')
-    .map(url => url.trim())
-    .filter(url => isTrustedInboundStreamUrl(url, channelId))
-  return [...new Set(trusted)].slice(0, limit)
 }
 
 /**

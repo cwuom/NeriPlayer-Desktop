@@ -1,4 +1,4 @@
-import type { TrackInfo } from '@/stores/player'
+import type { TrackInfo } from '@/types/track'
 import { createLogger } from '@/utils/logger'
 import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid } from './biliVideoSkip'
 export { resolveBiliVideoSkipCid as resolveBiliPartCid } from './biliVideoSkip'

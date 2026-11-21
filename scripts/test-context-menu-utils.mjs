@@ -17,7 +17,7 @@ function evaluate(source, dependencies = {}, context = {}) {
   return exports
 }
 
-const localTrack = evaluate(await readFile(new URL('utils/localTrack.ts', root), 'utf8'))
+const localTrack = evaluate(await readFile(new URL('modules/library/localTrack.ts', root), 'utf8'))
 const volume = evaluate(await readFile(new URL('utils/volume.ts', root), 'utf8'))
 const contextMenu = evaluate(await readFile(new URL('utils/contextMenu.ts', root), 'utf8'))
 const biliVideoSkip = evaluate(await readFile(new URL('modules/playback/biliVideoSkip.ts', root), 'utf8'))
@@ -59,7 +59,7 @@ function menuRuntime(native, { nativeError = false, browserError = false } = {})
     }) },
     '@/utils/contextMenu': contextMenu,
     '@/modules/playback/biliVideoSkip': biliVideoSkip,
-    '@/utils/localTrack': localTrack,
+    '@/modules/library/localTrack': localTrack,
     '@/utils/clipboard': clipboard,
     '@/utils/logger': { createLogger: () => ({ warn() {} }) },
   }

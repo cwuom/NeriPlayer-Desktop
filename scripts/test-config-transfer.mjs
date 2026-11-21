@@ -16,6 +16,10 @@ globalThis.localStorage = {
   setItem: (key, value) => storage.set(key, value),
   removeItem: key => storage.delete(key),
 }
+const jsonUtil = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/utils/json.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(jsonUtil)
 const mocks = {
   vue, pinia,
   '@tauri-apps/api/core': { invoke: async (command, args) => {
@@ -34,6 +38,7 @@ const mocks = {
   './settings': { useSettingsStore: () => ({ snapshot: () => ({ locale: 'en' }), applySnapshot: value => applied.push(value) }) },
   './auth': { useAuthStore: () => ({ checkStatus: async options => { accountChecks.push(options); accountChanges.push('check') }, notifyAuthChanged: platform => accountChanges.push(platform) }) },
   '@/i18n': { __esModule: true, default: { global: { t: key => key } }, setLocale() {} },
+  '@/utils/json': jsonUtil,
   '@/utils/logger': { createLogger: () => ({ error() {} }) },
 }
 const source = await readFile(new URL('../src/stores/sync.ts', import.meta.url), 'utf8')

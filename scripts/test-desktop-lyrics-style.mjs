@@ -124,7 +124,7 @@ async function karaokeRuntime(line, boxWidth, padding, align = 'center', options
   const scope = vue.effectScope()
   const actual = scope.run(() => new Function(...Object.keys(dependencies), `${compiled}\nreturn { container, fit, base, outline, fill, measure, update }`)(...Object.values(dependencies)))
   const classes = new Set()
-  actual.container.value = { clientWidth: boxWidth, classList: { toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name) } } }
+  actual.container.value = { clientWidth: boxWidth, classList: { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name) } } }
   actual.fit.value = { style: {} }
   actual.base.value = { offsetWidth: 600, children: [], style: {} }
   actual.outline.value = { style: {} }

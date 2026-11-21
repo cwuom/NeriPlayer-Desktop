@@ -33,17 +33,24 @@ async function loadMapperModule() {
     compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
   }).outputText
   const streamQualityUrl = `data:text/javascript;base64,${Buffer.from(streamQualityCompiled).toString('base64')}`
+  const streamTrustCompiled = ts.transpileModule(await readFile(path.join(root, 'src/modules/playback/streamTrust.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const streamTrustUrl = `data:text/javascript;base64,${Buffer.from(streamTrustCompiled).toString('base64')}`
   const compiled = ts.transpileModule(mapperSource.replace(
     "from './protocol'", `from '${protocolUrl}'`,
   ).replace("from './queue'", `from '${queueUrl}'`)
-    .replace("from './streamQuality'", `from '${streamQualityUrl}'`), {
+    .replace("from './streamQuality'", `from '${streamQualityUrl}'`)
+    .replace("from '@/modules/playback/streamTrust'", `from '${streamTrustUrl}'`), {
     compilerOptions: {
       module: ts.ModuleKind.ES2022,
       target: ts.ScriptTarget.ES2022,
     },
   }).outputText
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
-  return { ...await import(moduleUrl), ...await import(queueUrl), ...await import(streamQualityUrl) }
+  return {
+    ...await import(moduleUrl), ...await import(queueUrl), ...await import(streamQualityUrl), ...await import(streamTrustUrl),
+  }
 }
 
 async function loadProtocolModule() {

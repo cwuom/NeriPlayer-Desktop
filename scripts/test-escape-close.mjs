@@ -88,7 +88,7 @@ await nextTick()
 // KeepAlive 停用的页面不可见：其弹层让出栈顶，重新激活后恢复
 const pageOpen = ref(false)
 const Page = overlay('Page', pageOpen)
-const Other = defineComponent({ name: 'Other', setup: () => () => h('div') })
+const Other = defineComponent({ name: 'OtherPage', setup: () => () => h('div') })
 const showPage = ref(true)
 const cached = renderer.createApp({
   setup: () => () => h(KeepAlive, null, [showPage.value ? h(Page) : h(Other)]),

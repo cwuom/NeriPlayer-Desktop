@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
-use crate::error::{AppError, AppResult};
-use crate::audio::dsp_settings::{AudioEffectsSettings, ParametricEqBand};
+use neri_common::error::{AppError, AppResult};
+use neri_playback::dsp_settings::{AudioEffectsSettings, ParametricEqBand};
 
 pub const SETTINGS_FORMAT_VERSION: u32 = 1;
 pub const SETTINGS_STORE_FILE: &str = "settings.json";
@@ -36,12 +36,14 @@ mod bili_subtitle_settings_tests {
         let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
             "biliCcSubtitleEnabled": false, "biliCcSubtitleAiFallback": false,
             "biliCcSubtitleLanguage": " ai-zh ", "biliCcSubtitleOffset": -75
-        })).unwrap();
+        }))
+        .unwrap();
         settings.normalize();
         assert_eq!(settings.bili_cc_subtitle_language, "ai-zh");
         assert_eq!(settings.bili_cc_subtitle_offset, -50);
         assert_eq!(settings.cloud_music_offset, defaults.cloud_music_offset);
-        let restored: AppSettings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        let restored: AppSettings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
         assert_eq!(restored, settings);
         settings.bili_cc_subtitle_language = "invalid language".into();
         settings.bili_cc_subtitle_offset = 9000;
@@ -222,7 +224,10 @@ const MAX_DESKTOP_LYRICS_STYLE_BYTES: usize = 16 * 1024;
 const MAX_SHORTCUT_BINDINGS_BYTES: usize = 8 * 1024;
 
 fn legacy_audio_effects_settings() -> AudioEffectsSettings {
-    AudioEffectsSettings { version: 0, ..AudioEffectsSettings::default() }
+    AudioEffectsSettings {
+        version: 0,
+        ..AudioEffectsSettings::default()
+    }
 }
 
 fn deserialize_ui_scale<'de, D>(deserializer: D) -> Result<i32, D::Error>
@@ -230,7 +235,9 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(normalize_ui_scale(value.as_f64().unwrap_or(f64::from(UI_SCALE_DEFAULT))))
+    Ok(normalize_ui_scale(
+        value.as_f64().unwrap_or(f64::from(UI_SCALE_DEFAULT)),
+    ))
 }
 
 fn normalize_ui_scale(value: f64) -> i32 {
@@ -247,7 +254,11 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     let scale = value.as_f64().unwrap_or(1.0);
-    Ok(if scale.is_finite() { scale.clamp(0.5, 2.0) as f32 } else { 1.0 })
+    Ok(if scale.is_finite() {
+        scale.clamp(0.5, 2.0) as f32
+    } else {
+        1.0
+    })
 }
 
 /// 前端数字输入可能带小数：整数字段四舍五入接收，单个字段不能让整份设置被拒绝
@@ -401,20 +412,12 @@ impl AppSettings {
     /// Normalize persisted preferences to the current format, supported choices and numeric bounds.
     pub fn normalize(&mut self) {
         self.format_version = SETTINGS_FORMAT_VERSION;
-        self.dark_mode = normalize_choice(
-            &self.dark_mode,
-            &["system", "dark", "light"],
-            "dark",
-        );
+        self.dark_mode = normalize_choice(&self.dark_mode, &["system", "dark", "light"], "dark");
         self.theme_color = normalize_theme_color(&self.theme_color);
         self.ui_scale = normalize_ui_scale(f64::from(self.ui_scale));
         self.app_font_family = normalize_font_family(&self.app_font_family);
         self.lyric_font_family = normalize_font_family(&self.lyric_font_family);
-        self.locale = normalize_choice(
-            &self.locale,
-            &["zh-CN", "zh-TW", "en", "ja"],
-            "zh-CN",
-        );
+        self.locale = normalize_choice(&self.locale, &["zh-CN", "zh-TW", "en", "ja"], "zh-CN");
         self.default_screen = normalize_choice(
             &self.default_screen,
             &["home", "explore", "library"],
@@ -423,12 +426,21 @@ impl AppSettings {
         self.cover_style = normalize_choice(&self.cover_style, &["disc", "card"], "card");
         self.local_library_sort_by = normalize_choice(
             &self.local_library_sort_by,
-            &["default", "modified", "title", "artist", "album", "duration"],
+            &[
+                "default", "modified", "title", "artist", "album", "duration",
+            ],
             "default",
         );
         self.default_lyric_source = normalize_choice(
             &self.default_lyric_source,
-            &["automatic", "cloud_music", "kugou", "qq_music", "lrclib", "amll_ttml"],
+            &[
+                "automatic",
+                "cloud_music",
+                "kugou",
+                "qq_music",
+                "lrclib",
+                "amll_ttml",
+            ],
             "automatic",
         );
 
@@ -462,8 +474,14 @@ impl AppSettings {
         }
         let language = self.bili_cc_subtitle_language.trim();
         self.bili_cc_subtitle_language = if language.len() <= 32
-            && language.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        { language.to_owned() } else { String::new() };
+            && language
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            language.to_owned()
+        } else {
+            String::new()
+        };
         self.cover_blur_amount = clamp_f32(self.cover_blur_amount, 0.0, 8.0, 1.5);
         self.cover_blur_darken = clamp_f32(self.cover_blur_darken, 0.0, 1.0, 0.2);
         self.background_image_blur = clamp_f32(self.background_image_blur, 0.0, 100.0, 20.0);
@@ -479,14 +497,18 @@ impl AppSettings {
             .clamp(MIN_DOWNLOAD_PARALLELISM, MAX_DOWNLOAD_PARALLELISM);
         self.volume = clamp_f32(self.volume, 0.0, 1.0, 1.0);
         self.playback_speed = (clamp_f32(self.playback_speed, 0.1, 4.0, 1.0) * 20.0).round() / 20.0;
-        self.playback_pitch = (clamp_f32(self.playback_pitch, 0.25, 2.0, 1.0) * 20.0).round() / 20.0;
+        self.playback_pitch =
+            (clamp_f32(self.playback_pitch, 0.25, 2.0, 1.0) * 20.0).round() / 20.0;
         self.loudness_gain_mb = self.loudness_gain_mb.clamp(0, 1_500);
-        self.volume_balance = (clamp_f32(self.volume_balance, -1.0, 1.0, 0.0) * 100.0).round() / 100.0;
-        let style_bytes = serde_json::to_vec(&self.desktop_lyrics).map_or(usize::MAX, |bytes| bytes.len());
+        self.volume_balance =
+            (clamp_f32(self.volume_balance, -1.0, 1.0, 0.0) * 100.0).round() / 100.0;
+        let style_bytes =
+            serde_json::to_vec(&self.desktop_lyrics).map_or(usize::MAX, |bytes| bytes.len());
         if !self.desktop_lyrics.is_object() || style_bytes > MAX_DESKTOP_LYRICS_STYLE_BYTES {
             self.desktop_lyrics = serde_json::Value::Object(serde_json::Map::new());
         }
-        let bindings_bytes = serde_json::to_vec(&self.shortcut_bindings).map_or(usize::MAX, |bytes| bytes.len());
+        let bindings_bytes =
+            serde_json::to_vec(&self.shortcut_bindings).map_or(usize::MAX, |bytes| bytes.len());
         if !self.shortcut_bindings.is_object() || bindings_bytes > MAX_SHORTCUT_BINDINGS_BYTES {
             self.shortcut_bindings = serde_json::Value::Object(serde_json::Map::new());
         }
@@ -497,14 +519,7 @@ impl AppSettings {
         self.netease_quality = normalize_choice(
             &self.netease_quality,
             &[
-                "standard",
-                "higher",
-                "exhigh",
-                "lossless",
-                "hires",
-                "jyeffect",
-                "sky",
-                "jymaster",
+                "standard", "higher", "exhigh", "lossless", "hires", "jyeffect", "sky", "jymaster",
             ],
             "exhigh",
         );
@@ -531,14 +546,7 @@ impl AppSettings {
         self.download_netease_quality = normalize_choice(
             &self.download_netease_quality,
             &[
-                "standard",
-                "higher",
-                "exhigh",
-                "lossless",
-                "hires",
-                "jyeffect",
-                "sky",
-                "jymaster",
+                "standard", "higher", "exhigh", "lossless", "hires", "jyeffect", "sky", "jymaster",
             ],
             "exhigh",
         );
@@ -569,18 +577,13 @@ impl AppSettings {
         if self.dynamic_color && (self.color_mode.is_empty() || self.color_mode == "default") {
             self.color_mode = "cover".into();
         }
-        self.color_mode = normalize_choice(
-            &self.color_mode,
-            &["system", "default", "cover"],
-            "cover",
-        );
+        self.color_mode =
+            normalize_choice(&self.color_mode, &["system", "default", "cover"], "cover");
         self.dynamic_color = false;
 
         self.background_image_uri = self.background_image_uri.trim().into();
-        self.download_name_template = non_empty_or_default(
-            &self.download_name_template,
-            DEFAULT_DOWNLOAD_NAME_TEMPLATE,
-        );
+        self.download_name_template =
+            non_empty_or_default(&self.download_name_template, DEFAULT_DOWNLOAD_NAME_TEMPLATE);
         self.download_dir = self.download_dir.trim().into();
         self.audio_output_device = self.audio_output_device.trim().into();
         self.lt_server_url = self.lt_server_url.trim().trim_end_matches('/').into();
@@ -599,10 +602,15 @@ impl AppSettings {
             self.audio_effects.main.preset_id = "custom".into();
             self.audio_effects.main.sound.parametric_enabled = true;
             self.audio_effects.main.sound.parametric_bands = [60.0, 230.0, 910.0, 3600.0, 14000.0]
-                .into_iter().zip(&self.equalizer_bands).map(|(frequency_hz, level)| ParametricEqBand {
-                    frequency_hz, gain_db: (*level - headroom) as f32 / 100.0, q: 1.0,
+                .into_iter()
+                .zip(&self.equalizer_bands)
+                .map(|(frequency_hz, level)| ParametricEqBand {
+                    frequency_hz,
+                    gain_db: (*level - headroom) as f32 / 100.0,
+                    q: 1.0,
                     ..ParametricEqBand::default()
-                }).collect();
+                })
+                .collect();
             self.audio_effects.auto_headroom = false;
         }
         self.equalizer_enabled = false;
@@ -627,7 +635,10 @@ fn migrate_audio_display_settings(value: &mut serde_json::Value) -> bool {
         ("showAudioBitDepth", "showAudioSpec"),
     ] {
         if !settings.contains_key(key) {
-            if let Some(enabled) = settings.get(legacy_key).and_then(serde_json::Value::as_bool) {
+            if let Some(enabled) = settings
+                .get(legacy_key)
+                .and_then(serde_json::Value::as_bool)
+            {
                 settings.insert(key.into(), serde_json::Value::Bool(enabled));
                 migrated = true;
             }
@@ -746,9 +757,7 @@ fn normalize_choice(value: &str, allowed: &[&str], fallback: &str) -> String {
 fn normalize_theme_color(value: &str) -> String {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green" => {
-            normalized
-        }
+        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green" => normalized,
         "#6750a4" => "purple".into(),
         _ => "purple".into(),
     }
@@ -831,12 +840,15 @@ mod tests {
 
     #[test]
     fn library_interaction_preferences_survive_json_round_trip() {
-        for sort_by in ["default", "modified", "title", "artist", "album", "duration"] {
+        for sort_by in [
+            "default", "modified", "title", "artist", "album", "duration",
+        ] {
             let settings: super::AppSettings = serde_json::from_value(serde_json::json!({
                 "doubleClickPlay": true,
                 "localLibrarySortBy": sort_by,
                 "localLibrarySortDescending": true,
-            })).unwrap();
+            }))
+            .unwrap();
             let serialized = serde_json::to_value(settings.normalized()).unwrap();
             assert_eq!(serialized["doubleClickPlay"], true);
             assert_eq!(serialized["localLibrarySortBy"], sort_by);
@@ -854,7 +866,8 @@ mod tests {
             "doubleClickPlay": true,
             "localLibrarySortBy": "unsupported",
             "localLibrarySortDescending": true,
-        })).unwrap();
+        }))
+        .unwrap();
         let normalized = settings.normalized();
         assert_eq!(normalized.local_library_sort_by, "default");
         assert!(normalized.double_click_play);
@@ -865,7 +878,12 @@ mod tests {
     fn audio_effects_defaults_are_exported_as_typed_settings() {
         let value = serde_json::to_value(super::AppSettings::default()).unwrap();
         assert_eq!(value["audioEffects"]["version"], 2);
-        assert_eq!(value["audioEffects"]["main"]["sound"]["equalizerBandsDb"].as_array().map(Vec::len), Some(10));
+        assert_eq!(
+            value["audioEffects"]["main"]["sound"]["equalizerBandsDb"]
+                .as_array()
+                .map(Vec::len),
+            Some(10)
+        );
         assert_eq!(value["vinylEffectEnabled"], false);
     }
 
@@ -873,29 +891,56 @@ mod tests {
     fn legacy_five_band_settings_migrate_once_without_double_equalization() {
         let mut settings: super::AppSettings = serde_json::from_value(serde_json::json!({
             "equalizerEnabled": true, "equalizerBands": [600, 0, -300, 300, 100],
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(settings.audio_effects.version, 0);
         settings.normalize();
         assert!(!settings.equalizer_enabled);
         assert!(settings.audio_effects.main.enabled);
         assert!(!settings.audio_effects.auto_headroom);
         let bands = &settings.audio_effects.main.sound.parametric_bands;
-        assert_eq!(bands.iter().map(|band| band.frequency_hz).collect::<Vec<_>>(), vec![60.0, 230.0, 910.0, 3600.0, 14000.0]);
-        assert_eq!(bands.iter().map(|band| band.gain_db).collect::<Vec<_>>(), vec![0.0, -6.0, -9.0, -3.0, -5.0]);
+        assert_eq!(
+            bands
+                .iter()
+                .map(|band| band.frequency_hz)
+                .collect::<Vec<_>>(),
+            vec![60.0, 230.0, 910.0, 3600.0, 14000.0]
+        );
+        assert_eq!(
+            bands.iter().map(|band| band.gain_db).collect::<Vec<_>>(),
+            vec![0.0, -6.0, -9.0, -3.0, -5.0]
+        );
         settings.audio_effects.main.enabled = false;
         settings.equalizer_enabled = true;
         settings.normalize();
-        assert!(!settings.audio_effects.main.enabled, "新版保存后不能因legacy字段重新开启");
-        assert!(!settings.equalizer_enabled, "新版配置必须禁用旧均衡器以避免叠加");
+        assert!(
+            !settings.audio_effects.main.enabled,
+            "新版保存后不能因legacy字段重新开启"
+        );
+        assert!(
+            !settings.equalizer_enabled,
+            "新版配置必须禁用旧均衡器以避免叠加"
+        );
     }
 
     #[test]
     fn legacy_extreme_bands_keep_the_full_thirty_db_attenuation() {
         let mut settings: super::AppSettings = serde_json::from_value(serde_json::json!({
             "equalizerEnabled": true, "equalizerBands": [1500, -1500, 0, 1500, -1500],
-        })).unwrap();
+        }))
+        .unwrap();
         settings.normalize();
-        assert_eq!(settings.audio_effects.main.sound.parametric_bands.iter().map(|band| band.gain_db).collect::<Vec<_>>(), vec![0.0, -30.0, -15.0, 0.0, -30.0]);
+        assert_eq!(
+            settings
+                .audio_effects
+                .main
+                .sound
+                .parametric_bands
+                .iter()
+                .map(|band| band.gain_db)
+                .collect::<Vec<_>>(),
+            vec![0.0, -30.0, -15.0, 0.0, -30.0]
+        );
         assert!(!settings.equalizer_enabled && !settings.audio_effects.auto_headroom);
     }
     #[test]
@@ -910,7 +955,8 @@ mod tests {
         ] {
             let settings: AppSettings = serde_json::from_value(serde_json::json!({
                 "playbackSpeed": speed, "playbackPitch": pitch,
-            })).unwrap();
+            }))
+            .unwrap();
             let value = serde_json::to_value(settings.normalized()).unwrap();
             assert!((value["playbackSpeed"].as_f64().unwrap() - expected_speed).abs() < 1e-5);
             assert!((value["playbackPitch"].as_f64().unwrap() - expected_pitch).abs() < 1e-5);
@@ -959,7 +1005,13 @@ mod tests {
         assert!(settings.show_audio_sample_rate);
         assert!(!settings.show_audio_bit_depth);
         let serialized = serde_json::to_value(settings).expect("serialized settings");
-        for key in ["showAudioBitrate", "showAudioFormat", "showAudioChannels", "showAudioSampleRate", "showAudioBitDepth"] {
+        for key in [
+            "showAudioBitrate",
+            "showAudioFormat",
+            "showAudioChannels",
+            "showAudioSampleRate",
+            "showAudioBitDepth",
+        ] {
             assert_eq!(serialized[key], value[key]);
         }
     }
@@ -1021,7 +1073,8 @@ mod tests {
         assert_eq!(json["downloadBiliQuality"], "hires");
         assert_eq!(json["downloadNameTemplate"], "{artist} - {title}");
         assert_eq!(json["downloadDir"], "E:\\Music");
-        let restored: AppSettings = serde_json::from_value(json.clone()).expect("restored settings");
+        let restored: AppSettings =
+            serde_json::from_value(json.clone()).expect("restored settings");
         assert_eq!(serde_json::to_value(restored).expect("restored JSON"), json);
         let mut settings = AppSettings {
             download_parallelism: 0,
@@ -1061,8 +1114,14 @@ mod tests {
         let old: AppSettings = serde_json::from_str("{}").expect("old settings");
         assert_eq!(old.lyric_translation_scale, 1.0);
         for (value, expected) in [
-            (-1.0, 0.5), (0.5, 0.5), (1.25, 1.25), (2.0, 2.0), (3.0, 2.0),
-            (f32::NAN, 1.0), (f32::INFINITY, 1.0), (f32::NEG_INFINITY, 1.0),
+            (-1.0, 0.5),
+            (0.5, 0.5),
+            (1.25, 1.25),
+            (2.0, 2.0),
+            (3.0, 2.0),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+            (f32::NEG_INFINITY, 1.0),
         ] {
             let mut settings = AppSettings {
                 lyric_translation_scale: value,
@@ -1080,12 +1139,16 @@ mod tests {
     #[test]
     fn lyric_translation_scale_bad_types_keep_other_settings() {
         for value in [
-            serde_json::json!("1.5"), serde_json::Value::Null,
-            serde_json::json!(true), serde_json::json!([]), serde_json::json!({}),
+            serde_json::json!("1.5"),
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!([]),
+            serde_json::json!({}),
         ] {
             let settings: AppSettings = serde_json::from_value(serde_json::json!({
                 "lyricTranslationScale": value, "lyricFontScale": 1.25, "locale": "ja",
-            })).expect("invalid translation scale must not discard the settings payload");
+            }))
+            .expect("invalid translation scale must not discard the settings payload");
             assert_eq!(settings.lyric_translation_scale, 1.0);
             assert_eq!(settings.lyric_font_scale, 1.25);
             assert_eq!(settings.locale, "ja");
@@ -1099,18 +1162,33 @@ mod tests {
             #[serde(deserialize_with = "super::deserialize_app_settings")]
             settings: AppSettings,
         }
-        for (value, expected) in [(-1.0, 0.5), (0.5, 0.5), (1.25, 1.25), (2.0, 2.0), (3.0, 2.0)] {
+        for (value, expected) in [
+            (-1.0, 0.5),
+            (0.5, 0.5),
+            (1.25, 1.25),
+            (2.0, 2.0),
+            (3.0, 2.0),
+        ] {
             let config: Config = serde_json::from_value(serde_json::json!({
                 "settings": { "lyricTranslationScale": value, "lyricFontScale": 1.25 },
-            })).expect("translation scale config");
+            }))
+            .expect("translation scale config");
             let settings = config.settings.normalized();
             assert_eq!(settings.lyric_translation_scale, expected);
             let saved = serde_json::to_value(&settings).expect("saved settings");
-            let restored: AppSettings = serde_json::from_value(saved.clone()).expect("restored settings");
-            assert_eq!(serde_json::to_value(restored.normalized()).expect("restored JSON"), saved);
+            let restored: AppSettings =
+                serde_json::from_value(saved.clone()).expect("restored settings");
+            assert_eq!(
+                serde_json::to_value(restored.normalized()).expect("restored JSON"),
+                saved
+            );
             let exported = serde_json::to_value(Config { settings }).expect("exported config");
-            let imported: Config = serde_json::from_value(exported.clone()).expect("imported config");
-            assert_eq!(serde_json::to_value(imported).expect("imported JSON"), exported);
+            let imported: Config =
+                serde_json::from_value(exported.clone()).expect("imported config");
+            assert_eq!(
+                serde_json::to_value(imported).expect("imported JSON"),
+                exported
+            );
         }
     }
 
@@ -1119,22 +1197,50 @@ mod tests {
         let old: AppSettings = serde_json::from_str("{}").expect("old settings");
         assert_eq!(old.ui_scale, 100);
         for (value, expected) in [
-            (-f64::MAX, 25), (-1.0, 25), (0.0, 25), (24.9, 25), (25.0, 25),
-            (27.49, 25), (27.5, 30), (74.9, 75), (75.0, 75),
-            (77.49, 75), (77.5, 80), (100.0, 100), (122.49, 120), (122.5, 125),
-            (127.4, 125), (127.5, 130), (197.49, 195), (197.5, 200),
-            (200.0, 200), (200.1, 200), (202.5, 205), (997.49, 995), (997.5, 1000),
-            (1000.0, 1000), (1000.1, 1000), (f64::MAX, 1000),
-            (f64::NAN, 100), (f64::INFINITY, 100), (f64::NEG_INFINITY, 100),
+            (-f64::MAX, 25),
+            (-1.0, 25),
+            (0.0, 25),
+            (24.9, 25),
+            (25.0, 25),
+            (27.49, 25),
+            (27.5, 30),
+            (74.9, 75),
+            (75.0, 75),
+            (77.49, 75),
+            (77.5, 80),
+            (100.0, 100),
+            (122.49, 120),
+            (122.5, 125),
+            (127.4, 125),
+            (127.5, 130),
+            (197.49, 195),
+            (197.5, 200),
+            (200.0, 200),
+            (200.1, 200),
+            (202.5, 205),
+            (997.49, 995),
+            (997.5, 1000),
+            (1000.0, 1000),
+            (1000.1, 1000),
+            (f64::MAX, 1000),
+            (f64::NAN, 100),
+            (f64::INFINITY, 100),
+            (f64::NEG_INFINITY, 100),
         ] {
             assert_eq!(super::normalize_ui_scale(value), expected, "{value}");
         }
         for value in (25..=1000).step_by(5) {
-            let mut settings = AppSettings { ui_scale: value, ..AppSettings::default() };
+            let mut settings = AppSettings {
+                ui_scale: value,
+                ..AppSettings::default()
+            };
             settings.normalize();
             assert_eq!(settings.ui_scale, value);
         }
-        let mut settings = AppSettings { ui_scale: 127, ..AppSettings::default() };
+        let mut settings = AppSettings {
+            ui_scale: 127,
+            ..AppSettings::default()
+        };
         settings.normalize();
         assert_eq!(settings.ui_scale, 125);
     }
@@ -1142,13 +1248,19 @@ mod tests {
     #[test]
     fn ui_scale_deserialization_recovers_bad_types_without_resetting_other_settings() {
         for value in [
-            serde_json::json!("150"), serde_json::json!(""), serde_json::Value::Null,
-            serde_json::json!(true), serde_json::json!(false), serde_json::json!([]),
-            serde_json::json!([150]), serde_json::json!({ "value": 150 }),
+            serde_json::json!("150"),
+            serde_json::json!(""),
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!([150]),
+            serde_json::json!({ "value": 150 }),
         ] {
             let settings: AppSettings = serde_json::from_value(serde_json::json!({
                 "uiScale": value, "locale": "ja", "lyricFontScale": 1.25,
-            })).expect("bad scale must not reject the whole settings payload");
+            }))
+            .expect("bad scale must not reject the whole settings payload");
             assert_eq!(settings.ui_scale, 100);
             assert_eq!(settings.locale, "ja");
             assert_eq!(settings.lyric_font_scale, 1.25);
@@ -1162,19 +1274,37 @@ mod tests {
             #[serde(deserialize_with = "super::deserialize_app_settings")]
             settings: AppSettings,
         }
-        for (value, expected) in [(24.9, 25), (27.5, 30), (74.9, 75), (127.4, 125), (127.5, 130), (200.0, 200), (227.4, 225), (1001.0, 1000)] {
+        for (value, expected) in [
+            (24.9, 25),
+            (27.5, 30),
+            (74.9, 75),
+            (127.4, 125),
+            (127.5, 130),
+            (200.0, 200),
+            (227.4, 225),
+            (1001.0, 1000),
+        ] {
             let config: Config = serde_json::from_value(serde_json::json!({
                 "settings": { "uiScale": value, "lyricFontScale": 1.25 },
-            })).expect("UI scale config");
+            }))
+            .expect("UI scale config");
             let settings = config.settings.normalized();
             assert_eq!(settings.ui_scale, expected);
             let saved = serde_json::to_value(&settings).expect("saved settings");
             assert_eq!(saved["uiScale"], expected);
-            let restored: AppSettings = serde_json::from_value(saved.clone()).expect("restored settings");
-            assert_eq!(serde_json::to_value(restored.normalized()).expect("restored JSON"), saved);
+            let restored: AppSettings =
+                serde_json::from_value(saved.clone()).expect("restored settings");
+            assert_eq!(
+                serde_json::to_value(restored.normalized()).expect("restored JSON"),
+                saved
+            );
             let exported = serde_json::to_value(Config { settings }).expect("exported config");
-            let imported: Config = serde_json::from_value(exported.clone()).expect("imported config");
-            assert_eq!(serde_json::to_value(imported).expect("imported JSON"), exported);
+            let imported: Config =
+                serde_json::from_value(exported.clone()).expect("imported config");
+            assert_eq!(
+                serde_json::to_value(imported).expect("imported JSON"),
+                exported
+            );
         }
     }
 
@@ -1190,7 +1320,10 @@ mod tests {
     fn font_settings_sanitize_css_and_limit_unicode_characters() {
         for (value, expected) in [
             ("  Noto  Sans SC  ".to_string(), "Noto Sans SC".to_string()),
-            ("思源黑体.1-_ Regular".to_string(), "思源黑体.1-_ Regular".to_string()),
+            (
+                "思源黑体.1-_ Regular".to_string(),
+                "思源黑体.1-_ Regular".to_string(),
+            ),
             ("A\"; color:red/*x*/".to_string(), "A colorredx".to_string()),
             ("Noto\tSans\nSC".to_string(), "NotoSansSC".to_string()),
             ("x".repeat(80), "x".repeat(64)),
@@ -1199,11 +1332,13 @@ mod tests {
             let settings: AppSettings = serde_json::from_value(serde_json::json!({
                 "appFontFamily": value,
                 "lyricFontFamily": value,
-            })).expect("font settings");
+            }))
+            .expect("font settings");
             let saved = serde_json::to_value(settings.normalized()).expect("saved font settings");
             assert_eq!(saved["appFontFamily"], expected);
             assert_eq!(saved["lyricFontFamily"], expected);
-            let restored: AppSettings = serde_json::from_value(saved).expect("restored font settings");
+            let restored: AppSettings =
+                serde_json::from_value(saved).expect("restored font settings");
             let restored = serde_json::to_value(restored.normalized()).expect("restored font JSON");
             assert_eq!(restored["appFontFamily"], expected);
             assert_eq!(restored["lyricFontFamily"], expected);
@@ -1223,13 +1358,17 @@ mod tests {
                 "lyricFontFamily": "Noto Serif SC",
                 "lyricFontScale": 1.25,
             }
-        })).expect("font config");
+        }))
+        .expect("font config");
         let exported = serde_json::to_value(config).expect("exported config");
         assert_eq!(exported["settings"]["appFontFamily"], "思源黑体");
         assert_eq!(exported["settings"]["lyricFontFamily"], "Noto Serif SC");
         assert_eq!(exported["settings"]["lyricFontScale"], 1.25);
         let imported: Config = serde_json::from_value(exported.clone()).expect("imported config");
-        assert_eq!(serde_json::to_value(imported).expect("imported JSON"), exported);
+        assert_eq!(
+            serde_json::to_value(imported).expect("imported JSON"),
+            exported
+        );
     }
 
     #[test]
@@ -1324,7 +1463,10 @@ mod tests {
         assert_eq!(settings.max_cache_size, 1049);
         assert_eq!(settings.loudness_gain_mb, 11);
         assert_eq!(settings.equalizer_bands, vec![1, -3, 0, 4, 4]);
-        assert!(serde_json::from_value::<AppSettings>(serde_json::json!({ "fadeInDuration": "fast" })).is_err());
+        assert!(serde_json::from_value::<AppSettings>(
+            serde_json::json!({ "fadeInDuration": "fast" })
+        )
+        .is_err());
     }
 
     #[test]
@@ -1342,10 +1484,17 @@ mod tests {
         assert_eq!(settings.qq_music_offset, -50);
         assert_eq!(settings.kugou_offset, 5_000);
         assert_eq!(settings.lrclib_offset, -5_000);
-        assert_eq!(settings.amll_ttml_offset, -50, "半步向正无穷取整，与 Android/前端一致");
+        assert_eq!(
+            settings.amll_ttml_offset, -50,
+            "半步向正无穷取整，与 Android/前端一致"
+        );
         let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(
-            (missing.kugou_offset, missing.lrclib_offset, missing.amll_ttml_offset),
+            (
+                missing.kugou_offset,
+                missing.lrclib_offset,
+                missing.amll_ttml_offset
+            ),
             (0, 0, 0),
             "旧配置没有这些字段时按 Android 默认 0",
         );
@@ -1353,8 +1502,17 @@ mod tests {
 
     #[test]
     fn volume_balance_is_clamped_and_rounded_like_android() {
-        for (value, expected) in [(0.354f32, 0.35f32), (-0.35, -0.35), (1.7, 1.0), (-3.0, -1.0), (f32::NAN, 0.0)] {
-            let mut settings = AppSettings { volume_balance: value, ..AppSettings::default() };
+        for (value, expected) in [
+            (0.354f32, 0.35f32),
+            (-0.35, -0.35),
+            (1.7, 1.0),
+            (-3.0, -1.0),
+            (f32::NAN, 0.0),
+        ] {
+            let mut settings = AppSettings {
+                volume_balance: value,
+                ..AppSettings::default()
+            };
             settings.normalize();
             assert_eq!(settings.volume_balance, expected, "{value}");
         }
@@ -1365,7 +1523,11 @@ mod tests {
     #[test]
     fn desktop_lyrics_style_is_kept_as_an_object_and_bounded() {
         let missing: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(missing.desktop_lyrics, serde_json::json!({}), "旧配置没有这个字段时为空对象，前端补默认值");
+        assert_eq!(
+            missing.desktop_lyrics,
+            serde_json::json!({}),
+            "旧配置没有这个字段时为空对象，前端补默认值"
+        );
         let mut kept: AppSettings = serde_json::from_value(serde_json::json!({
             "desktopLyrics": { "layout": "double", "fontSize": 40, "bounds": { "x": 10, "y": 20, "width": 900, "height": 180 } }
         }))
@@ -1373,8 +1535,14 @@ mod tests {
         kept.normalize();
         assert_eq!(kept.desktop_lyrics["layout"], "double");
         assert_eq!(kept.desktop_lyrics["bounds"]["width"], 900);
-        for bad in [serde_json::json!("double"), serde_json::json!({ "fontFamily": "x".repeat(20_000) })] {
-            let mut settings = AppSettings { desktop_lyrics: bad, ..AppSettings::default() };
+        for bad in [
+            serde_json::json!("double"),
+            serde_json::json!({ "fontFamily": "x".repeat(20_000) }),
+        ] {
+            let mut settings = AppSettings {
+                desktop_lyrics: bad,
+                ..AppSettings::default()
+            };
             settings.normalize();
             assert_eq!(settings.desktop_lyrics, serde_json::json!({}));
         }
@@ -1386,7 +1554,8 @@ mod tests {
         assert!(!missing.show_menu_bar_lyrics);
         let mut enabled: AppSettings = serde_json::from_value(serde_json::json!({
             "showMenuBarLyrics": true,
-        })).unwrap();
+        }))
+        .unwrap();
         enabled.normalize();
         assert!(enabled.show_menu_bar_lyrics);
         let saved = serde_json::to_value(enabled).unwrap();
@@ -1397,10 +1566,15 @@ mod tests {
 
     #[test]
     fn romanization_is_its_own_switch_and_off_by_default_like_android() {
-        let missing: AppSettings = serde_json::from_value(serde_json::json!({ "showTranslation": true })).unwrap();
+        let missing: AppSettings =
+            serde_json::from_value(serde_json::json!({ "showTranslation": true })).unwrap();
         assert!(missing.show_translation);
         assert!(!missing.show_romanization, "旧配置没有这个字段时不显示音译");
-        let saved = serde_json::to_value(AppSettings { show_romanization: true, ..AppSettings::default() }).unwrap();
+        let saved = serde_json::to_value(AppSettings {
+            show_romanization: true,
+            ..AppSettings::default()
+        })
+        .unwrap();
         assert_eq!(saved["showRomanization"], true);
     }
 
@@ -1427,7 +1601,10 @@ mod tests {
         };
         explicit.normalize();
         assert!(!explicit.crossfade);
-        assert_eq!(explicit.crossfade_in_duration, 1500, "existing crossfade durations win");
+        assert_eq!(
+            explicit.crossfade_in_duration, 1500,
+            "existing crossfade durations win"
+        );
     }
 
     #[test]

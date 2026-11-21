@@ -1,5 +1,5 @@
 // CC subtitle selection and interval matching ported from NeriPlayer PR #575.
-import type { LyricLine, TrackInfo } from '@/stores/player'
+import type { LyricLine, TrackInfo } from '@/types/track'
 import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid, resolveBiliVideoSkipCid } from '@/modules/playback/biliVideoSkip'
 import { isLyricCreditMetadataLine, visibleLyricTranslation } from './lyricsFormat'
 

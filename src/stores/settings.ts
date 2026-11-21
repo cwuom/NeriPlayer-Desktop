@@ -5,8 +5,14 @@ import { createLogger } from '@/utils/logger'
 import { normalizeDesktopLyricsStyle, sanitizeFontFamily, type DesktopLyricsStyle } from '@/modules/desktopLyrics/style'
 import { normalizeShortcutBindings, type ShortcutBindings } from '@/modules/shortcuts/bindings'
 import { migrateLegacyAudioEffects, normalizeAudioEffectsSettings, type AudioEffectsSettings } from '@/modules/audioEffects/model'
+import { DEFAULT_LYRIC_SOURCES, type DefaultLyricSource } from '@/modules/lyrics/lyricSourcePreference'
+import { normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN, UI_SCALE_STEP } from '@/modules/settings/uiScaleRange'
 
 const log = createLogger('settings')
+
+// 取值域已下沉到 modules，这里继续导出以兼容现有调用方
+export { DEFAULT_LYRIC_SOURCES, normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN, UI_SCALE_STEP }
+export type { DefaultLyricSource }
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
@@ -17,11 +23,6 @@ export const YOUTUBE_PLAYBACK_SOURCES = [
   'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
 ] as const
 export type YouTubePlaybackSource = typeof YOUTUBE_PLAYBACK_SOURCES[number]
-/** 与 Android LyricSourcePreference.storageValue 一致 */
-export const DEFAULT_LYRIC_SOURCES = [
-  'automatic', 'cloud_music', 'kugou', 'qq_music', 'lrclib', 'amll_ttml',
-] as const
-export type DefaultLyricSource = typeof DEFAULT_LYRIC_SOURCES[number]
 
 export interface AppSettings {
   formatVersion: number
@@ -165,10 +166,6 @@ export const MAX_DOWNLOAD_PARALLELISM = 8
 export const DEFAULT_DOWNLOAD_PARALLELISM = 6
 export const MIN_MEDIA_CACHE_SIZE_MB = 256
 export const MAX_MEDIA_CACHE_SIZE_MB = 512 * 1024
-export const UI_SCALE_DEFAULT = 100
-export const UI_SCALE_MIN = 25
-export const UI_SCALE_MAX = 1000
-export const UI_SCALE_STEP = 5
 // 对齐 Android LyricFontScale 0.5–1.6
 export const LYRIC_FONT_SCALE_MIN = 0.5
 export const LYRIC_FONT_SCALE_MAX = 1.6
@@ -593,11 +590,6 @@ function canonicalNeteaseQuality(value: string): string {
   return value.trim() === 'high' ? 'higher' : value
 }
 
-export function normalizeUiScale(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return UI_SCALE_DEFAULT
-  return Math.round(Math.min(UI_SCALE_MAX, Math.max(UI_SCALE_MIN, value)) / UI_SCALE_STEP) * UI_SCALE_STEP
-}
-
 /** 歌词来源的默认偏移：按 50ms 对齐并夹到 ±5000ms（Android normalizeLyricDefaultOffsetMs）；非数值回到默认 */
 export function normalizeLyricDefaultOffset(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback
@@ -802,6 +794,12 @@ export const useSettingsStore = defineStore('settings', () => {
   const isHydrated = ref(false)
   let hydrationPromise: Promise<void> | null = null
   let persistTimer: ReturnType<typeof setTimeout> | null = null
+  // 最近一次与后端一致的设置；applySnapshot 换掉对象型设置会触发 deep watch，内容没变时不再重复保存
+  let syncedSnapshot: AppSettings | null = null
+  // 已发出但尚未完成的保存；完成后后端会是这个值，跳过判断要以它为准
+  let pendingSnapshot: AppSettings | null = null
+  // 保存串行执行，后发出的写入一定后落盘
+  let persistChain: Promise<void> = Promise.resolve()
 
   function snapshot(): AppSettings {
     const result = { formatVersion: SETTINGS_FORMAT_VERSION } as AppSettings
@@ -824,18 +822,28 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  async function persistNow() {
+  function persistNow(): Promise<void> {
     const next = snapshot()
+    pendingSnapshot = next
     writeLegacyShadow(next)
+    const run = persistChain.then(() => save(next))
+    persistChain = run.catch(() => undefined)
+    return run
+  }
+
+  async function save(next: AppSettings) {
     try {
       const saved = await invoke<AppSettings | undefined>('save_settings', { settings: next })
+      syncedSnapshot = saved ? normalizeSnapshot(saved) : next
       // Rust 会再规整一遍（去空白、夹范围）；保存期间没有新改动时采用它，两边不必等到重启才一致
-      if (saved && sameSnapshot(snapshot(), next) && !sameSnapshot(normalizeSnapshot(saved), next)) {
+      if (saved && sameSnapshot(snapshot(), next) && !sameSnapshot(syncedSnapshot, next)) {
         applySnapshot(saved)
       }
     } catch (error) {
       // 浏览器开发模式没有 Rust bridge 时仍保留 localStorage 兼容缓存
       if (hasTauriBridge()) log.error('save_settings failed:', error)
+    } finally {
+      if (pendingSnapshot === next) pendingSnapshot = null
     }
   }
 
@@ -844,6 +852,8 @@ export const useSettingsStore = defineStore('settings', () => {
     if (persistTimer) clearTimeout(persistTimer)
     persistTimer = setTimeout(() => {
       persistTimer = null
+      const expected = pendingSnapshot ?? syncedSnapshot
+      if (expected && sameSnapshot(snapshot(), expected)) return
       void persistNow()
     }, 180)
   }
@@ -858,11 +868,16 @@ export const useSettingsStore = defineStore('settings', () => {
         applySnapshot(loaded.persisted ? loaded.settings : legacy)
         isHydrated.value = true
         if (shouldMigrate || !loaded.persisted) await persistNow()
-        else writeLegacyShadow(snapshot())
+        else {
+          syncedSnapshot = snapshot()
+          writeLegacyShadow(syncedSnapshot)
+        }
       } catch {
         applySnapshot(readLegacySnapshot())
         isHydrated.value = true
-        writeLegacyShadow(snapshot())
+        // 没有后端时只维护 localStorage 影子，读入本身不算改动
+        syncedSnapshot = snapshot()
+        writeLegacyShadow(syncedSnapshot)
       }
     })()
     return hydrationPromise

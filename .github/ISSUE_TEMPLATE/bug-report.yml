@@ -1,17 +1,23 @@
-name: Bug report / 问题报告
-description: 报告可复现的问题，帮助我们改进 NeriPlayer Desktop / Report a reproducible problem
+name: Bug report / 报告问题
+description: 报告可复现的问题，帮助我们改进 NeriPlayer Desktop / Report a reproducible problem in NeriPlayer Desktop
 title: "[Bug] "
-labels: ["bug"]
+labels: ["bug", "status: needs-triage"]
 
 body:
   - type: markdown
     attributes:
       value: |
-        感谢你报告 NeriPlayer Desktop 的问题
-        请完整填写复现信息，并在日志、截图中移除隐私数据
+        感谢你报告 NeriPlayer Desktop 的问题！
+        请说明复现步骤、应用构建和运行环境，便于定位问题。
+        日志、截图和链接请先移除 Cookie、Token、密钥和个人信息。
+        下拉框中的“请选择”仅为填写提示，请改为实际情况后再提交。
+        提交后会根据表单自动添加模块、平台和系统标签，优先级由维护者确认。
 
-        Thank you for reporting an issue with NeriPlayer Desktop
-        Please provide complete reproduction details and remove private data from logs or screenshots
+        Thank you for reporting an issue with NeriPlayer Desktop!
+        Provide reproduction steps, build information, and environment details.
+        Remove cookies, tokens, keys, and personal data before uploading.
+        Replace "Please select" in dropdowns with the actual value before submitting.
+        Area, platform, and OS labels are added automatically; maintainers assign priority.
 
   - type: textarea
     id: problem-description
@@ -37,41 +43,79 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: reproduction-frequency
+    attributes:
+      label: 复现频率 / Reproduction frequency
+      description: 请选择问题出现的频率；无法判断时可选择“暂不确定” / Select how often the issue occurs or choose unsure
+      default: 0
+      options:
+        - 请选择 / Please select
+        - 每次 / Every time
+        - 经常 / Frequently
+        - 偶尔 / Occasionally
+        - 仅一次 / Only once
+        - 暂不确定 / Not sure yet
+    validations:
+      required: true
+
   - type: textarea
     id: expected-behavior
     attributes:
-      label: 预期行为 / Expected behavior
-      placeholder: 正常情况下应该发生什么 / What should happen instead
+      label: 预期行为 / Expected behaviour
+      placeholder: 正常情况下应该发生什么 / Tell us what should happen
     validations:
       required: true
 
   - type: textarea
     id: actual-behavior
     attributes:
-      label: 实际行为 / Actual behavior
+      label: 实际行为 / Actual behaviour
       description: 可附截图或录屏，请先隐藏个人信息 / Screenshots or recordings are welcome after removing personal data
-      placeholder: 实际发生了什么 / What actually happened
+      placeholder: 实际发生了什么 / Tell us what happens instead
     validations:
       required: true
 
   - type: dropdown
     id: affected-area
     attributes:
-      label: 问题模块 / Affected area
+      label: 涉及模块 / Affected area
+      description: 可多选；请选择实际出现问题的模块，不确定时选择“其他或不确定” / Select the affected areas or choose unsure
+      multiple: true
       options:
-        - 安装、启动或更新 / Installation, startup, or update
-        - 音频播放 / Audio playback
+        - 账号与登录 / Accounts and login
+        - 播放与音频 / Playback and audio
+        - 音频输出设备 / Audio output devices
+        - 系统媒体控制与快捷键 / System media controls and shortcuts
+        - 网络与代理 / Network and proxy
+        - 歌词 / Lyrics
+        - 下载与存储 / Downloads and storage
+        - 本地音乐与歌单 / Local music and playlists
+        - 云同步与备份 / Cloud sync and backup
+        - 一起听 / Listen Together
+        - 界面与窗口 / UI and window
+        - 性能与资源占用 / Performance and resource usage
+        - 文档与翻译 / Documentation and translation
+        - 构建、CI 与发布 / Build and CI and release
+        - 安装、启动与更新 / Installation and startup and update
+        - 其他或不确定 / Other or unsure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected-platforms
+    attributes:
+      label: 涉及平台 / Affected platforms
+      description: 可多选；跨平台问题请选中所有实际涉及的平台 / Select all affected platforms
+      multiple: true
+      options:
         - 网易云音乐 / NetEase Cloud Music
         - QQ 音乐 / QQ Music
         - Bilibili
-        - YouTube
-        - 本地音乐 / Local music
-        - 歌词 / Lyrics
-        - 下载 / Downloads
-        - 云同步 / Cloud sync
-        - 一起听 / Listen Together
-        - 界面或交互 / UI or interaction
-        - 其他 / Other
+        - YouTube Music
+        - 本地音频或下载文件 / Local audio or downloaded files
+        - 不涉及在线平台 / Not related to online platforms
+        - 其他或不确定 / Other or unsure
     validations:
       required: true
 
@@ -80,23 +124,32 @@ body:
     attributes:
       label: 应用版本与构建信息 / App version and build information
       description: >-
-        在设置页「关于」中点击右侧复制图标即可复制版本号。只需填写构建版本，无需 Build UUID /
-        Open Settings → About and click the copy icon on the right. Only the build version is needed; Build UUID is not required
-      placeholder: >-
-        例如 38547d9.07210803 /
-        For example 38547d9.07210803
+        在设置页「关于」中点击右侧复制图标即可复制版本号；无法确认可填“未知” /
+        Open Settings → About and click the copy icon on the right, or enter unknown
+      placeholder: 例如 38547d9.07210803，或未知 / For example 38547d9.07210803, or unknown
     validations:
       required: true
+
+  - type: input
+    id: build-uuid
+    attributes:
+      label: 构建 UUID / Build UUID
+      description: 如方便获取，可从「关于」复制构建 UUID；无法启动或找不到时可留空 / Copy the Build UUID from About if available; otherwise leave blank
+      placeholder: 可选 / Optional
+    validations:
+      required: false
 
   - type: dropdown
     id: distribution
     attributes:
       label: 安装来源 / Distribution
+      default: 0
       options:
+        - 请选择 / Please select
         - GitHub Release
         - GitHub Actions CI
         - 本地源码构建 / Local source build
-        - 其他 / Other
+        - 其他或不确定 / Other or unsure
     validations:
       required: true
 
@@ -104,11 +157,13 @@ body:
     id: operating-system
     attributes:
       label: 操作系统 / Operating system
+      default: 0
       options:
+        - 请选择 / Please select
         - Windows
         - macOS
         - Linux
-        - 其他 / Other
+        - 其他或不确定 / Other or unsure
     validations:
       required: true
 
@@ -116,7 +171,7 @@ body:
     id: operating-system-version
     attributes:
       label: 操作系统版本 / Operating system version
-      placeholder: 例如 Windows 11 24H2、macOS 15.5、Ubuntu 22.04
+      placeholder: 例如 Windows 11 24H2、macOS 15.5、Ubuntu 24.04 (Wayland) / For example Windows 11 24H2, macOS 15.5, Ubuntu 24.04 (Wayland)
     validations:
       required: true
 
@@ -124,11 +179,12 @@ body:
     id: architecture
     attributes:
       label: CPU 架构 / CPU architecture
+      default: 0
       options:
+        - 请选择 / Please select
         - x86_64
         - arm64 / aarch64
-        - 不确定 / Unsure
-        - 其他 / Other
+        - 不确定 / Not sure
     validations:
       required: true
 
@@ -136,10 +192,12 @@ body:
     id: package-format
     attributes:
       label: 安装包类型 / Package format
+      default: 0
       options:
+        - 请选择 / Please select
         - DMG
         - MSI
-        - EXE
+        - EXE (NSIS)
         - AppImage
         - DEB
         - RPM
@@ -148,14 +206,30 @@ body:
     validations:
       required: true
 
-  - type: textarea
-    id: logs
+  - type: markdown
     attributes:
-      label: 日志与错误信息 / Logs and error messages
-      description: 可附终端输出、错误提示或调试页探针结果，提交前请删除敏感信息 / Attach terminal output, errors, or Debug page probe results after removing sensitive data
-      render: shell
+      value: |
+        ### 播放环境 / Playback environment
+        以下信息有助于区分音源、解码与音频输出的问题；与播放无关时选择“不涉及播放”。
+
+        The following information helps distinguish source, decoding, and audio-output issues. Choose "Not related to playback" when it does not apply.
+
+  - type: dropdown
+    id: audio-output
+    attributes:
+      label: 复现时的音频输出设备 / Audio output during reproduction
+      default: 0
+      options:
+        - 请选择 / Please select
+        - 内置扬声器 / Built-in speakers
+        - 有线耳机或音箱 / Wired headphones or speakers
+        - 蓝牙耳机或音箱 / Bluetooth device
+        - USB DAC 或声卡 / USB DAC or audio interface
+        - HDMI 或显示器音频 / HDMI or display audio
+        - 虚拟声卡或远程桌面 / Virtual audio device or remote desktop
+        - 不涉及播放 / Not related to playback
     validations:
-      required: false
+      required: true
 
   - type: textarea
     id: playback-sync-context
@@ -170,22 +244,35 @@ body:
     validations:
       required: false
 
-  - type: textarea
-    id: additional-information
-    attributes:
-      label: 补充说明 / Additional information
-      description: 提供其他可能有助于定位问题的信息 / Add any other details that may help diagnose the problem
-    validations:
-      required: false
-
   - type: checkboxes
     id: confirmation
     attributes:
       label: 提交前确认 / Confirmation
       options:
-        - label: 我已搜索 [Issue Tracker](https://github.com/cwuom/NeriPlayer-Desktop/issues)，没有发现相同问题 / I searched the Issue Tracker and found no duplicate
+        - label: 我确认本 Issue 只提交一个问题；多个问题需要分多个 Issue 提交，否则只有第一个问题会被考虑 / I confirm this issue covers only one topic; multiple topics require separate issues, otherwise only the first will be considered
           required: true
         - label: 我已尽可能在最新 Release 或 CI 构建中复现问题 / I reproduced the issue on the latest Release or CI build when possible
+          required: false
+        - label: 我已搜索现有 Issue，未找到相同问题 / I searched existing issues and found no duplicate
           required: true
-        - label: 我已从日志和截图中移除 Cookie、Token、密钥及其他敏感信息 / I removed cookies, tokens, keys, and other secrets from logs and screenshots
+        - label: 我已从日志、截图和链接中移除 Cookie、Token、密钥和个人信息 / I removed cookies, tokens, keys, and personal data
           required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / Logs
+      description: >-
+        在设置中开启「写入日志文件」，复现后通过「打开日志目录」获取日志；在「关于」中连续点击版本号 7 次可启用调试页。上传前请脱敏 /
+        Enable "Write logs to file" in Settings, reproduce, then use "Open log folder". Tap the version in About 7 times to unlock the Debug page. Redact before uploading
+      placeholder: 将日志粘贴到此处或者点击文本框底栏上传日志文件 / Paste logs here or upload a log file using the bar at the bottom
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra-desc
+    attributes:
+      label: 补充说明（可选） / Additional information (optional)
+      description: 任何其他与问题相关的信息都可以在这里提供 / Any other relevant information
+    validations:
+      required: false

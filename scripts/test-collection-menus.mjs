@@ -12,12 +12,13 @@ async function plainModule(file) {
 
 async function functions(file, names, context) {
   const component = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8')
-  const script = component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  const script = file.endsWith('.vue') ? component.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1] : component
   const parsed = ts.createSourceFile('view.ts', script, ts.ScriptTarget.ES2022, true)
   const source = names.map(name => {
     const node = parsed.statements.find(item => ts.isFunctionDeclaration(item) && item.name?.text === name)
     assert.ok(node, `missing actual menu handler ${file}:${name}`)
-    return node.getText(parsed)
+    // 纯 TS 模块里的处理函数是导出声明，去掉 export 后与组件内函数同样求值
+    return node.getText(parsed).replace(/^export\s+/, '')
   }).join('\n')
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   return new Function(...Object.keys(context), `${compiled}; return { ${names.join(',')} }`)(...Object.values(context))
@@ -30,10 +31,13 @@ const routed = [], menus = [], played = []
 const event = { type: 'contextmenu' }
 const router = { push: route => routed.push(route) }
 const collectionMenuRef = { value: { open: (event, target) => menus.push(target) } }
-const library = await functions('views/LibraryView.vue', ['favoriteRoute', 'openFavorite', 'openFavoriteMenu'], {
-  router, collectionMenuRef, collectionWebUrl, ...bili,
+const favoriteLinks = await functions('components/library/favoriteLinks.ts', ['favoriteRoute', 'favoriteWebUrl'], {
+  collectionWebUrl, ...bili,
   isArtistFavoriteSource: source => ['neteaseArtist', 'biliArtist', 'youtubeMusicArtist'].includes(source),
   favoriteArtistRoute: favorite => ({ name: 'fixture-artist', params: { id: favorite.browseId || favorite.id } }),
+})
+const library = await functions('views/LibraryView.vue', ['openFavorite', 'openFavoriteMenu'], {
+  router, collectionMenuRef, ...favoriteLinks,
   toast: { show() { assert.fail('valid favorite routes must not produce an error') } }, t: key => key,
 })
 for (const favorite of [

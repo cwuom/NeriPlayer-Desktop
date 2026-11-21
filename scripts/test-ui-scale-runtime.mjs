@@ -7,15 +7,15 @@ import ts from 'typescript'
 const path = new URL('../src/modules/settings/uiScale.ts', import.meta.url)
 assert.ok(existsSync(path), 'main-window UI scaling must have a runtime installer')
 const source = await readFile(path, 'utf8')
-const settingsSource = await readFile(new URL('../src/stores/settings.ts', import.meta.url), 'utf8')
-const normalizerSource = settingsSource.match(/export function normalizeUiScale[\s\S]*?\n}/)?.[0]
-assert.ok(normalizerSource)
-const normalizer = ts.transpileModule(`${normalizerSource}`, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS },
-}).outputText
+const rangeSource = await readFile(new URL('../src/modules/settings/uiScaleRange.ts', import.meta.url), 'utf8')
 const normalization = {}
-new Function('exports', 'UI_SCALE_DEFAULT', 'UI_SCALE_MIN', 'UI_SCALE_MAX', 'UI_SCALE_STEP', normalizer)(normalization, 100, 25, 1000, 5)
-Object.assign(normalization, { UI_SCALE_DEFAULT: 100, UI_SCALE_MIN: 25, UI_SCALE_MAX: 1000, UI_SCALE_STEP: 5 })
+new Function('exports', ts.transpileModule(rangeSource, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS },
+}).outputText)(normalization)
+assert.deepEqual(
+  [normalization.UI_SCALE_DEFAULT, normalization.UI_SCALE_MIN, normalization.UI_SCALE_MAX, normalization.UI_SCALE_STEP],
+  [100, 25, 1000, 5],
+)
 
 function load({ native = true, supported = true, mac = false, setZoom = async () => {}, check = async () => supported } = {}) {
   const exports = {}
@@ -54,7 +54,7 @@ function load({ native = true, supported = true, mac = false, setZoom = async ()
         workArea: { size: new Size(geometry.workWidth, geometry.workHeight), position: new Position(0, 0) },
       }),
     },
-    '@/stores/settings': normalization,
+    './uiScaleRange': normalization,
     '@/modules/shortcuts/platform': { isMacPlatform: mac },
     '@/utils/logger': { createLogger: () => ({ warn() {} }) },
   }

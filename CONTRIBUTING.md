@@ -6,6 +6,10 @@
 本文描述**当前桌面客户端的真实实现**，请以源码和运行行为为准同步维护文档。
 项目目前处于预览阶段，开发和测试请使用可恢复的数据副本。
 
+> [!CAUTION]
+> 🚧 **开发中**：文档中有相当部分是占位描述，许多功能实现并不完善；极端情况下可能损坏本地数据。
+> 仓库随时可能进入无人维护状态，桌面端的推进主要依靠社区贡献。
+
 ---
 
 ### 项目定位 / Scope
@@ -32,14 +36,20 @@
   - 面向用户和新贡献者，说明项目定位、能力边界、安装、同步与隐私。
 - [CONTRIBUTING.md](CONTRIBUTING.md) / [CONTRIBUTING_EN.md](CONTRIBUTING_EN.md)
   - 面向开发者，说明环境、模块、扩展方式、验证和提交要求。
-- [src-tauri/native/ffmpeg/README.md](src-tauri/native/ffmpeg/README.md)
+- [src-tauri/crates/neri-playback/native/ffmpeg/README.md](src-tauri/crates/neri-playback/native/ffmpeg/README.md)
   - 说明共享库准备、运行时加载、安装包配置、解码测试与分发许可。
-- [src-tauri/native/dsp/README.md](src-tauri/native/dsp/README.md)
+- [src-tauri/crates/neri-playback/native/dsp/README.md](src-tauri/crates/neri-playback/native/dsp/README.md)
   - 说明 Android DSP 来源、桌面桥接、参数兼容与原生测试。
-- [src-tauri/src/sync/archive/fixtures/README.md](src-tauri/src/sync/archive/fixtures/README.md)
+- [src-tauri/crates/neri-library/src/sync/archive/fixtures/README.md](src-tauri/crates/neri-library/src/sync/archive/fixtures/README.md)
   - 说明同步归档夹具及其验证范围。
 - [.github/workflows/](.github/workflows/)、[PR 模板](.github/PULL_REQUEST_TEMPLATE.md)
   - 说明实际 CI、测试包、发布入口和审查所需信息。
+- [docs/implementation.md](docs/implementation.md) / [docs/implementation_EN.md](docs/implementation_EN.md)
+  - 说明进程边界、Rust crate 划分、宿主能力注入、前端分层与质量门禁。
+- [tools/quality/README.md](tools/quality/README.md)、各 crate 的 `README.md`（`src-tauri/crates/*/`）
+  - 说明门禁规则与基线、各 crate 的职责与约束。
+- [SECURITY.md](SECURITY.md)、[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+  - 说明安全问题的报告方式，以及直接引入或改编的第三方源码与资源。
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)、[LICENSE](LICENSE)、[LICENSES/MIT.txt](LICENSES/MIT.txt)
   - 说明社区规范、当前许可和历史 MIT 声明。
 
@@ -105,7 +115,7 @@ rustup component add clippy rustfmt
   托盘、媒体键、桌面歌词、多窗口与 IME 输入需要原生环境验收。
 - **同步与一起听**：保留 ProtoBuf 字段号、三路合并、因果 token、删除记录、远端并发保护、
   房间版本和重连恢复；跨端兼容是单独的验收条件。
-- **凭据与诊断**：凭据统一走 `security.rs`，日志不得包含 Cookie、Token、同步密码或签名 URL。
+- **凭据与诊断**：凭据统一走 `neri_common::security`，日志不得包含 Cookie、Token、同步密码或签名 URL。
   不通过忽略错误、关闭规则或删除有效测试来掩盖问题。
 
 前端回归在 `scripts/`，Rust 测试随模块维护。修改这些链路时先搜索相邻测试，
@@ -171,7 +181,7 @@ pnpm tauri build -- --locked
 
 分发完整解码包时：
 
-1. 按 [FFmpeg 构建说明](src-tauri/native/ffmpeg/README.md)构建共享库，
+1. 按 [FFmpeg 构建说明](src-tauri/crates/neri-playback/native/ffmpeg/README.md)构建共享库，
    或从本仓库可信工作流取得匹配的 `ffmpeg-<目标>` artifact。
 2. 将四个共享库、`LICENSE.txt` 与 `BUILDINFO.txt` 放入 `.cache/ffmpeg-build/<目标>/`。
    不混合不同架构或来源的库。
@@ -214,46 +224,45 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 
 - `src/main.ts`、`src/App.vue`、`src/views/`
   - 应用启动、路由和页面。桌面歌词与托盘弹窗由独立窗口入口挂载。
-- `src/stores/`、`src/modules/`
-  - Pinia 状态与业务逻辑，覆盖播放、曲库、下载、歌词、设置、同步和一起听。
+- `src/stores/`、`src/modules/`、`src/integrations/`
+  - Pinia 状态与业务逻辑，覆盖播放、曲库、下载、歌词、设置、同步和一起听；`integrations/` 安装托盘、
+    桌面歌词桥、剪贴板等宿主集成。
   - `modules/persistence/userData.ts` 在 store 创建前读取启动快照，并串行发送持久化写入。
-- `src/components/`、`src/composables/`、`src/utils/`
-  - 播放器、AMLL 歌词、菜单、共用交互与原生适配；语言资源在 `src/i18n/`。
-- `src-tauri/src/main.rs`、`lib.rs`、`state.rs`
-  - Tauri 应用与共享运行状态，命令注册、窗口、托盘、插件和原生事件。
-- `src-tauri/src/commands/`
-  - 按业务划分 IPC 入口，包括播放、账号、下载、本地文件、存储、同步和诊断。
-- `src-tauri/src/audio/`
-  - CPAL 输出、Symphonia / FFmpeg 解码、Range / HLS、缓冲、队列、DSP、变速与媒体会话。
-- `src-tauri/src/api/`、`auth/`、`lyrics/`
-  - 平台请求、授权、元数据和歌词解析 / 匹配；不在前端复制平台签名或凭据逻辑。
-- `src-tauri/src/library/`、`stats/`、`db/`、`settings/`
-  - 本地扫描与标签、歌单、统计、数据库、设置与迁移。
-- `src-tauri/src/sync/`、`src/stores/listenTogether/`、`src-tauri/src/listen_together/`
-  - 云同步的模型、传输和合并，以及一起听的协议、会话、队列与重连。
-- `src-tauri/src/security.rs`、`logging/`、`fsutil.rs`
-  - 凭据、统一日志和文件原子写入。
-- `src-tauri/native/ffmpeg/`、`src-tauri/native/dsp/`
-  - C++17 解码加载垫片与 DSP 核心；由 `src-tauri/build.rs` 编入原生应用。
-- `scripts/`、`.github/workflows/`
-  - 前端回归、开发启动、FFmpeg 构建、跨端辅助检查与 CI / 发布。
+- `src/components/`、`src/composables/`、`src/utils/`、`src/types/`
+  - 播放器、AMLL 歌词、菜单、共用交互与工具函数；语言资源在 `src/i18n/`。
+  - 分层只能向下依赖：`types → utils → modules → composables / stores / integrations → components → views`。
+- `src-tauri/src/`（应用壳层 `neri-player-desktop`）
+  - `main.rs`、`lib.rs`、`state.rs`：Tauri 应用与共享运行状态，命令注册、窗口、托盘、插件和原生事件。
+  - `commands/`：按业务划分的 IPC 入口（播放、账号、下载、本地文件、存储、同步、探索、诊断），
+    较大的命令模块拆成子目录，例如 `player_cmd/`、`sync_cmd/`、`download_cmd/`、`discover/`。
+  - `auth/cookies.rs`、`settings/`、`logging/`：凭据持久化、设置与统一日志。
+  - `events.rs`、`platform_webview/`、`sync_state.rs`：为领域 crate 注入的宿主能力（事件、WebView 令牌、同步状态）。
+- `src-tauri/crates/`（领域 crate，均不依赖 Tauri，依赖方向见 [实现概览](docs/implementation.md)）
+  - `neri-playback`：CPAL 输出、Symphonia / FFmpeg 解码、Range / HLS、缓冲、队列、DSP、变速与媒体会话；
+    `native/ffmpeg/`、`native/dsp/` 的 C++17 代码由该 crate 的 `build.rs` 编译。
+  - `neri-platform`：平台请求、授权、元数据与 Cookie Jar；不在前端复制平台签名或凭据逻辑。
+  - `neri-library`：数据库、本地扫描与标签、歌单、歌词解析 / 匹配、统计、下载元数据与云同步。
+  - `neri-listentogether`：一起听协议、会话与 WebSocket；前端部分在 `src/stores/listenTogether/`。
+  - `neri-common`、`neri-model`：错误、原子写入、凭据存储、配置备份编解码与共享数据模型。
+- `scripts/`、`tools/quality/`、`.github/workflows/`
+  - 前端回归、开发启动、FFmpeg 构建、跨端辅助检查、质量门禁与 CI / 发布。
 
-新增 IPC 时，需要实现 `commands/` 入口、在 `main.rs` 的 `generate_handler!` 注册，
-并同步前端命令、参数和返回类型。JavaScript 参数与 Rust / serde 命名保持一致。
+新增 IPC 时，需要实现 `commands/` 入口（业务逻辑放进对应 crate）、在 `main.rs` 的 `generate_handler!` 注册，
+并同步前端命令、参数和返回类型；新的 `invoke()` 放在 stores / modules，不放进组件和页面。JavaScript 参数与 Rust / serde 命名保持一致。
 共享状态复用已有 store / module，事件监听随组件或作用域销毁时清理。
 
 #### 持久化边界
 
-`src-tauri/src/db/` 将歌单、收藏、历史、队列、统计、下载目录与同步元数据存入
+`neri-library` 的 `db/` 将歌单、收藏、历史、队列、统计、下载目录与同步元数据存入
 `neri_user_data.db`，并维护 schema 和旧数据迁移。业务写入复用领域事务，
 不为同一状态另建 JSON 副本；前端启动恢复与后续写入保持顺序。
 
-本地音乐文件夹和曲目索引由 `library/local_index.rs` 另存为 `local-library.json`。
+本地音乐文件夹和曲目索引由 `neri-library` 的 `library/local_index.rs` 另存为 `local-library.json`。
 它按文件大小和修改时间复用未变曲目，合并 notify 原生事件触发增量扫描，并在启动时更新。
 文件夹管理、直接播放与导入歌单是独立操作；移除文件夹不应删除源文件或隐式改写歌单。
 
 设置、凭据、缓存、音频和导出文件不全属于 SQLite。修改存储或清理流程前，
-先确认实际目录和所有者，文件写入复用 `fsutil.rs` 等既有原子替换方式。
+先确认实际目录和所有者，文件写入复用 `neri_common::fsutil` 等既有原子替换方式。
 
 ---
 
@@ -281,8 +290,8 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 
 #### 1. 新增平台或搜索来源
 
-1. 先检查 `src-tauri/src/api/`、`auth/`、`commands/search_cmd.rs`、
-   `commands/explore_cmd.rs` 与 `commands/settings_cmd.rs` 中已有请求和取流入口。
+1. 先检查 `neri-platform` 的 `api/`、`auth/`，以及 `commands/discover/search_cmd.rs`、
+   `commands/discover/explore_cmd.rs` 与 `commands/settings_cmd.rs` 中已有请求和取流入口。
 2. 明确新来源承担搜索、元数据补全还是实际播放，保留原始曲目身份与最终播放来源的区别。
 3. 同步前端来源模型、搜索状态、路由、登录、封面、歌词、下载和统计身份。
 4. 添加解析 / 签名回归，并单独记录真实平台请求验证；不要提交账号凭据或签名 URL。
@@ -290,18 +299,19 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 #### 2. 修改播放、队列或音效
 
 1. 从 `src/stores/player.ts`、`src/modules/playback/` 和
-   `src-tauri/src/commands/player_cmd.rs` 追踪请求，再检查 `src-tauri/src/audio/`。
+   `src-tauri/src/commands/player_cmd/` 追踪请求，再检查 `src-tauri/crates/neri-playback/`。
 2. 同时检查取消、快速切歌、seek、预取、失败回退、续播与音频信息更新。
    保留 generation 校验和来源 / 客户端相关缓存身份。
-3. DSP 变更还需检查 `src/modules/audioEffects/`、`audio/dsp.rs`、`audio/dsp_settings.rs`
+3. DSP 变更还需检查 `src/modules/audioEffects/`、`neri-playback` 的 `processing/dsp.rs`、`processing/dsp_settings.rs`
    及 `native/dsp/` 的参数布局和来源说明；不在实时音频回调中引入配置、锁等待或堆分配。
 4. 逻辑测试外，在原生应用验证实际播放、输出设备切换和参数变化，记录系统与设备环境。
 
 #### 3. 修改下载、本地音乐或标签
 
 1. 查看 `src/modules/download/`、`src/stores/download.ts` 与
-   `commands/download_cmd.rs`、`download_catalog.rs`、`download_metadata.rs`、`download_recovery.rs`。
-2. 修改扫描和标签时检查 `commands/local_files_cmd.rs`、`library/local_index.rs`
+   `commands/download_cmd/`（`mod.rs`、`catalog.rs`、`recovery.rs`、`artwork.rs`），以及 `neri-library` 的
+   `download_metadata.rs`、`downloads.rs`。
+2. 修改扫描和标签时检查 `commands/local_files_cmd.rs`，以及 `neri-library` 的 `library/local_index.rs`
    与 `library/local_file_tags.rs`，区分索引、歌单记录和真实文件。
 3. 保留任务取消、恢复、sidecar 与清单一致性；使用测试文件验证失败 / 取消不会破坏原文件。
 4. 涉及写标签时覆盖歌词、封面和 NP 元数据保留，并在写回后读回检查。
@@ -315,7 +325,7 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 
 #### 5. 修改歌词或桌面歌词
 
-1. 查看 `src-tauri/src/lyrics/manager.rs`、`src/modules/lyrics/`、`src/stores/currentLyrics.ts`
+1. 查看 `src-tauri/crates/neri-library/src/lyrics/manager.rs`、`src/modules/lyrics/`、`src/stores/currentLyrics.ts`
    与 `src/components/LyricsView.vue`，区分解析、匹配和渲染职责。
 2. 保留已匹配结果、翻译 / 罗马字、逐字结构、用户偏移和请求代次；不要假设来源格式相同。
 3. 桌面歌词同时检查 `src/modules/desktopLyrics/`、`src/views/DesktopLyricsView.vue`
@@ -330,8 +340,8 @@ Bilibili CC 字幕移植依据 Android PR #575，参考提交 `43cf89ae2e331f80e
 
 #### 6. 修改 GitHub / WebDAV 同步
 
-1. 先读 `sync/models.rs`、`proto_models.rs`、`serializer.rs`、`archive/`、`merge.rs`、
-   `manager.rs` 和 `commands/sync_cmd.rs`，记录对照的 Android 提交。
+1. 先读 `neri-model` 的 `sync/models.rs`、`sync/proto_models.rs`，`neri-library` 的 `sync/serializer.rs`、
+   `sync/archive/`、`sync/merge/`、`sync/manager.rs`，以及 `commands/sync_cmd/`，记录对照的 Android 提交。
 2. 保持 ProtoBuf 字段号与 V4 记录类型；新字段需要缺省读取，旧字段号不能重新分配。
    保留三路合并、因果 token、删除记录和成员恢复语义。
 3. Bilibili 分 P 跳过规则按 `bvid + cid` 绑定，使用 `biliVideoSkipRules` 和 V4 类型 14；
@@ -346,7 +356,7 @@ Bilibili CC 字幕移植依据 Android PR #575，参考提交 `43cf89ae2e331f80e
 
 #### 7. 修改一起听
 
-1. 同时检查 `src/stores/listenTogether/`、`src-tauri/src/listen_together/`
+1. 同时检查 `src/stores/listenTogether/`、`src-tauri/crates/neri-listentogether/`
    与 `commands/listen_together_cmd.rs`，再对照 Android 客户端和 Worker。
 2. 保持字段、角色权限、房间版本和旧协议回退；增量队列使用 `baseRoomVersion`，
    重复曲目以 `stableKey + occurrence` 定位。
@@ -356,7 +366,7 @@ Bilibili CC 字幕移植依据 Android PR #575，参考提交 `43cf89ae2e331f80e
 #### 8. 修改窗口、快捷键或系统集成
 
 1. 从 `src/main.ts`、`src/components/TitleBar.vue`、`src/modules/shortcuts/`、
-   `src/modules/tray/` 及对应 Rust 命令 / `main.rs` 追踪生命周期。
+   `src/integrations/tray.ts` 及对应 Rust 命令 / `main.rs` 追踪生命周期。
 2. 保留单实例、窗口状态、事件清理、IME 输入与全局快捷键边界；不要扩大不必要的 Tauri 权限。
 3. 在实际 WebView 环境检查主窗口、托盘弹窗、桌面歌词、媒体键和退出路径。
    涉及平台分支时，明确记录已验证平台与未验证平台。
@@ -423,14 +433,20 @@ NERI_WEBKIT_KEEP_DMABUF=1 pnpm tauri dev
 常用检查入口：
 
 ```bash
+pnpm typecheck
+pnpm lint
 pnpm test
 pnpm build
-cargo check --manifest-path src-tauri/Cargo.toml --locked
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
-cargo clippy --manifest-path src-tauri/Cargo.toml --locked
+python3 -B tools/quality/module_boundaries.py
+python3 -B tools/quality/ipc_contract.py
+pnpm crap
+cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --workspace --all-targets --release -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked --workspace
 ```
 
-`pnpm test` 通过 `scripts/test-frontend.mjs` 枚举并串行运行 `package.json` 的全部 `test:*`。
+`pnpm test` 先通过 `scripts/test-frontend.mjs` 枚举并串行运行 `package.json` 的全部 `test:*`，再运行 Vitest 单测（`src/**/__tests__/*.test.ts`，单独运行用 `pnpm unit`，覆盖率用 `pnpm unit:coverage`）。
 这些脚本覆盖纯逻辑、store、组件 / IPC mock 与源码约束，不是浏览器端到端测试。
 其中 `test:config-backup-codec` 使用项目固定 Rust 工具链运行实际配置编解码器与 Node 加密互通检查，
 因此 `pnpm test` 也需要 Rust。测试工作目录位于被忽略的 `docs/tmp/`，结束后自动清理。
@@ -446,17 +462,17 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --locked
 | 一起听 | `pnpm test:listen-together-protocol`、`pnpm test:listen-together-queue`、`pnpm test:listen-together-reconnect` |
 | 原生界面与打包配置 | `pnpm test:tray-popup`、`pnpm test:title-bar-window-state`、`pnpm test:ffmpeg-bundle` |
 
-完整清单以 `package.json` 为准。Rust 可以按模块过滤：
+完整清单以 `package.json` 为准。Rust 可以按 crate 和模块过滤：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib sync
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib listen_together
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib library::local_file_tags::tests
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p neri-library --lib sync::
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p neri-listentogether
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p neri-library --lib library::local_file_tags::tests
 ```
 
 FFmpeg 配置测试使用模拟库；实际解码测试还需匹配共享库。
 未设置 `NERI_REQUIRE_FFMPEG=1` 时，部分测试缺库会跳过。
-按 [FFmpeg 文档](src-tauri/native/ffmpeg/README.md)设置 `NERI_FFMPEG_DIR` 和该变量后运行解码测试，
+按 [FFmpeg 文档](src-tauri/crates/neri-playback/native/ffmpeg/README.md)设置 `NERI_FFMPEG_DIR` 和该变量后运行解码测试，
 再单独验证安装包内资源与安装后播放。
 
 Android JVM 反向解码辅助检查：
@@ -481,9 +497,10 @@ node -p "typeof require('node:zlib').zstdDecompressSync"
 
 当前工作流边界：
 
-- **CI / `build.yml`**：main / master 推送、PR 或手动触发，运行前端回归与构建、四目标 Rust
-  locked check，以及 Windows x64、macOS arm64、Linux x64 随包 FFmpeg 解码检查。
-  不运行完整 Rust 单元测试集或 Clippy。
+- **CI / `build.yml`**：main / master 推送、PR 或手动触发，运行前端类型检查、ESLint、回归脚本与 Vitest
+  （含覆盖率摘要）和构建；质量门禁（模块边界、IPC 契约及其自测）；Linux 上的 rustfmt 与 debug / release
+  Clippy、完整 workspace 测试与 Rust 覆盖率（`cargo llvm-cov`）；四目标 Rust locked check 与部分测试；
+  以及 Windows x64、macOS arm64、Linux x64 随包 FFmpeg 解码检查。
 - **Artifacts / `artifacts.yml`**：main / master 推送或手动触发，生成四目标测试包；
   安装包保留 3 天、构建元数据保留 14 天，不发布 GitHub Release。
 - **FFmpeg / `ffmpeg.yml`**：手动或被其他工作流调用，生成四份 `ffmpeg-<目标>` artifact。
@@ -491,6 +508,7 @@ node -p "typeof require('node:zlib').zstdDecompressSync"
   手动路径生成构建版本标签；标签触发且标签含连字符时标记 prerelease。
   Release 附 FFmpeg 源码、构建脚本、macOS 安装说明与 `SHA256SUMS.txt`。
 
+门禁规则与基线说明见 [tools/quality/README.md](tools/quality/README.md)，可维护性度量可用 `python3 -B tools/quality/maintainability.py --run` 复现。
 CI 和 Artifacts 对纯文档、许可证和模板变更设有路径忽略；没有运行记录不等于检查通过。
 GitHub prerelease 标记与项目仍处于预览阶段是不同概念。工作流检查包内容不替代安装后的原生验收。
 
@@ -505,7 +523,7 @@ GitHub prerelease 标记与项目仍处于预览阶段是不同概念。工作�
 - `vendor/applemusic-like-lyrics` 按自身 AGPL-3.0 许可分发。
   FFmpeg 共享库未启用 GPL / nonfree 组件，按 LGPL-2.1-or-later 分发，
   需要保留许可、构建信息、对应源码和构建脚本。
-- Android DSP 移植来源及 GPL-3.0 文本见 [native/dsp](src-tauri/native/dsp/README.md)；
+- Android DSP 移植来源及 GPL-3.0 文本见 [native/dsp](src-tauri/crates/neri-playback/native/dsp/README.md)；
   桌面 DSP 不采用 Android USB 路径的替代授权。
 - 移植 Android 或其他项目实现时，保留版权和许可声明，在提交正文注明来源及对照版本。
   不提交或公开 Cookie、Token、密码、完整配置导出、私有曲库、数据库或敏感日志。

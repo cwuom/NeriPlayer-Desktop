@@ -4,7 +4,7 @@
  */
 import { invoke } from '@tauri-apps/api/core'
 import { persistUserData } from '@/modules/persistence/userData'
-import type { TrackInfo } from '@/stores/player'
+import type { TrackInfo } from '@/types/track'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('sync-track-payload')

@@ -1,13 +1,16 @@
 // 调试台命令：应用内日志查看、诊断报告导出、崩溃报告管理
 // 能力对齐 Android 调试页（NPLogger 文件日志 + 崩溃收集 + 导出）
 
-use crate::error::{AppError, AppResult};
 use crate::logging;
+use neri_common::error::{AppError, AppResult};
 use serde::Serialize;
 
 /// 拉取最近日志（新→旧）
 #[tauri::command]
-pub fn get_recent_logs(limit: Option<usize>, min_level: Option<String>) -> Vec<logging::RecentLogEntry> {
+pub fn get_recent_logs(
+    limit: Option<usize>,
+    min_level: Option<String>,
+) -> Vec<logging::RecentLogEntry> {
     let level = min_level
         .as_deref()
         .and_then(|value| value.parse::<log::Level>().ok());
@@ -33,7 +36,10 @@ pub fn export_debug_report(app: tauri::AppHandle) -> AppResult<String> {
     ));
     body.push_str("== crash reports ==\n");
     for report in list_crash_reports().unwrap_or_default() {
-        body.push_str(&format!("{} ({} bytes)\n", report.file_name, report.size_bytes));
+        body.push_str(&format!(
+            "{} ({} bytes)\n",
+            report.file_name, report.size_bytes
+        ));
     }
     body.push_str("\n== recent logs (oldest first) ==\n");
     for entry in logs.into_iter().rev() {
@@ -58,9 +64,9 @@ pub fn export_debug_report(app: tauri::AppHandle) -> AppResult<String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioEngineStats {
-    pub output: crate::audio::metrics::OutputMetricsSnapshot,
+    pub output: neri_playback::metrics::OutputMetricsSnapshot,
     /// 最近的起播/seek 首帧耗时，新的在前
-    pub recent_starts: Vec<crate::audio::metrics::StartTiming>,
+    pub recent_starts: Vec<neri_playback::metrics::StartTiming>,
 }
 
 /// 播放引擎指标：输出回调计数、欠载与最近的首帧耗时
@@ -69,8 +75,8 @@ pub struct AudioEngineStats {
 #[tauri::command]
 pub fn audio_engine_stats() -> AudioEngineStats {
     AudioEngineStats {
-        output: crate::audio::metrics::OUTPUT_METRICS.snapshot(),
-        recent_starts: crate::audio::metrics::recent_starts(),
+        output: neri_playback::metrics::OUTPUT_METRICS.snapshot(),
+        recent_starts: neri_playback::metrics::recent_starts(),
     }
 }
 
@@ -98,7 +104,9 @@ fn validated_crash_path(file_name: &str) -> AppResult<std::path::PathBuf> {
         && !file_name.contains(['/', '\\'])
         && !file_name.contains("..");
     if !valid {
-        return Err(AppError::Other(format!("invalid crash report name: {file_name}")));
+        return Err(AppError::Other(format!(
+            "invalid crash report name: {file_name}"
+        )));
     }
     Ok(logging::crash_dir().join(file_name))
 }

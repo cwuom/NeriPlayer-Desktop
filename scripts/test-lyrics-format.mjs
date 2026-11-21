@@ -36,7 +36,7 @@ const {
 } = await loadTsModule('../src/modules/lyrics/lyricsFormat.ts')
 
 const creditFixtures = JSON.parse(await readFile(
-  new URL('../src-tauri/src/lyrics/fixtures/credit-lines.json', import.meta.url), 'utf8',
+  new URL('../src-tauri/crates/neri-library/src/lyrics/fixtures/credit-lines.json', import.meta.url), 'utf8',
 ))
 for (const text of creditFixtures.credits) {
   assert.equal(isLyricCreditMetadataLine(text), true, `制作署名应被识别：${text}`)

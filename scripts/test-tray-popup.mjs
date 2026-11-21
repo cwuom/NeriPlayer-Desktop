@@ -240,7 +240,7 @@ async function loadCommonJs(path) {
 const coverCacheModule = await loadCommonJs('../src/utils/bilibiliCoverCache.ts')
 const trackCoverModule = await loadCommonJs('../src/utils/trackCover.ts')
 const lyricTimeline = await loadCommonJs('../src/modules/desktopLyrics/timeline.ts')
-const bridgeSource = await readFile(new URL('../src/modules/tray/bridge.ts', import.meta.url), 'utf8')
+const bridgeSource = await readFile(new URL('../src/integrations/tray.ts', import.meta.url), 'utf8')
 const bridgeCompiled = ts.transpileModule(bridgeSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText

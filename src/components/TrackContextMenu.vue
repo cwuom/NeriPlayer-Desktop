@@ -6,7 +6,7 @@ import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
-import BiliVideoSkipDialog from '@/components/BiliVideoSkipDialog.vue'
+import BiliVideoSkipDialog from '@/components/bilibili/BiliVideoSkipDialog.vue'
 import { resolveBiliVideoSkipBvid } from '@/modules/playback/biliVideoSkip'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
@@ -18,7 +18,7 @@ import {
   type ContextMenuActionItem,
   type ContextMenuItem,
 } from '@/utils/contextMenu'
-import { isLocalTrack, localTrackFilePath } from '@/utils/localTrack'
+import { isLocalTrack, localTrackFilePath } from '@/modules/library/localTrack'
 import { writeClipboardText } from '@/utils/clipboard'
 import { createLogger } from '@/utils/logger'
 

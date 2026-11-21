@@ -1,5 +1,7 @@
 // 基于 NeriPlayer Android c54884d 的纯音效模型、预设和 RBJ 频响计算移植
 // 原作者 cwuom / ouom，来源 https://github.com/cwuom/NeriPlayer，按 GPL-3.0 保留来源
+// 应用 lib 停在 ES2021，导入失败要用 Error cause 保留原始解析错误，单独引入 ES2022 的 Error 类型
+/// <reference lib="es2022.error" />
 
 export type ParametricEqBandType = 'peak' | 'low_shelf' | 'high_shelf' | 'low_pass' | 'high_pass' | 'notch' | 'band_pass'
 export type AudioEffectsPowerMode = 'eco' | 'balanced' | 'high'
@@ -631,7 +633,7 @@ export function exportAudioEffectsProfile(profile: AudioEffectsProfile, name = '
 function parseImportedJson(text: string, limit = IMPORT_TEXT_LIMIT): unknown {
   let parsed: unknown
   try { parsed = JSON.parse(importText(text, limit)) } catch (error) {
-    throw new Error(error instanceof SyntaxError ? '音效 JSON 格式无效' : error instanceof Error ? error.message : '音效导入失败')
+    throw new Error(error instanceof SyntaxError ? '音效 JSON 格式无效' : error instanceof Error ? error.message : '音效导入失败', { cause: error })
   }
   return parsed
 }

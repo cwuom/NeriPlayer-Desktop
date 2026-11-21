@@ -52,8 +52,12 @@ const settingsModule = load(await read('../src/stores/settings.ts'), {
   '@/modules/audioEffects/model': await loadAudioEffectsModel(),
   '@/modules/desktopLyrics/style': load(await read('../src/modules/desktopLyrics/style.ts')),
   '@/modules/shortcuts/bindings': load(await read('../src/modules/shortcuts/bindings.ts'), {
-    './platform': load(await read('../src/modules/shortcuts/platform.ts')),
+    './platform': load(await read('../src/modules/shortcuts/platform.ts'), {
+      '@/utils/platform': load(await read('../src/utils/platform.ts')),
+    }),
   }),
+  '@/modules/lyrics/lyricSourcePreference': load(await read('../src/modules/lyrics/lyricSourcePreference.ts')),
+  '@/modules/settings/uiScaleRange': load(await read('../src/modules/settings/uiScaleRange.ts')),
 })
 
 let cases = 0

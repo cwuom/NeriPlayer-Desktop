@@ -13,7 +13,7 @@
 #   FFMPEG_WORK_DIR    源码与中间产物目录，默认 <输出目录>/work
 #   JOBS               并行编译数
 #
-# 组件清单要覆盖 src-tauri/src/audio/decoder.rs 里 FFMPEG_CODECS 与嗅探规则用到的编码和容器。
+# 组件清单要覆盖 src-tauri/crates/neri-playback/src/decoder.rs 里 FFMPEG_CODECS 与嗅探规则用到的编码和容器。
 # 不加 --enable-gpl / --enable-nonfree：这些组件都是 FFmpeg 自带的 LGPL 实现。
 set -euo pipefail
 

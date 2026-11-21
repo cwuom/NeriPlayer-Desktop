@@ -20,8 +20,10 @@ assert.ok(existsSync(new URL(layoutPath, import.meta.url)), 'YouTube 首页分�
 const { module: { buildYoutubeHomeSections } } = await loadModule(layoutPath)
 const { module: { resolvePlaybackQueueStartIndex } } = await loadModule('../src/modules/playback/playbackQueue.ts')
 const { url: coverUrl } = await loadModule('../src/utils/trackCover.ts')
+const { url: jsonUrl } = await loadModule('../src/utils/json.ts')
 const { module: { parseYouTubeHomeFeed } } = await loadModule('../src/modules/youtube/youtubePlaylistParse.ts', {
   '@/utils/trackCover': coverUrl,
+  '@/utils/json': jsonUrl,
 })
 
 const song = (videoId, overrides = {}) => ({ title: `歌曲 ${videoId}`, subtitle: '歌曲 • 歌手 • 专辑 • 3:15 • 42 views', coverUrl: 'https://cover.test/song.jpg', videoId, durationMs: 195000, ...overrides })

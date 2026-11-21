@@ -4,7 +4,7 @@ import * as vue from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
 
-const componentSource = await readFile(new URL('../src/components/HyperBackground.vue', import.meta.url), 'utf8')
+const componentSource = await readFile(new URL('../src/components/background/HyperBackground.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(componentSource).descriptor, { id: 'hyper-background-test', genDefaultAs: 'component' })
 const compile = source => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -38,8 +38,12 @@ function mount(overrides = {}, { hidden = false, dpr = 1, softwareRenderer = fal
   const requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame }
   const cancelAnimationFrame = id => frames.delete(id)
   const frameLoop = {}
-  new Function('exports', 'requestAnimationFrame', 'cancelAnimationFrame', frameLoopCode)(
-    frameLoop, requestAnimationFrame, cancelAnimationFrame,
+  const frameLoopRequire = name => {
+    if (name === './logger') return { createLogger: () => ({ error: (...args) => console.error(...args) }) }
+    throw new Error(`unexpected dependency: ${name}`)
+  }
+  new Function('require', 'exports', 'requestAnimationFrame', 'cancelAnimationFrame', frameLoopCode)(
+    frameLoopRequire, frameLoop, requestAnimationFrame, cancelAnimationFrame,
   )
   const props = vue.reactive({ playing: true, lowPerformance: false, suspended: false, ...overrides })
   if (props.lowPerformance) frameLoop.setFrameInterval(1000 / 30)

@@ -13,8 +13,13 @@ function loadFrameLoop() {
   const frames = new Map()
   let frameId = 0
   let now = 0
+  // frameLoop 通过作用域 logger 报告回调异常；桩与真实 logger 一样写到 console
+  const logger = { createLogger: () => ({ error: (...args) => console.error(...args) }) }
   new Function('require', 'exports', 'requestAnimationFrame', 'cancelAnimationFrame', compiled)(
-    name => { throw new Error(`unexpected dependency: ${name}`) },
+    name => {
+      if (name === './logger') return logger
+      throw new Error(`unexpected dependency: ${name}`)
+    },
     exports,
     callback => { const id = ++frameId; frames.set(id, callback); return id },
     id => frames.delete(id),

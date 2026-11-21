@@ -1,7 +1,7 @@
 // 下一首歌词预取：在当前曲目播放中把下一首的歌词提前写进本地缓存，
 // 切歌时正在播放页与桌面歌词直接命中缓存，不再等一轮在线匹配
-import type { TrackInfo } from '@/stores/player'
-import type { DefaultLyricSource } from '@/stores/settings'
+import type { TrackInfo } from '@/types/track'
+import type { DefaultLyricSource } from './lyricSourcePreference'
 import { readCachedLyrics, saveCachedLyrics } from './lyricsCache'
 import { fetchAutomaticLyrics, fetchPreferredSourceLyrics, preferredLyricMatchSource } from './lyricsFetch'
 import { resolveStoredLyricStateFromPayload } from './lyricsFormat'

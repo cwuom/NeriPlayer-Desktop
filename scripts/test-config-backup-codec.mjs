@@ -9,7 +9,7 @@ const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temporaryRoot = path.join(project, 'docs', 'tmp')
 mkdirSync(temporaryRoot, { recursive: true })
 const directory = mkdtempSync(path.join(temporaryRoot, 'neriplayer-config-codec-'))
-const codec = path.join(project, 'src-tauri/src/config_backup.rs').replaceAll('\\', '/')
+const codec = path.join(project, 'src-tauri/crates/neri-common/src/config_backup.rs').replaceAll('\\', '/')
 const aad = 'moe.ouom.neriplayer.config.encrypted|1|PBKDF2-HMAC-SHA256|600000|AES-256-GCM'
 const password = ' 密码🔐 e\u0301 '
 const plain = { kind: 'moe.ouom.neriplayer.config', formatVersion: 1, settings: { strings: { audio_quality: 'lossless' } } }

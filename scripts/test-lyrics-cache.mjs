@@ -22,7 +22,7 @@ const lyricSource = {
 }
 const exports = {}
 new Function('require', 'exports', compiled)(name => {
-  if (name === '@/utils/persistentCache') return persistentCache
+  if (name === '@/modules/persistence/persistentCache') return persistentCache
   if (name === './lyricsRequest') return { lyricsIdentity: track => track.id }
   if (name === './lyricSource') return lyricSource
   if (name === './biliSubtitle') return subtitle
@@ -80,7 +80,7 @@ const detailCompiled = ts.transpileModule(detailSource, {
 }).outputText
 const detail = {}
 new Function('require', 'exports', detailCompiled)(name => {
-  if (name === '@/utils/persistentCache') return persistentCache
+  if (name === '@/modules/persistence/persistentCache') return persistentCache
   throw new Error(`Unexpected detail cache dependency: ${name}`)
 }, detail)
 const radarA = detail.playlistDetailCacheKey('netease-playlist', 5320167908, 'alice')

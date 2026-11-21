@@ -38,10 +38,22 @@ const desktopLyricsStyle = {}
 new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/desktopLyrics/style.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(desktopLyricsStyle)
-const shortcutPlatform = {}
-new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/shortcuts/platform.ts', import.meta.url), 'utf8'), {
+const desktopPlatform = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/utils/platform.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText)(shortcutPlatform)
+}).outputText)(desktopPlatform)
+const shortcutPlatform = {}
+new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/shortcuts/platform.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(() => desktopPlatform, shortcutPlatform)
+const lyricSourcePreference = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/lyrics/lyricSourcePreference.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(lyricSourcePreference)
+const uiScaleRange = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/settings/uiScaleRange.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(uiScaleRange)
 const shortcutBindings = {}
 new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/shortcuts/bindings.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -55,6 +67,8 @@ new Function('require', 'exports', compiled)(name => {
   if (name === '@/modules/desktopLyrics/style') return desktopLyricsStyle
   if (name === '@/modules/shortcuts/bindings') return shortcutBindings
   if (name === '@/modules/audioEffects/model') return audioEffectsModel
+  if (name === '@/modules/lyrics/lyricSourcePreference') return lyricSourcePreference
+  if (name === '@/modules/settings/uiScaleRange') return uiScaleRange
   throw new Error(`Unexpected settings dependency: ${name}`)
 }, exports)
 

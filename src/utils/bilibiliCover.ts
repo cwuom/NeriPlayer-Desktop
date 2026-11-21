@@ -34,7 +34,8 @@ function decodeBilibiliCover(dataUrl: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const image = new Image()
     let settled = false
-    let timer: ReturnType<typeof window.setTimeout> | null = null
+    // 显式写 number：测试配置同时带 Node 类型时，ReturnType 会取到 NodeJS.Timeout 重载
+    let timer: number | null = null
 
     const finish = (complete: () => void) => {
       if (settled) return

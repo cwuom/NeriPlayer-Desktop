@@ -1,5 +1,5 @@
-import type { TrackInfo } from '@/stores/player'
-import { getCachedValue, setCachedValue } from '@/utils/persistentCache'
+import type { TrackInfo } from '@/types/track'
+import { getCachedValue, setCachedValue } from '@/modules/persistence/persistentCache'
 
 const PLAYLIST_DETAIL_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const PLAYLIST_DETAIL_CACHE_MAX_ENTRIES = 200

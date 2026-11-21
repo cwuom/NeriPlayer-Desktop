@@ -6,7 +6,7 @@ import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
-const source = await readFile(new URL('../src/components/BiliVideoSkipDialog.vue', import.meta.url), 'utf8')
+const source = await readFile(new URL('../src/components/bilibili/BiliVideoSkipDialog.vue', import.meta.url), 'utf8')
 const script = compileScript(parse(source).descriptor, { id: 'bili-skip-test', genDefaultAs: 'component' })
 const compiled = ts.transpileModule(script.content, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

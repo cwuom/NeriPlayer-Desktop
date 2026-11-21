@@ -1,15 +1,18 @@
+use crate::state::{AppState, TrackInfo, TrackSource};
+use neri_common::error::{AppError, AppResult};
+use neri_library::library::{
+    playlist::{self, PlaylistStore},
+    scanner,
+};
+use neri_library::sync::manager;
+use neri_model::sync::models::SyncCausalToken;
+use neri_model::sync::models::SyncFavoritePlaylist;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
-use crate::error::{AppError, AppResult};
-use crate::state::{AppState, TrackInfo, TrackSource};
-use crate::library::{scanner, playlist::{self, PlaylistStore}};
-use crate::sync::models::SyncFavoritePlaylist;
-use crate::sync::models::SyncCausalToken;
-use crate::sync::manager;
 
 #[tauri::command]
 pub async fn scan_music_directory(
@@ -24,7 +27,8 @@ pub async fn scan_music_directory(
 #[tauri::command]
 pub async fn get_playlist_usage_stats() -> AppResult<Value> {
     tokio::task::spawn_blocking(|| {
-        let metadata = crate::db::user_db()?.read(crate::sync::storage::load_archive_metadata)?;
+        let metadata = neri_library::db::user_db()?
+            .read(neri_library::sync::storage::load_archive_metadata)?;
         playlist_usage_stats_value(&metadata.extensions)
     })
     .await
@@ -36,20 +40,28 @@ fn playlist_usage_stats_value(extensions: &serde_json::Map<String, Value>) -> Ap
         return Ok(serde_json::json!([]));
     };
     let mut usage = usage.clone();
-    let entries = usage.as_array_mut()
+    let entries = usage
+        .as_array_mut()
         .ok_or_else(|| AppError::Other("Playlist usage stats must be an array".into()))?;
     for entry in entries {
-        let entry = entry.as_object_mut()
+        let entry = entry
+            .as_object_mut()
             .ok_or_else(|| AppError::Other("Playlist usage entries must be objects".into()))?;
         // Android 的 Long 身份字段可能超过 JavaScript 安全整数范围
         for field in ["id", "fid", "mid"] {
-            let Some(value) = entry.get_mut(field) else { continue; };
+            let Some(value) = entry.get_mut(field) else {
+                continue;
+            };
             match value {
                 Value::Number(number) if number.is_i64() || number.is_u64() => {
                     *value = Value::String(number.to_string());
                 }
                 Value::String(_) | Value::Null => {}
-                _ => return Err(AppError::Other(format!("Playlist usage {field} must be an integer or string"))),
+                _ => {
+                    return Err(AppError::Other(format!(
+                        "Playlist usage {field} must be an integer or string"
+                    )))
+                }
             }
         }
     }
@@ -76,8 +88,9 @@ impl PlaylistId {
     fn into_i64(self) -> AppResult<i64> {
         match self {
             Self::Number(id) => Ok(id),
-            Self::Decimal(id) => id.parse::<i64>()
-                .map_err(|_| AppError::Other("Playlist id must be a signed 64-bit decimal integer".into())),
+            Self::Decimal(id) => id.parse::<i64>().map_err(|_| {
+                AppError::Other("Playlist id must be a signed 64-bit decimal integer".into())
+            }),
         }
     }
 }
@@ -88,12 +101,15 @@ pub async fn get_home_local_playlists() -> AppResult<Value> {
 }
 
 fn home_local_playlists_value(playlists: Vec<PlaylistInfo>) -> AppResult<Value> {
-    let items = playlists.into_iter().map(|playlist| {
-        let id = playlist.id.to_string();
-        let mut item = serde_json::to_value(playlist)?;
-        item["id"] = Value::String(id);
-        Ok(item)
-    }).collect::<AppResult<Vec<_>>>()?;
+    let items = playlists
+        .into_iter()
+        .map(|playlist| {
+            let id = playlist.id.to_string();
+            let mut item = serde_json::to_value(playlist)?;
+            item["id"] = Value::String(id);
+            Ok(item)
+        })
+        .collect::<AppResult<Vec<_>>>()?;
     Ok(Value::Array(items))
 }
 
@@ -143,7 +159,11 @@ fn list_playlists_blocking() -> AppResult<Vec<PlaylistInfo>> {
         let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for pl in &summaries {
             let name = pl.name.trim().to_string();
-            let first_report = || WARNED_DUPLICATE_PLAYLISTS.lock().map_or(true, |mut warned| warned.insert(pl.id));
+            let first_report = || {
+                WARNED_DUPLICATE_PLAYLISTS
+                    .lock()
+                    .map_or(true, |mut warned| warned.insert(pl.id))
+            };
             if !seen_names.insert(name.clone()) && first_report() {
                 log::warn!(
                     target: "playlist-io",
@@ -190,9 +210,9 @@ pub async fn create_playlist(app: AppHandle, name: String) -> AppResult<Playlist
 #[tauri::command]
 pub async fn ensure_favorites_playlist(app: AppHandle, name: String) -> AppResult<PlaylistInfo> {
     let (info, created) = PlaylistStore::update(|store| {
-        let (playlist, created) =
-            store.ensure_system_playlist(manager::SYSTEM_FAVORITES_ID, &name);
-        let (track_count, cover_url) = crate::library::playlist::summarize_tracks(&playlist.tracks);
+        let (playlist, created) = store.ensure_system_playlist(manager::SYSTEM_FAVORITES_ID, &name);
+        let (track_count, cover_url) =
+            neri_library::library::playlist::summarize_tracks(&playlist.tracks);
         let info = PlaylistInfo {
             id: playlist.id,
             name: playlist.name.clone(),
@@ -231,7 +251,11 @@ pub async fn rename_playlist(app: AppHandle, id: i64, name: String) -> AppResult
             return Ok((false, false));
         }
         let name = store.sanitized_name(&name, Some(id))?;
-        let pl = store.playlists.iter_mut().find(|p| p.id == id).expect("playlist found above");
+        let pl = store
+            .playlists
+            .iter_mut()
+            .find(|p| p.id == id)
+            .expect("playlist found above");
         if pl.name == name {
             return Ok((true, false));
         }
@@ -256,7 +280,8 @@ pub async fn reorder_playlists(app: AppHandle, ordered_ids: Vec<PlaylistId>) -> 
         .map(PlaylistId::into_i64)
         .collect::<AppResult<Vec<_>>>()?;
     let changed = PlaylistStore::update(|store| {
-        let changed = reorder_store_playlists(store, &ordered_ids, chrono::Utc::now().timestamp_millis());
+        let changed =
+            reorder_store_playlists(store, &ordered_ids, chrono::Utc::now().timestamp_millis());
         Ok((changed, changed))
     })?;
     if changed {
@@ -278,7 +303,11 @@ fn reorder_store_playlists(store: &mut PlaylistStore, ordered_ids: &[i64], now: 
         }
     }
     ordered.extend(remaining);
-    let changed = ordered.iter().map(|playlist| playlist.id).collect::<Vec<_>>() != original;
+    let changed = ordered
+        .iter()
+        .map(|playlist| playlist.id)
+        .collect::<Vec<_>>()
+        != original;
     if changed {
         for playlist in &mut ordered {
             playlist.modified_at = now.max(0) as u64;
@@ -341,7 +370,10 @@ pub async fn get_playlist_tracks(id: PlaylistId) -> AppResult<Vec<TrackInfo>> {
 pub async fn add_to_playlist(app: AppHandle, playlist_id: i64, track: TrackInfo) -> AppResult<()> {
     let added = PlaylistStore::update(|store| {
         let added_at = {
-            let pl = store.playlists.iter().find(|p| p.id == playlist_id)
+            let pl = store
+                .playlists
+                .iter()
+                .find(|p| p.id == playlist_id)
                 .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
             if pl
                 .tracks
@@ -352,15 +384,19 @@ pub async fn add_to_playlist(app: AppHandle, playlist_id: i64, track: TrackInfo)
             }
             next_track_added_at(&pl.tracks, 1)
         };
-        let token = manager::next_sync_causal_tokens_pub(&app, 1)?
-            .into_iter()
-            .next()
-            .expect("one causal token must be allocated");
+        let token =
+            manager::next_sync_causal_tokens_pub(&crate::sync_state::TauriSyncState(&app), 1)?
+                .into_iter()
+                .next()
+                .expect("one causal token must be allocated");
         let stamped = stamp_track_for_playlist_insert(track, added_at, token);
         let sync_song = manager::tracks_to_sync_songs_pub(std::slice::from_ref(&stamped))
             .into_iter()
             .next();
-        let pl = store.playlists.iter_mut().find(|p| p.id == playlist_id)
+        let pl = store
+            .playlists
+            .iter_mut()
+            .find(|p| p.id == playlist_id)
             .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
         pl.tracks.insert(0, stamped);
         pl.modified_at = added_at as u64;
@@ -375,20 +411,29 @@ pub async fn add_to_playlist(app: AppHandle, playlist_id: i64, track: TrackInfo)
     Ok(())
 }
 
-
 #[tauri::command]
-pub async fn add_tracks_to_playlist(app: AppHandle, playlist_id: i64, tracks: Vec<TrackInfo>) -> AppResult<usize> {
+pub async fn add_tracks_to_playlist(
+    app: AppHandle,
+    playlist_id: i64,
+    tracks: Vec<TrackInfo>,
+) -> AppResult<usize> {
     let added = PlaylistStore::update(|store| {
         let mut seen = std::collections::HashSet::new();
         let new_tracks: Vec<TrackInfo> = {
-            let pl = store.playlists.iter().find(|p| p.id == playlist_id)
+            let pl = store
+                .playlists
+                .iter()
+                .find(|p| p.id == playlist_id)
                 .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
             tracks
                 .into_iter()
                 .filter(|track| {
                     let key = playlist_track_key(track);
                     !track.id.is_empty()
-                        && !pl.tracks.iter().any(|current| playlist_track_key(current) == key)
+                        && !pl
+                            .tracks
+                            .iter()
+                            .any(|current| playlist_track_key(current) == key)
                         && seen.insert(key)
                 })
                 .collect()
@@ -399,11 +444,15 @@ pub async fn add_tracks_to_playlist(app: AppHandle, playlist_id: i64, tracks: Ve
             return Ok((0, false));
         }
         let newest_added_at = {
-            let pl = store.playlists.iter().find(|p| p.id == playlist_id)
+            let pl = store
+                .playlists
+                .iter()
+                .find(|p| p.id == playlist_id)
                 .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
             next_track_added_at(&pl.tracks, added)
         };
-        let tokens = manager::next_sync_causal_tokens_pub(&app, added)?;
+        let tokens =
+            manager::next_sync_causal_tokens_pub(&crate::sync_state::TauriSyncState(&app), added)?;
         let stamped_tracks: Vec<TrackInfo> = new_tracks
             .into_iter()
             .zip(tokens)
@@ -421,7 +470,10 @@ pub async fn add_tracks_to_playlist(app: AppHandle, playlist_id: i64, tracks: Ve
                 store.clear_playlist_song_deletion(&playlist_id.to_string(), &sync_song);
             }
         }
-        let pl = store.playlists.iter_mut().find(|p| p.id == playlist_id)
+        let pl = store
+            .playlists
+            .iter_mut()
+            .find(|p| p.id == playlist_id)
             .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
         for track in stamped_tracks.into_iter().rev() {
             pl.tracks.insert(0, track);
@@ -461,27 +513,42 @@ fn next_track_added_at(tracks: &[TrackInfo], count: usize) -> i64 {
 pub async fn record_playlist_open(
     app: AppHandle,
     state: State<'_, AppState>,
-    mut open: crate::library::playlist_usage::PlaylistOpen,
+    mut open: neri_library::library::playlist_usage::PlaylistOpen,
 ) -> AppResult<bool> {
-    if open.source == "bili" && open.subtype.as_deref().is_none_or(|subtype| subtype.trim().is_empty()) {
-        let own_mid = state.auth.lock().bilibili.as_ref().and_then(|auth| auth.mid);
-        open.subtype = Some(crate::library::playlist_usage::bili_favorite_kind(&open, own_mid).into());
+    if open.source == "bili"
+        && open
+            .subtype
+            .as_deref()
+            .is_none_or(|subtype| subtype.trim().is_empty())
+    {
+        let own_mid = state
+            .auth
+            .lock()
+            .bilibili
+            .as_ref()
+            .and_then(|auth| auth.mid);
+        open.subtype =
+            Some(neri_library::library::playlist_usage::bili_favorite_kind(&open, own_mid).into());
     }
-    let Some(usage) = open.resolve() else { return Ok(false) };
-    let device_id = manager::get_or_create_device_id_pub(&app);
+    let Some(usage) = open.resolve() else {
+        return Ok(false);
+    };
+    let device_id = manager::get_or_create_device_id_pub(&crate::sync_state::TauriSyncState(&app));
     let now = chrono::Utc::now().timestamp_millis();
     let changed = tokio::task::spawn_blocking(move || -> AppResult<bool> {
         // 与同步回写共用歌单锁并推进写入版本：进行中的同步会推迟，而不是用旧快照的扩展段覆盖这条记录
-        let _guard = crate::library::playlist::lock_io();
+        let _guard = neri_library::library::playlist::lock_io();
         let mut changed = false;
-        crate::db::user_db()?.write(|transaction| {
-            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
-                changed = crate::sync::merge::record_playlist_open(extensions, &usage, &device_id, now);
+        neri_library::db::user_db()?.write(|transaction| {
+            neri_library::sync::storage::update_archive_extensions(transaction, |extensions| {
+                changed = neri_library::sync::merge::record_playlist_open(
+                    extensions, &usage, &device_id, now,
+                );
                 Ok(())
             })
         })?;
         if changed {
-            crate::library::playlist::mark_io_changed();
+            neri_library::library::playlist::mark_io_changed();
         }
         Ok(changed)
     })
@@ -503,13 +570,13 @@ pub async fn record_lyric_override(track: TrackInfo) -> AppResult<()> {
     }
     tokio::task::spawn_blocking(move || {
         // 与同步回写共用歌单锁并推进写入版本：进行中的同步会推迟，而不是用旧快照的扩展段覆盖这条记录
-        let _guard = crate::library::playlist::lock_io();
-        crate::db::user_db()?.write(|transaction| {
-            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
-                crate::sync::merge::record_lyric_override(extensions, &song)
+        let _guard = neri_library::library::playlist::lock_io();
+        neri_library::db::user_db()?.write(|transaction| {
+            neri_library::sync::storage::update_archive_extensions(transaction, |extensions| {
+                neri_library::sync::merge::record_lyric_override(extensions, &song)
             })
         })?;
-        crate::library::playlist::mark_io_changed();
+        neri_library::library::playlist::mark_io_changed();
         Ok(())
     })
     .await
@@ -568,10 +635,10 @@ fn apply_playlist_track_update(
             // 本地会丢失 CLEARED 语义并在下次播放时重新在线拉取
             if let Some(payload) = existing.sync_payload.as_mut() {
                 if payload.sync_metadata_version
-                    < crate::sync::models::CURRENT_SYNC_METADATA_VERSION
+                    < neri_model::sync::models::CURRENT_SYNC_METADATA_VERSION
                 {
                     payload.sync_metadata_version =
-                        crate::sync::models::CURRENT_SYNC_METADATA_VERSION;
+                        neri_model::sync::models::CURRENT_SYNC_METADATA_VERSION;
                 }
             }
             touched = true;
@@ -585,10 +652,17 @@ fn apply_playlist_track_update(
 }
 
 #[tauri::command]
-pub async fn remove_from_playlist(app: AppHandle, playlist_id: PlaylistId, track_id: String) -> AppResult<()> {
+pub async fn remove_from_playlist(
+    app: AppHandle,
+    playlist_id: PlaylistId,
+    track_id: String,
+) -> AppResult<()> {
     let playlist_id = playlist_id.into_i64()?;
     let removed = PlaylistStore::update(|store| {
-        let pl = store.playlists.iter_mut().find(|p| p.id == playlist_id)
+        let pl = store
+            .playlists
+            .iter_mut()
+            .find(|p| p.id == playlist_id)
             .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
         let uses_playlist_key = pl
             .tracks
@@ -609,7 +683,7 @@ pub async fn remove_from_playlist(app: AppHandle, playlist_id: PlaylistId, track
         let deletion = manager::track_to_playlist_song_deletion_pub(
             playlist_id,
             &track,
-            manager::get_or_create_device_id_pub(&app),
+            manager::get_or_create_device_id_pub(&crate::sync_state::TauriSyncState(&app)),
         );
         store.record_playlist_song_deletion(deletion);
         Ok((true, true))
@@ -620,20 +694,25 @@ pub async fn remove_from_playlist(app: AppHandle, playlist_id: PlaylistId, track
     Ok(())
 }
 
-
 #[tauri::command]
-pub async fn remove_tracks_from_playlist(app: AppHandle, playlist_id: PlaylistId, track_ids: Vec<String>) -> AppResult<usize> {
+pub async fn remove_tracks_from_playlist(
+    app: AppHandle,
+    playlist_id: PlaylistId,
+    track_ids: Vec<String>,
+) -> AppResult<usize> {
     let playlist_id = playlist_id.into_i64()?;
     let ids: std::collections::HashSet<String> = track_ids.into_iter().collect();
     let removed = PlaylistStore::update(|store| {
-        let pl = store.playlists.iter_mut().find(|p| p.id == playlist_id)
+        let pl = store
+            .playlists
+            .iter_mut()
+            .find(|p| p.id == playlist_id)
             .ok_or_else(|| AppError::NotFound("Playlist not found".into()))?;
         if ids.is_empty() {
             return Ok((0, false));
         }
-        let matches = |track: &TrackInfo| {
-            ids.contains(&playlist_track_key(track)) || ids.contains(&track.id)
-        };
+        let matches =
+            |track: &TrackInfo| ids.contains(&playlist_track_key(track)) || ids.contains(&track.id);
         let removed_tracks: Vec<TrackInfo> = pl
             .tracks
             .iter()
@@ -647,13 +726,11 @@ pub async fn remove_tracks_from_playlist(app: AppHandle, playlist_id: PlaylistId
             return Ok((0, false));
         }
         pl.modified_at = chrono::Utc::now().timestamp_millis() as u64;
-        let device_id = manager::get_or_create_device_id_pub(&app);
+        let device_id =
+            manager::get_or_create_device_id_pub(&crate::sync_state::TauriSyncState(&app));
         for track in &removed_tracks {
-            let deletion = manager::track_to_playlist_song_deletion_pub(
-                playlist_id,
-                track,
-                device_id.clone(),
-            );
+            let deletion =
+                manager::track_to_playlist_song_deletion_pub(playlist_id, track, device_id.clone());
             store.record_playlist_song_deletion(deletion);
         }
         Ok((removed, true))
@@ -723,13 +800,19 @@ fn reorder_tracks(
         let mut expected_sorted: Vec<&String> = expected.iter().collect();
         ordered_sorted.sort();
         expected_sorted.sort();
-        if !current_matches || unique.len() != ordered_keys.len() || ordered_sorted != expected_sorted {
+        if !current_matches
+            || unique.len() != ordered_keys.len()
+            || ordered_sorted != expected_sorted
+        {
             return Err(AppError::Other(PLAYLIST_ORDER_CHANGED.into()));
         }
     }
 
-    let order_index: HashMap<&String, usize> =
-        ordered_keys.iter().enumerate().map(|(idx, key)| (key, idx)).collect();
+    let order_index: HashMap<&String, usize> = ordered_keys
+        .iter()
+        .enumerate()
+        .map(|(idx, key)| (key, idx))
+        .collect();
     // 稳定排序：命中 key 用目标位次，未命中用末位并保留原相对序，保证不丢歌
     let fallback = ordered_keys.len();
     let mut indexed: Vec<(usize, usize, TrackInfo)> = tracks
@@ -756,7 +839,11 @@ fn reorder_tracks(
 
 fn playlist_track_order_aliases(track: &TrackInfo) -> Vec<String> {
     let mut aliases = vec![playlist_track_key(track)];
-    if let Some(key) = track.playlist_key.as_ref().filter(|key| !key.trim().is_empty()) {
+    if let Some(key) = track
+        .playlist_key
+        .as_ref()
+        .filter(|key| !key.trim().is_empty())
+    {
         aliases.push(key.clone());
     }
     if !track.id.is_empty() {
@@ -788,8 +875,13 @@ mod tests {
         }
     }
 
-    fn playlist(id: i64, name: &str) -> crate::library::playlist::Playlist {
-        crate::library::playlist::Playlist { id, name: name.into(), tracks: Vec::new(), modified_at: 1 }
+    fn playlist(id: i64, name: &str) -> neri_library::library::playlist::Playlist {
+        neri_library::library::playlist::Playlist {
+            id,
+            name: name.into(),
+            tracks: Vec::new(),
+            modified_at: 1,
+        }
     }
 
     #[test]
@@ -806,12 +898,17 @@ mod tests {
         assert!(reorder_store_playlists(&mut store, &[3, -1002, 1], 500));
         let ids: Vec<i64> = store.playlists.iter().map(|playlist| playlist.id).collect();
         assert_eq!(ids, vec![-1001, 3, 1, 2, -1002]);
-        assert!(store.playlists[1..4].iter().all(|playlist| playlist.modified_at == 500));
+        assert!(store.playlists[1..4]
+            .iter()
+            .all(|playlist| playlist.modified_at == 500));
         assert_eq!(store.playlists[0].modified_at, 1);
         assert_eq!(store.playlists[4].modified_at, 1);
 
         assert!(!reorder_store_playlists(&mut store, &[3, 1, 2], 900));
-        assert!(store.playlists.iter().all(|playlist| playlist.modified_at != 900));
+        assert!(store
+            .playlists
+            .iter()
+            .all(|playlist| playlist.modified_at != 900));
     }
 
     #[test]
@@ -827,28 +924,74 @@ mod tests {
 
     #[test]
     fn track_reorder_is_rejected_when_the_previewed_order_is_outdated() {
-        let tracks = || vec![track("a", "", Some("ka")), track("b", "", Some("kb")), track("c", "", Some("kc"))];
+        let tracks = || {
+            vec![
+                track("a", "", Some("ka")),
+                track("b", "", Some("kb")),
+                track("c", "", Some("kc")),
+            ]
+        };
         let keys = |list: &[&str]| list.iter().map(|key| key.to_string()).collect::<Vec<_>>();
-        let ids = |list: &[TrackInfo]| list.iter().map(|track| track.id.clone()).collect::<Vec<_>>();
+        let ids = |list: &[TrackInfo]| {
+            list.iter()
+                .map(|track| track.id.clone())
+                .collect::<Vec<_>>()
+        };
 
-        let reordered = reorder_tracks(tracks(), &keys(&["kc", "ka", "kb"]), Some(&keys(&["ka", "kb", "kc"])), 100).unwrap();
+        let reordered = reorder_tracks(
+            tracks(),
+            &keys(&["kc", "ka", "kb"]),
+            Some(&keys(&["ka", "kb", "kc"])),
+            100,
+        )
+        .unwrap();
         assert_eq!(ids(&reordered), ["c", "a", "b"]);
-        assert_eq!(reordered.iter().map(|track| track.added_at).collect::<Vec<_>>(), [100, 99, 98]);
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|track| track.added_at)
+                .collect::<Vec<_>>(),
+            [100, 99, 98]
+        );
 
         let mut synced_in = tracks();
         synced_in.push(track("d", "", Some("kd")));
         for (current, ordered, expected, why) in [
-            (synced_in, keys(&["kc", "ka", "kb"]), keys(&["ka", "kb", "kc"]), "a song arrived after the preview"),
-            (tracks(), keys(&["kc", "ka", "kb"]), keys(&["kb", "ka", "kc"]), "the order changed after the preview"),
-            (tracks(), keys(&["kc", "ka", "ka"]), keys(&["ka", "kb", "kc"]), "the new order repeats a song"),
-            (tracks(), keys(&["kc", "ka"]), keys(&["ka", "kb", "kc"]), "the new order drops a song"),
+            (
+                synced_in,
+                keys(&["kc", "ka", "kb"]),
+                keys(&["ka", "kb", "kc"]),
+                "a song arrived after the preview",
+            ),
+            (
+                tracks(),
+                keys(&["kc", "ka", "kb"]),
+                keys(&["kb", "ka", "kc"]),
+                "the order changed after the preview",
+            ),
+            (
+                tracks(),
+                keys(&["kc", "ka", "ka"]),
+                keys(&["ka", "kb", "kc"]),
+                "the new order repeats a song",
+            ),
+            (
+                tracks(),
+                keys(&["kc", "ka"]),
+                keys(&["ka", "kb", "kc"]),
+                "the new order drops a song",
+            ),
         ] {
             let error = reorder_tracks(current, &ordered, Some(&expected), 100).unwrap_err();
             assert_eq!(error.to_string(), PLAYLIST_ORDER_CHANGED, "{why}");
         }
 
         let without_expectation = reorder_tracks(tracks(), &keys(&["kc"]), None, 100).unwrap();
-        assert_eq!(ids(&without_expectation), ["c", "a", "b"], "unlisted songs keep their order at the end");
+        assert_eq!(
+            ids(&without_expectation),
+            ["c", "a", "b"],
+            "unlisted songs keep their order at the end"
+        );
     }
 }
 
@@ -864,13 +1007,13 @@ pub struct FavoritePlaylistWithTracks {
 /// 获取收藏歌单列表
 #[tauri::command]
 pub async fn list_favorite_playlists() -> AppResult<Vec<FavoritePlaylistWithTracks>> {
-    Ok(crate::sync::manager::load_favorite_playlists()?
+    Ok(neri_library::sync::manager::load_favorite_playlists()?
         .into_iter()
         .map(|favorite| {
             let tracks = favorite
                 .songs
                 .iter()
-                .map(crate::sync::manager::sync_song_to_track_pub)
+                .map(neri_library::sync::manager::sync_song_to_track_pub)
                 .collect();
             FavoritePlaylistWithTracks { favorite, tracks }
         })
@@ -902,14 +1045,20 @@ impl ArtistFavoriteInput {
         }
         match self.source.as_str() {
             "neteaseArtist" | "biliArtist" => {
-                let id = self.id.parse::<i64>().ok().filter(|id| *id > 0)
+                let id = self
+                    .id
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|id| *id > 0)
                     .ok_or_else(|| AppError::Other("Artist id must be positive".into()))?;
                 self.id = id.to_string();
             }
             "youtubeMusicArtist" => {
                 let browse_id = self.browse_id.as_deref().unwrap_or_default().trim();
                 if browse_id.is_empty() {
-                    return Err(AppError::Other("YouTube artist browseId is required".into()));
+                    return Err(AppError::Other(
+                        "YouTube artist browseId is required".into(),
+                    ));
                 }
                 let digest = Sha256::digest(browse_id.as_bytes());
                 let id = i64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
@@ -923,26 +1072,43 @@ impl ArtistFavoriteInput {
     }
 
     fn matches(&self, favorite: &SyncFavoritePlaylist) -> bool {
-        favorite.source == self.source && (favorite.id == self.id ||
-            (self.source == "youtubeMusicArtist" && favorite.browse_id == self.browse_id))
+        favorite.source == self.source
+            && (favorite.id == self.id
+                || (self.source == "youtubeMusicArtist" && favorite.browse_id == self.browse_id))
     }
 
     fn into_favorite(self, now: i64) -> SyncFavoritePlaylist {
         SyncFavoritePlaylist {
-            id: self.id, name: self.name, source: self.source, cover_url: self.cover_url,
-            track_count: self.track_count, browse_id: self.browse_id, subtitle: self.subtitle,
-            songs: Vec::new(), added_time: now, modified_at: now, sort_order: now,
-            is_deleted: false, playlist_id: None,
+            id: self.id,
+            name: self.name,
+            source: self.source,
+            cover_url: self.cover_url,
+            track_count: self.track_count,
+            browse_id: self.browse_id,
+            subtitle: self.subtitle,
+            songs: Vec::new(),
+            added_time: now,
+            modified_at: now,
+            sort_order: now,
+            is_deleted: false,
+            playlist_id: None,
         }
     }
 }
 
 #[tauri::command]
-pub async fn set_artist_favorite(app: AppHandle, artist: ArtistFavoriteInput, following: bool) -> AppResult<bool> {
+pub async fn set_artist_favorite(
+    app: AppHandle,
+    artist: ArtistFavoriteInput,
+    following: bool,
+) -> AppResult<bool> {
     let artist = artist.normalized()?;
     let now = chrono::Utc::now().timestamp_millis();
     manager::update_favorite_playlists(|favorites| {
-        if let Some(existing) = favorites.iter_mut().find(|favorite| artist.matches(favorite)) {
+        if let Some(existing) = favorites
+            .iter_mut()
+            .find(|favorite| artist.matches(favorite))
+        {
             let was_deleted = existing.is_deleted;
             existing.is_deleted = !following;
             existing.modified_at = now.max(existing.modified_at.saturating_add(1));
@@ -952,7 +1118,9 @@ pub async fn set_artist_favorite(app: AppHandle, artist: ArtistFavoriteInput, fo
                     existing.sort_order = existing.modified_at;
                 }
                 existing.name = artist.name;
-                if !artist.cover_url.is_empty() { existing.cover_url = artist.cover_url; }
+                if !artist.cover_url.is_empty() {
+                    existing.cover_url = artist.cover_url;
+                }
                 existing.subtitle = artist.subtitle.or_else(|| existing.subtitle.clone());
                 existing.browse_id = artist.browse_id.or_else(|| existing.browse_id.clone());
                 existing.track_count = existing.track_count.max(artist.track_count);
@@ -972,16 +1140,26 @@ pub async fn set_artist_favorite(app: AppHandle, artist: ArtistFavoriteInput, fo
 }
 
 fn merge_followed_artists(
-    favorites: &mut Vec<SyncFavoritePlaylist>, artists: Vec<ArtistFavoriteInput>, started_at: i64, now: i64,
+    favorites: &mut Vec<SyncFavoritePlaylist>,
+    artists: Vec<ArtistFavoriteInput>,
+    started_at: i64,
+    now: i64,
 ) -> AppResult<usize> {
     let mut imported = 0;
     let mut seen = std::collections::HashSet::new();
     for artist in artists {
         let artist = artist.normalized()?;
-        if !seen.insert(format!("{}:{}", artist.source, artist.id)) { continue; }
-        if let Some(existing) = favorites.iter_mut().find(|favorite| artist.matches(favorite)) {
+        if !seen.insert(format!("{}:{}", artist.source, artist.id)) {
+            continue;
+        }
+        if let Some(existing) = favorites
+            .iter_mut()
+            .find(|favorite| artist.matches(favorite))
+        {
             // 远端拉取只能添加，不能覆盖当前关注或拉取期间发生的取消关注
-            if !existing.is_deleted || existing.modified_at >= started_at { continue; }
+            if !existing.is_deleted || existing.modified_at >= started_at {
+                continue;
+            }
             *existing = artist.into_favorite(now.max(existing.modified_at.saturating_add(1)));
         } else {
             favorites.push(artist.into_favorite(now));
@@ -994,33 +1172,70 @@ fn merge_followed_artists(
 fn artist_account_fingerprint(state: &AppState, source: &str) -> Option<Vec<(String, String)>> {
     let auth = state.auth.lock();
     let cookies = match source {
-        "neteaseArtist" => &auth.netease.as_ref().filter(|auth| auth.has_login())?.cookies,
-        "youtubeMusicArtist" => &auth.youtube.as_ref().filter(|auth| auth.has_login())?.cookies,
+        "neteaseArtist" => {
+            &auth
+                .netease
+                .as_ref()
+                .filter(|auth| auth.has_login())?
+                .cookies
+        }
+        "youtubeMusicArtist" => {
+            &auth
+                .youtube
+                .as_ref()
+                .filter(|auth| auth.has_login())?
+                .cookies
+        }
         _ => return None,
     };
-    let mut identity: Vec<_> = cookies.iter().filter(|cookie| match source {
-        "neteaseArtist" => cookie.name == "MUSIC_U",
-        _ => matches!(cookie.name.as_str(), "SAPISID" | "__Secure-3PAPISID" | "SID" | "LOGIN_INFO" | "authuser"),
-    }).map(|cookie| (cookie.name.clone(), cookie.value.clone())).collect();
+    let mut identity: Vec<_> = cookies
+        .iter()
+        .filter(|cookie| match source {
+            "neteaseArtist" => cookie.name == "MUSIC_U",
+            _ => matches!(
+                cookie.name.as_str(),
+                "SAPISID" | "__Secure-3PAPISID" | "SID" | "LOGIN_INFO" | "authuser"
+            ),
+        })
+        .map(|cookie| (cookie.name.clone(), cookie.value.clone()))
+        .collect();
     identity.sort();
     Some(identity)
 }
 
 #[tauri::command]
-pub async fn import_followed_artists(app: AppHandle, source: String, state: State<'_, AppState>) -> AppResult<usize> {
+pub async fn import_followed_artists(
+    app: AppHandle,
+    source: String,
+    state: State<'_, AppState>,
+) -> AppResult<usize> {
     let started_at = chrono::Utc::now().timestamp_millis();
     let account = artist_account_fingerprint(&state, &source)
         .ok_or_else(|| AppError::Other("请先登录该平台".into()))?;
     let artists = match source.as_str() {
         "neteaseArtist" => load_netease_followed_artists(&state).await?,
         "youtubeMusicArtist" => {
-            let auth = state.auth.lock().youtube.clone()
+            let auth = state
+                .auth
+                .lock()
+                .youtube
+                .clone()
                 .ok_or_else(|| AppError::Other("请先登录 YouTube".into()))?;
-            state.youtube().get_followed_artists(&auth).await?.into_iter().map(|artist| ArtistFavoriteInput {
-                source: source.clone(), id: String::new(), name: artist.name,
-                cover_url: artist.cover_url.unwrap_or_default(), track_count: 0,
-                browse_id: Some(artist.browse_id), subtitle: Some(artist.subtitle),
-            }).collect()
+            state
+                .youtube()
+                .get_followed_artists(&auth)
+                .await?
+                .into_iter()
+                .map(|artist| ArtistFavoriteInput {
+                    source: source.clone(),
+                    id: String::new(),
+                    name: artist.name,
+                    cover_url: artist.cover_url.unwrap_or_default(),
+                    track_count: 0,
+                    browse_id: Some(artist.browse_id),
+                    subtitle: Some(artist.subtitle),
+                })
+                .collect()
         }
         _ => return Err(AppError::Other("Unsupported artist source".into())),
     };
@@ -1028,9 +1243,16 @@ pub async fn import_followed_artists(app: AppHandle, source: String, state: Stat
         if artist_account_fingerprint(&state, &source).as_ref() != Some(&account) {
             return Err(AppError::Other("拉取期间账号已变更，请重试".into()));
         }
-        merge_followed_artists(favorites, artists, started_at, chrono::Utc::now().timestamp_millis())
+        merge_followed_artists(
+            favorites,
+            artists,
+            started_at,
+            chrono::Utc::now().timestamp_millis(),
+        )
     })?;
-    if count > 0 { let _ = app.emit("playlists-changed", ()); }
+    if count > 0 {
+        let _ = app.emit("playlists-changed", ());
+    }
     Ok(count)
 }
 
@@ -1047,43 +1269,84 @@ async fn load_netease_followed_artists(state: &AppState) -> AppResult<Vec<Artist
             return Err(AppError::Api("Repeated artist subscription page".into()));
         }
         artists.extend(items);
-        if !has_more { return Ok(artists); }
-        offset = offset.checked_add(raw_count).ok_or_else(|| AppError::Api("Artist pagination overflow".into()))?;
+        if !has_more {
+            return Ok(artists);
+        }
+        offset = offset
+            .checked_add(raw_count)
+            .ok_or_else(|| AppError::Api("Artist pagination overflow".into()))?;
     }
     Err(AppError::Api("Artist pagination exceeded budget".into()))
 }
 
-fn parse_netease_followed_artist_page(page: &Value) -> AppResult<(Vec<ArtistFavoriteInput>, bool, u32)> {
+fn parse_netease_followed_artist_page(
+    page: &Value,
+) -> AppResult<(Vec<ArtistFavoriteInput>, bool, u32)> {
     if page["code"].as_i64() != Some(200) {
         return Err(AppError::Api("Artist subscriptions request failed".into()));
     }
-    let raw = page["data"].as_array().ok_or_else(|| AppError::Api("Artist subscriptions have no data array".into()))?;
-    let has_more = page["hasMore"].as_bool().ok_or_else(|| AppError::Api("Artist subscriptions have no pagination state".into()))?;
+    let raw = page["data"]
+        .as_array()
+        .ok_or_else(|| AppError::Api("Artist subscriptions have no data array".into()))?;
+    let has_more = page["hasMore"]
+        .as_bool()
+        .ok_or_else(|| AppError::Api("Artist subscriptions have no pagination state".into()))?;
     if has_more && raw.is_empty() {
-        return Err(AppError::Api("Artist subscription pagination did not advance".into()));
+        return Err(AppError::Api(
+            "Artist subscription pagination did not advance".into(),
+        ));
     }
-    let artists = raw.iter().filter_map(|artist| {
-        let id = artist["id"].as_i64().filter(|id| *id > 0)?;
-        let name = artist["name"].as_str()?.trim();
-        if name.is_empty() { return None; }
-        let cover_url = ["picUrl", "img1v1Url", "cover"].iter().find_map(|key|
-            artist[key].as_str().filter(|url| !url.trim().is_empty())).unwrap_or_default();
-        let aliases = artist["alias"].as_array().map(|aliases| aliases.iter().filter_map(Value::as_str)
-            .filter(|alias| !alias.trim().is_empty()).collect::<Vec<_>>().join(" / "));
-        Some(ArtistFavoriteInput {
-            source: "neteaseArtist".into(), id: id.to_string(), name: name.into(),
-            cover_url: normalize_artist_cover(cover_url), track_count: artist["musicSize"].as_i64()
-                .unwrap_or(0).clamp(0, i32::MAX as i64) as i32,
-            browse_id: None, subtitle: aliases,
+    let artists = raw
+        .iter()
+        .filter_map(|artist| {
+            let id = artist["id"].as_i64().filter(|id| *id > 0)?;
+            let name = artist["name"].as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let cover_url = ["picUrl", "img1v1Url", "cover"]
+                .iter()
+                .find_map(|key| artist[key].as_str().filter(|url| !url.trim().is_empty()))
+                .unwrap_or_default();
+            let aliases = artist["alias"].as_array().map(|aliases| {
+                aliases
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|alias| !alias.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            });
+            Some(ArtistFavoriteInput {
+                source: "neteaseArtist".into(),
+                id: id.to_string(),
+                name: name.into(),
+                cover_url: normalize_artist_cover(cover_url),
+                track_count: artist["musicSize"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .clamp(0, i32::MAX as i64) as i32,
+                browse_id: None,
+                subtitle: aliases,
+            })
         })
-    }).collect();
-    Ok((artists, has_more, raw.len().try_into().map_err(|_| AppError::Api("Artist page exceeds budget".into()))?))
+        .collect();
+    Ok((
+        artists,
+        has_more,
+        raw.len()
+            .try_into()
+            .map_err(|_| AppError::Api("Artist page exceeds budget".into()))?,
+    ))
 }
 
 fn normalize_artist_cover(value: &str) -> String {
-    if value.starts_with("//") { format!("https:{value}") }
-    else if let Some(path) = value.strip_prefix("http://") { format!("https://{path}") }
-    else { value.to_string() }
+    if value.starts_with("//") {
+        format!("https:{value}")
+    } else if let Some(path) = value.strip_prefix("http://") {
+        format!("https://{path}")
+    } else {
+        value.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1106,11 +1369,20 @@ pub struct BiliArtistDetail {
 }
 
 #[tauri::command]
-pub async fn get_bili_artist_detail(mid: u64, page: Option<u32>, state: State<'_, AppState>) -> AppResult<BiliArtistDetail> {
-    if mid == 0 { return Err(AppError::Other("Uploader mid must be positive".into())); }
+pub async fn get_bili_artist_detail(
+    mid: u64,
+    page: Option<u32>,
+    state: State<'_, AppState>,
+) -> AppResult<BiliArtistDetail> {
+    if mid == 0 {
+        return Err(AppError::Other("Uploader mid must be positive".into()));
+    }
     let page = page.unwrap_or(1).max(1);
     let client = state.bilibili();
-    let (profile, videos) = tokio::try_join!(client.get_uploader_profile(mid), client.get_uploader_videos(mid, page))?;
+    let (profile, videos) = tokio::try_join!(
+        client.get_uploader_profile(mid),
+        client.get_uploader_videos(mid, page)
+    )?;
     Ok(parse_bili_artist_detail(&profile, &videos, page))
 }
 
@@ -1123,33 +1395,84 @@ fn parse_bili_artist_detail(profile: &Value, videos: &Value, page: u32) -> BiliA
         description: profile["sign"].as_str().unwrap_or_default().into(),
     };
     let items = videos["data"]["list"]["vlist"].as_array();
-    let tracks = items.into_iter().flatten().filter_map(|video| {
-        let bvid = video["bvid"].as_str().filter(|bvid| !bvid.is_empty())?;
-        let title = video["title"].as_str().filter(|title| !title.is_empty())?;
-        let duration = video["length"].as_str().unwrap_or_default().split(':')
-            .try_fold(0_u64, |total, part| part.parse::<u64>().ok().and_then(|part| total.checked_mul(60)?.checked_add(part))).unwrap_or(0);
-        Some(TrackInfo {
-            id: format!("bilibili:{bvid}"), title: title.into(),
-            artist: video["author"].as_str().filter(|name| !name.is_empty()).unwrap_or(&header.name).into(),
-            album: String::new(), duration_ms: duration.saturating_mul(1000), source: TrackSource::Bilibili,
-            url: String::new(), cover_url: Some(normalize_artist_cover(video["pic"].as_str().unwrap_or_default())),
-            added_at: 0, sync_payload: None, playlist_key: None,
+    let tracks = items
+        .into_iter()
+        .flatten()
+        .filter_map(|video| {
+            let bvid = video["bvid"].as_str().filter(|bvid| !bvid.is_empty())?;
+            let title = video["title"].as_str().filter(|title| !title.is_empty())?;
+            let duration = video["length"]
+                .as_str()
+                .unwrap_or_default()
+                .split(':')
+                .try_fold(0_u64, |total, part| {
+                    part.parse::<u64>()
+                        .ok()
+                        .and_then(|part| total.checked_mul(60)?.checked_add(part))
+                })
+                .unwrap_or(0);
+            Some(TrackInfo {
+                id: format!("bilibili:{bvid}"),
+                title: title.into(),
+                artist: video["author"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&header.name)
+                    .into(),
+                album: String::new(),
+                duration_ms: duration.saturating_mul(1000),
+                source: TrackSource::Bilibili,
+                url: String::new(),
+                cover_url: Some(normalize_artist_cover(
+                    video["pic"].as_str().unwrap_or_default(),
+                )),
+                added_at: 0,
+                sync_payload: None,
+                playlist_key: None,
+            })
         })
-    }).collect::<Vec<_>>();
-    let total = videos["data"]["page"]["count"].as_u64().unwrap_or(tracks.len() as u64);
-    BiliArtistDetail { header, tracks, page, total, has_more: u64::from(page).saturating_mul(30) < total }
+        .collect::<Vec<_>>();
+    let total = videos["data"]["page"]["count"]
+        .as_u64()
+        .unwrap_or(tracks.len() as u64);
+    BiliArtistDetail {
+        header,
+        tracks,
+        page,
+        total,
+        has_more: u64::from(page).saturating_mul(30) < total,
+    }
 }
 
 #[tauri::command]
-pub async fn get_youtube_artist_detail(browse_id: String, state: State<'_, AppState>) -> AppResult<Value> {
+pub async fn get_youtube_artist_detail(
+    browse_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<Value> {
     let auth = state.auth.lock().youtube.clone();
-    state.youtube().get_creator_detail(&browse_id, auth.as_ref()).await
+    state
+        .youtube()
+        .get_creator_detail(&browse_id, auth.as_ref())
+        .await
 }
 
 #[tauri::command]
-pub async fn get_youtube_artist_items(browse_id: String, params: Option<String>, continuation: Option<String>, state: State<'_, AppState>) -> AppResult<Value> {
+pub async fn get_youtube_artist_items(
+    browse_id: String,
+    params: Option<String>,
+    continuation: Option<String>,
+    state: State<'_, AppState>,
+) -> AppResult<Value> {
     let auth = state.auth.lock().youtube.clone();
-    state.youtube().get_creator_items(&browse_id, params.as_deref(), continuation.as_deref(), auth.as_ref()).await
+    state
+        .youtube()
+        .get_creator_items(
+            &browse_id,
+            params.as_deref(),
+            continuation.as_deref(),
+            auth.as_ref(),
+        )
+        .await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1173,8 +1496,14 @@ pub struct BiliArtistContents {
 }
 
 #[tauri::command]
-pub async fn get_bili_artist_contents(mid: u64, page: Option<u32>, state: State<'_, AppState>) -> AppResult<BiliArtistContents> {
-    if mid == 0 { return Err(AppError::Other("Uploader mid must be positive".into())); }
+pub async fn get_bili_artist_contents(
+    mid: u64,
+    page: Option<u32>,
+    state: State<'_, AppState>,
+) -> AppResult<BiliArtistContents> {
+    if mid == 0 {
+        return Err(AppError::Other("Uploader mid must be positive".into()));
+    }
     let page = page.unwrap_or(1).max(1);
     let raw = state.bilibili().get_uploader_contents(mid, page).await?;
     Ok(parse_bili_artist_contents(&raw, page))
@@ -1183,22 +1512,39 @@ pub async fn get_bili_artist_contents(mid: u64, page: Option<u32>, state: State<
 fn parse_bili_artist_contents(raw: &Value, page: u32) -> BiliArtistContents {
     let lists = &raw["data"]["items_lists"];
     let parse = |key: &str, kind: &str, id_key: &str| {
-        lists[key].as_array().into_iter().flatten().filter_map(|value| {
-            let meta = value.get("meta").unwrap_or(value);
-            let id = meta[id_key].as_u64().filter(|id| *id > 0)?;
-            let name = meta["name"].as_str().or_else(|| meta["title"].as_str()).filter(|name| !name.is_empty())?;
-            Some(BiliArtistContent {
-                id: id.to_string(), kind: kind.into(), name: name.into(),
-                cover_url: normalize_artist_cover(meta["cover"].as_str().unwrap_or_default()),
-                description: meta["description"].as_str().unwrap_or_default().into(),
-                total: meta["total"].as_u64().unwrap_or_default(),
+        lists[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| {
+                let meta = value.get("meta").unwrap_or(value);
+                let id = meta[id_key].as_u64().filter(|id| *id > 0)?;
+                let name = meta["name"]
+                    .as_str()
+                    .or_else(|| meta["title"].as_str())
+                    .filter(|name| !name.is_empty())?;
+                Some(BiliArtistContent {
+                    id: id.to_string(),
+                    kind: kind.into(),
+                    name: name.into(),
+                    cover_url: normalize_artist_cover(meta["cover"].as_str().unwrap_or_default()),
+                    description: meta["description"].as_str().unwrap_or_default().into(),
+                    total: meta["total"].as_u64().unwrap_or_default(),
+                })
             })
-        }).collect::<Vec<_>>()
+            .collect::<Vec<_>>()
     };
     let collections = parse("seasons_list", "collection", "season_id");
     let series = parse("series_list", "series", "series_id");
-    let total = lists["page"]["total"].as_u64().unwrap_or((collections.len() + series.len()) as u64);
-    BiliArtistContents { collections, series, page, has_more: u64::from(page).saturating_mul(20) < total }
+    let total = lists["page"]["total"]
+        .as_u64()
+        .unwrap_or((collections.len() + series.len()) as u64);
+    BiliArtistContents {
+        collections,
+        series,
+        page,
+        has_more: u64::from(page).saturating_mul(20) < total,
+    }
 }
 
 #[derive(Serialize)]
@@ -1211,27 +1557,64 @@ pub struct BiliArtistCollection {
 }
 
 #[tauri::command]
-pub async fn get_bili_artist_collection(mid: u64, content_id: u64, kind: String, page: Option<u32>, state: State<'_, AppState>) -> AppResult<BiliArtistCollection> {
-    if mid == 0 || content_id == 0 { return Err(AppError::Other("Uploader content id must be positive".into())); }
+pub async fn get_bili_artist_collection(
+    mid: u64,
+    content_id: u64,
+    kind: String,
+    page: Option<u32>,
+    state: State<'_, AppState>,
+) -> AppResult<BiliArtistCollection> {
+    if mid == 0 || content_id == 0 {
+        return Err(AppError::Other(
+            "Uploader content id must be positive".into(),
+        ));
+    }
     let page = page.unwrap_or(1).max(1);
-    let raw = state.bilibili().get_uploader_collection(mid, content_id, &kind, page).await?;
+    let raw = state
+        .bilibili()
+        .get_uploader_collection(mid, content_id, &kind, page)
+        .await?;
     Ok(parse_bili_artist_collection(&raw, page))
 }
 
 fn parse_bili_artist_collection(raw: &Value, page: u32) -> BiliArtistCollection {
-    let tracks = raw["data"]["archives"].as_array().into_iter().flatten().filter_map(|video| {
-        let bvid = video["bvid"].as_str().filter(|bvid| !bvid.is_empty())?;
-        let title = video["title"].as_str().filter(|title| !title.is_empty())?;
-        Some(TrackInfo {
-            id: format!("bilibili:{bvid}"), title: title.into(), artist: String::new(), album: String::new(),
-            duration_ms: video["duration"].as_u64().unwrap_or_default().saturating_mul(1000),
-            source: TrackSource::Bilibili, url: String::new(),
-            cover_url: Some(normalize_artist_cover(video["pic"].as_str().unwrap_or_default())),
-            added_at: 0, sync_payload: None, playlist_key: None,
+    let tracks = raw["data"]["archives"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|video| {
+            let bvid = video["bvid"].as_str().filter(|bvid| !bvid.is_empty())?;
+            let title = video["title"].as_str().filter(|title| !title.is_empty())?;
+            Some(TrackInfo {
+                id: format!("bilibili:{bvid}"),
+                title: title.into(),
+                artist: String::new(),
+                album: String::new(),
+                duration_ms: video["duration"]
+                    .as_u64()
+                    .unwrap_or_default()
+                    .saturating_mul(1000),
+                source: TrackSource::Bilibili,
+                url: String::new(),
+                cover_url: Some(normalize_artist_cover(
+                    video["pic"].as_str().unwrap_or_default(),
+                )),
+                added_at: 0,
+                sync_payload: None,
+                playlist_key: None,
+            })
         })
-    }).collect::<Vec<_>>();
-    let total = raw["data"]["page"]["total"].as_u64().or_else(|| raw["data"]["meta"]["total"].as_u64()).unwrap_or(tracks.len() as u64);
-    BiliArtistCollection { tracks, page, total, has_more: u64::from(page).saturating_mul(30) < total }
+        .collect::<Vec<_>>();
+    let total = raw["data"]["page"]["total"]
+        .as_u64()
+        .or_else(|| raw["data"]["meta"]["total"].as_u64())
+        .unwrap_or(tracks.len() as u64);
+    BiliArtistCollection {
+        tracks,
+        page,
+        total,
+        has_more: u64::from(page).saturating_mul(30) < total,
+    }
 }
 
 #[cfg(test)]
@@ -1241,8 +1624,13 @@ mod artist_tests {
 
     fn artist(id: &str) -> ArtistFavoriteInput {
         ArtistFavoriteInput {
-            source: "neteaseArtist".into(), id: id.into(), name: "New remote name".into(),
-            cover_url: String::new(), track_count: 0, browse_id: None, subtitle: None,
+            source: "neteaseArtist".into(),
+            id: id.into(),
+            name: "New remote name".into(),
+            cover_url: String::new(),
+            track_count: 0,
+            browse_id: None,
+            subtitle: None,
         }
     }
 
@@ -1255,7 +1643,19 @@ mod artist_tests {
         let mut old_delete = artist("3").into_favorite(50);
         old_delete.is_deleted = true;
         let mut favorites = vec![active, recent_delete, old_delete];
-        let count = merge_followed_artists(&mut favorites, vec![artist("1"), artist("2"), artist("3"), artist("4"), artist("4")], 100, 200).unwrap();
+        let count = merge_followed_artists(
+            &mut favorites,
+            vec![
+                artist("1"),
+                artist("2"),
+                artist("3"),
+                artist("4"),
+                artist("4"),
+            ],
+            100,
+            200,
+        )
+        .unwrap();
         assert_eq!(count, 2);
         assert_eq!(favorites[0].name, "Local display name");
         assert_eq!(favorites[0].modified_at, 10);
@@ -1274,7 +1674,11 @@ mod artist_tests {
         assert_eq!(artists[0].subtitle.as_deref(), Some("Alias"));
         assert_eq!(raw, 2);
         assert!(!more);
-        for invalid in [json!({"code": 301}), json!({"code":200,"data":[]}), json!({"code":200,"data":[],"hasMore":true})] {
+        for invalid in [
+            json!({"code": 301}),
+            json!({"code":200,"data":[]}),
+            json!({"code":200,"data":[],"hasMore":true}),
+        ] {
             assert!(parse_netease_followed_artist_page(&invalid).is_err());
         }
     }
@@ -1285,15 +1689,19 @@ mod artist_tests {
         input.source = "youtubeMusicArtist".into();
         input.browse_id = Some("UCdemoCreator".into());
         let normalized = input.normalized().unwrap();
-        let expected = i64::from_be_bytes(Sha256::digest(b"UCdemoCreator")[..8].try_into().unwrap());
+        let expected =
+            i64::from_be_bytes(Sha256::digest(b"UCdemoCreator")[..8].try_into().unwrap());
         assert_eq!(normalized.id, expected.to_string());
         assert!(artist("0").normalized().is_err());
     }
 
     #[test]
     fn bili_artist_detail_preserves_video_ids_duration_and_pagination() {
-        let detail = parse_bili_artist_detail(&json!({"data":{"name":"UP","face":"//avatar/a","top_photo":"http://banner/a","sign":"About"}}),
-            &json!({"data":{"page":{"count":31},"list":{"vlist":[{"bvid":"BV1demo","title":"Demo","length":"1:02:03","pic":"//cover/a"},{"bvid":"","title":"invalid"}]}}}), 1);
+        let detail = parse_bili_artist_detail(
+            &json!({"data":{"name":"UP","face":"//avatar/a","top_photo":"http://banner/a","sign":"About"}}),
+            &json!({"data":{"page":{"count":31},"list":{"vlist":[{"bvid":"BV1demo","title":"Demo","length":"1:02:03","pic":"//cover/a"},{"bvid":"","title":"invalid"}]}}}),
+            1,
+        );
         assert_eq!(detail.tracks.len(), 1);
         assert_eq!(detail.tracks[0].id, "bilibili:BV1demo");
         assert_eq!(detail.tracks[0].duration_ms, 3_723_000);
@@ -1304,16 +1712,22 @@ mod artist_tests {
 
     #[test]
     fn bili_artist_contents_preserve_collection_series_kind_and_archive_pagination() {
-        let contents = parse_bili_artist_contents(&json!({"data":{"items_lists":{
-            "page":{"total":21},"seasons_list":[{"meta":{"season_id":12,"name":"Collection","cover":"//cover/collection"}}],
-            "series_list":[{"meta":{"series_id":13,"name":"Series"}}]
-        }}}), 1);
+        let contents = parse_bili_artist_contents(
+            &json!({"data":{"items_lists":{
+                "page":{"total":21},"seasons_list":[{"meta":{"season_id":12,"name":"Collection","cover":"//cover/collection"}}],
+                "series_list":[{"meta":{"series_id":13,"name":"Series"}}]
+            }}}),
+            1,
+        );
         assert_eq!(contents.collections[0].kind, "collection");
         assert_eq!(contents.series[0].kind, "series");
         assert!(contents.has_more);
-        let archive = parse_bili_artist_collection(&json!({"data":{"page":{"total":31},"archives":[
-            {"bvid":"BVcollection","title":"Episode","duration":201,"pic":"http://cover/episode"}
-        ]}}), 1);
+        let archive = parse_bili_artist_collection(
+            &json!({"data":{"page":{"total":31},"archives":[
+                {"bvid":"BVcollection","title":"Episode","duration":201,"pic":"http://cover/episode"}
+            ]}}),
+            1,
+        );
         assert_eq!(archive.tracks[0].id, "bilibili:BVcollection");
         assert_eq!(archive.tracks[0].duration_ms, 201000);
         assert!(archive.has_more);
@@ -1341,11 +1755,22 @@ mod playlist_usage_tests {
 
     #[test]
     fn playlist_ids_reject_invalid_and_out_of_range_values() {
-        for value in ["", "invalid", "1.5", "9223372036854775808", "-9223372036854775809"] {
+        for value in [
+            "",
+            "invalid",
+            "1.5",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ] {
             let id = serde_json::from_value::<PlaylistId>(json!(value)).unwrap();
             assert!(id.into_i64().is_err());
         }
-        for value in [json!(true), json!(null), json!(1.5), json!(9223372036854775808_u64)] {
+        for value in [
+            json!(true),
+            json!(null),
+            json!(1.5),
+            json!(9223372036854775808_u64),
+        ] {
             assert!(serde_json::from_value::<PlaylistId>(value).is_err());
         }
     }
@@ -1363,27 +1788,37 @@ mod playlist_usage_tests {
         let home = home_local_playlists_value(vec![playlist]).unwrap();
 
         assert_eq!(original["id"].as_i64(), Some(9007199254740993));
-        assert_eq!(home, json!([{
-            "id": "9007199254740993",
-            "name": "Local playlist",
-            "track_count": 12,
-            "modified_at": 1720000000000_u64,
-            "cover_url": "https://example.test/cover",
-        }]));
+        assert_eq!(
+            home,
+            json!([{
+                "id": "9007199254740993",
+                "name": "Local playlist",
+                "track_count": 12,
+                "modified_at": 1720000000000_u64,
+                "cover_url": "https://example.test/cover",
+            }])
+        );
     }
 
     #[test]
     fn metadata_without_playlist_usage_returns_an_empty_array() {
-        assert_eq!(playlist_usage_stats_value(&serde_json::Map::new()).unwrap(), json!([]));
+        assert_eq!(
+            playlist_usage_stats_value(&serde_json::Map::new()).unwrap(),
+            json!([])
+        );
         let extensions = json!({"lyricOverrides": []});
-        assert_eq!(playlist_usage_stats_value(extensions.as_object().unwrap()).unwrap(), json!([]));
+        assert_eq!(
+            playlist_usage_stats_value(extensions.as_object().unwrap()).unwrap(),
+            json!([])
+        );
     }
 
     #[test]
     fn synced_usage_preserves_android_long_ids_and_camel_case_fields() {
-        let metadata: crate::sync::storage::ArchiveMetadata = serde_json::from_str(r#"{"extensions":{"playlistUsageStats":[{"playlistKey":"youtubeMusic:VLdemo","source":"youtubeMusic","id":9223372036854775807,"fid":9007199254740993,"mid":-9223372036854775808,"browseId":"VLdemo","playlistId":"demo","name":"Music","coverUrl":"https://example.test/cover","trackCount":12,"firstOpenedAt":1710000000000,"lastOpenedAt":1720000000000,"openCount":3,"counterShards":[]}],"localPlaylistPlaybackStats":[{"playlistId":7,"totalPlayCount":8}]},"playbackStats":[]}"#).unwrap();
+        let metadata: neri_library::sync::storage::ArchiveMetadata = serde_json::from_str(r#"{"extensions":{"playlistUsageStats":[{"playlistKey":"youtubeMusic:VLdemo","source":"youtubeMusic","id":9223372036854775807,"fid":9007199254740993,"mid":-9223372036854775808,"browseId":"VLdemo","playlistId":"demo","name":"Music","coverUrl":"https://example.test/cover","trackCount":12,"firstOpenedAt":1710000000000,"lastOpenedAt":1720000000000,"openCount":3,"counterShards":[]}],"localPlaylistPlaybackStats":[{"playlistId":7,"totalPlayCount":8}]},"playbackStats":[]}"#).unwrap();
         let stored = serde_json::to_string(&metadata).unwrap();
-        let reloaded: crate::sync::storage::ArchiveMetadata = serde_json::from_str(&stored).unwrap();
+        let reloaded: neri_library::sync::storage::ArchiveMetadata =
+            serde_json::from_str(&stored).unwrap();
 
         let usage = playlist_usage_stats_value(&reloaded.extensions).unwrap();
         assert_eq!(usage.as_array().unwrap().len(), 1);
@@ -1395,7 +1830,10 @@ mod playlist_usage_tests {
         assert_eq!(usage[0]["trackCount"], 12);
         assert_eq!(usage[0]["lastOpenedAt"], 1720000000000_i64);
         assert_eq!(usage[0]["openCount"], 3);
-        assert_eq!(reloaded.extensions["playlistUsageStats"][0]["id"], json!(9223372036854775807_i64));
+        assert_eq!(
+            reloaded.extensions["playlistUsageStats"][0]["id"],
+            json!(9223372036854775807_i64)
+        );
     }
 
     #[test]

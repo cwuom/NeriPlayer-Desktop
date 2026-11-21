@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import * as vue from 'vue'
 import * as pinia from 'pinia'
 import ts from 'typescript'
@@ -44,6 +44,13 @@ async function load(source, dependencies = {}) {
 
 const root = new URL('../src/', import.meta.url)
 const source = await readFile(new URL('stores/player.ts', root), 'utf8')
+// player store 拆成 player/ 下的切片；切片依赖 invoke 等运行时替身，每个 runtime 重新加载
+const playerModuleSources = Object.fromEntries(await Promise.all((await readdir(new URL('stores/player/', root)))
+  .filter(name => name.endsWith('.ts')).sort()
+  .map(async name => [name.slice(0, -3), await readFile(new URL(`stores/player/${name}`, root), 'utf8')])))
+const qualityLabelsText = await readFile(new URL('modules/playback/audioQualityLabels.ts', root), 'utf8')
+const transition = await load(await readFile(new URL('modules/playback/playbackTransition.ts', root), 'utf8'))
+const eqPresets = await load(await readFile(new URL('modules/audioEffects/eqPresets.ts', root), 'utf8'))
 const settingsSource = await readFile(new URL('stores/settings.ts', root), 'utf8')
 const settingsTree = ts.createSourceFile('settings.ts', settingsSource, ts.ScriptTarget.ES2022, true)
 const soundNormalization = await load(settingsTree.statements.filter(node => ts.isFunctionDeclaration(node)
@@ -57,6 +64,7 @@ const queueDisplayOrder = await load(await readFile(new URL('modules/playback/qu
 const state = await load(await readFile(new URL('modules/playback/playerState.ts', root), 'utf8'))
 const display = await load(await readFile(new URL('modules/playback/audioQualityDisplay.ts', root), 'utf8'))
 const metadataText = await readFile(new URL('modules/playback/playbackAudioInfo.ts', root), 'utf8')
+const trackModelText = await readFile(new URL('modules/playback/trackModel.ts', root), 'utf8')
 const localInfoText = await readFile(new URL('modules/playback/localAudioInfo.ts', root), 'utf8')
 const failure = await load(await readFile(new URL('modules/playback/playbackFailure.ts', root), 'utf8'))
 const longForm = await load(await readFile(new URL('modules/playback/longFormProgress.ts', root), 'utf8'))
@@ -101,12 +109,14 @@ async function runtime(options = {}) {
   const core = { invoke }
   const playback = await load(sourceText, {
     '@tauri-apps/api/core': core,
-    '@/stores/listenTogether/mapper': { trustedInboundStreamUrls: () => [] },
+    './streamTrust': { trustedInboundStreamUrls: () => [] },
     '@/modules/playback/biliVideoSkip': biliVideoSkip,
     './playbackFailure': failure,
   })
   const localInfo = await load(localInfoText, { '@tauri-apps/api/core': core })
   const playbackInfo = await load(metadataText, { '@tauri-apps/api/core': core })
+  const coverUrls = { getTrackCoverUrl: value => value.coverUrl || '' }
+  const trackModel = await load(trackModelText, { './playbackSource': playback, '@/utils/trackCover': coverUrls })
   const settings = vue.reactive({
     audioEffects: audioEffectsModel.normalizeAudioEffectsSettings(undefined), vinylEffectEnabled: false,
     volume: 0.7, playbackSpeed: 1, playbackPitch: 1, loudnessGainMb: 0, equalizerEnabled: false, equalizerPresetId: 'flat', equalizerBands: [0, 0, 0, 0, 0],
@@ -116,7 +126,7 @@ async function runtime(options = {}) {
     neteaseAutoSourceSwitch: false, neteaseLocalSourceFallback: !!options.localFallback,
     rememberLongFormProgress: options.rememberLongForm !== false,
   })
-  const loaded = await load(source, {
+  const dependencies = {
     '@/modules/audioEffects/model': audioEffectsModel,
     '@/modules/audioEffects/listening': listeningTuning,
     vue, pinia, '@tauri-apps/api/core': core,
@@ -149,10 +159,11 @@ async function runtime(options = {}) {
     '@/modules/playback/playerState': state,
     '@/utils/logger': { createLogger: () => ({ info() {}, warn() {}, error() {} }) },
     '@/utils/timeFormat': { formatTimeMs: value => String(value) },
-    '@/utils/trackCover': { getTrackCoverUrl: value => value.coverUrl || '' },
+    '@/utils/trackCover': coverUrls,
     '@/utils/logSanitizer': { summarizeLogError: String },
     '@/modules/playback/localAudioInfo': localInfo,
     '@/modules/playback/playbackAudioInfo': playbackInfo,
+    '@/modules/playback/trackModel': trackModel,
     '@/modules/library/albumDisplay': { displayAlbum: album => album },
     '@/modules/persistence/userData': {
       LEGACY_PLAYER_STATE_KEY: 'neri:player-state',
@@ -160,7 +171,19 @@ async function runtime(options = {}) {
       persistUserData: async () => undefined,
       finishLegacyPlayerStateCleanup: () => {},
     },
-  })
+    '@/modules/playback/playbackTransition': transition,
+    '@/modules/audioEffects/eqPresets': eqPresets,
+  }
+  // 切片按别名引用其它 store，指向同一组替身
+  for (const name of ['history', 'toast', 'settings', 'download', 'listenTogether']) {
+    dependencies[`@/stores/${name}`] = dependencies[`./${name}`]
+  }
+  dependencies['@/modules/playback/audioQualityLabels'] = await load(qualityLabelsText, { './playbackSource': playback })
+  // trace 被其它切片引用，先加载；切片之间用 ./name，player.ts 用 ./player/name
+  for (const name of ['trace', ...Object.keys(playerModuleSources).filter(name => name !== 'trace')]) {
+    dependencies[`./player/${name}`] = dependencies[`./${name}`] = await load(playerModuleSources[name], dependencies)
+  }
+  const loaded = await load(source, dependencies)
   pinia.setActivePinia(pinia.createPinia())
   return { store: loaded.usePlayerStore(), calls, metadata, events }
 }

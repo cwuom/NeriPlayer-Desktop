@@ -51,9 +51,29 @@ for (const bitrate of [undefined, NaN, Infinity, -1, 0]) assert.equal(actualAudi
 const componentSource = await readFile(new URL('../src/components/NowPlaying.vue', import.meta.url), 'utf8')
 const script = componentSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
 const parsed = ts.createSourceFile('NowPlaying.ts', script, ts.ScriptTarget.ES2022, true)
-const specFunction = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'paperSpecFromAudioInfo')
+// 音质行、音质标签与下载入口已拆到 now-playing/ 下的模块与组合式函数，按声明名在这些文件里查找
+const extractedSources = await Promise.all(['audioInfoDisplay.ts', 'useAudioQuality.ts', 'useAudioInfoRow.ts', 'useCurrentTrackDownload.ts']
+  .map(async file => ts.createSourceFile(file, await readFile(new URL(`../src/components/now-playing/${file}`, import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)))
+function findDeclaration(name) {
+  for (const sourceFile of extractedSources) {
+    let found
+    const visit = node => {
+      if (found) return
+      if ((ts.isFunctionDeclaration(node) && node.name?.text === name)
+        || (ts.isVariableStatement(node) && node.declarationList.declarations.some(item => item.name.getText(sourceFile) === name))) {
+        found = node
+        return
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
+    // 去掉 export 修饰，与原先页面里的局部声明形态一致
+    if (found) return found.getText(sourceFile).replace(/^export\s+/, '')
+  }
+}
+const specFunction = findDeclaration('paperSpecFromAudioInfo')
 assert.ok(specFunction, 'playback page should retain its factual audio specification formatter')
-const specCompiled = ts.transpileModule(`export ${specFunction.getText(parsed)}`, {
+const specCompiled = ts.transpileModule(`export ${specFunction}`, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const { paperSpecFromAudioInfo } = await import(`data:text/javascript;base64,${Buffer.from(specCompiled).toString('base64')}`)
@@ -61,9 +81,9 @@ assert.deepEqual(paperSpecFromAudioInfo({ sampleRateHz: 48000, bitDepth: 16, cha
 assert.deepEqual(paperSpecFromAudioInfo({ specLabel: '48 kHz | 16 bit | 无损' }, false), [], 'local files must not inherit paper specifications from an online quality label')
 assert.deepEqual(paperSpecFromAudioInfo({ sampleRateHz: 44100, bitDepth: 24 }, true), ['44.1 kHz', '24 bit'])
 const displayFunctions = ['normalizeAudioDisplayToken', 'isHiddenAudioInfoToken'].map(name => {
-  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  const declaration = findDeclaration(name)
   assert.ok(declaration)
-  return `export ${declaration.getText(parsed)}`
+  return `export ${declaration}`
 }).join('\n')
 const displayCompiled = ts.transpileModule(displayFunctions, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
@@ -93,14 +113,13 @@ assert.equal(visibleText(downloadIndicator).trim(), 'download_done', 'download p
 assert.equal(downloadIndicator.props.title, '正在播放下载')
 assert.equal(downloadIndicator.props['aria-label'], '正在播放下载')
 
-const infoPartsStatement = parsed.statements.find(node => ts.isVariableStatement(node)
-  && node.declarationList.declarations.some(declaration => declaration.name.getText(parsed) === 'audioInfoParts'))
+const infoPartsStatement = findDeclaration('audioInfoParts')
 assert.ok(infoPartsStatement)
 const partFunctions = ['currentAudioQualityLabel', 'paperSpecFromAudioInfo', 'addAudioInfoPart',
   'normalizeAudioDisplayToken', 'isHiddenAudioInfoToken', 'isSameAudioInfoToken'].map(name => {
-  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  const declaration = findDeclaration(name)
   assert.ok(declaration)
-  return declaration.getText(parsed)
+  return declaration
 }).join('\n')
 const defaults = {
   showAudioBitrate: true, showAudioFormat: true, showAudioChannels: false,
@@ -117,7 +136,7 @@ const parameterHarness = ts.transpileModule(`
   const currentQualityKey = () => 'exhigh'
   const qualityLabelFor = (_source, key) => key === 'exhigh' ? '极高' : key
   ${partFunctions}
-  ${infoPartsStatement.getText(parsed)}
+  ${infoPartsStatement}
   export { audioInfoParts }
 `, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
@@ -183,10 +202,9 @@ assert.equal(normalizeAudioDisplayToken('audio/webm; codecs="opus"'), 'Opus')
 
 const downloadDeclarations = ['isCurrentDownloading', 'isCurrentDownloadCancellable', 'downloadTaskStatusText',
   'downloadActionIcon', 'downloadActionLabel', 'downloadActionDesc', 'downloadActionDisabled', 'handleDownloadAction'].map(name => {
-  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) ? node.name?.text === name
-    : ts.isVariableStatement(node) && node.declarationList.declarations.some(item => item.name.getText(parsed) === name))
+  const declaration = findDeclaration(name)
   assert.ok(declaration)
-  return declaration.getText(parsed)
+  return declaration
 }).join('\n')
 const downloadHarness = ts.transpileModule(`
   import { computed, shallowReactive } from ${JSON.stringify(import.meta.resolve('vue'))}

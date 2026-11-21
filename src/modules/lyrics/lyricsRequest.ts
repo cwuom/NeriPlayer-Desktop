@@ -1,4 +1,4 @@
-import type { LyricLine, TrackInfo } from '@/stores/player'
+import type { LyricLine, TrackInfo } from '@/types/track'
 
 const inFlightLyrics = new Map<string, Promise<unknown>>()
 

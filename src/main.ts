@@ -4,13 +4,14 @@ import { createPinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from '@tauri-apps/api/core'
-import i18n from './i18n'
+import i18n, { setViewTransitionSupported } from './i18n'
 import { initTheme } from './utils/theme'
-import { installHostBackgroundSync } from './utils/hostBackground'
+import { detectPlatform } from './utils/platform'
+import { installHostBackgroundSync } from './integrations/hostBackground'
 import { preloadUserData } from './modules/persistence/userData'
-import { removeLegacyCacheBuckets } from './utils/persistentCache'
-import { installNativeContextMenuPolicy } from './utils/nativeContextMenu'
-import { installClipboardPasteGuard } from './utils/clipboardPaste'
+import { removeLegacyCacheBuckets } from './modules/persistence/persistentCache'
+import { installNativeContextMenuPolicy } from './integrations/nativeContextMenu'
+import { installClipboardPasteGuard } from './integrations/clipboardPaste'
 import { useSettingsStore } from './stores/settings'
 import { installUiScale } from './modules/settings/uiScale'
 import '@fontsource-variable/fraunces'
@@ -21,6 +22,7 @@ import './styles/global.scss'
 
 // 在 DOM 挂载前应用主题（class 已在 index.html 内联脚本中预设）
 initTheme()
+setViewTransitionSupported(detectPlatform() !== 'linux')
 installNativeContextMenuPolicy()
 
 const windowKind = new URLSearchParams(window.location.search).get('window')

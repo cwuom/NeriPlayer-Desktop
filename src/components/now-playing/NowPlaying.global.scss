@@ -1,0 +1,825 @@
+/* 更多选项面板：Overlay + Sheet 过渡 */
+.more-sheet-enter-active {
+  transition: opacity 280ms cubic-bezier(0.2, 0, 0, 1);
+  .np-more-sheet {
+    transition: opacity 280ms cubic-bezier(0.2, 0, 0, 1), transform 280ms cubic-bezier(0.2, 0, 0, 1);
+  }
+}
+.more-sheet-leave-active {
+  transition: opacity 200ms cubic-bezier(0.2, 0, 0, 1);
+  .np-more-sheet {
+    transition: opacity 200ms cubic-bezier(0.2, 0, 0, 1), transform 200ms cubic-bezier(0.2, 0, 0, 1);
+  }
+}
+.more-sheet-enter-from,
+.more-sheet-leave-to {
+  opacity: 0;
+  .np-more-sheet {
+    opacity: 0;
+    transform: scale(0.92) translateY(16px);
+  }
+}
+
+/* 子视图滑动过渡 */
+.slide-left-enter-active,
+.slide-left-leave-active,
+.slide-right-enter-active,
+.slide-right-leave-active {
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+.slide-left-enter-from { transform: translateX(24px); opacity: 0; }
+.slide-left-leave-to   { transform: translateX(-24px); opacity: 0; }
+.slide-right-enter-from { transform: translateX(-24px); opacity: 0; }
+.slide-right-leave-to   { transform: translateX(24px); opacity: 0; }
+
+.np-more-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  /* 高斯模糊遮罩，避免生硬压暗 */
+  background: rgba(8, 8, 12, 0.28);
+  backdrop-filter: blur(22px) saturate(1.08);
+  -webkit-backdrop-filter: blur(22px) saturate(1.08);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  clip-path: inset(0 round var(--radius-lg));
+}
+
+.np-more-sheet {
+  width: min(380px, 100%);
+  max-width: calc(100vw - 32px);
+  max-height: min(80vh, calc(100vh - 32px));
+  /* 隐藏滚动条，仍允许内容滚动 */
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  background: rgba(30, 28, 34, 0.88);
+  backdrop-filter: blur(28px) saturate(1.12);
+  -webkit-backdrop-filter: blur(28px) saturate(1.12);
+  border-radius: 24px;
+  padding: 24px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.06);
+  /* 面板恒为深色玻璃, 文字不能继承浅色主题的全局黑字 */
+  color: rgba(255,255,255,0.9);
+
+  /* 隐藏滚动条 */
+  &::-webkit-scrollbar { width: 0; height: 0; display: none; }
+}
+
+.np-more-sheet-content {
+  min-height: 0;
+}
+
+.np-more-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.9);
+  margin: 0 0 16px;
+}
+
+// 子视图 header（返回按钮 + 标题）
+.np-more-sub-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+
+  .np-more-title { margin: 0; }
+
+  .np-more-header-action {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px 6px 10px;
+    border: none;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.1);
+    color: rgba(255,255,255,0.85);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+
+    .material-symbols-rounded { font-size: 18px; }
+    &:hover { background: rgba(255,255,255,0.16); }
+  }
+}
+
+.np-more-back {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.7);
+  transition: background 0.15s;
+  &:hover { background: rgba(255,255,255,0.08); }
+}
+
+.np-more-list-check {
+  margin-left: auto;
+  font-size: 20px;
+  color: var(--md-primary, #d0bcff);
+}
+
+// Android 风格列表项
+.np-more-list-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 12px 14px 12px 12px;
+  border: none;
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.88);
+  cursor: pointer;
+  border-radius: 16px;
+  transition: background 0.18s, transform 0.18s cubic-bezier(0.2, 0, 0, 1);
+
+  &:hover {
+    background: rgba(255,255,255,0.09);
+    .np-more-chevron {
+      color: rgba(255,255,255,0.55) !important;
+      transform: translateX(2px);
+    }
+    > .material-symbols-rounded:first-child {
+      background: color-mix(in srgb, var(--md-primary, #D0BCFF) 26%, transparent);
+      color: var(--md-primary, #D0BCFF);
+    }
+  }
+
+  &:active { transform: scale(0.985); }
+
+  > .material-symbols-rounded:first-child {
+    font-size: 21px;
+    color: rgba(255,255,255,0.72);
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 13px;
+    background: rgba(255,255,255,0.08);
+    transition: background 0.18s, color 0.18s;
+  }
+}
+
+.np-more-list-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+
+.np-more-list-headline {
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-more-list-desc {
+  font-size: 12px;
+  color: rgba(255,255,255,0.45);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-more-chevron {
+  font-size: 20px !important;
+  color: rgba(255,255,255,0.28) !important;
+  transition: color 0.18s, transform 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+
+// 分组：组与组之间用细线隔开，组内是 Android 式列表项
+.np-more-group + .np-more-group {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+// 带行内加减的列表项：左边整块点进详细页，右边直接调整，不用来回进出子页
+.np-more-list-item--stepper {
+  padding: 0 10px 0 0;
+  cursor: default;
+
+  &:active { transform: none; }
+}
+
+.np-more-stepper-main {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+  padding: 12px 0 12px 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+
+  > .material-symbols-rounded:first-child {
+    font-size: 21px;
+    color: rgba(255,255,255,0.72);
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 13px;
+    background: rgba(255,255,255,0.08);
+    transition: background 0.18s, color 0.18s;
+  }
+
+  &:hover > .material-symbols-rounded:first-child {
+    background: color-mix(in srgb, var(--md-primary, #D0BCFF) 26%, transparent);
+    color: var(--md-primary, #D0BCFF);
+  }
+}
+
+.np-more-stepper {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.np-more-stepper button,
+.np-more-step-btn {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.78);
+  background: rgba(255,255,255,0.08);
+  transition: background 0.15s, color 0.15s;
+
+  .material-symbols-rounded { font-size: 20px; }
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--md-primary, #D0BCFF) 26%, transparent);
+    color: var(--md-primary, #D0BCFF);
+  }
+
+  &:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+}
+
+// 这首歌单独调过偏移时用主色标出
+.np-more-list-desc--custom {
+  color: var(--md-primary, #D0BCFF);
+}
+
+.np-more-text-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 14px;
+  border-radius: var(--radius-full, 999px);
+  color: var(--md-primary, #D0BCFF);
+  background: rgba(255,255,255,0.06);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.15s;
+
+  .material-symbols-rounded { font-size: 18px; }
+
+  &:hover { background: rgba(255,255,255,0.1); }
+}
+
+.np-more-effects {
+  padding: 0 2px 4px;
+}
+
+.np-more-item {
+  margin-bottom: 20px;
+}
+
+.np-more-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.7);
+  margin-bottom: 10px;
+}
+
+.np-more-hint {
+  font-size: 12px;
+  color: rgba(255,255,255,0.5);
+  margin-top: -4px;
+  margin-bottom: 12px;
+
+  &--below { margin-top: 12px; }
+}
+
+.np-more-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.np-more-slider {
+  flex: 1;
+  appearance: none;
+  height: 4px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--md-primary, #D0BCFF);
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+}
+
+.np-offset-value {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,0.5);
+  min-width: 60px;
+  text-align: right;
+
+  &.positive { color: #66BB6A; }
+  &.negative { color: #EF5350; }
+}
+
+.np-more-preview {
+  margin-top: 8px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.5);
+  line-height: 1.4;
+  transition: font-size 0.15s;
+}
+
+// 搜索栏
+.np-more-search-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.np-more-input {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  color: white;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+
+  &:focus { border-color: rgba(255,255,255,0.3); }
+  &::placeholder { color: rgba(255,255,255,0.3); }
+}
+
+.np-more-search-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255,255,255,0.14); }
+  &:disabled { opacity: 0.4; }
+}
+
+.np-more-status {
+  text-align: center;
+  color: rgba(255,255,255,0.35);
+  font-size: 13px;
+  padding: 16px 0;
+}
+
+// 搜索结果列表
+.np-more-search-results {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: max-height 240ms cubic-bezier(0.2, 0, 0, 1);
+  &::-webkit-scrollbar { display: none; }
+
+  /* 选中候选后收紧列表, 给字段选择面板让出高度, 避免按钮被顶出可视区 */
+  &.compact {
+    max-height: 176px;
+  }
+}
+
+.np-more-search-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 4px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.85);
+  cursor: pointer;
+  border-radius: 10px;
+  transition: background 0.15s;
+  text-align: left;
+
+  &:hover { background: rgba(255,255,255,0.06); }
+
+  &.active {
+    background: rgba(255,255,255,0.10);
+    outline: 1px solid rgba(255,255,255,0.12);
+  }
+}
+
+.np-more-search-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(255,255,255,0.06);
+}
+
+.np-more-search-cover-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: rgba(255,255,255,0.5);
+}
+
+.np-more-search-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.np-more-search-title {
+  font-size: 14px;
+  font-weight: 500;
+  /* 显式取色: 候选预览等非按钮容器里不能依赖继承(浅色主题下会变黑) */
+  color: rgba(255,255,255,0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-more-search-artist {
+  font-size: 12px;
+  color: rgba(255,255,255,0.4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-more-search-source {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+// 编辑表单
+.np-more-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.np-more-form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.45);
+  margin-top: 4px;
+}
+
+.np-more-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+
+  &.compact {
+    margin-top: 10px;
+  }
+}
+
+.np-more-form-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.7);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+
+  .material-symbols-rounded { font-size: 18px; }
+
+  &:hover { background: rgba(255,255,255,0.12); }
+
+  &.primary {
+    background: var(--md-primary-container, #E8DEF8);
+    color: var(--md-on-primary-container, #1D192B);
+    &:hover { opacity: 0.9; }
+  }
+}
+
+.np-more-field-picker {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04));
+  border: 1px solid rgba(255,255,255,0.10);
+}
+
+.np-more-candidate-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.np-more-candidate-cover {
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: rgba(255,255,255,0.08);
+  flex-shrink: 0;
+}
+
+.np-more-field-title {
+  margin-bottom: 8px;
+  color: rgba(255,255,255,0.48);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.np-more-field-options {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.np-more-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.72);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+
+  input {
+    accent-color: var(--md-primary, #D0BCFF);
+  }
+}
+
+.np-more-segmented {
+  display: flex;
+  padding: 3px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+
+  button {
+    flex: 1;
+    padding: 8px 10px;
+    border: none;
+    border-radius: 11px;
+    background: transparent;
+    color: rgba(255,255,255,0.50);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+
+    &.active {
+      background: rgba(255,255,255,0.14);
+      color: rgba(255,255,255,0.90);
+    }
+  }
+
+  &.platform {
+    margin: -2px 0 12px;
+
+    button {
+      font-size: 12px;
+      padding: 7px 8px;
+    }
+  }
+}
+
+.np-track-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.np-track-detail-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 4px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.np-track-detail-cover {
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  object-fit: cover;
+  background: rgba(255,255,255,0.08);
+}
+
+.np-track-detail-cover-fallback {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: rgba(255,255,255,0.6);
+}
+
+.np-track-detail-heading {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  strong,
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: rgba(255,255,255,0.92);
+    font-size: 15px;
+  }
+
+  span {
+    color: rgba(255,255,255,0.45);
+    font-size: 12px;
+  }
+}
+
+.np-track-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 4px;
+  border: none;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  background: transparent;
+  text-align: left;
+
+  span {
+    color: rgba(255,255,255,0.42);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  strong {
+    min-width: 0;
+    color: rgba(255,255,255,0.78);
+    font-size: 12px;
+    font-weight: 650;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &.copyable {
+    cursor: pointer;
+    border-radius: 10px;
+    transition: background 0.15s;
+
+    &:hover {
+      background: rgba(255,255,255,0.06);
+    }
+  }
+}
+
+.np-track-detail-share {
+  width: 100%;
+  margin-top: 8px;
+  flex: none;
+}
+
+// 音质列表
+.np-more-quality-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+// 歌词编辑器
+.np-lyrics-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.np-lyrics-textarea {
+  width: 100%;
+  min-height: 200px;
+  max-height: 320px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.85);
+  font-size: 13px;
+  font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s;
+
+  &:focus { border-color: rgba(255,255,255,0.3); }
+  &::placeholder { color: rgba(255,255,255,0.2); }
+  &::-webkit-scrollbar { width: 4px; }
+  &::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.12);
+    border-radius: 2px;
+  }
+}
+
+.np-more-quality-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 12px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.7);
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 10px;
+  transition: background 0.15s;
+
+  &:hover { background: rgba(255,255,255,0.06); }
+
+  &.active {
+    color: var(--md-primary-container, #E8DEF8);
+    font-weight: 600;
+  }
+}

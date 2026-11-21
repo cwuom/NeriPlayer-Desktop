@@ -8,6 +8,10 @@ import { loadModule, subtitle } from './bili-subtitle-test-loader.mjs'
 
 const read = path => readFile(new URL(path, import.meta.url), 'utf8')
 const view = (await read('../src/views/SettingsView.vue')).replace(/\r\n/g, '\n')
+// 分区定义、搜索逻辑与歌词面板已拆到 components/settings/
+const sectionsSource = await read('../src/components/settings/useSettingsSections.ts')
+const searchSource = await read('../src/components/settings/useSettingsSearch.ts')
+const lyricsPanels = (await read('../src/components/settings/LyricsSettingsPanels.vue')).replace(/\r\n/g, '\n')
 const indexSource = await read('../src/modules/settings/searchIndex.ts')
 const exports = {}
 new Function('exports', ts.transpileModule(indexSource, {
@@ -15,10 +19,10 @@ new Function('exports', ts.transpileModule(indexSource, {
 }).outputText)(exports)
 const index = exports.SETTINGS_SEARCH_INDEX
 
-const sectionIds = [...view.matchAll(/^\s+\| '(\w+)'$/gm)].map(match => match[1])
+const sectionIds = [...sectionsSource.matchAll(/^\s+\| '(\w+)'$/gm)].map(match => match[1])
 assert.ok(sectionIds.length >= 15, 'SettingsSectionId union is parsed')
 
-const template = view.slice(view.indexOf('<template>'))
+const template = view.slice(view.indexOf('<template>')) + lyricsPanels.slice(lyricsPanels.indexOf('<template>'))
 const panels = [...template.matchAll(/<div v-show="activeSettingsSection === '(\w+)'" class="settings-section-panel" data-section="(\w+)">/g)]
 assert.ok(panels.length > 0, 'every settings panel carries data-section')
 for (const [, shown, tagged] of panels) {
@@ -44,8 +48,9 @@ const matcher = {}
 new Function('require', 'exports', ts.transpileModule(await read('../src/modules/search/textMatcher.ts'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(name => { assert.equal(name, 'pinyin-pro'); return pinyinPro }, matcher)
-const parsed = ts.createSourceFile('SettingsView.ts', view.slice(view.indexOf('<script setup lang="ts">') + '<script setup lang="ts">'.length, view.indexOf('</script>')), ts.ScriptTarget.ES2022, true)
-const searchStatement = parsed.statements.find(statement => ts.isVariableStatement(statement)
+const parsed = ts.createSourceFile('useSettingsSearch.ts', searchSource, ts.ScriptTarget.ES2022, true)
+const searchBody = parsed.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'useSettingsSearch').body.statements
+const searchStatement = searchBody.find(statement => ts.isVariableStatement(statement)
   && statement.declarationList.declarations.some(declaration => declaration.name.getText(parsed) === 'settingsSearchResults'))
 const searchCompiled = ts.transpileModule(searchStatement.getText(parsed), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -74,7 +79,7 @@ for (const [query, expected] of [
 }
 
 // Render the child component and exercise the parent's real search-focus function.
-const subtitleSource = await read('../src/components/BiliSubtitleSettings.vue')
+const subtitleSource = await read('../src/components/bilibili/BiliSubtitleSettings.vue')
 const subtitleScript = compileScript(parse(subtitleSource).descriptor, {
   id: 'subtitle-search', genDefaultAs: 'component', inlineTemplate: true,
 })
@@ -122,7 +127,7 @@ const renderer = vue.createRenderer({
   insert(element, parent) { element.parent = parent; parent.children.push(element) },
   remove(element) { element.parent.children = element.parent.children.filter(child => child !== element) },
 })
-const focusStatement = parsed.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'focusSettingsItem')
+const focusStatement = searchBody.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === 'focusSettingsItem')
 const focusCompiled = ts.transpileModule(focusStatement.getText(parsed), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText

@@ -8,10 +8,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::db::{self, meta, UserDatabase};
-use crate::error::{AppError, AppResult};
-use crate::library::{bili_video_skip, lyric_offsets, play_history, playback_queue};
 use crate::state::AppState;
+use neri_common::error::{AppError, AppResult};
+use neri_library::db::{self, meta, UserDatabase};
+use neri_library::library::{bili_video_skip, lyric_offsets, play_history, playback_queue};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,11 +107,18 @@ fn import_legacy(
 
 #[tauri::command]
 pub async fn save_playback_state(state: playback_queue::PlaybackStateInput) -> AppResult<()> {
-    blocking(move |database| database.write(|transaction| playback_queue::save_into(transaction, &state))).await
+    blocking(move |database| {
+        database.write(|transaction| playback_queue::save_into(transaction, &state))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn record_play_history(track: Value, played_at: i64, resume_position_ms: Option<i64>) -> AppResult<()> {
+pub async fn record_play_history(
+    track: Value,
+    played_at: i64,
+    resume_position_ms: Option<i64>,
+) -> AppResult<()> {
     blocking(move |database| {
         database.write(|transaction| {
             play_history::record(transaction, &track, played_at, resume_position_ms).map(|_| ())
@@ -121,38 +128,55 @@ pub async fn record_play_history(track: Value, played_at: i64, resume_position_m
 }
 
 #[tauri::command]
-pub async fn update_play_history_metadata(entries: Vec<play_history::HistoryEntry>) -> AppResult<()> {
-    blocking(move |database| database.write(|transaction| play_history::update_metadata(transaction, &entries))).await
+pub async fn update_play_history_metadata(
+    entries: Vec<play_history::HistoryEntry>,
+) -> AppResult<()> {
+    blocking(move |database| {
+        database.write(|transaction| play_history::update_metadata(transaction, &entries))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn remove_play_history(identity_key: String, deleted_at: i64) -> AppResult<()> {
     blocking(move |database| {
-        database.write(|transaction| play_history::remove(transaction, &identity_key, deleted_at).map(|_| ()))
+        database.write(|transaction| {
+            play_history::remove(transaction, &identity_key, deleted_at).map(|_| ())
+        })
     })
     .await
 }
 
 #[tauri::command]
 pub async fn clear_play_history(deleted_at: i64) -> AppResult<()> {
-    blocking(move |database| database.write(|transaction| play_history::clear(transaction, deleted_at).map(|_| ())))
-        .await
+    blocking(move |database| {
+        database.write(|transaction| play_history::clear(transaction, deleted_at).map(|_| ()))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn replace_play_history(history: play_history::PlayHistory) -> AppResult<()> {
-    blocking(move |database| database.write(|transaction| play_history::replace(transaction, &history))).await
+    blocking(move |database| {
+        database.write(|transaction| play_history::replace(transaction, &history))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn set_lyric_offset(track_key: String, offset_ms: i64) -> AppResult<()> {
-    blocking(move |database| database.write(|transaction| lyric_offsets::set(transaction, &track_key, offset_ms)))
-        .await
+    blocking(move |database| {
+        database.write(|transaction| lyric_offsets::set(transaction, &track_key, offset_ms))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn replace_lyric_offsets(offsets: BTreeMap<String, i64>) -> AppResult<()> {
-    blocking(move |database| database.write(|transaction| lyric_offsets::replace(transaction, &offsets))).await
+    blocking(move |database| {
+        database.write(|transaction| lyric_offsets::replace(transaction, &offsets))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -183,15 +207,23 @@ pub async fn set_bili_video_skip_rule(
 ) -> AppResult<Option<bili_video_skip::BiliVideoSkipRule>> {
     let (rule, changed) = blocking(move |database| {
         // 与同步共用写入版本，网络请求期间保存的区间不能被旧快照覆盖
-        let _guard = crate::library::playlist::lock_io();
-        let result = database.write(|transaction| bili_video_skip::set(
-            transaction, &bvid, cid, &intervals, duration_ms.unwrap_or(0), chrono::Utc::now().timestamp_millis(),
-        ))?;
+        let _guard = neri_library::library::playlist::lock_io();
+        let result = database.write(|transaction| {
+            bili_video_skip::set(
+                transaction,
+                &bvid,
+                cid,
+                &intervals,
+                duration_ms.unwrap_or(0),
+                chrono::Utc::now().timestamp_millis(),
+            )
+        })?;
         if result.1 {
-            crate::library::playlist::mark_io_changed();
+            neri_library::library::playlist::mark_io_changed();
         }
         Ok(result)
-    }).await?;
+    })
+    .await?;
     if changed {
         let _ = app.emit("playlists-changed", ());
     }
@@ -213,12 +245,14 @@ mod tests {
             "modifiedAt": 10,
             "isDeleted": false
         }]);
-        database.write(|transaction| {
-            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
-                extensions.insert("biliVideoSkipRules".into(), rules.clone());
-                Ok(())
+        database
+            .write(|transaction| {
+                neri_library::sync::storage::update_archive_extensions(transaction, |extensions| {
+                    extensions.insert("biliVideoSkipRules".into(), rules.clone());
+                    Ok(())
+                })
             })
-        }).unwrap();
+            .unwrap();
         let snapshot = serde_json::to_value(snapshot_from(&database).unwrap()).unwrap();
         assert_eq!(snapshot["biliVideoSkipRules"], rules);
     }
@@ -233,13 +267,28 @@ mod tests {
         .unwrap();
         import_legacy(&database, None, Some(history), None).unwrap();
         let snapshot = snapshot_from(&database).unwrap();
-        assert!(snapshot.migrated.playback_state && snapshot.migrated.history && snapshot.migrated.lyric_offsets);
+        assert!(
+            snapshot.migrated.playback_state
+                && snapshot.migrated.history
+                && snapshot.migrated.lyric_offsets
+        );
         assert_eq!(snapshot.history.entries.len(), 1);
 
-        let stale: play_history::PlayHistory = serde_json::from_value(json!({"entries": [], "deletions": []})).unwrap();
-        import_legacy(&database, None, Some(stale), Some(BTreeMap::from([("qq:1".into(), 5)]))).unwrap();
+        let stale: play_history::PlayHistory =
+            serde_json::from_value(json!({"entries": [], "deletions": []})).unwrap();
+        import_legacy(
+            &database,
+            None,
+            Some(stale),
+            Some(BTreeMap::from([("qq:1".into(), 5)])),
+        )
+        .unwrap();
         let snapshot = snapshot_from(&database).unwrap();
-        assert_eq!(snapshot.history.entries.len(), 1, "stale legacy data must never overwrite the database");
+        assert_eq!(
+            snapshot.history.entries.len(),
+            1,
+            "stale legacy data must never overwrite the database"
+        );
         assert!(snapshot.lyric_offsets.is_empty());
     }
 }

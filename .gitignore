@@ -9,6 +9,10 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
+# Test coverage output (pnpm unit:coverage, cargo llvm-cov)
+coverage/
+lcov.info
+
 # IDE personal state is ignored inside .idea/.gitignore
 *.swp
 *.swo

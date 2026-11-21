@@ -84,7 +84,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     try {
       const synced = await materializeStoredLyrics(
         track.syncPayload,
-        async (content, part) => mapBackendLyrics(await invoke<any[]>('parse_lrc_content', part === 'original'
+        async (content, part) => mapBackendLyrics(await invoke<unknown>('parse_lrc_content', part === 'original'
           ? { content, title: track.title, artist: track.artist }
           : { content })),
         error => log.warn('stored translation or romanization not parsed:', summarizeLogError(error)),
@@ -158,7 +158,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
     const songId = resolveKnownNeteaseLyricSongId(track)
     void fetchNeteaseRomanization(track, songId).then(async (text) => {
       if (!text || !stillWanted()) return
-      const roman = mapBackendLyrics(await invoke<any[]>('parse_lrc_content', { content: text }))
+      const roman = mapBackendLyrics(await invoke<unknown>('parse_lrc_content', { content: text }))
       if (!stillWanted()) return
       const merged = mergeParsedLyricsWithRomanization(lines.value, roman)
       if (!merged.some(line => line.roman)) return
@@ -204,7 +204,7 @@ export const useCurrentLyricsStore = defineStore('currentLyrics', () => {
       // Downloaded Bilibili tracks can have edited sidecars; read them before online subtitles.
       const audioPath = localAudioPath(track)
       if (audioPath) {
-        const local = mapBackendLyrics(await invoke<any[]>('load_local_lyrics', { audioPath }).catch(() => []))
+        const local = mapBackendLyrics(await invoke<unknown>('load_local_lyrics', { audioPath }).catch(() => []))
         if (id !== request) return
         if (local.length) {
           rememberLyricSource(track, 'local')

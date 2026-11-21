@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { TrackInfo } from '@/stores/player'
+import type { TrackInfo } from '@/types/track'
 import { isBiliVideoSkipTrack, resolveBiliVideoSkipBvid } from '@/modules/playback/biliVideoSkip'
 import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 import { toHttpsImageUrl } from '@/utils/trackCover'

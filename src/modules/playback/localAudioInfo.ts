@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { AudioInfo } from '@/stores/player'
+import type { AudioInfo } from './playbackAudioInfo'
 
 type LocalAudioInfo = Pick<AudioInfo, 'bitrate' | 'codec' | 'format' | 'sampleRateHz' | 'bitDepth' | 'channelCount'>
 

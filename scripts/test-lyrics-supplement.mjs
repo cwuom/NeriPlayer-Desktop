@@ -73,7 +73,13 @@ await test('补齐翻译与音译时保留酷狗原文和逐字时间轴', async
   const before = structuredClone(original)
   const result = await module.supplementKugouLyrics(track, original, needsBoth)
   assert.deepEqual(result.map(line => [line.translation, line.roman]), [['夜晚天空', 'yozora'], ['光芒', 'hikari']])
-  assert.deepEqual(result.map(({ translation, roman, ...line }) => line), before)
+  const withoutSupplement = line => {
+    const rest = { ...line }
+    delete rest.translation
+    delete rest.roman
+    return rest
+  }
+  assert.deepEqual(result.map(withoutSupplement), before)
   assert.deepEqual(original, before, '不能修改原数组或逐字信息')
   assert.deepEqual(requests, [{
     keyword: '夜空 歌手', title: '夜空', artist: '歌手', album: '专辑', durationMs: 200000,

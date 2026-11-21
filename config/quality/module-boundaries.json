@@ -1,0 +1,154 @@
+{
+  "rust": {
+    "workspace": "src-tauri",
+    "crates_dir": "src-tauri/crates",
+    "app_crate": "neri-player-desktop",
+    "require_readme": true,
+    "forbidden_external_prefixes": [
+      "tauri"
+    ],
+    "max_production_lines": 2000,
+    "max_rs_files_per_directory": 16,
+    "crates": {
+      "neri-common": {
+        "allowed": []
+      },
+      "neri-model": {
+        "allowed": []
+      },
+      "neri-platform": {
+        "allowed": [
+          "neri-common"
+        ]
+      },
+      "neri-playback": {
+        "allowed": [
+          "neri-common",
+          "neri-model",
+          "neri-platform"
+        ]
+      },
+      "neri-library": {
+        "allowed": [
+          "neri-common",
+          "neri-model",
+          "neri-platform",
+          "neri-playback"
+        ]
+      },
+      "neri-listentogether": {
+        "allowed": [
+          "neri-common"
+        ]
+      }
+    }
+  },
+  "frontend": {
+    "root": "src",
+    "max_lines": 2000,
+    "max_files_per_directory": 24,
+    "layers": {
+      "types": [
+        "types"
+      ],
+      "utils": [
+        "types",
+        "utils"
+      ],
+      "modules": [
+        "types",
+        "utils",
+        "modules"
+      ],
+      "i18n": [
+        "i18n"
+      ],
+      "shaders": [
+        "shaders"
+      ],
+      "styles": [
+        "styles"
+      ],
+      "composables": [
+        "types",
+        "utils",
+        "modules",
+        "composables",
+        "stores"
+      ],
+      "stores": [
+        "types",
+        "utils",
+        "modules",
+        "stores",
+        "i18n"
+      ],
+      "components": [
+        "types",
+        "utils",
+        "modules",
+        "composables",
+        "stores",
+        "components",
+        "shaders",
+        "styles",
+        "i18n"
+      ],
+      "views": [
+        "types",
+        "utils",
+        "modules",
+        "composables",
+        "stores",
+        "components",
+        "views",
+        "shaders",
+        "styles",
+        "i18n"
+      ],
+      "(root)": "*",
+      "integrations": [
+        "types",
+        "utils",
+        "modules",
+        "stores",
+        "i18n"
+      ]
+    },
+    "ipc_layers": [
+      "types",
+      "utils",
+      "modules",
+      "composables",
+      "stores",
+      "integrations"
+    ],
+    "legacy_oversized": {},
+    "ui_invoke_baseline": {
+      "src/components/AddToPlaylistDialog.vue": 6,
+      "src/components/bilibili/BiliVideoSkipDialog.vue": 1,
+      "src/components/CommentsPanel.vue": 5,
+      "src/components/NowPlaying.vue": 4,
+      "src/components/TrackContextMenu.vue": 1,
+      "src/components/debug/DebugLogViewer.vue": 5,
+      "src/views/BiliArtistView.vue": 3,
+      "src/views/BiliPlaylistView.vue": 3,
+      "src/views/DebugView.vue": 22,
+      "src/views/DesktopLyricsView.vue": 3,
+      "src/views/DownloadsView.vue": 1,
+      "src/views/ExploreView.vue": 1,
+      "src/views/FavoritePlaylistView.vue": 1,
+      "src/views/HomeView.vue": 2,
+      "src/views/LibraryView.vue": 7,
+      "src/views/LocalFilesView.vue": 1,
+      "src/views/LocalPlaylistView.vue": 5,
+      "src/views/NeteaseArtistView.vue": 3,
+      "src/views/NeteasePlaylistView.vue": 2,
+      "src/views/SettingsView.vue": 13,
+      "src/views/TrayPopupView.vue": 3,
+      "src/views/YouTubeArtistView.vue": 2,
+      "src/views/YouTubePlaylistView.vue": 1
+    },
+    "legacy_crowded_directories": {}
+  }
+}

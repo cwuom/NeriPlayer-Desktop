@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
 // 取流失败的重试间隔（250ms × 次数）在这里立即执行，只记录请求的等待时长
@@ -20,20 +20,13 @@ function transpileUrl(source) {
   }).outputText
   return `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
 }
-const protocolUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogether/protocol.ts', import.meta.url), 'utf8'))
-const queueUrl = transpileUrl(await readFile(new URL('../src/stores/listenTogether/queue.ts', import.meta.url), 'utf8'))
-const streamQualityUrl = transpileUrl((await readFile(new URL('../src/stores/listenTogether/streamQuality.ts', import.meta.url), 'utf8'))
-  .replace("from './protocol'", `from '${protocolUrl}'`))
-const mapperUrl = transpileUrl((await readFile(new URL('../src/stores/listenTogether/mapper.ts', import.meta.url), 'utf8'))
-  .replace("from './protocol'", `from '${protocolUrl}'`)
-  .replace("from './queue'", `from '${queueUrl}'`)
-  .replace("from './streamQuality'", `from '${streamQualityUrl}'`))
+const streamTrustUrl = transpileUrl(await readFile(new URL('../src/modules/playback/streamTrust.ts', import.meta.url), 'utf8'))
 const failureUrl = transpileUrl(await readFile(new URL('../src/modules/playback/playbackFailure.ts', import.meta.url), 'utf8'))
 const sourceUrl = new URL('../src/modules/playback/playbackSource.ts', import.meta.url)
 const source = (await readFile(sourceUrl, 'utf8')).replace(
   "from '@tauri-apps/api/core'",
   `from '${mockModuleUrl}'`,
-).replace("from '@/stores/listenTogether/mapper'", `from '${mapperUrl}'`)
+).replace("from './streamTrust'", `from '${streamTrustUrl}'`)
   .replace("from './playbackFailure'", `from '${failureUrl}'`)
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
@@ -280,7 +273,11 @@ await run('resolving a local Bilibili page keeps its aid identity after normaliz
     ...track(99904), id: 'bilibili:123456:222', source: 'bilibili', album: 'Bilibili|222|BV1actual',
     syncPayload: { channelId: 'bilibili', audioId: '123456', subAudioId: '222', bvid: 'BV1actual' },
   }
-  const playerSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+  // player store 拆成 player.ts 与 player/ 下的切片，拼接全部源码后按名称查找实现
+  const playerDir = new URL('../src/stores/player/', import.meta.url)
+  const playerFiles = [new URL('../src/stores/player.ts', import.meta.url),
+    ...(await readdir(playerDir)).filter(name => name.endsWith('.ts')).sort().map(name => new URL(name, playerDir))]
+  const playerSource = (await Promise.all(playerFiles.map(file => readFile(file, 'utf8')))).join('\n')
   const parsed = ts.createSourceFile('player.ts', playerSource, ts.ScriptTarget.ES2022, true)
   let apply
   function visit(node) {

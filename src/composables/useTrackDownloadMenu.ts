@@ -4,7 +4,7 @@ import { useDownloadStore } from '@/stores/download'
 import type { TrackInfo } from '@/stores/player'
 import { createContextMenuItem } from '@/utils/contextMenu'
 import { createLogger } from '@/utils/logger'
-import { isLocalTrack } from '@/utils/localTrack'
+import { isLocalTrack } from '@/modules/library/localTrack'
 
 const log = createLogger('track-download-menu')
 

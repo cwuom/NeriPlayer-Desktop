@@ -37,5 +37,5 @@
     "vendor/applemusic-like-lyrics/packages/core/src/lyric-player/**/*.ts",
     "vendor/applemusic-like-lyrics/packages/core/src/utils/**/*.ts"
   ],
-  "exclude": ["dist", "node_modules", "src-tauri"]
+  "exclude": ["dist", "node_modules", "src-tauri", "src/**/__tests__/**"]
 }

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { ref } from 'vue'
 import ts from 'typescript'
 
-const source = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+// player store 拆成 player.ts 与 player/ 下的切片，拼接全部源码后按名称查找实现
+const playerDir = new URL('../src/stores/player/', import.meta.url)
+const playerFiles = [new URL('../src/stores/player.ts', import.meta.url),
+  ...(await readdir(playerDir)).filter(name => name.endsWith('.ts')).sort().map(name => new URL(name, playerDir))]
+const source = (await Promise.all(playerFiles.map(file => readFile(file, 'utf8')))).join('\n')
 const parsed = ts.createSourceFile('player.ts', source, ts.ScriptTarget.ES2022, true)
 const names = ['markCommandSource', 'isRemoteSyncGuardActive', 'markOptimisticSeek']
 const functions = new Map()

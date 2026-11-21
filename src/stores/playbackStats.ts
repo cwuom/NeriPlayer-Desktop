@@ -66,6 +66,9 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
 
   const tracker = new PlaybackStatsTracker<TrackedPlayback>()
   let attached = false
+  // 每次 attach 换一个代次：listen 是异步注册的，旧代次晚到的注册必须立即注销
+  let attachGeneration = 0
+  let refreshSequence = 0
   let flushTimer: ReturnType<typeof setInterval> | null = null
 
   async function submit(snapshot: PlaybackStatsSnapshot<TrackedPlayback> | null) {
@@ -108,6 +111,7 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
   function attach() {
     if (attached) return
     attached = true
+    const generation = ++attachGeneration
     const player = usePlayerStore()
 
     watchStops.push(watch(
@@ -147,7 +151,8 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
     }, PLAYBACK_STATS_PERIODIC_FLUSH_MS)
 
     void listen('playback-stats-changed', () => void refresh())
-      .then(un => { if (attached) unlistens.push(un); else un() })
+      .then(un => { if (attached && generation === attachGeneration) unlistens.push(un); else un() })
+      .catch(error => log.warn('listen playback-stats-changed failed:', error))
   }
 
   function detach() {
@@ -161,16 +166,19 @@ export const usePlaybackStatsStore = defineStore('playbackStats', () => {
   }
 
   async function refresh() {
+    // 并发刷新只采用最后一次请求的结果，较早发出的慢响应不能覆盖新数据
+    const request = ++refreshSequence
     loading.value = true
     try {
       const overview = await invoke<StatsSummary[]>('get_playback_stats_overview')
+      if (request !== refreshSequence) return
       const next = { ...summaries.value }
       for (const summary of overview) next[summary.period] = summary
       summaries.value = next
     } catch (e) {
-      log.error('load playback stats failed:', e)
+      if (request === refreshSequence) log.error('load playback stats failed:', e)
     } finally {
-      loading.value = false
+      if (request === refreshSequence) loading.value = false
     }
   }
 

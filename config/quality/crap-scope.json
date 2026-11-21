@@ -1,0 +1,42 @@
+{
+  "measure_patterns": [
+    "src/modules/**/*.ts",
+    "src/utils/**/*.ts",
+    "src/stores/**/*.ts"
+  ],
+  "source_patterns": [
+    "src/modules/desktopLyrics/bridge.ts",
+    "src/modules/download/downloadCancellation.ts",
+    "src/modules/download/downloadQueue.ts",
+    "src/modules/lyrics/lyricSource.ts",
+    "src/modules/playback/biliVideoParts.ts",
+    "src/modules/playback/playbackQueue.ts",
+    "src/modules/playback/playbackStatTracks.ts",
+    "src/modules/playback/playbackStatsTracker.ts",
+    "src/modules/search/searchHistory.ts",
+    "src/modules/settings/searchIndex.ts",
+    "src/modules/settings/uiScaleRange.ts",
+    "src/modules/shortcuts/platform.ts",
+    "src/stores/library.ts",
+    "src/stores/listenTogether/session.ts",
+    "src/stores/playbackStats.ts",
+    "src/stores/player/pauseGuard.ts",
+    "src/stores/player/sleepTimer.ts",
+    "src/stores/searchHistory.ts",
+    "src/stores/toast.ts",
+    "src/utils/bilibiliCover.ts",
+    "src/utils/clipboard.ts",
+    "src/utils/contextMenu.ts",
+    "src/utils/json.ts",
+    "src/utils/linuxNotice.ts",
+    "src/utils/logSanitizer.ts",
+    "src/utils/logger.ts",
+    "src/utils/nowPlayingBackground.ts",
+    "src/utils/platform.ts",
+    "src/utils/spring.ts",
+    "src/utils/theme.ts",
+    "src/utils/themeColor.ts",
+    "src/utils/timeFormat.ts"
+  ],
+  "unscoped_failure_baseline": 705
+}

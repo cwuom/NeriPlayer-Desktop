@@ -9,8 +9,8 @@ use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 use url::Url;
 
-use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use neri_common::error::{AppError, AppResult};
 
 const MAX_COVER_BYTES: u64 = 8 * 1024 * 1024;
 const IMAGE_CACHE_DIRECTORY: &str = "image_cache";
@@ -246,8 +246,8 @@ fn normalize_cover_url(raw_url: &str) -> AppResult<Url> {
     } else {
         trimmed.to_string()
     };
-    let mut url = Url::parse(&normalized)
-        .map_err(|_| AppError::Api("Cover URL is invalid".into()))?;
+    let mut url =
+        Url::parse(&normalized).map_err(|_| AppError::Api("Cover URL is invalid".into()))?;
     if url.scheme() == "http" {
         url.set_scheme("https")
             .map_err(|_| AppError::Api("Failed to upgrade cover URL".into()))?;
@@ -263,7 +263,9 @@ fn validate_cover_url(url: &Url) -> AppResult<()> {
         return Err(AppError::Api("Cover URL must use HTTPS".into()));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(AppError::Api("Cover URL credentials are not allowed".into()));
+        return Err(AppError::Api(
+            "Cover URL credentials are not allowed".into(),
+        ));
     }
     if url.port().is_some_and(|port| port != 443) {
         return Err(AppError::Api("Cover URL port is not allowed".into()));
@@ -283,8 +285,7 @@ impl CoverDiskCache {
         let digest = hex::encode(Sha256::digest(cache_key.as_bytes()));
         let shard = digest.get(0..2).unwrap_or("00");
         let directory = root.join(shard);
-        std::fs::create_dir_all(&directory)
-            .map_err(|err| AppError::Other(err.to_string()))?;
+        std::fs::create_dir_all(&directory).map_err(|err| AppError::Other(err.to_string()))?;
         Ok(Self {
             root,
             ready_path: directory.join(format!("{}.ready", digest)),
@@ -300,7 +301,7 @@ impl CoverDiskCache {
         let path = self.resolve_marker_file(&marker.file_name)?;
         match validate_cached_cover(&path, &marker) {
             Ok(cached) => {
-                crate::fsutil::touch_modified(&self.ready_path);
+                neri_common::fsutil::touch_modified(&self.ready_path);
                 Some(cached)
             }
             Err(err) => {
@@ -359,8 +360,7 @@ impl CoverDiskCache {
         let marker = format_cover_cache_marker(bytes.len() as u64, &sha256, mime_type, &file_name);
         atomic_write_cover_marker(&self.ready_path, &marker)
             .map_err(|err| AppError::Other(err.to_string()))?;
-        sync_parent_directory(&self.ready_path)
-            .map_err(|err| AppError::Other(err.to_string()))?;
+        sync_parent_directory(&self.ready_path).map_err(|err| AppError::Other(err.to_string()))?;
         Ok(())
     }
 
@@ -377,8 +377,8 @@ impl CoverDiskCache {
 }
 
 fn validate_cached_cover(path: &Path, marker: &CoverCacheMarker) -> Result<CachedCover, String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|err| format!("cache metadata unavailable: {}", err))?;
+    let metadata =
+        std::fs::metadata(path).map_err(|err| format!("cache metadata unavailable: {}", err))?;
     if !metadata.is_file()
         || metadata.len() == 0
         || metadata.len() > MAX_COVER_BYTES
@@ -393,8 +393,7 @@ fn validate_cached_cover(path: &Path, marker: &CoverCacheMarker) -> Result<Cache
         .map_err(|err| format!("cache read failed: {}", err))?;
     let mime_type = detect_image_mime(&bytes)
         .ok_or_else(|| "cover cache is not a supported image".to_string())?;
-    validate_image_decode(&bytes)
-        .map_err(|err| format!("cover cache decode failed: {}", err))?;
+    validate_image_decode(&bytes).map_err(|err| format!("cover cache decode failed: {}", err))?;
     if mime_type != marker.mime_type || sha256_bytes(&bytes) != marker.sha256 {
         return Err("cover cache content hash or MIME mismatch".into());
     }
@@ -452,10 +451,7 @@ fn atomic_write_cover_marker(path: &Path, marker: &str) -> io::Result<()> {
         .tempfile_in(parent)?;
     temporary.write_all(marker.as_bytes())?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map(|_| ())
-        .map_err(|err| err.error)
+    temporary.persist(path).map(|_| ()).map_err(|err| err.error)
 }
 
 fn prune_cover_cache(root: &Path, max_cache_bytes: u64, keep_digest: &str) {
@@ -497,7 +493,11 @@ fn prune_cover_cache(root: &Path, max_cache_bytes: u64, keep_digest: &str) {
 
 /// 启动时按封面上限裁剪一次（之前只有新封面写入时才会裁剪）
 pub fn prune_cover_cache_dir(app_cache_dir: &Path) {
-    prune_cover_cache(&app_cache_dir.join(IMAGE_CACHE_DIRECTORY), IMAGE_CACHE_MAX_BYTES, "");
+    prune_cover_cache(
+        &app_cache_dir.join(IMAGE_CACHE_DIRECTORY),
+        IMAGE_CACHE_MAX_BYTES,
+        "",
+    );
 }
 
 fn collect_cover_cache_files(
@@ -555,15 +555,29 @@ fn cover_data_url(bytes: &[u8], mime_type: &str) -> String {
 }
 
 pub(crate) fn cover_referer(url: &Url) -> &'static str {
-    match url.host_str().unwrap_or_default().to_ascii_lowercase().as_str() {
+    match url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         host if is_host_or_subdomain(host, "hdslb.com")
-            || is_host_or_subdomain(host, "biliimg.com") => BILIBILI_REFERER,
+            || is_host_or_subdomain(host, "biliimg.com") =>
+        {
+            BILIBILI_REFERER
+        }
         host if is_host_or_subdomain(host, "y.qq.com")
             || is_host_or_subdomain(host, "qqmusic.qq.com")
-            || is_host_or_subdomain(host, "y.gtimg.cn") => QQ_REFERER,
+            || is_host_or_subdomain(host, "y.gtimg.cn") =>
+        {
+            QQ_REFERER
+        }
         host if is_host_or_subdomain(host, "ytimg.com")
             || is_host_or_subdomain(host, "ggpht.com")
-            || is_host_or_subdomain(host, "googleusercontent.com") => YOUTUBE_REFERER,
+            || is_host_or_subdomain(host, "googleusercontent.com") =>
+        {
+            YOUTUBE_REFERER
+        }
         _ => NETEASE_REFERER,
     }
 }
@@ -593,9 +607,9 @@ fn validate_image_decode(bytes: &[u8]) -> Result<(), image::ImageError> {
     reader.limits(limits);
     let image = reader.decode()?;
     if image.width() == 0 || image.height() == 0 {
-        return Err(image::ImageError::Limits(image::error::LimitError::from_kind(
-            image::error::LimitErrorKind::DimensionError,
-        )));
+        return Err(image::ImageError::Limits(
+            image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError),
+        ));
     }
     Ok(())
 }
@@ -612,8 +626,8 @@ fn is_allowed_cover_image_host(host: &str) -> bool {
         "ggpht.com",
         "googleusercontent.com",
     ]
-        .iter()
-        .any(|domain| is_host_or_subdomain(host, domain))
+    .iter()
+    .any(|domain| is_host_or_subdomain(host, domain))
 }
 
 fn is_host_or_subdomain(host: &str, domain: &str) -> bool {
@@ -636,9 +650,7 @@ fn sync_parent_directory(_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        detect_image_mime, normalize_cover_url, parse_cover_cache_marker, CoverDiskCache,
-    };
+    use super::{detect_image_mime, normalize_cover_url, parse_cover_cache_marker, CoverDiskCache};
 
     #[test]
     fn pruning_keeps_recently_used_covers() {
@@ -653,12 +665,17 @@ mod tests {
             std::fs::write(&image, vec![0; 100]).unwrap();
             std::fs::write(&marker, b"marker").unwrap();
             for path in [&image, &marker] {
-                std::fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(hour_ago).unwrap();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_modified(hour_ago)
+                    .unwrap();
             }
             files.push((image, marker));
         }
         // a 先下载但刚被播放过：命中刷新了它的 .ready
-        crate::fsutil::touch_modified(&files[0].1);
+        neri_common::fsutil::touch_modified(&files[0].1);
 
         super::prune_cover_cache(root.path(), 150, "");
         assert!(files[0].0.exists(), "recently used cover survives");
@@ -707,10 +724,8 @@ mod tests {
 
     #[test]
     fn removes_fragment_from_cache_equivalent_url() {
-        let url = normalize_cover_url(
-            "https://i0.hdslb.com/bfs/archive/test.jpg#ignored-fragment",
-        )
-        .expect("URL should be accepted");
+        let url = normalize_cover_url("https://i0.hdslb.com/bfs/archive/test.jpg#ignored-fragment")
+            .expect("URL should be accepted");
         assert_eq!(url.as_str(), "https://i0.hdslb.com/bfs/archive/test.jpg");
     }
 
@@ -770,7 +785,9 @@ mod tests {
         )
         .expect("cache");
 
-        assert!(cache.publish(b"\x89PNG\r\n\x1a\nnot-a-png", "image/png").is_err());
+        assert!(cache
+            .publish(b"\x89PNG\r\n\x1a\nnot-a-png", "image/png")
+            .is_err());
         assert!(!cache.ready_path.exists());
     }
 }

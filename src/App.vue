@@ -8,10 +8,11 @@ import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
 import { installGlobalShortcuts, type ShortcutActions } from '@/modules/shortcuts/globalShortcuts'
 import { applySystemShortcuts, clearSystemShortcuts } from '@/modules/shortcuts/systemShortcuts'
-import { detectPlatform } from '@/modules/shortcuts/platform'
+import { detectPlatform } from '@/utils/platform'
 import { shortcutRecording } from '@/modules/shortcuts/recording'
-import { closeDesktopLyricsWindow, desktopLyricsOpen, installDesktopLyricsBridge, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
-import { installTrayBridge, quitApp } from '@/modules/tray/bridge'
+import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
+import { installDesktopLyricsBridge } from '@/integrations/desktopLyrics'
+import { installTrayBridge, quitApp } from '@/integrations/tray'
 import { syncFrequencyDelayMs, useSyncStore } from '@/stores/sync'
 import { useAuthStore } from '@/stores/auth'
 import { useRecommendStore } from '@/stores/recommend'
@@ -27,12 +28,12 @@ import { useDownloadStore } from '@/stores/download'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import AppBackgroundImage from '@/components/AppBackgroundImage.vue'
+import AppBackgroundImage from '@/components/background/AppBackgroundImage.vue'
 import MiniPlayer from '@/components/MiniPlayer.vue'
 import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppToast from '@/components/AppToast.vue'
-import BiliVideoPartsDialog from '@/components/BiliVideoPartsDialog.vue'
+import BiliVideoPartsDialog from '@/components/bilibili/BiliVideoPartsDialog.vue'
 import TitleBar from '@/components/TitleBar.vue'
 import i18n, { setLocale } from '@/i18n'
 import { useToastStore } from '@/stores/toast'
@@ -140,42 +141,6 @@ function scheduleNowPlayingMotionCleanup(delay = nvidiaCompat.value ? 0 : 520) {
   }, delay)
 }
 
-function setFlipStyle(snapshot: CoverSnapshot) {
-  flipOverlayStyle.value = {
-    left: `${snapshot.rect.left}px`,
-    top: `${snapshot.rect.top}px`,
-    width: `${snapshot.rect.width}px`,
-    height: `${snapshot.rect.height}px`,
-    borderRadius: snapshot.borderRadius,
-  }
-}
-
-function runFlipTransition(from: CoverSnapshot, to: CoverSnapshot, mode: 'opening' | 'closing') {
-  cancelFlipAnimation()
-  flipTransitionMode.value = mode
-  flipOverlay.value = from
-  setFlipStyle(from)
-  isFlipAnimating.value = true
-
-  flipAnimationFrame = requestAnimationFrame(() => {
-    flipAnimationFrame = requestAnimationFrame(() => {
-      flipOverlay.value = { ...to, src: from.src || to.src }
-      flipOverlayStyle.value = {
-        left: `${to.rect.left}px`,
-        top: `${to.rect.top}px`,
-        width: `${to.rect.width}px`,
-        height: `${to.rect.height}px`,
-        borderRadius: to.borderRadius,
-      }
-    })
-  })
-
-  flipCleanupTimer = window.setTimeout(() => {
-    flipCleanupTimer = null
-    resetFlipState()
-  }, mode === 'opening' ? 420 : 520)
-}
-
 async function openNowPlaying() {
   if (!hasMiniPlayer.value) return
   // 动画进行中允许打断，避免连点卡住
@@ -205,7 +170,7 @@ onErrorCaptured((error, instance) => {
   isNowPlayingOpen.value = false
   nowPlayingMotionState.value = null
   nowPlayingBoundaryKey.value++
-  useToastStore().error((i18n.global as any).t('player.now_playing_failed'))
+  useToastStore().error(i18n.global.t('player.now_playing_failed'))
   return false
 })
 
@@ -546,7 +511,7 @@ onMounted(async () => {
     },
     toggleDesktopLyrics: () => {
       const toggle = desktopLyricsOpen.value ? closeDesktopLyricsWindow() : openDesktopLyricsWindow()
-      void toggle.catch(() => useToastStore().error((i18n.global as any).t('player.desktop_lyrics_failed')))
+      void toggle.catch(() => useToastStore().error(i18n.global.t('player.desktop_lyrics_failed')))
     },
     showWindow: () => {
       const appWindow = getCurrentWindow()

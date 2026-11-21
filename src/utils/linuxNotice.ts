@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { detectPlatform } from '@/modules/shortcuts/platform'
+import { detectPlatform } from '@/utils/platform'
 
 /** 是否 Linux 桌面（Tauri 三端之一）喵 */
 export function isLinuxDesktop(): boolean {

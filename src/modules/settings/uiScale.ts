@@ -2,7 +2,7 @@ import { ref, watch, type WatchStopHandle } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition } from '@tauri-apps/api/window'
-import { normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_STEP } from '@/stores/settings'
+import { normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_STEP } from './uiScaleRange'
 import { isMacPlatform } from '@/modules/shortcuts/platform'
 import { createLogger } from '@/utils/logger'
 

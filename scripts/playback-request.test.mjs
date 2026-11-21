@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
 
@@ -87,7 +87,11 @@ assert.deepEqual(initialPlaybackPrefetchWindow(prefetchTracks), prefetchTracks.s
 assert.deepEqual(initialPlaybackPrefetchWindow(prefetchTracks, 1), prefetchTracks.slice(0, 1))
 assert.deepEqual(initialPlaybackPrefetchWindow(prefetchTracks, 0), [])
 
-const playerStoreSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+// player store 拆成 player.ts 与 player/ 下的切片，拼接全部源码后按名称查找实现
+const playerDir = new URL('../src/stores/player/', import.meta.url)
+const playerFiles = [new URL('../src/stores/player.ts', import.meta.url),
+  ...(await readdir(playerDir)).filter(name => name.endsWith('.ts')).sort().map(name => new URL(name, playerDir))]
+const playerStoreSource = (await Promise.all(playerFiles.map(file => readFile(file, 'utf8')))).join('\n')
 assert.match(
   playerStoreSource,
   /void invoke<void>\('begin_playback_request'/,

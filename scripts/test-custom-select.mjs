@@ -171,10 +171,10 @@ await test('device refresh preserves the highlighted value and empty results clo
 
 /** Renders labels with the real zh-CN messages to verify the KDE-style device names */
 async function audioOutputLabel() {
-  const source = await readFile(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8')
-  const script = ts.createSourceFile('settings.ts', parse(source).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const source = await readFile(new URL('../src/components/settings/usePlaybackSettings.ts', import.meta.url), 'utf8')
+  const script = ts.createSourceFile('settings.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   const functions = script.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'audioOutputLabel')
-  assert.equal(functions.length, 1, 'SettingsView exposes audioOutputLabel')
+  assert.equal(functions.length, 1, 'usePlaybackSettings exposes audioOutputLabel')
   const compiled = ts.transpileModule(functions.map(node => ts.createPrinter().printNode(ts.EmitHint.Unspecified, node, script)).join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText
@@ -184,22 +184,36 @@ async function audioOutputLabel() {
     if (typeof value !== 'string') throw new Error(`missing message: ${key}`)
     return value.replace(/\{(\w+)\}/g, (_, name) => params[name] ?? '')
   }
-  return new Function('t', `${compiled}\nreturn audioOutputLabel`)(t)
+  return new Function('t', 'exports', `${compiled}\nreturn device => audioOutputLabel(device, t)`)(t, {})
+}
+
+/** 设置页注入的 IPC 端口：用真实的命令名与参数形状驱动 composable */
+async function settingsIpc(invoke) {
+  const source = await readFile(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8')
+  const script = ts.createSourceFile('view.ts', parse(source).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const statement = script.statements.find(node => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some(declaration => declaration.name.getText(script) === 'settingsIpc'))
+  const compiled = ts.transpileModule(statement.getText(script), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  return new Function('invoke', `${compiled}\nreturn settingsIpc`)(invoke)
 }
 
 async function audioSettings() {
-  const source = await readFile(new URL('../src/views/SettingsView.vue', import.meta.url), 'utf8')
-  const script = ts.createSourceFile('settings.ts', parse(source).descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-  const functions = script.statements.filter(node => ts.isFunctionDeclaration(node) && ['changeAudioOutputDevice', 'loadAudioOutputDevices'].includes(node.name?.text))
+  const source = await readFile(new URL('../src/components/settings/usePlaybackSettings.ts', import.meta.url), 'utf8')
+  const script = ts.createSourceFile('settings.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const composable = script.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'usePlaybackSettings')
+  const functions = composable.body.statements.filter(node => ts.isFunctionDeclaration(node) && ['changeAudioOutputDevice', 'loadAudioOutputDevices'].includes(node.name?.text))
   const compiled = ts.transpileModule(functions.map(node => ts.createPrinter().printNode(ts.EmitHint.Unspecified, node, script)).join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText
   const calls = [], errors = []
   let resolve, reject
   const pending = new Promise((accept, fail) => { resolve = accept; reject = fail })
+  const invoke = (command, input) => { calls.push({ command, input }); return command === 'set_audio_output_device' ? pending : Promise.resolve([]) }
   const dependencies = {
     audioOutputDevice: ref('headphones'), audioOutputDevices: ref([]), audioOutputSwitching: ref(false),
-    invoke: (command, input) => { calls.push({ command, input }); return command === 'set_audio_output_device' ? pending : Promise.resolve([]) },
+    ipc: await settingsIpc(invoke),
     t: key => key, log: { warn() {} }, toast: { error: message => errors.push(message) },
   }
   const change = new Function(...Object.keys(dependencies), `${compiled}\nreturn changeAudioOutputDevice`)(...Object.values(dependencies))
