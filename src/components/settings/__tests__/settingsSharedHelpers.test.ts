@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   dialogSelectionPath,
+  displayBuildVersion,
   onExpandAfterEnter,
   onExpandAfterLeave,
   onExpandEnter,
@@ -13,6 +14,20 @@ function element(scrollHeight: number): HTMLElement {
   Object.defineProperty(el, 'scrollHeight', { value: scrollHeight })
   return el
 }
+
+describe('displayBuildVersion', () => {
+  it('appends the installer version to the build number', () => {
+    expect(displayBuildVersion({ version: '18744b1.11211340', app_version: '26.1121.1340' }))
+      .toBe('18744b1.11211340 (26.1121.1340)')
+  })
+
+  it('falls back to whichever part is available', () => {
+    expect(displayBuildVersion({ version: '18744b1.11211340', app_version: '' })).toBe('18744b1.11211340')
+    expect(displayBuildVersion({ version: '18744b1.11211340' })).toBe('18744b1.11211340')
+    expect(displayBuildVersion({ version: ' ', app_version: '26.1121.1340' })).toBe('26.1121.1340')
+    expect(displayBuildVersion({ version: null, app_version: null })).toBe('')
+  })
+})
 
 describe('dialogSelectionPath', () => {
   it('returns string selections unchanged', () => {

@@ -154,7 +154,7 @@ const {
 const lyricsSettings = useLyricsSettings()
 
 const {
-  handleVersionTap, disposeVersionTap, buildInfo, loadBuildInfo, copyBuildValue, ffmpegComponentText, openExternalUrl,
+  handleVersionTap, disposeVersionTap, buildInfo, buildVersionText, loadBuildInfo, copyBuildValue, ffmpegComponentText, openExternalUrl,
 } = useAboutSettings(settingsIpc, toggleSection)
 
 const syncSettings = useSyncSettings(openExternalUrl)
@@ -1559,7 +1559,7 @@ useEscapeClose(
         <div class="setting-title about-wordmark">NeriPlayer <span class="about-wordmark-hand">Desktop</span>{{ devModeEnabled ? ' (dev)' : '' }}</div>
         <div class="setting-desc mono-build-value">
           {{ t('settings.version_info', {
-            version: buildInfo?.version || 'dev',
+            version: buildVersionText || 'dev',
           }) }}
         </div>
       </div>
@@ -1568,7 +1568,7 @@ useEscapeClose(
         class="about-copy-btn"
         :title="t('settings.copy_build_version')"
         :aria-label="t('settings.copy_build_version')"
-        @click="copyBuildValue(buildInfo?.version, $event)"
+        @click="copyBuildValue(buildVersionText, $event)"
       >
         <span class="material-symbols-rounded">content_copy</span>
       </button>

@@ -56,6 +56,17 @@ export interface SettingsIpc {
   getBuildInfo(): Promise<BuildInfo>
 }
 
+/**
+ * 应用内展示的版本：构建号 `<sha>.<MMddHHmm>` 后附安装包版本，例如 `18744b1.11211340 (26.1121.1340)`。
+ * 构建号用来定位提交，安装包版本对应发布页与系统里看到的版本；两者缺一时只显示有的那个。
+ */
+export function displayBuildVersion(info: { version?: string | null, app_version?: string | null }): string {
+  const build = info.version?.trim() ?? ''
+  const app = info.app_version?.trim() ?? ''
+  if (build && app) return `${build} (${app})`
+  return build || app
+}
+
 // 兼容返回 { path } 对象的旧对话框实现，非字符串且无 path 时退化为字符串化结果
 export function dialogSelectionPath(result: unknown): string {
   if (typeof result === 'string') return result
