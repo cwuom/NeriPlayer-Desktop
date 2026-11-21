@@ -138,8 +138,10 @@ pub fn install_panic_hook(app_version: &'static str) {
                 )
             })
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         let report = format!(
             "NeriPlayer Desktop crash report
              version: {}
@@ -189,8 +191,7 @@ fn rotate_crash_reports(dir: &Path) {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            (name.starts_with("crash-") && name.ends_with(".txt"))
-                .then_some((name, entry.path()))
+            (name.starts_with("crash-") && name.ends_with(".txt")).then_some((name, entry.path()))
         })
         .collect();
     if files.len() <= MAX_CRASH_REPORTS {
@@ -289,10 +290,7 @@ pub fn load_bootstrap_config() -> BootstrapConfig {
         .map(parse_level)
         .unwrap_or(defaults.level);
 
-    BootstrapConfig {
-        log_to_file,
-        level,
-    }
+    BootstrapConfig { log_to_file, level }
 }
 
 /// 统一日志格式：`2026-07-19 12:00:00.123 [scope] [LEVEL] message`
@@ -448,7 +446,10 @@ mod tests {
             assert_eq!(super::level_from_usize(level as usize), level);
         }
         assert!(log::Level::Warn <= LevelFilter::Info);
-        assert!(log::Level::Error > LevelFilter::Off, "Off drops every record");
+        assert!(
+            log::Level::Error > LevelFilter::Off,
+            "Off drops every record"
+        );
     }
 
     /// Set-Cookie 行必须整段打码，键名保留（cookie_store P0 泄漏路径）
@@ -469,7 +470,10 @@ mod tests {
     #[test]
     fn authorization_header_is_fully_redacted() {
         let output = redact_sensitive("Authorization: Bearer eyJhbGciOi.secret.sig");
-        assert!(output.contains("Authorization: [REDACTED]"), "got: {output}");
+        assert!(
+            output.contains("Authorization: [REDACTED]"),
+            "got: {output}"
+        );
         assert!(!output.contains("eyJhbGciOi"));
     }
 

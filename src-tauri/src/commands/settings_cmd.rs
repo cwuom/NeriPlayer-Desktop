@@ -1,10 +1,10 @@
-use crate::api::bilibili::client::{
+use crate::settings::store::{self, AppSettings, SettingsLoadResult};
+use crate::state::AppState;
+use neri_common::error::{AppError, AppResult};
+use neri_platform::api::bilibili::client::{
     bili_quality_key, is_lossless_stream, BiliAudioStream, BiliClient,
 };
-use crate::api::netease::client::NeteasePlaybackUnavailableReason;
-use crate::error::{AppError, AppResult};
-use crate::state::AppState;
-use crate::settings::store::{self, AppSettings, SettingsLoadResult};
+use neri_platform::api::netease::client::NeteasePlaybackUnavailableReason;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
@@ -68,14 +68,16 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> AppResult<A
     if previous_cache_limit.is_some_and(|previous| saved.max_cache_size < previous) {
         let app = app.clone();
         let limit = saved.max_cache_size;
-        tauri::async_runtime::spawn_blocking(move || super::player_cmd::prune_media_caches(&app, limit));
+        tauri::async_runtime::spawn_blocking(move || {
+            super::player_cmd::prune_media_caches(&app, limit)
+        });
     }
     Ok(saved)
 }
 
 /// 把需要后端立即生效的设置推到各子系统
 pub fn apply_runtime_settings(settings: &AppSettings) {
-    crate::api::youtube::set_locale_preferences(
+    neri_platform::api::youtube::set_locale_preferences(
         settings.internationalization_enabled,
         &settings.locale,
     );
@@ -117,7 +119,9 @@ fn copy_background_into(dir: &std::path::Path, source: &std::path::Path) -> AppR
         .ok_or_else(|| AppError::Other("unsupported background image type".into()))?;
     let metadata = std::fs::metadata(source)?;
     if !metadata.is_file() || metadata.len() > MAX_BACKGROUND_BYTES {
-        return Err(AppError::Other("background image is missing or too large".into()));
+        return Err(AppError::Other(
+            "background image is missing or too large".into(),
+        ));
     }
     std::fs::create_dir_all(dir)?;
     let destination = dir.join(format!(
@@ -191,7 +195,11 @@ pub async fn get_netease_song_url(
 ) -> AppResult<SongUrlResult> {
     // 快速切歌时，过期请求直接中止，释放连接池
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -219,7 +227,11 @@ pub async fn get_qq_song_url(
     state: State<'_, AppState>,
 ) -> AppResult<SongUrlResult> {
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -279,7 +291,11 @@ pub async fn get_bili_audio_url(
     state: State<'_, AppState>,
 ) -> AppResult<BiliAudioResult> {
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -468,7 +484,7 @@ pub struct YtAudioResult {
     pub bitrate: u64,
     pub mime_type: String,
     pub content_length: u64,
-    pub stream_type: crate::api::youtube::client::YtStreamType,
+    pub stream_type: neri_platform::api::youtube::client::YtStreamType,
 }
 
 #[tauri::command]
@@ -483,7 +499,11 @@ pub async fn get_youtube_audio_url(
 ) -> AppResult<Vec<YtAudioResult>> {
     // 快速切歌时丢弃过期解析, 与网易云/QQ/B站一致
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -496,17 +516,27 @@ pub async fn get_youtube_audio_url(
         Some(source) => source,
         None => store::load_settings(&app)?.settings.youtube_playback_source,
     };
-    let resolution = crate::api::youtube::playback::resolve_audio_streams_with_source(
+    let youtube_host = crate::platform_webview::youtube_host(&app);
+    let resolution = neri_platform::api::youtube::playback::resolve_audio_streams_with_source(
         &video_id,
         yt_auth.as_ref().filter(|a| a.has_login()),
-        Some(&app),
+        Some(&youtube_host),
         force_refresh.unwrap_or(false),
         avoid_direct.unwrap_or(false),
         &playback_source,
     );
-    let streams = await_current_playback_resolution(resolution, request_generation, &state.playback_generation).await?;
+    let streams = await_current_playback_resolution(
+        resolution,
+        request_generation,
+        &state.playback_generation,
+    )
+    .await?;
     if let Some(gen) = request_generation {
-        if state.playback_generation.load(std::sync::atomic::Ordering::Acquire) > gen {
+        if state
+            .playback_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            > gen
+        {
             return Err(AppError::Audio("Playback request superseded".into()));
         }
     }
@@ -584,24 +614,23 @@ pub struct LinuxGraphicsCompat {
 
 #[tauri::command]
 pub fn get_linux_graphics_compat() -> LinuxGraphicsCompat {
-    let mut compat = LinuxGraphicsCompat {
+    #[cfg(target_os = "linux")]
+    if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
+        return LinuxGraphicsCompat {
+            nvidia: true,
+            dmabuf_atlas_disabled: quirk.dmabuf_atlas_disabled,
+            dmabuf_shm_forced: quirk.dmabuf_shm_forced,
+            dmabuf_disabled: quirk.dmabuf_disabled,
+            software_compositing: quirk.software_compositing,
+        };
+    }
+    LinuxGraphicsCompat {
         nvidia: false,
         dmabuf_atlas_disabled: false,
         dmabuf_shm_forced: false,
         dmabuf_disabled: false,
         software_compositing: false,
-    };
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(quirk) = crate::linux_graphics::apply_nvidia_webkit_workarounds() {
-            compat.nvidia = true;
-            compat.dmabuf_atlas_disabled = quirk.dmabuf_atlas_disabled;
-            compat.dmabuf_shm_forced = quirk.dmabuf_shm_forced;
-            compat.dmabuf_disabled = quirk.dmabuf_disabled;
-            compat.software_compositing = quirk.software_compositing;
-        }
     }
-    compat
 }
 
 /// “Linux 首次运行提示已展示过”的标记文件，放在应用数据目录。
@@ -685,7 +714,7 @@ pub fn get_system_accent_color() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::await_current_playback_resolution;
-    use crate::error::AppResult;
+    use neri_common::error::AppResult;
 
     #[test]
     fn background_import_copies_into_managed_dir_and_keeps_one_copy() {
@@ -697,7 +726,10 @@ mod tests {
         let first = super::copy_background_into(&managed, &original).unwrap();
         let first = std::path::PathBuf::from(first);
         assert_eq!(first.parent(), Some(managed.as_path()));
-        assert_eq!(first.extension().and_then(|value| value.to_str()), Some("jpg"));
+        assert_eq!(
+            first.extension().and_then(|value| value.to_str()),
+            Some("jpg")
+        );
         assert_eq!(std::fs::read(&first).unwrap(), b"jpeg");
 
         // 已受管的路径原样返回，不再复制
@@ -707,7 +739,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let other = root.path().join("next.png");
         std::fs::write(&other, b"png").unwrap();
-        let second = std::path::PathBuf::from(super::copy_background_into(&managed, &other).unwrap());
+        let second =
+            std::path::PathBuf::from(super::copy_background_into(&managed, &other).unwrap());
         assert!(!first.exists(), "the previous copy is removed");
         assert_eq!(std::fs::read_dir(&managed).unwrap().count(), 1);
         assert!(second.exists());
@@ -719,10 +752,15 @@ mod tests {
 
     #[tokio::test]
     async fn superseded_youtube_resolution_drops_its_pending_resources() {
-        use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            Arc,
+        };
         struct DropFlag(Arc<AtomicBool>);
         impl Drop for DropFlag {
-            fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
         }
         let dropped = Arc::new(AtomicBool::new(false));
         let flag = DropFlag(dropped.clone());
@@ -732,11 +770,16 @@ mod tests {
             std::future::pending::<AppResult<()>>().await
         };
         let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            tokio::join!(await_current_playback_resolution(resolution, Some(1), &active), async {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                active.store(2, Ordering::Release);
-            })
-        }).await.expect("an old stream must stop without waiting for its network timeout");
+            tokio::join!(
+                await_current_playback_resolution(resolution, Some(1), &active),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    active.store(2, Ordering::Release);
+                }
+            )
+        })
+        .await
+        .expect("an old stream must stop without waiting for its network timeout");
         assert!(result.unwrap_err().to_string().contains("superseded"));
         assert!(dropped.load(Ordering::Acquire));
     }
@@ -745,7 +788,7 @@ mod tests {
         build_bili_audio_candidates, select_bili_audio_stream, split_legacy_bili_song_id,
         LegacyBiliSongId,
     };
-    use crate::api::bilibili::client::BiliAudioStream;
+    use neri_platform::api::bilibili::client::BiliAudioStream;
 
     fn stream(url: &str, bandwidth: u64, codecs: &str, quality_id: u32) -> BiliAudioStream {
         BiliAudioStream {

@@ -1,13 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use neri_player_desktop::audio::analyzer::SharedAudioLevel;
-use neri_player_desktop::audio::media_session::{MediaAction, MediaSessionController};
+use neri_playback::analyzer::SharedAudioLevel;
+use neri_playback::media_session::{MediaAction, MediaSessionController};
 use neri_player_desktop::auth;
+use neri_player_desktop::commands::discover::{
+    comment_cmd, explore_cmd, recommend_cmd, search_cmd,
+};
 use neri_player_desktop::commands::{
-    auth_cmd, cache_cmd, comment_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, explore_cmd, image_cmd, library_cmd,
-    local_files_cmd, listen_together_cmd, lyrics_cmd, player_cmd, playback_fallback_cmd,
-    recommend_cmd, search_cmd, settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd,
-    user_data_cmd,
+    auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
+    listen_together_cmd, local_files_cmd, lyrics_cmd, playback_fallback_cmd, player_cmd,
+    settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd, user_data_cmd,
 };
 use neri_player_desktop::state::AppState;
 use std::sync::mpsc;
@@ -53,6 +55,8 @@ fn classify_playback_finish(
 fn main() {
     // 崩溃收集必须最早安装：之后任何线程 panic 都会把现场落盘
     neri_player_desktop::logging::install_panic_hook(env!("CARGO_PKG_VERSION"));
+    // 播放引擎的远程拉流与 Tauri 命令共用同一 tokio 运行时，reqwest 连接池不跨运行时
+    neri_playback::runtime::install(tauri::async_runtime::handle().inner().clone());
     // 强制 WebView2 (Chromium) 启用 GPU 硬件加速
     // 仅 Windows 生效：WEBVIEW2_* 对 macOS 的 WKWebView、Linux 的 WebKitGTK 均为 no-op
     #[cfg(target_os = "windows")]
@@ -111,7 +115,7 @@ fn main() {
             // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
             match app.path().resource_dir() {
                 Ok(resources) => {
-                    neri_player_desktop::audio::ffmpeg::set_bundled_directory(resources.join("ffmpeg"));
+                    neri_playback::ffmpeg::set_bundled_directory(resources.join("ffmpeg"));
                 }
                 Err(error) => log::warn!(
                     target: "audio-decoder",
@@ -122,7 +126,7 @@ fn main() {
             let preload = std::thread::Builder::new()
                 .name("ffmpeg-preload".into())
                 .spawn(|| {
-                    let _ = neri_player_desktop::audio::ffmpeg::runtime();
+                    let _ = neri_playback::ffmpeg::runtime();
                 });
             if let Err(error) = preload {
                 log::warn!(target: "audio-decoder", "could not start FFmpeg preloading: {error}");
@@ -145,13 +149,13 @@ fn main() {
             tray_cmd::setup(app)?;
 
             // 本地音乐库：读索引、开始监视文件夹，后台做一次增量校对
-            neri_player_desktop::library::local_index::start(handle.clone());
+            neri_library::library::local_index::start(neri_player_desktop::events::event_sink(&handle));
 
             // 恢复持久化的登录 Cookie
             {
                 let state = handle.state::<AppState>();
                 let saved_auth = auth::cookies::load_auth(&handle);
-                auth::cookies::inject_all(&state.cookie_jar, &saved_auth);
+                neri_platform::auth::cookie_jar::inject_all(&state.cookie_jar, &saved_auth);
                 *state.auth.lock() = saved_auth;
             }
 
@@ -179,7 +183,7 @@ fn main() {
                     auth_cmd::maybe_refresh_youtube_session(&handle_yt, state.inner(), true).await;
                     // 会话保鲜之后再预热：首页配置按登录指纹缓存，Cookie 轮换前拿的会作废
                     let auth = state.auth.lock().youtube.clone();
-                    neri_player_desktop::api::youtube::playback::warm_playback(auth, state.bypasses_system_proxy()).await;
+                    neri_platform::api::youtube::playback::warm_playback(auth, state.bypasses_system_proxy()).await;
                 });
             }
 
@@ -789,7 +793,9 @@ fn window_command_allowed(label: &str, command: &str) -> bool {
         || (label == desktop_lyrics_cmd::WINDOW_LABEL
             && matches!(
                 command,
-                "get_desktop_lyrics_snapshot" | "desktop_lyrics_action" | "desktop_lyrics_hit_region"
+                "get_desktop_lyrics_snapshot"
+                    | "desktop_lyrics_action"
+                    | "desktop_lyrics_hit_region"
             ))
         || (label == tray_cmd::POPUP_LABEL
             && matches!(
@@ -805,32 +811,60 @@ mod tests {
     #[test]
     fn desktop_lyrics_window_only_reads_its_snapshot() {
         assert!(super::window_command_allowed(
-            "main", "publish_desktop_lyrics",
+            "main",
+            "publish_desktop_lyrics",
         ));
         assert!(super::window_command_allowed(
-            "desktop-lyrics", "get_desktop_lyrics_snapshot",
+            "desktop-lyrics",
+            "get_desktop_lyrics_snapshot",
         ));
-        assert!(super::window_command_allowed("desktop-lyrics", "desktop_lyrics_action"));
-        assert!(super::window_command_allowed("desktop-lyrics", "desktop_lyrics_hit_region"));
-        assert!(!super::window_command_allowed("desktop-lyrics", "set_desktop_lyrics_lock"));
+        assert!(super::window_command_allowed(
+            "desktop-lyrics",
+            "desktop_lyrics_action"
+        ));
+        assert!(super::window_command_allowed(
+            "desktop-lyrics",
+            "desktop_lyrics_hit_region"
+        ));
+        assert!(!super::window_command_allowed(
+            "desktop-lyrics",
+            "set_desktop_lyrics_lock"
+        ));
         assert!(!super::window_command_allowed("desktop-lyrics", "play_url"));
         assert!(!super::window_command_allowed(
-            "desktop-lyrics", "publish_desktop_lyrics",
+            "desktop-lyrics",
+            "publish_desktop_lyrics",
         ));
         assert!(!super::window_command_allowed(
-            "youtube-login", "get_desktop_lyrics_snapshot",
+            "youtube-login",
+            "get_desktop_lyrics_snapshot",
         ));
     }
 
     #[test]
     fn tray_popup_only_reads_its_state_and_sends_actions() {
-        assert!(super::window_command_allowed("tray-popup", "get_tray_popup_state"));
-        assert!(super::window_command_allowed("tray-popup", "tray_popup_ready"));
-        assert!(super::window_command_allowed("tray-popup", "tray_popup_action"));
-        assert!(!super::window_command_allowed("tray-popup", "publish_tray_snapshot"));
+        assert!(super::window_command_allowed(
+            "tray-popup",
+            "get_tray_popup_state"
+        ));
+        assert!(super::window_command_allowed(
+            "tray-popup",
+            "tray_popup_ready"
+        ));
+        assert!(super::window_command_allowed(
+            "tray-popup",
+            "tray_popup_action"
+        ));
+        assert!(!super::window_command_allowed(
+            "tray-popup",
+            "publish_tray_snapshot"
+        ));
         assert!(!super::window_command_allowed("tray-popup", "quit_app"));
         assert!(!super::window_command_allowed("tray-popup", "play_url"));
-        assert!(!super::window_command_allowed("desktop-lyrics", "tray_popup_action"));
+        assert!(!super::window_command_allowed(
+            "desktop-lyrics",
+            "tray_popup_action"
+        ));
     }
 
     #[test]

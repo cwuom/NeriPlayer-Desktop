@@ -1,16 +1,16 @@
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use crate::sync::models::SyncSong;
+use neri_listentogether::session::LtSession;
+use neri_platform::auth::state::AuthState;
+use neri_playback::player::PlayerEngine;
+use neri_playback::queue::PlayQueue;
 
-use crate::audio::player::PlayerEngine;
-use crate::audio::queue::PlayQueue;
-use crate::auth::state::AuthState;
-use crate::listen_together::session::LtSession;
+// 曲目模型定义在 neri-model；AppState 持有队列与当前曲目，命令层沿用 crate::state 路径
+pub use neri_model::{RepeatMode, TrackInfo, TrackSource};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
@@ -67,18 +67,18 @@ pub struct AppState {
     pub cookie_jar: Arc<reqwest::cookie::Jar>,
     /// 三平台登录状态
     pub auth: Mutex<AuthState>,
-    pub auth_operations: Mutex<crate::auth::coordination::AuthOperations>,
+    pub auth_operations: Mutex<neri_platform::auth::coordination::AuthOperations>,
     /// 一起听会话
     pub lt_session: Mutex<LtSession>,
     /// 后台下载任务
     pub download_tasks: Mutex<HashMap<String, DownloadTaskControl>>,
     /// YouTube 会话保鲜闸门(冷却 + 熔断), 对齐 Android 自动刷新
-    pub youtube_refresh: Mutex<crate::api::youtube::refresh::YouTubeRefreshGate>,
+    pub youtube_refresh: Mutex<neri_platform::api::youtube::refresh::YouTubeRefreshGate>,
     /// YouTube SIDTS 主动轮换闸门，避免 RotateCookies 请求风暴
     pub youtube_cookie_rotation:
-        Mutex<crate::api::youtube::refresh::YouTubeCookieRotationGate>,
+        Mutex<neri_platform::api::youtube::refresh::YouTubeCookieRotationGate>,
     /// 播放统计, 启动时从磁盘恢复
-    pub stats: Mutex<crate::stats::StatsStore>,
+    pub stats: Mutex<neri_library::stats::StatsStore>,
     /// 前端切歌时镜像的媒体会话元数据（PlayQueue 从不被前端填充, 不能作为元数据源, PB-01）
     pub media_metadata: Mutex<Option<MediaMetadataMirror>>,
     /// 与 http 代理设置相反的备用客户端
@@ -124,14 +124,18 @@ impl AppState {
             bypass_system_proxy: AtomicBool::new(true),
             cookie_jar: jar,
             auth: Mutex::new(AuthState::default()),
-            auth_operations: Mutex::new(crate::auth::coordination::AuthOperations::default()),
+            auth_operations: Mutex::new(
+                neri_platform::auth::coordination::AuthOperations::default(),
+            ),
             lt_session: Mutex::new(LtSession::new()),
             download_tasks: Mutex::new(HashMap::new()),
-            youtube_refresh: Mutex::new(crate::api::youtube::refresh::YouTubeRefreshGate::default()),
-            youtube_cookie_rotation: Mutex::new(
-                crate::api::youtube::refresh::YouTubeCookieRotationGate::default(),
+            youtube_refresh: Mutex::new(
+                neri_platform::api::youtube::refresh::YouTubeRefreshGate::default(),
             ),
-            stats: Mutex::new(crate::stats::load()),
+            youtube_cookie_rotation: Mutex::new(
+                neri_platform::api::youtube::refresh::YouTubeCookieRotationGate::default(),
+            ),
+            stats: Mutex::new(neri_library::stats::load()),
             media_metadata: Mutex::new(None),
             alt_http: parking_lot::RwLock::new(alt),
         }
@@ -148,7 +152,8 @@ impl AppState {
         };
         if let Ok(client) = build(bypass_proxy) {
             *self.http.write() = client;
-            self.bypass_system_proxy.store(bypass_proxy, std::sync::atomic::Ordering::Release);
+            self.bypass_system_proxy
+                .store(bypass_proxy, std::sync::atomic::Ordering::Release);
         }
         // 备用客户端始终取相反设置
         if let Ok(client) = build(!bypass_proxy) {
@@ -175,7 +180,8 @@ impl AppState {
     }
 
     pub fn bypasses_system_proxy(&self) -> bool {
-        self.bypass_system_proxy.load(std::sync::atomic::Ordering::Acquire)
+        self.bypass_system_proxy
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     // 同步锁和条件写入绑定资源地址，重定向不能绕过目标校验
@@ -183,17 +189,19 @@ impl AppState {
         self.sync_http.read().clone()
     }
 
-    pub fn hls_transport(&self) -> crate::api::transport::FallbackHttp {
-        crate::api::transport::FallbackHttp::with_fallback(
+    pub fn hls_transport(&self) -> neri_platform::api::transport::FallbackHttp {
+        neri_platform::api::transport::FallbackHttp::with_fallback(
             &self.sync_http(),
             &self.sync_alt_http.read().clone(),
             "youtube_hls",
         )
     }
 
-    pub fn subtitle_transport(&self) -> crate::api::transport::FallbackHttp {
-        crate::api::transport::FallbackHttp::with_fallback(
-            &self.sync_http(), &self.sync_alt_http.read().clone(), "bilibili_subtitle",
+    pub fn subtitle_transport(&self) -> neri_platform::api::transport::FallbackHttp {
+        neri_platform::api::transport::FallbackHttp::with_fallback(
+            &self.sync_http(),
+            &self.sync_alt_http.read().clone(),
+            "bilibili_subtitle",
         )
     }
 
@@ -205,90 +213,62 @@ impl AppState {
     /// 带代理兜底的传输通道
     ///
     /// 平台客户端一律经由它构造，代理配错或必须走代理两种情况都能自愈。
-    pub fn transport(&self, target: &'static str) -> crate::api::transport::FallbackHttp {
-        crate::api::transport::FallbackHttp::with_fallback(
+    pub fn transport(&self, target: &'static str) -> neri_platform::api::transport::FallbackHttp {
+        neri_platform::api::transport::FallbackHttp::with_fallback(
             &self.http(),
             &self.alt_http(),
             target,
         )
     }
 
-    pub fn auth_http_clients(&self, jar: Arc<reqwest::cookie::Jar>) -> crate::error::AppResult<(reqwest::Client, reqwest::Client)> {
+    pub fn auth_http_clients(
+        &self,
+        jar: Arc<reqwest::cookie::Jar>,
+    ) -> neri_common::error::AppResult<(reqwest::Client, reqwest::Client)> {
         let bypass_proxy = self.bypasses_system_proxy();
         let build = |bypass_proxy: bool| {
             let mut builder = api_client_builder(jar.clone());
-            if bypass_proxy { builder = builder.no_proxy(); }
+            if bypass_proxy {
+                builder = builder.no_proxy();
+            }
             builder.build()
         };
         Ok((build(bypass_proxy)?, build(!bypass_proxy)?))
     }
 
-    pub fn netease(&self) -> crate::api::netease::client::NeteaseClient {
-        let csrf = crate::auth::cookies::read_netease_csrf(&self.cookie_jar);
-        crate::api::netease::client::NeteaseClient::with_fallback(&self.http(), &self.alt_http())
-            .with_csrf(csrf)
+    pub fn netease(&self) -> neri_platform::api::netease::client::NeteaseClient {
+        let csrf = neri_platform::auth::cookie_jar::read_netease_csrf(&self.cookie_jar);
+        neri_platform::api::netease::client::NeteaseClient::with_fallback(
+            &self.http(),
+            &self.alt_http(),
+        )
+        .with_csrf(csrf)
+        .with_cookie_jar(self.cookie_jar.clone())
+    }
+
+    pub fn youtube(&self) -> neri_platform::api::youtube::client::YouTubeClient {
+        neri_platform::api::youtube::client::YouTubeClient::with_transport(
+            self.transport("youtube"),
+        )
+    }
+
+    pub fn bilibili(&self) -> neri_platform::api::bilibili::client::BiliClient {
+        neri_platform::api::bilibili::client::BiliClient::with_transport(self.transport("bilibili"))
             .with_cookie_jar(self.cookie_jar.clone())
     }
 
-    pub fn youtube(&self) -> crate::api::youtube::client::YouTubeClient {
-        crate::api::youtube::client::YouTubeClient::with_transport(self.transport("youtube"))
+    pub fn qq(&self) -> neri_platform::api::qq::client::QqMusicClient {
+        neri_platform::api::qq::client::QqMusicClient::with_transport(self.transport("qq"))
     }
 
-    pub fn bilibili(&self) -> crate::api::bilibili::client::BiliClient {
-        crate::api::bilibili::client::BiliClient::with_transport(self.transport("bilibili"))
-            .with_cookie_jar(self.cookie_jar.clone())
-    }
-
-    pub fn qq(&self) -> crate::api::qq::client::QqMusicClient {
-        crate::api::qq::client::QqMusicClient::with_transport(self.transport("qq"))
-    }
-
-    pub fn lrclib(&self) -> crate::api::lrclib::LrcLibClient {
-        crate::api::lrclib::LrcLibClient::with_transport(self.transport("lrclib"))
+    pub fn lrclib(&self) -> neri_platform::api::lrclib::LrcLibClient {
+        neri_platform::api::lrclib::LrcLibClient::with_transport(self.transport("lrclib"))
     }
 
     /// 获取当前 HTTP Client 的克隆（O(1)，reqwest::Client 内部是 Arc）
     pub fn http(&self) -> reqwest::Client {
         self.http.read().clone()
     }
-}
-
-/// 曲目信息（前后端共享）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackInfo {
-    pub id: String,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    pub duration_ms: u64,
-    pub source: TrackSource,
-    /// 本地文件路径或远程 URL
-    pub url: String,
-    pub cover_url: Option<String>,
-    #[serde(default, alias = "addedAt")]
-    pub added_at: i64,
-    #[serde(default, alias = "syncPayload", skip_serializing_if = "Option::is_none")]
-    pub sync_payload: Option<SyncSong>,
-    #[serde(default, alias = "playlistKey", skip_serializing_if = "Option::is_none")]
-    pub playlist_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackSource {
-    Local,
-    Netease,
-    Qq,
-    Bilibili,
-    Youtube,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RepeatMode {
-    Off,
-    All,
-    One,
 }
 
 #[cfg(test)]
@@ -308,10 +288,18 @@ mod tests {
             assert!(socket.read(&mut request).await.unwrap() > 0);
             socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{redirected_address}/locked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         });
-        let response = AppState::build_sync_http(true).unwrap()
-            .get(format!("http://{address}/manifest")).send().await.unwrap();
+        let response = AppState::build_sync_http(true)
+            .unwrap()
+            .get(format!("http://{address}/manifest"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), redirected.accept()).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), redirected.accept())
+                .await
+                .is_err()
+        );
         server.await.unwrap();
     }
 }

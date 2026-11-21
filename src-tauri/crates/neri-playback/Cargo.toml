@@ -1,0 +1,36 @@
+[package]
+name = "neri-playback"
+description = "播放引擎：cpal 输出、解码、HLS/远程拉流缓存、原生 DSP、播放队列与系统媒体会话"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+neri-common.workspace = true
+neri-model.workspace = true
+neri-platform.workspace = true
+aes.workspace = true
+cbc.workspace = true
+cpal.workspace = true
+hex.workspace = true
+log.workspace = true
+md-5.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+souvlaki.workspace = true
+symphonia.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# 读取 alsa-lib 设备提示生成可读的输出设备名；版本与 cpal 使用的一致
+alsa.workspace = true
+
+[build-dependencies]
+cc.workspace = true

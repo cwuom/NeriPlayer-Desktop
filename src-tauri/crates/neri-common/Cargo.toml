@@ -1,0 +1,31 @@
+[package]
+name = "neri-common"
+description = "错误类型、原子文件写入、凭据存储与配置备份等无宿主依赖的基础设施"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+cbc.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+hex.workspace = true
+hmac.workspace = true
+keyring.workspace = true
+log.workspace = true
+pbkdf2.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

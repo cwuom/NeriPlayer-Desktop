@@ -1,8 +1,8 @@
 // 前端详情与歌词缓存的数据库命令
 use serde_json::Value;
 
-use crate::db::{self, cache};
-use crate::error::{AppError, AppResult};
+use neri_common::error::{AppError, AppResult};
+use neri_library::db::{self, cache};
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -20,7 +20,8 @@ async fn blocking<T: Send + 'static>(
 pub async fn cache_get(bucket: String, key: String, max_age_ms: i64) -> AppResult<Option<Value>> {
     cache::validate_bucket(&bucket)?;
     blocking(move || {
-        db::user_db()?.read(|connection| cache::get(connection, &bucket, &key, max_age_ms, now_ms()))
+        db::user_db()?
+            .read(|connection| cache::get(connection, &bucket, &key, max_age_ms, now_ms()))
     })
     .await
 }
@@ -35,9 +36,14 @@ pub async fn cache_put(
     max_bytes: i64,
 ) -> AppResult<()> {
     cache::validate_bucket(&bucket)?;
-    let policy = cache::CachePolicy { max_age_ms, max_entries, max_bytes };
+    let policy = cache::CachePolicy {
+        max_age_ms,
+        max_entries,
+        max_bytes,
+    };
     blocking(move || {
-        db::user_db()?.write(|transaction| cache::put(transaction, &bucket, &key, &value, policy, now_ms()))
+        db::user_db()?
+            .write(|transaction| cache::put(transaction, &bucket, &key, &value, policy, now_ms()))
     })
     .await
 }
@@ -45,5 +51,6 @@ pub async fn cache_put(
 #[tauri::command]
 pub async fn cache_remove(bucket: String, key: String) -> AppResult<()> {
     cache::validate_bucket(&bucket)?;
-    blocking(move || db::user_db()?.write(|transaction| cache::remove(transaction, &bucket, &key))).await
+    blocking(move || db::user_db()?.write(|transaction| cache::remove(transaction, &bucket, &key)))
+        .await
 }

@@ -4,10 +4,12 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 
-use crate::error::{AppError, AppResult};
 use crate::webview_args::MainBrowserArgs;
+use neri_common::error::{AppError, AppResult};
 
 pub const WINDOW_LABEL: &str = "desktop-lyrics";
 const FRAME_EVENT: &str = "desktop-lyrics:frame";
@@ -99,7 +101,11 @@ fn invalid(message: &str) -> AppError {
 
 impl DesktopLyricsFrame {
     fn validate(&self) -> AppResult<()> {
-        if self.locale.as_deref().is_some_and(|locale| !["zh-CN", "zh-TW", "en", "ja"].contains(&locale)) {
+        if self
+            .locale
+            .as_deref()
+            .is_some_and(|locale| !["zh-CN", "zh-TW", "en", "ja"].contains(&locale))
+        {
             return Err(invalid("has an invalid locale"));
         }
         for (value, maximum) in [
@@ -114,7 +120,9 @@ impl DesktopLyricsFrame {
         if !(self.accent.is_empty()
             || (self.accent.len() == 7
                 && self.accent.starts_with('#')
-                && self.accent[1..].chars().all(|character| character.is_ascii_hexdigit())))
+                && self.accent[1..]
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())))
         {
             return Err(invalid("has an invalid accent color"));
         }
@@ -129,13 +137,21 @@ impl DesktopLyricsFrame {
                 .iter()
                 .any(|text| text.len() > MAX_TEXT_BYTES)
                 || line.words.len() > MAX_LINE_WORDS
-                || line.words.iter().any(|word| word.text.len() > MAX_WORD_BYTES)
+                || line
+                    .words
+                    .iter()
+                    .any(|word| word.text.len() > MAX_WORD_BYTES)
             {
                 return Err(invalid("exceeds text limit"));
             }
-            let times = std::iter::once((line.start_ms, line.duration_ms))
-                .chain(line.words.iter().map(|word| (word.start_ms, word.duration_ms)));
-            if times.into_iter().any(|(start, duration)| !(0.0..=1e9).contains(&start) || !(0.0..=1e9).contains(&duration)) {
+            let times = std::iter::once((line.start_ms, line.duration_ms)).chain(
+                line.words
+                    .iter()
+                    .map(|word| (word.start_ms, word.duration_ms)),
+            );
+            if times.into_iter().any(|(start, duration)| {
+                !(0.0..=1e9).contains(&start) || !(0.0..=1e9).contains(&duration)
+            }) {
                 return Err(invalid("has an invalid time"));
             }
         }
@@ -182,7 +198,9 @@ pub struct HitRegion {
 
 impl HitRegion {
     fn valid(&self) -> bool {
-        [self.x, self.y, self.width, self.height].iter().all(|value| value.is_finite() && value.abs() <= 10_000.0)
+        [self.x, self.y, self.width, self.height]
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 10_000.0)
             && self.width >= 0.0
             && self.height >= 0.0
     }
@@ -296,27 +314,40 @@ fn overlap(bounds: LogicalBounds, area: WorkArea) -> f64 {
 
 /// 打开时放在哪：上次的位置还有三分之一以上落在某块屏幕的工作区内就沿用（拔掉显示器后
 /// 不会跑到屏幕外），否则放在主屏幕底部居中
-fn placement(saved: Option<LogicalBounds>, areas: &[WorkArea], primary: Option<WorkArea>) -> LogicalBounds {
+fn placement(
+    saved: Option<LogicalBounds>,
+    areas: &[WorkArea],
+    primary: Option<WorkArea>,
+) -> LogicalBounds {
     if let Some(saved) = saved.filter(|bounds| {
-        [bounds.x, bounds.y, bounds.width, bounds.height].iter().all(|value| value.is_finite())
+        [bounds.x, bounds.y, bounds.width, bounds.height]
+            .iter()
+            .all(|value| value.is_finite())
     }) {
         let saved = clamp_size(saved);
-        let visible = areas.iter().map(|area| overlap(saved, *area)).fold(0.0, f64::max);
+        let visible = areas
+            .iter()
+            .map(|area| overlap(saved, *area))
+            .fold(0.0, f64::max);
         if visible >= saved.width * saved.height / 3.0 {
             return saved;
         }
     }
-    let area = primary.or_else(|| areas.first().copied()).unwrap_or(WorkArea {
-        x: 0.0,
-        y: 0.0,
-        width: 1280.0,
-        height: 720.0,
-    });
+    let area = primary
+        .or_else(|| areas.first().copied())
+        .unwrap_or(WorkArea {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 720.0,
+        });
     let width = DEFAULT_WIDTH.min(area.width * 0.8).max(MIN_WIDTH);
     let height = DEFAULT_HEIGHT;
     LogicalBounds {
         x: (area.x + (area.width - width) / 2.0).round(),
-        y: (area.y + area.height - height - DEFAULT_BOTTOM_MARGIN).max(area.y).round(),
+        y: (area.y + area.height - height - DEFAULT_BOTTOM_MARGIN)
+            .max(area.y)
+            .round(),
         width,
         height,
     }
@@ -354,7 +385,9 @@ fn report_bounds_when_settled(app: &AppHandle) {
         if bounds_generation().load(Ordering::Acquire) != generation {
             return;
         }
-        let Some(window) = app.get_webview_window(WINDOW_LABEL) else { return };
+        let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+            return;
+        };
         if window.is_minimized().unwrap_or(false) {
             return;
         }
@@ -369,7 +402,13 @@ fn create_lyrics_window_with_recovery<T>(
     recover_disconnect: bool,
 ) -> AppResult<T> {
     match create(false) {
-        Err(error) if recover_disconnect && error.to_string().to_ascii_lowercase().contains("0x80010108") => {
+        Err(error)
+            if recover_disconnect
+                && error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("0x80010108") =>
+        {
             // 同目录的新环境仍会连接原浏览器进程，断连时改用固定的专用目录恢复一次
             log::warn!(target: "desktop-lyrics", "WebView2 disconnected; retrying with isolated browser data: {error}");
             let window = create(true)?;
@@ -401,13 +440,18 @@ fn build_lyrics_window(app: &AppHandle, place: LogicalBounds) -> AppResult<Webvi
             .focused(false)
             .visible(false);
             let builder = if isolated {
-                let directory = app.path().app_local_data_dir()
+                let directory = app
+                    .path()
+                    .app_local_data_dir()
                     .map_err(|error| AppError::Other(error.to_string()))?;
                 builder.data_directory(directory.join("desktop-lyrics-webview2"))
             } else {
                 builder
             };
-            builder.main_browser_args(app).build().map_err(|error| AppError::Other(error.to_string()))
+            builder
+                .main_browser_args(app)
+                .build()
+                .map_err(|error| AppError::Other(error.to_string()))
         },
         cfg!(windows),
     )
@@ -436,7 +480,11 @@ pub async fn open_desktop_lyrics(
         .available_monitors()
         .map(|monitors| monitors.iter().map(work_area).collect::<Vec<_>>())
         .unwrap_or_default();
-    let primary = app.primary_monitor().ok().flatten().map(|monitor| work_area(&monitor));
+    let primary = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| work_area(&monitor));
     let place = placement(bounds, &areas, primary);
     let instance = uuid::Uuid::new_v4().to_string();
     {
@@ -557,11 +605,17 @@ pub async fn set_desktop_lyrics_lock(
         state.lock.generation += 1;
         state.lock.generation
     };
-    let Some(lyrics) = app.get_webview_window(WINDOW_LABEL) else { return Ok(()) };
+    let Some(lyrics) = app.get_webview_window(WINDOW_LABEL) else {
+        return Ok(());
+    };
     lyrics
         .set_ignore_cursor_events(locked)
         .map_err(|error| AppError::Other(error.to_string()))?;
-    let _ = app.emit_to(WINDOW_LABEL, LOCK_EVENT, serde_json::json!({"locked":locked}));
+    let _ = app.emit_to(
+        WINDOW_LABEL,
+        LOCK_EVENT,
+        serde_json::json!({"locked":locked}),
+    );
     log::info!(target: "desktop-lyrics", "lock={locked}");
     if locked {
         tauri::async_runtime::spawn(poll_locked_cursor(app, generation));
@@ -582,7 +636,9 @@ async fn poll_locked_cursor(app: AppHandle, generation: u64) {
             }
             state.lock.hit_region
         };
-        let Some(window) = app.get_webview_window(WINDOW_LABEL) else { break };
+        let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+            break;
+        };
         // WebView 从客户区原点开始布局，命中计算必须用 inner 坐标
         let (Ok(cursor), Ok(origin), Ok(size), Ok(scale)) = (
             app.cursor_position(),
@@ -594,13 +650,19 @@ async fn poll_locked_cursor(app: AppHandle, generation: u64) {
         };
         let x = cursor.x - f64::from(origin.x);
         let y = cursor.y - f64::from(origin.y);
-        let now_inside = x >= 0.0 && y >= 0.0 && x < f64::from(size.width) && y < f64::from(size.height);
+        let now_inside =
+            x >= 0.0 && y >= 0.0 && x < f64::from(size.width) && y < f64::from(size.height);
         if now_inside != inside {
             inside = now_inside;
-            let _ = app.emit_to(WINDOW_LABEL, HOVER_EVENT, serde_json::json!({"inside":inside}));
+            let _ = app.emit_to(
+                WINDOW_LABEL,
+                HOVER_EVENT,
+                serde_json::json!({"inside":inside}),
+            );
         }
         let scale = scale.max(0.1);
-        let on_button = now_inside && region.is_some_and(|region| region.contains(x / scale, y / scale));
+        let on_button =
+            now_inside && region.is_some_and(|region| region.contains(x / scale, y / scale));
         if on_button == passthrough {
             passthrough = !on_button;
             let _ = window.set_ignore_cursor_events(passthrough);
@@ -617,10 +679,16 @@ async fn poll_locked_cursor(app: AppHandle, generation: u64) {
 
 #[cfg(windows)]
 fn primary_button_pressed() -> bool {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
     // GetAsyncKeyState 读的是物理按键：左右键互换时主键是物理右键
-    let key = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    let key = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+        VK_RBUTTON
+    } else {
+        VK_LBUTTON
+    };
     let state = unsafe { GetAsyncKeyState(i32::from(key)) };
     state < 0
 }
@@ -632,7 +700,10 @@ fn primary_button_pressed() -> bool {
 
 /// 歌词窗口报告锁定时可点的解锁按钮位置
 #[tauri::command]
-pub fn desktop_lyrics_hit_region(window: WebviewWindow, region: Option<HitRegion>) -> AppResult<()> {
+pub fn desktop_lyrics_hit_region(
+    window: WebviewWindow,
+    region: Option<HitRegion>,
+) -> AppResult<()> {
     require_lyrics(window.label())?;
     if region.is_some_and(|region| !region.valid()) {
         return Err(AppError::Other("Invalid desktop lyrics hit region".into()));
@@ -643,7 +714,11 @@ pub fn desktop_lyrics_hit_region(window: WebviewWindow, region: Option<HitRegion
 
 /// 歌词窗口工具栏的操作转给主窗口执行；歌词窗口自己不碰播放状态
 #[tauri::command]
-pub fn desktop_lyrics_action(app: AppHandle, window: WebviewWindow, action: String) -> AppResult<()> {
+pub fn desktop_lyrics_action(
+    app: AppHandle,
+    window: WebviewWindow,
+    action: String,
+) -> AppResult<()> {
     require_lyrics(window.label())?;
     if !ACTIONS.contains(&action.as_str()) {
         return Err(AppError::Other("Unknown desktop lyrics action".into()));
@@ -726,7 +801,10 @@ mod tests {
             },
             true,
         );
-        assert_eq!(result.unwrap_err().to_string(), "isolated browser creation failed");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "isolated browser creation failed"
+        );
         assert_eq!(attempts, [false, true]);
     }
 
@@ -764,7 +842,10 @@ mod tests {
 
     #[test]
     fn closing_the_window_stops_the_lock_poll() {
-        let mut state = DesktopLyricsState { window_instance: "native".into(), ..Default::default() };
+        let mut state = DesktopLyricsState {
+            window_instance: "native".into(),
+            ..Default::default()
+        };
         state.lock.locked = true;
         state.lock.generation = 4;
         state.retire("native");
@@ -780,18 +861,49 @@ mod tests {
     }
 
     fn frame_with_line(line: DesktopLyricsLine) -> DesktopLyricsFrame {
-        DesktopLyricsFrame { rate: 1.0, lines: vec![line], ..Default::default() }
+        DesktopLyricsFrame {
+            rate: 1.0,
+            lines: vec![line],
+            ..Default::default()
+        }
     }
 
     #[test]
     fn frame_is_bounded_by_utf8_bytes_counts_and_serialized_size() {
-        let line = DesktopLyricsLine { text: "词".repeat(341), ..Default::default() };
+        let line = DesktopLyricsLine {
+            text: "词".repeat(341),
+            ..Default::default()
+        };
         assert!(frame_with_line(line.clone()).validate().is_ok());
-        assert!(frame_with_line(DesktopLyricsLine { text: "词".repeat(342), ..line.clone() }).validate().is_err());
-        let words = vec![DesktopLyricsWord { text: "字".into(), ..Default::default() }; MAX_LINE_WORDS + 1];
-        assert!(frame_with_line(DesktopLyricsLine { words, ..Default::default() }).validate().is_err());
-        let long_word = vec![DesktopLyricsWord { text: "x".repeat(MAX_WORD_BYTES + 1), ..Default::default() }];
-        assert!(frame_with_line(DesktopLyricsLine { words: long_word, ..Default::default() }).validate().is_err());
+        assert!(frame_with_line(DesktopLyricsLine {
+            text: "词".repeat(342),
+            ..line.clone()
+        })
+        .validate()
+        .is_err());
+        let words = vec![
+            DesktopLyricsWord {
+                text: "字".into(),
+                ..Default::default()
+            };
+            MAX_LINE_WORDS + 1
+        ];
+        assert!(frame_with_line(DesktopLyricsLine {
+            words,
+            ..Default::default()
+        })
+        .validate()
+        .is_err());
+        let long_word = vec![DesktopLyricsWord {
+            text: "x".repeat(MAX_WORD_BYTES + 1),
+            ..Default::default()
+        }];
+        assert!(frame_with_line(DesktopLyricsLine {
+            words: long_word,
+            ..Default::default()
+        })
+        .validate()
+        .is_err());
         let mut too_many = frame_with_line(DesktopLyricsLine::default());
         too_many.lines = vec![DesktopLyricsLine::default(); MAX_FRAME_LINES + 1];
         assert!(too_many.validate().is_err());
@@ -799,7 +911,10 @@ mod tests {
 
     #[test]
     fn frame_rejects_bad_times_rates_accents_and_styles() {
-        let negative = DesktopLyricsLine { start_ms: -1.0, ..Default::default() };
+        let negative = DesktopLyricsLine {
+            start_ms: -1.0,
+            ..Default::default()
+        };
         assert!(frame_with_line(negative).validate().is_err());
         let mut frame = frame_with_line(DesktopLyricsLine::default());
         frame.rate = 0.0;
@@ -839,7 +954,8 @@ mod tests {
 
     #[test]
     fn frame_preserves_a_frozen_clock_without_pausing_playback() {
-        let mut value = serde_json::to_value(frame_with_line(DesktopLyricsLine::default())).unwrap();
+        let mut value =
+            serde_json::to_value(frame_with_line(DesktopLyricsLine::default())).unwrap();
         value["isPlaying"] = serde_json::json!(true);
         value["clockRunning"] = serde_json::json!(false);
         let frame: DesktopLyricsFrame = serde_json::from_value(value.clone()).unwrap();
@@ -891,40 +1007,116 @@ mod tests {
         assert!(!ACTIONS.contains(&"set-volume"));
     }
 
-    const SCREEN: WorkArea = WorkArea { x: 0.0, y: 0.0, width: 1920.0, height: 1032.0 };
-    const RIGHT_SCREEN: WorkArea = WorkArea { x: 1920.0, y: 0.0, width: 1280.0, height: 984.0 };
+    const SCREEN: WorkArea = WorkArea {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1032.0,
+    };
+    const RIGHT_SCREEN: WorkArea = WorkArea {
+        x: 1920.0,
+        y: 0.0,
+        width: 1280.0,
+        height: 984.0,
+    };
 
     #[test]
     fn a_saved_position_on_a_connected_screen_is_kept() {
-        let saved = LogicalBounds { x: 2100.0, y: 700.0, width: 900.0, height: 200.0 };
-        assert_eq!(placement(Some(saved), &[SCREEN, RIGHT_SCREEN], Some(SCREEN)), saved);
-        let tiny = LogicalBounds { x: 100.0, y: 100.0, width: 50.0, height: 20.0 };
+        let saved = LogicalBounds {
+            x: 2100.0,
+            y: 700.0,
+            width: 900.0,
+            height: 200.0,
+        };
+        assert_eq!(
+            placement(Some(saved), &[SCREEN, RIGHT_SCREEN], Some(SCREEN)),
+            saved
+        );
+        let tiny = LogicalBounds {
+            x: 100.0,
+            y: 100.0,
+            width: 50.0,
+            height: 20.0,
+        };
         assert_eq!(
             placement(Some(tiny), &[SCREEN], Some(SCREEN)),
-            LogicalBounds { x: 100.0, y: 100.0, width: MIN_WIDTH, height: MIN_HEIGHT },
+            LogicalBounds {
+                x: 100.0,
+                y: 100.0,
+                width: MIN_WIDTH,
+                height: MIN_HEIGHT
+            },
             "过小的尺寸放大到下限",
         );
     }
 
     #[test]
     fn an_off_screen_position_falls_back_to_the_bottom_center_of_the_primary_screen() {
-        let unplugged = LogicalBounds { x: 2100.0, y: 700.0, width: 900.0, height: 200.0 };
+        let unplugged = LogicalBounds {
+            x: 2100.0,
+            y: 700.0,
+            width: 900.0,
+            height: 200.0,
+        };
         let placed = placement(Some(unplugged), &[SCREEN], Some(SCREEN));
-        assert_eq!(placed, LogicalBounds { x: 530.0, y: 780.0, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
-        let mostly_off = LogicalBounds { x: 1700.0, y: 900.0, width: 900.0, height: 200.0 };
-        assert_eq!(placement(Some(mostly_off), &[SCREEN], Some(SCREEN)).x, 530.0, "只露出一小角的也重新摆放");
-        assert_eq!(placement(None, &[SCREEN], Some(SCREEN)), placed, "第一次打开放在主屏幕底部居中");
-        let narrow = WorkArea { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
-        assert_eq!(placement(None, &[narrow], None).width, 640.0, "窄屏幕上按八成宽度");
+        assert_eq!(
+            placed,
+            LogicalBounds {
+                x: 530.0,
+                y: 780.0,
+                width: DEFAULT_WIDTH,
+                height: DEFAULT_HEIGHT
+            }
+        );
+        let mostly_off = LogicalBounds {
+            x: 1700.0,
+            y: 900.0,
+            width: 900.0,
+            height: 200.0,
+        };
+        assert_eq!(
+            placement(Some(mostly_off), &[SCREEN], Some(SCREEN)).x,
+            530.0,
+            "只露出一小角的也重新摆放"
+        );
+        assert_eq!(
+            placement(None, &[SCREEN], Some(SCREEN)),
+            placed,
+            "第一次打开放在主屏幕底部居中"
+        );
+        let narrow = WorkArea {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        assert_eq!(
+            placement(None, &[narrow], None).width,
+            640.0,
+            "窄屏幕上按八成宽度"
+        );
     }
 
     #[test]
     fn hit_regions_are_validated_and_hit_tested_in_css_pixels() {
-        let region = HitRegion { x: 10.0, y: 8.0, width: 32.0, height: 32.0 };
+        let region = HitRegion {
+            x: 10.0,
+            y: 8.0,
+            width: 32.0,
+            height: 32.0,
+        };
         assert!(region.valid());
         assert!(region.contains(20.0, 20.0));
         assert!(!region.contains(50.0, 20.0));
-        assert!(!HitRegion { x: f64::NAN, ..region }.valid());
-        assert!(!HitRegion { width: -1.0, ..region }.valid());
+        assert!(!HitRegion {
+            x: f64::NAN,
+            ..region
+        }
+        .valid());
+        assert!(!HitRegion {
+            width: -1.0,
+            ..region
+        }
+        .valid());
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "neri-model"
+description = "曲目与云同步数据模型（ProtoBuf 字段号与 Android 对齐）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+urlencoding.workspace = true

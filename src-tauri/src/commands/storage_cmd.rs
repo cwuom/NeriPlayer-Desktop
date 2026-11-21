@@ -1,4 +1,4 @@
-use crate::error::AppResult;
+use neri_common::error::AppResult;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -92,7 +92,9 @@ fn webview_data_paths(app_cache_dir: Option<&Path>) -> Vec<PathBuf> {
 fn is_download_staging_file(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "part" | "reserve"))
+        .is_some_and(|extension| {
+            matches!(extension.to_ascii_lowercase().as_str(), "part" | "reserve")
+        })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,15 +116,8 @@ pub async fn get_storage_usage(
     let download_roots = download_roots(default_download_dir.as_deref(), download_dir.as_deref());
 
     let playback_cache = app_cache_dir.as_ref().map(|dir| dir.join("playback-audio"));
-    let image_cache = child_paths(
-        app_data_dir.as_deref(),
-        &["covers", "thumbnails"],
-    );
-    let image_cache = append_child_path(
-        image_cache,
-        app_cache_dir.as_deref(),
-        "image_cache",
-    );
+    let image_cache = child_paths(app_data_dir.as_deref(), &["covers", "thumbnails"]);
+    let image_cache = append_child_path(image_cache, app_cache_dir.as_deref(), "image_cache");
     let download_staging = child_paths(app_data_dir.as_deref(), &["temp"]);
     let download_staging = append_child_path(
         download_staging,
@@ -154,28 +149,38 @@ pub async fn get_storage_usage(
     }
 
     // 数据库内的缓存与下载索引按估算字节归属到各自条目，剩余部分才计入用户数据库
-    let user_database = crate::db::database_files(
-        &crate::db::user_data_dir().join(crate::db::DATABASE_FILE),
+    let user_database = neri_library::db::database_files(
+        &neri_library::db::user_data_dir().join(neri_library::db::DATABASE_FILE),
     );
-    let database_stats = user_database.iter().fold(FileStats::default(), |mut total, path| {
-        total += stats_for_path(path, &[]);
-        total
-    });
+    let database_stats = user_database
+        .iter()
+        .fold(FileStats::default(), |mut total, path| {
+            total += stats_for_path(path, &[]);
+            total
+        });
     let mut unattributed = database_stats.size_bytes;
     let mut attribute = |(bytes, records): (u64, u64)| {
         let bytes = bytes.min(unattributed);
         unattributed -= bytes;
         (bytes, records)
     };
-    let (detail_bytes, detail_records) =
-        attribute(database_usage(|connection| crate::db::cache::usage(connection, crate::db::cache::PLATFORM_DETAIL_BUCKET)));
-    let (lyrics_bytes, lyrics_records) =
-        attribute(database_usage(|connection| crate::db::cache::usage(connection, crate::db::cache::LYRICS_BUCKET)));
-    let (index_bytes, index_records) = attribute(database_usage(super::download_cmd::catalog::usage));
+    let (detail_bytes, detail_records) = attribute(database_usage(|connection| {
+        neri_library::db::cache::usage(connection, neri_library::db::cache::PLATFORM_DETAIL_BUCKET)
+    }));
+    let (lyrics_bytes, lyrics_records) = attribute(database_usage(|connection| {
+        neri_library::db::cache::usage(connection, neri_library::db::cache::LYRICS_BUCKET)
+    }));
+    let (index_bytes, index_records) =
+        attribute(database_usage(super::download_cmd::catalog::usage));
 
     let downloads = scan_download_roots(&download_roots);
-    let platform_list_files = aggregate_item("platform_list_cache", &platform_list, Some("platform_list"));
-    let staging_files = aggregate_item("download_staging", &download_staging, Some("download_staging"));
+    let platform_list_files =
+        aggregate_item("platform_list_cache", &platform_list, Some("platform_list"));
+    let staging_files = aggregate_item(
+        "download_staging",
+        &download_staging,
+        Some("download_staging"),
+    );
     let other_cache = other_cache_item(app_cache_dir.as_deref(), &classified_cache_paths);
     let mut sections = vec![StorageUsageSection {
         id: "cleanable_cache".into(),
@@ -183,8 +188,12 @@ pub async fn get_storage_usage(
             usage_item("audio_cache", playback_cache.as_deref(), Some("audio")),
             aggregate_item("image_cache", &image_cache, Some("image")),
             StorageUsageItem {
-                size_bytes: staging_files.size_bytes.saturating_add(downloads.staging.size_bytes),
-                file_count: staging_files.file_count.saturating_add(downloads.staging.file_count),
+                size_bytes: staging_files
+                    .size_bytes
+                    .saturating_add(downloads.staging.size_bytes),
+                file_count: staging_files
+                    .file_count
+                    .saturating_add(downloads.staging.file_count),
                 ..staging_files
             },
             aggregate_item("shared_media", &shared_media, Some("shared_media")),
@@ -218,11 +227,7 @@ pub async fn get_storage_usage(
         id: "diagnostics".into(),
         items: vec![
             aggregate_item("logs", &diagnostics[..2.min(diagnostics.len())], None),
-            aggregate_item(
-                "crash_logs",
-                &diagnostics[2.min(diagnostics.len())..],
-                None,
-            ),
+            aggregate_item("crash_logs", &diagnostics[2.min(diagnostics.len())..], None),
         ],
     });
 
@@ -344,8 +349,12 @@ pub async fn clear_storage_cache(
         // 删不掉的条目（被占用、无权限）跳过继续，按实际释放的字节统计
         let failed = clear_directory_contents(&target);
         let after = stats_for_path(&target, &[]);
-        result.cleared_bytes = result.cleared_bytes.saturating_add(before.size_bytes.saturating_sub(after.size_bytes));
-        result.deleted_files = result.deleted_files.saturating_add(before.file_count.saturating_sub(after.file_count));
+        result.cleared_bytes = result
+            .cleared_bytes
+            .saturating_add(before.size_bytes.saturating_sub(after.size_bytes));
+        result.deleted_files = result
+            .deleted_files
+            .saturating_add(before.file_count.saturating_sub(after.file_count));
         result.failed_count = result.failed_count.saturating_add(failed);
     }
 
@@ -358,14 +367,15 @@ pub async fn clear_storage_cache(
 
     let mut buckets = Vec::new();
     if options.platform_list {
-        buckets.push(crate::db::cache::PLATFORM_DETAIL_BUCKET);
+        buckets.push(neri_library::db::cache::PLATFORM_DETAIL_BUCKET);
     }
     if options.lyrics_cache {
-        buckets.push(crate::db::cache::LYRICS_BUCKET);
+        buckets.push(neri_library::db::cache::LYRICS_BUCKET);
     }
     for bucket in buckets {
-        let cleared = crate::db::user_db()
-            .and_then(|database| database.write(|transaction| crate::db::cache::clear(transaction, bucket)));
+        let cleared = neri_library::db::user_db().and_then(|database| {
+            database.write(|transaction| neri_library::db::cache::clear(transaction, bucket))
+        });
         match cleared {
             Ok((bytes, records)) => {
                 result.cleared_bytes = result.cleared_bytes.saturating_add(bytes);
@@ -402,7 +412,9 @@ fn remove_download_staging_files(path: &Path, result: &mut StorageClearResult) {
 }
 
 fn usage_item(id: &str, path: Option<&Path>, cache_kind: Option<&str>) -> StorageUsageItem {
-    let stats = path.map(|value| stats_for_path(value, &[])).unwrap_or_default();
+    let stats = path
+        .map(|value| stats_for_path(value, &[]))
+        .unwrap_or_default();
     stats_item(
         id,
         stats,
@@ -445,7 +457,15 @@ fn stats_item(
 fn database_item(id: &str, size_bytes: u64, record_count: u64) -> StorageUsageItem {
     StorageUsageItem {
         record_count: Some(record_count),
-        ..stats_item(id, FileStats { size_bytes, file_count: 0 }, None, None)
+        ..stats_item(
+            id,
+            FileStats {
+                size_bytes,
+                file_count: 0,
+            },
+            None,
+            None,
+        )
     }
 }
 
@@ -453,7 +473,7 @@ fn database_item(id: &str, size_bytes: u64, record_count: u64) -> StorageUsageIt
 fn database_usage(
     measure: impl FnOnce(&rusqlite::Connection) -> AppResult<(u64, u64)>,
 ) -> (u64, u64) {
-    crate::db::user_db()
+    neri_library::db::user_db()
         .and_then(|database| database.read(measure))
         .unwrap_or_else(|error| {
             log::warn!(target: "storage", "数据库占用统计失败: {error}");
@@ -527,7 +547,8 @@ fn is_excluded(path: &Path, excluded: &[PathBuf]) -> bool {
     let path_key = canonical_key(path);
     excluded.iter().any(|root| {
         let root_key = canonical_key(root);
-        path_key == root_key || path_key.starts_with(&format!("{}{}", root_key, std::path::MAIN_SEPARATOR))
+        path_key == root_key
+            || path_key.starts_with(&format!("{}{}", root_key, std::path::MAIN_SEPARATOR))
     })
 }
 
@@ -572,7 +593,10 @@ fn download_roots(default_root: Option<&Path>, custom_root: Option<&str>) -> Vec
     }
     if let Some(custom) = custom_root.map(str::trim).filter(|value| !value.is_empty()) {
         let path = PathBuf::from(custom);
-        if !roots.iter().any(|root| canonical_key(root) == canonical_key(&path)) {
+        if !roots
+            .iter()
+            .any(|root| canonical_key(root) == canonical_key(&path))
+        {
             roots.push(path);
         }
     }
@@ -603,7 +627,10 @@ fn scan_download_path(path: &Path, stats: &mut DownloadStats) {
             size_bytes: fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
             file_count: 1,
         };
-        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
         if is_download_staging_file(path) {
             stats.staging += file_stats;
         } else if matches!(extension.to_ascii_lowercase().as_str(), "lrc" | "tlrc") {
@@ -662,7 +689,11 @@ mod tests {
         #[cfg(windows)]
         let guard = {
             use std::os::windows::fs::OpenOptionsExt;
-            fs::OpenOptions::new().read(true).share_mode(0).open(locked.join("held.audio")).unwrap()
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(locked.join("held.audio"))
+                .unwrap()
         };
         #[cfg(unix)]
         {
@@ -688,9 +719,18 @@ mod tests {
     fn webview_profile_and_debug_stores_are_not_cache() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("EBWebView/Default/Local Storage")).unwrap();
-        fs::write(root.path().join("EBWebView/Default/Local Storage/leveldb.ldb"), vec![0; 4096]).unwrap();
+        fs::write(
+            root.path()
+                .join("EBWebView/Default/Local Storage/leveldb.ldb"),
+            vec![0; 4096],
+        )
+        .unwrap();
         fs::create_dir_all(root.path().join("debug-credentials")).unwrap();
-        fs::write(root.path().join("debug-credentials/store.bin"), vec![0; 512]).unwrap();
+        fs::write(
+            root.path().join("debug-credentials/store.bin"),
+            vec![0; 512],
+        )
+        .unwrap();
         fs::create_dir_all(root.path().join("playback-audio/ab")).unwrap();
         fs::write(root.path().join("playback-audio/ab/x.audio"), vec![0; 100]).unwrap();
         fs::write(root.path().join("stray.tmp"), vec![0; 10]).unwrap();
@@ -700,7 +740,10 @@ mod tests {
         excluded.push(root.path().join("playback-audio"));
         let other = other_cache_item(Some(root.path()), &excluded);
         assert_eq!(other.size_bytes, 10, "only the stray file is other cache");
-        assert_eq!(aggregate_item("webview_data", &webview, None).size_bytes, 4096 + 512);
+        assert_eq!(
+            aggregate_item("webview_data", &webview, None).size_bytes,
+            4096 + 512
+        );
     }
 
     #[test]
@@ -716,7 +759,11 @@ mod tests {
         assert_eq!(stats.staging.size_bytes, 250);
         assert_eq!(stats.staging.file_count, 2);
 
-        let mut result = StorageClearResult { cleared_bytes: 0, deleted_files: 0, failed_count: 0 };
+        let mut result = StorageClearResult {
+            cleared_bytes: 0,
+            deleted_files: 0,
+            failed_count: 0,
+        };
         remove_download_staging_files(root.path(), &mut result);
         assert_eq!(result.cleared_bytes, 250);
         assert!(root.path().join("song.flac").exists());

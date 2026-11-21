@@ -21,8 +21,8 @@ use tauri::{
     WebviewWindowBuilder, WindowEvent, Wry,
 };
 
-use crate::error::{AppError, AppResult};
 use crate::webview_args::MainBrowserArgs;
+use neri_common::error::{AppError, AppResult};
 
 pub const POPUP_LABEL: &str = "tray-popup";
 const TRAY_ID: &str = "main-tray";
@@ -155,7 +155,10 @@ struct PopupMetrics {
 
 impl Default for PopupMetrics {
     fn default() -> Self {
-        Self { text_scale: 1.0, content_height: POPUP_HEIGHT }
+        Self {
+            text_scale: 1.0,
+            content_height: POPUP_HEIGHT,
+        }
     }
 }
 
@@ -163,27 +166,36 @@ impl PopupMetrics {
     /// physical_width、monitor_scale 取测量时面板窗口自身的值
     fn measured(layout: TrayPopupLayout, physical_width: f64, monitor_scale: f64) -> Self {
         let fallback = Self::default();
-        let text_scale = if layout.css_width.is_finite() && layout.css_width > 0.0 && monitor_scale > 0.0 {
-            physical_width / layout.css_width / monitor_scale
-        } else {
-            fallback.text_scale
-        };
+        let text_scale =
+            if layout.css_width.is_finite() && layout.css_width > 0.0 && monitor_scale > 0.0 {
+                physical_width / layout.css_width / monitor_scale
+            } else {
+                fallback.text_scale
+            };
         let text_scale = if text_scale.is_finite() {
             text_scale.clamp(POPUP_TEXT_SCALE_RANGE.0, POPUP_TEXT_SCALE_RANGE.1)
         } else {
             fallback.text_scale
         };
         let content_height = if layout.content_height.is_finite() {
-            layout.content_height.clamp(POPUP_CONTENT_HEIGHT_RANGE.0, POPUP_CONTENT_HEIGHT_RANGE.1)
+            layout
+                .content_height
+                .clamp(POPUP_CONTENT_HEIGHT_RANGE.0, POPUP_CONTENT_HEIGHT_RANGE.1)
         } else {
             fallback.content_height
         };
-        Self { text_scale, content_height }
+        Self {
+            text_scale,
+            content_height,
+        }
     }
 
     fn physical_size(self, monitor_scale: f64) -> (i32, i32) {
         let zoom = monitor_scale.max(0.1) * self.text_scale;
-        ((POPUP_WIDTH * zoom).round() as i32, (self.content_height * zoom).round() as i32)
+        (
+            (POPUP_WIDTH * zoom).round() as i32,
+            (self.content_height * zoom).round() as i32,
+        )
     }
 }
 
@@ -315,7 +327,9 @@ fn sanitize(snapshot: &mut TraySnapshot) {
         }
     }
     if snapshot.show_menu_bar_lyrics && snapshot.track.is_some() {
-        let text: String = snapshot.menu_bar_lyric.chars()
+        let text: String = snapshot
+            .menu_bar_lyric
+            .chars()
             .filter(|character| !character.is_control() || character.is_whitespace())
             .collect();
         snapshot.menu_bar_lyric = truncate_chars(
@@ -369,7 +383,9 @@ fn set_page_visible(window: &WebviewWindow, visible: bool) {
 }
 
 pub fn show_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else { return };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
     if MAIN_HIDDEN.swap(false, Ordering::AcqRel) {
         set_page_visible(&window, true);
     }
@@ -380,7 +396,9 @@ pub fn show_main_window(app: &AppHandle) {
 
 /// 关闭主窗口 = 收进托盘，播放继续
 pub fn hide_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else { return };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
     if !window.is_visible().unwrap_or(false) {
         return;
     }
@@ -485,7 +503,12 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
 
 fn handle_icon_event(app: &AppHandle, event: TrayIconEvent) {
     // 光标移到图标上就预建面板：WebView 创建、页面加载要几百毫秒，等到右键再建会明显迟滞
-    if USE_POPUP && matches!(event, TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. }) {
+    if USE_POPUP
+        && matches!(
+            event,
+            TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. }
+        )
+    {
         ensure_popup(app);
         return;
     }
@@ -560,7 +583,9 @@ fn hide_popup(app: &AppHandle) {
         // 页面未就绪时也取消待弹出的请求，避免恢复主窗口后面板才弹出
         runtime.popup_anchor = None;
     }
-    let Some(window) = app.get_webview_window(POPUP_LABEL) else { return };
+    let Some(window) = app.get_webview_window(POPUP_LABEL) else {
+        return;
+    };
     if window.is_visible().unwrap_or(false) {
         let _ = window.hide();
         if let Some(runtime) = TRAY.lock().as_mut() {
@@ -573,7 +598,9 @@ fn toggle_popup(app: &AppHandle, anchor: PhysicalPosition<f64>) {
     let window = app.get_webview_window(POPUP_LABEL);
     let (ready, just_hidden) = {
         let mut guard = TRAY.lock();
-        let Some(runtime) = guard.as_mut() else { return };
+        let Some(runtime) = guard.as_mut() else {
+            return;
+        };
         if window.is_none() || !runtime.popup_ready {
             // 页面就绪后在最后一次右键的位置弹出
             runtime.popup_anchor = Some(anchor);
@@ -632,7 +659,9 @@ fn show_popup(app: &AppHandle, window: &WebviewWindow, anchor: PhysicalPosition<
 fn disable_window_transitions(window: &WebviewWindow) {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+        use windows_sys::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+        };
         let Ok(hwnd) = window.hwnd() else { return };
         let disabled: i32 = 1;
         // SAFETY: hwnd 属于刚建好的窗口，属性值指向栈上的 BOOL，长度与之一致
@@ -656,7 +685,9 @@ fn disable_window_transitions(window: &WebviewWindow) {
 fn ensure_popup(app: &AppHandle) {
     {
         let mut guard = TRAY.lock();
-        let Some(runtime) = guard.as_mut() else { return };
+        let Some(runtime) = guard.as_mut() else {
+            return;
+        };
         if runtime.popup_creating || runtime.popup_ready {
             return;
         }
@@ -723,7 +754,9 @@ fn ensure_popup(app: &AppHandle) {
 fn push_state(app: &AppHandle, force: bool) {
     let state = {
         let mut guard = TRAY.lock();
-        let Some(runtime) = guard.as_mut() else { return };
+        let Some(runtime) = guard.as_mut() else {
+            return;
+        };
         let state = runtime.popup_state();
         if !force && runtime.sent_state.as_ref() == Some(&state) {
             return;
@@ -741,7 +774,9 @@ fn refresh(app: &AppHandle) {
     push_state(app, false);
     let (menu, labels, tooltip) = {
         let mut guard = TRAY.lock();
-        let Some(runtime) = guard.as_mut() else { return };
+        let Some(runtime) = guard.as_mut() else {
+            return;
+        };
         let labels = runtime.menu.as_ref().map(|_| runtime.menu_labels());
         let labels = labels.filter(|labels| runtime.sent_labels.as_ref() != Some(labels));
         if let Some(labels) = labels.as_ref() {
@@ -766,7 +801,9 @@ fn refresh(app: &AppHandle) {
         #[cfg(target_os = "macos")]
         {
             let _ = menu.menu_bar_lyrics.set_text(&labels.menu_bar_lyrics);
-            let _ = menu.menu_bar_lyrics.set_checked(labels.show_menu_bar_lyrics);
+            let _ = menu
+                .menu_bar_lyrics
+                .set_checked(labels.show_menu_bar_lyrics);
         }
         let _ = menu.quit.set_text(&labels.quit);
     }
@@ -777,7 +814,10 @@ fn refresh(app: &AppHandle) {
     }
     #[cfg(target_os = "macos")]
     {
-        let title = TRAY.lock().as_mut().and_then(TrayRuntime::take_menu_bar_title_update);
+        let title = TRAY
+            .lock()
+            .as_mut()
+            .and_then(TrayRuntime::take_menu_bar_title_update);
         if let Some(title) = title {
             if let Some(tray) = app.tray_by_id(TRAY_ID) {
                 let next = (!title.is_empty()).then_some(title.as_str());
@@ -798,7 +838,9 @@ fn refresh(app: &AppHandle) {
 pub fn sync_playing(app: &AppHandle, is_playing: bool) {
     {
         let mut guard = TRAY.lock();
-        let Some(runtime) = guard.as_mut() else { return };
+        let Some(runtime) = guard.as_mut() else {
+            return;
+        };
         if runtime.is_playing == is_playing {
             return;
         }
@@ -828,7 +870,9 @@ pub fn publish_tray_snapshot(
     sanitize(&mut snapshot);
     {
         let mut guard = TRAY.lock();
-        let Some(runtime) = guard.as_mut() else { return Ok(()) };
+        let Some(runtime) = guard.as_mut() else {
+            return Ok(());
+        };
         runtime.snapshot = snapshot;
     }
     refresh(&app);
@@ -856,7 +900,11 @@ pub fn tray_popup_ready(
     let metrics = layout.and_then(|layout| {
         let physical_width = window.inner_size().ok()?.width as f64;
         let monitor_scale = window.scale_factor().ok()?;
-        Some(PopupMetrics::measured(layout, physical_width, monitor_scale))
+        Some(PopupMetrics::measured(
+            layout,
+            physical_width,
+            monitor_scale,
+        ))
     });
     let anchor = TRAY.lock().as_mut().and_then(|runtime| {
         if let Some(metrics) = metrics {
@@ -958,7 +1006,10 @@ mod tests {
     #[test]
     fn menu_bar_lyrics_follow_the_switch_and_clear_without_a_track() {
         let mut runtime = runtime_with(
-            Some(TrayTrack { title: "Song".into(), ..Default::default() }),
+            Some(TrayTrack {
+                title: "Song".into(),
+                ..Default::default()
+            }),
             true,
         );
         runtime.snapshot.menu_bar_lyric = "当前歌词".into();
@@ -969,7 +1020,10 @@ mod tests {
         assert_eq!(runtime.menu_bar_title(), "当前歌词");
         assert!(runtime.menu_labels().show_menu_bar_lyrics);
         assert_eq!(runtime.menu_labels().menu_bar_lyrics, "菜单栏歌词");
-        runtime.snapshot.texts.insert("menu_bar_lyrics".into(), "Menu bar lyrics".into());
+        runtime
+            .snapshot
+            .texts
+            .insert("menu_bar_lyrics".into(), "Menu bar lyrics".into());
         assert_eq!(runtime.menu_labels().menu_bar_lyrics, "Menu bar lyrics");
 
         runtime.snapshot.track = None;
@@ -979,17 +1033,26 @@ mod tests {
     #[test]
     fn menu_bar_title_updates_only_on_text_changes_and_clears_on_disable() {
         let mut runtime = runtime_with(
-            Some(TrayTrack { title: "Song".into(), ..Default::default() }),
+            Some(TrayTrack {
+                title: "Song".into(),
+                ..Default::default()
+            }),
             true,
         );
         runtime.snapshot.show_menu_bar_lyrics = true;
         runtime.snapshot.menu_bar_lyric = "First line".into();
-        assert_eq!(runtime.take_menu_bar_title_update(), Some("First line".into()));
+        assert_eq!(
+            runtime.take_menu_bar_title_update(),
+            Some("First line".into())
+        );
         assert_eq!(runtime.take_menu_bar_title_update(), None);
         runtime.is_playing = false;
         assert_eq!(runtime.take_menu_bar_title_update(), None);
         runtime.snapshot.menu_bar_lyric = "Second line".into();
-        assert_eq!(runtime.take_menu_bar_title_update(), Some("Second line".into()));
+        assert_eq!(
+            runtime.take_menu_bar_title_update(),
+            Some("Second line".into())
+        );
         runtime.snapshot.show_menu_bar_lyrics = false;
         assert_eq!(runtime.take_menu_bar_title_update(), Some(String::new()));
         assert_eq!(runtime.take_menu_bar_title_update(), None);
@@ -1051,7 +1114,10 @@ mod tests {
                 vars: [
                     ("--md-primary".to_string(), "rgb(1, 2, 3)".to_string()),
                     ("color".to_string(), "red".to_string()),
-                    ("--md-on-primary".to_string(), "red; background: url(x)".to_string()),
+                    (
+                        "--md-on-primary".to_string(),
+                        "red; background: url(x)".to_string(),
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -1067,7 +1133,10 @@ mod tests {
     #[test]
     fn popup_grows_with_windows_text_size_so_quit_stays_visible() {
         // 150% 显示器缩放 + 125% 文本大小：300 逻辑宽的窗口里页面只有 240 CSS 宽
-        let layout = TrayPopupLayout { css_width: 240.0, content_height: 316.0 };
+        let layout = TrayPopupLayout {
+            css_width: 240.0,
+            content_height: 316.0,
+        };
         let metrics = PopupMetrics::measured(layout, 450.0, 1.5);
         assert!((metrics.text_scale - 1.25).abs() < 1e-9);
         assert_eq!(metrics.physical_size(1.5), (563, 593));
@@ -1077,9 +1146,18 @@ mod tests {
 
     #[test]
     fn popup_layout_ignores_broken_measurements() {
-        let broken = TrayPopupLayout { css_width: 0.0, content_height: f64::NAN };
-        assert_eq!(PopupMetrics::measured(broken, 300.0, 1.0), PopupMetrics::default());
-        let tiny = TrayPopupLayout { css_width: 600.0, content_height: 10_000.0 };
+        let broken = TrayPopupLayout {
+            css_width: 0.0,
+            content_height: f64::NAN,
+        };
+        assert_eq!(
+            PopupMetrics::measured(broken, 300.0, 1.0),
+            PopupMetrics::default()
+        );
+        let tiny = TrayPopupLayout {
+            css_width: 600.0,
+            content_height: 10_000.0,
+        };
         let metrics = PopupMetrics::measured(tiny, 300.0, 1.0);
         assert_eq!(metrics.text_scale, POPUP_TEXT_SCALE_RANGE.0);
         assert_eq!(metrics.content_height, POPUP_CONTENT_HEIGHT_RANGE.1);

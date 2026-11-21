@@ -1,6 +1,6 @@
-use crate::error::{AppError, AppResult};
-use crate::library::playlist;
 use crate::state::{AppState, TrackInfo, TrackSource};
+use neri_common::error::{AppError, AppResult};
+use neri_library::library::playlist;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn matched_id_precedes_metadata_and_allows_unknown_duration() {
         let mut local = track();
-        local.sync_payload = Some(crate::sync::models::SyncSong {
+        local.sync_payload = Some(neri_model::sync::models::SyncSong {
             matched_lyric_source: Some("CLOUD_MUSIC".into()),
             matched_song_id: Some("7".into()),
             ..Default::default()

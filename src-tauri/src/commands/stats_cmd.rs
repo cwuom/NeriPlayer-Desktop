@@ -1,10 +1,10 @@
 // 播放统计命令：与 Android 播放统计页对齐
 use tauri::{AppHandle, State};
 
-use crate::error::AppResult;
 use crate::state::{AppState, TrackSource};
-use crate::stats::{self, PlaybackSession, PlaybackStatsSummary, StatsPeriod};
-use crate::sync::manager;
+use neri_common::error::AppResult;
+use neri_library::stats::{self, PlaybackSession, PlaybackStatsSummary, StatsPeriod};
+use neri_library::sync::manager;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -32,7 +32,13 @@ fn counted_local_playlist_id(input: &PlaybackSessionInput) -> Option<i64> {
     if input.play_count_increment <= 0 {
         return None;
     }
-    input.local_playlist_id.as_deref()?.trim().parse().ok().filter(|id| *id != 0)
+    input
+        .local_playlist_id
+        .as_deref()?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|id| *id != 0)
 }
 
 /// 本地歌单播放计数写进同步扩展段（对齐 Android LocalPlaylistPlaybackStatsRepository.recordPlayNow）
@@ -42,17 +48,23 @@ async fn record_local_playlist_plays(device_id: String, playlist_ids: Vec<i64>, 
     }
     let result = tokio::task::spawn_blocking(move || -> AppResult<()> {
         // 与同步回写共用歌单锁并推进写入版本：进行中的同步会推迟，而不是用旧快照的扩展段覆盖这次计数
-        let _guard = crate::library::playlist::lock_io();
+        let _guard = neri_library::library::playlist::lock_io();
         let day_start_at = stats::day_start_at(played_at);
-        crate::db::user_db()?.write(|transaction| {
-            crate::sync::storage::update_archive_extensions(transaction, |extensions| {
+        neri_library::db::user_db()?.write(|transaction| {
+            neri_library::sync::storage::update_archive_extensions(transaction, |extensions| {
                 for &playlist_id in &playlist_ids {
-                    crate::sync::merge::record_local_playlist_play(extensions, playlist_id, day_start_at, &device_id, played_at);
+                    neri_library::sync::merge::record_local_playlist_play(
+                        extensions,
+                        playlist_id,
+                        day_start_at,
+                        &device_id,
+                        played_at,
+                    );
                 }
                 Ok(())
             })
         })?;
-        crate::library::playlist::mark_io_changed();
+        neri_library::library::playlist::mark_io_changed();
         Ok(())
     })
     .await;
@@ -91,7 +103,7 @@ pub async fn record_playback_session(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    let device_id = manager::get_or_create_device_id_pub(&app);
+    let device_id = manager::get_or_create_device_id_pub(&crate::sync_state::TauriSyncState(&app));
     let played_at = now_ms();
     {
         let mut store = state.stats.lock();
@@ -113,7 +125,7 @@ pub async fn record_playback_sessions(
     if sessions.is_empty() {
         return Ok(());
     }
-    let device_id = manager::get_or_create_device_id_pub(&app);
+    let device_id = manager::get_or_create_device_id_pub(&crate::sync_state::TauriSyncState(&app));
     let played_at = now_ms();
     {
         let mut store = state.stats.lock();
@@ -122,7 +134,10 @@ pub async fn record_playback_sessions(
         }
         stats::save(&store);
     }
-    let playlists = sessions.iter().filter_map(counted_local_playlist_id).collect();
+    let playlists = sessions
+        .iter()
+        .filter_map(counted_local_playlist_id)
+        .collect();
     record_local_playlist_plays(device_id, playlists, played_at).await;
     Ok(())
 }
@@ -178,7 +193,9 @@ pub async fn remove_playback_stats(
 ///
 /// 本机记下的统计 id 带平台前缀（`netease:123`）；Android 同步来的是同步模型的
 /// 裸 id + album/mediaUri 标记，交给同步歌单同一套 SyncSong -> TrackInfo 规则解析
-fn stat_to_track(stat: &crate::sync::models::SyncTrackStat) -> Option<crate::state::TrackInfo> {
+fn stat_to_track(
+    stat: &neri_model::sync::models::SyncTrackStat,
+) -> Option<crate::state::TrackInfo> {
     use crate::state::TrackInfo;
     let id = stat.id.trim();
     let media_uri = stat.media_uri.clone().unwrap_or_default();
@@ -195,7 +212,11 @@ fn stat_to_track(stat: &crate::sync::models::SyncTrackStat) -> Option<crate::sta
     });
     if let Some(source) = prefixed {
         let url = if source == TrackSource::Local {
-            if media_uri.trim().is_empty() { id.trim_start_matches("local:").to_string() } else { media_uri }
+            if media_uri.trim().is_empty() {
+                id.trim_start_matches("local:").to_string()
+            } else {
+                media_uri
+            }
         } else {
             String::new()
         };
@@ -216,7 +237,7 @@ fn stat_to_track(stat: &crate::sync::models::SyncTrackStat) -> Option<crate::sta
     if id.is_empty() && media_uri.trim().is_empty() {
         return None;
     }
-    let song = crate::sync::models::SyncSong {
+    let song = neri_model::sync::models::SyncSong {
         id: id.to_string(),
         name: stat.name.clone(),
         artist: stat.artist.clone(),
@@ -241,22 +262,24 @@ pub async fn get_playback_stat_tracks(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<Option<crate::state::TrackInfo>>> {
     let store = state.stats.lock();
-    let by_key: std::collections::HashMap<&str, &crate::sync::models::SyncTrackStat> = store
+    let by_key: std::collections::HashMap<&str, &neri_model::sync::models::SyncTrackStat> = store
         .stats
         .iter()
         .map(|stat| (stat.identity_key.as_str(), stat))
         .collect();
     Ok(identity_keys
         .iter()
-        .map(|key| by_key.get(key.as_str()).and_then(|stat| stat_to_track(stat)))
+        .map(|key| {
+            by_key
+                .get(key.as_str())
+                .and_then(|stat| stat_to_track(stat))
+        })
         .collect())
 }
 
 /// 计算曲目的统计身份键，供前端上报时使用
 #[tauri::command]
-pub async fn playback_stats_identity_key(
-    track: crate::state::TrackInfo,
-) -> AppResult<String> {
+pub async fn playback_stats_identity_key(track: crate::state::TrackInfo) -> AppResult<String> {
     Ok(manager::playback_stats_identity_key_pub(&track))
 }
 
@@ -313,7 +336,10 @@ mod tests {
             "playCountIncrement": 1,
         });
         let input: PlaybackSessionInput = serde_json::from_value(payload).unwrap();
-        assert_eq!(to_session(&input).media_uri.as_deref(), Some("D:\\Music\\song.flac"));
+        assert_eq!(
+            to_session(&input).media_uri.as_deref(),
+            Some("D:\\Music\\song.flac")
+        );
     }
 
     /// 回归：前端曾直接上送 camelCase TrackInfo，反序列化失败被前端

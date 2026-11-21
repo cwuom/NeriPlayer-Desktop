@@ -1,7 +1,7 @@
-use crate::listen_together::protocol::*;
-use crate::listen_together::session::{LtSessionHttpCredentials, LtSessionUpdate};
-use crate::listen_together::ws_client::LtWsClient;
 use crate::state::AppState;
+use neri_listentogether::protocol::*;
+use neri_listentogether::session::{LtSessionHttpCredentials, LtSessionUpdate};
+use neri_listentogether::ws_client::LtWsClient;
 use std::time::Duration;
 use tauri::{AppHandle, State};
 
@@ -36,7 +36,7 @@ pub async fn lt_create_room(
     // 必须先判状态码：房间服务返回 4xx/5xx 时错误体同样可能是 JSON，
     // 直接解析会得到 ok=false 却没有原因，用户只看到一句 Parse error
     let room_resp: LtRoomResponse =
-        crate::api::transport::parse_json_response(resp, "listen-together create room")
+        neri_platform::api::transport::parse_json_response(resp, "listen-together create room")
             .await
             .map_err(|e| e.to_string())?;
 
@@ -107,7 +107,7 @@ pub async fn lt_join_room(
         .map_err(|e| format!("HTTP error: {e}"))?;
 
     let room_resp: LtRoomResponse =
-        crate::api::transport::parse_json_response(resp, "listen-together join room")
+        neri_platform::api::transport::parse_json_response(resp, "listen-together join room")
             .await
             .map_err(|e| e.to_string())?;
 
@@ -161,7 +161,7 @@ pub async fn lt_get_room_state(
         .await
         .map_err(|e| format!("HTTP error: {e}"))?;
 
-    crate::api::transport::parse_json_response(resp, "listen-together room state")
+    neri_platform::api::transport::parse_json_response(resp, "listen-together room state")
         .await
         .map_err(|e| e.to_string())
 }
@@ -205,7 +205,7 @@ pub async fn lt_leave_room(
 }
 
 async fn cleanup_abandoned_room(
-    http: &crate::api::transport::FallbackHttp,
+    http: &neri_platform::api::transport::FallbackHttp,
     base_url: &str,
     response: &LtRoomResponse,
 ) {
@@ -248,7 +248,7 @@ async fn cleanup_abandoned_room(
 }
 
 async fn post_room_operation<T: serde::Serialize + ?Sized>(
-    http: &crate::api::transport::FallbackHttp,
+    http: &neri_platform::api::transport::FallbackHttp,
     credentials: &LtSessionHttpCredentials,
     operation: &str,
     body: &T,
@@ -276,12 +276,18 @@ async fn post_room_operation<T: serde::Serialize + ?Sized>(
             // 交给前端走与 WebSocket 拒绝相同的恢复路径（对齐 Android HttpControlFallbackOwner）
             let body = resp.bytes().await.map_err(|e| format!("HTTP error: {e}"))?;
             return serde_json::from_slice::<LtControlResponse>(&body).map_err(|_| {
-                format!("HTTP {}: listen-together {operation} rejected", status.as_u16())
+                format!(
+                    "HTTP {}: listen-together {operation} rejected",
+                    status.as_u16()
+                )
             });
         }
-        crate::api::transport::parse_json_response(resp, &format!("listen-together {operation}"))
-            .await
-            .map_err(|e| e.to_string())
+        neri_platform::api::transport::parse_json_response(
+            resp,
+            &format!("listen-together {operation}"),
+        )
+        .await
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|_| format!("Listen-together {operation} timed out"))?
@@ -303,7 +309,7 @@ pub async fn lt_connect_ws(
         old.disconnect().await;
     }
 
-    let client = LtWsClient::connect(&ws_url, app_handle).await?;
+    let client = LtWsClient::connect(&ws_url, crate::events::event_sink(&app_handle)).await?;
     *ws = Some(client);
 
     Ok(())
@@ -355,7 +361,7 @@ pub async fn lt_send_ping(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::transport::FallbackHttp;
+    use neri_platform::api::transport::FallbackHttp;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
