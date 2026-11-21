@@ -83,6 +83,17 @@ run('Cargo.lock stamping skips registry packages with the same version', () => {
   assert.throws(() => stampCargoLock(lock, '9.9.9', '26.1121.1340'))
 })
 
+run('Cargo manifests checked out with CRLF are stamped and keep CRLF', () => {
+  const crlf = text => text.replace(/\r?\n/g, '\r\n')
+  const toml = stampCargoToml(crlf(readFileSync('src-tauri/Cargo.toml', 'utf8')), '26.1121.1340')
+  assert.match(toml, /\[workspace\.package\]\r\nversion = "26\.1121\.1340"\r\n/)
+  assert.ok(!/[^\r]\n/.test(toml))
+  const lock = stampCargoLock(crlf(readFileSync('src-tauri/Cargo.lock', 'utf8')), '1.0.0', '26.1121.1340')
+  assert.match(lock, /name = "neri-player-desktop"\r\nversion = "26\.1121\.1340"\r\n/)
+  assert.match(lock, /name = "neri-common"\r\nversion = "26\.1121\.1340"/)
+  assert.ok(!/[^\r]\n/.test(lock))
+})
+
 run('stampVersion keeps the repository manifests consistent', () => {
   const root = mkdtempSync(join(tmpdir(), 'neri-release-version-'))
   try {

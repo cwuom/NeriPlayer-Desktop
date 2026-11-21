@@ -64,7 +64,18 @@ export function stampPackageJson(text, version) {
   return next
 }
 
+// Windows 构建机按 core.autocrlf=true 检出时清单是 CRLF：先按 LF 处理，写回时还原原有换行
+function preservingLineEndings(text, transform) {
+  const crlf = text.includes('\r\n')
+  const result = transform(crlf ? text.replace(/\r\n/g, '\n') : text)
+  return crlf ? result.replace(/\n/g, '\r\n') : result
+}
+
 export function stampCargoToml(text, version) {
+  return preservingLineEndings(text, lf => stampCargoTomlLf(lf, version))
+}
+
+function stampCargoTomlLf(text, version) {
   let replaced = false
   const next = text.replace(
     /(^\[workspace\.package\]\n(?:(?!\[)[^\n]*\n)*?version\s*=\s*")[^"]*(")/m,
@@ -79,6 +90,10 @@ export function stampCargoToml(text, version) {
 
 /** 只改工作区成员（没有 source 字段的包），第三方依赖的版本保持原样 */
 export function stampCargoLock(text, fromVersion, toVersion) {
+  return preservingLineEndings(text, lf => stampCargoLockLf(lf, fromVersion, toVersion))
+}
+
+function stampCargoLockLf(text, fromVersion, toVersion) {
   let count = 0
   const blocks = text.split('\n\n').map(block => {
     if (!block.startsWith('[[package]]') || /\nsource = /.test(block)) return block
