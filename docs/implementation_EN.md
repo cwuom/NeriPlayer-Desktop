@@ -2,12 +2,6 @@
 
 # Implementation Overview
 
-> [!CAUTION]
-> 🚧 **Work in progress**: NeriPlayer Desktop is still a preview. This document describes the current code
-> structure, and some features are incomplete. In edge cases local data may be damaged, so develop and test
-> against recoverable copies of your data. The repository may become unmaintained at any time; desktop
-> development relies mainly on community contributions.
-
 This document is for developers. It covers the process boundary, the crates of the Rust workspace, host
 capability injection, frontend layering, and quality gates. User-facing information lives in the
 [README](../README_EN.md); the development workflow and verification requirements live in

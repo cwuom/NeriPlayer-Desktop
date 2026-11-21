@@ -41,10 +41,6 @@
 
 </div>
 
-> [!CAUTION]
-> **项目状态**：文档中有相当部分是占位描述，许多功能实现并不完善；极端情况下可能损坏本地数据，请先备份。
-> 仓库随时可能进入无人维护状态，桌面端的理想是依靠社区共同推进。
-
 > [!WARNING]
 > 本项目仅供学习与研究使用，请勿将其用于任何非法用途。
 > 请只在你拥有权利、授权或第三方平台规则允许的范围内访问、播放或保存内容。
@@ -71,16 +67,7 @@
 
 ---
 
-## 快速定位 / Start here
-
-如果你只是想体验应用，请看 [快速体验](#快速体验--getting-started)。
-如果你想了解项目能力，请看 [项目亮点](#项目亮点--why-it-stands-out)
-和 [核心特性](#核心特性--key-features)。
-如果你准备贡献代码，请直接阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。
-如果你要自建一起听服务端，请看
-[一起听服务端部署](#一起听服务端部署--listen-together-deployment)。
-跨端使用前请先阅读 [GitHub 同步](#github-同步--github-sync)
-和 [WebDAV 同步](#webdav-同步--webdav-sync)中的兼容说明。
+## 项目简介 / About
 
 ```text
 NeriPlayer Desktop
@@ -88,10 +75,8 @@ NeriPlayer Desktop
 ├── 本地优先数据：曲库、下载、歌单、历史、队列、统计
 ├── 可选自有同步：GitHub / WebDAV 元数据同步
 ├── 桌面播放体验：原生音频、逐字歌词、音效、托盘、媒体键、桌面歌词
-└── 调试与反馈：实时日志、文件日志、崩溃报告、连通性探针
+└── 调试与反馈：最近日志、文件日志、崩溃报告、连通性探针
 ```
-
-## 项目简介 / About
 
 NeriPlayer Desktop 使用 **Vue 3 + TypeScript** 构建界面，
 以 **Rust** 处理平台请求、音频解码、播放、存储和同步，通过 **Tauri 2** 接入桌面系统。
@@ -142,7 +127,7 @@ NeriPlayer Desktop 使用 **Vue 3 + TypeScript** 构建界面，
   独立桌面歌词、托盘、关闭到托盘、媒体键、系统媒体会话、
   可配置的应用内与全局快捷键，以及 macOS 菜单栏歌词。
 - **诊断信息可以主动获取**：
-  开发者模式提供实时日志、崩溃报告和连通性探针，
+  开发者模式提供自动刷新的最近日志、崩溃报告和连通性探针，
   文件日志可单独开启，反馈可以定位到具体构建版本。
 
 ---
@@ -212,9 +197,9 @@ pnpm tauri dev
 ## 核心特性 / Key Features
 
 - **首页与探索**：最近播放、常用歌单与分区推荐，网易云/Bilibili/YouTube Music 搜索，
-  可管理搜索历史；国际化模式下支持已登录账号的 YouTube Music 首页货架。
+  搜索历史可清空或关闭；国际化模式下支持已登录账号的 YouTube Music 首页货架。
 - **音乐库与艺术家**：本地歌单、收藏歌单与艺术家、下载、网易云歌单/专辑、
-  Bilibili 收藏夹与 YouTube Music 歌单；支持分类搜索、分页、多选、拖拽和右键操作。
+  Bilibili 收藏夹与 YouTube Music 歌单；支持分类搜索、分批加载、多选、拖拽和右键操作。
 - **队列与续播**：随机、循环、顺序调整、播放进度记忆和长音频续播；
   随机模式可查看实际播放顺序，切回原始顺序后可拖拽排序。
 - **原生音频与音效**：输出设备、声道平衡、0.1x–4x 倍速、0.25x–2x 独立音调、
@@ -256,7 +241,7 @@ pnpm tauri dev
 - **外观与语言**：简体中文、繁体中文、English、日本語，浅色/深色主题、封面取色、
   自定义背景、流体背景、界面/歌词字体、界面缩放和设置搜索。
 - **桌面集成与调试**：托盘、关闭到托盘、单实例、系统媒体会话、媒体键、
-  应用内/全局快捷键、macOS 菜单栏歌词、实时日志与调试报告。
+  应用内/全局快捷键、macOS 菜单栏歌词、最近日志与调试报告。
 
 ### 默认快捷键
 
@@ -294,44 +279,12 @@ pnpm tauri dev
 | QQ 音乐 | 后端搜索、游客接口可用范围内的取流、下载和歌词/元数据匹配 | 依赖游客接口及内容可用性 |
 | 本地音频 | 多文件夹扫描、直接播放、歌单与艺术家管理、标签和歌词 | 路径必须在当前设备有效；格式支持取决于可用解码器 |
 
-桌面端提供原生音频输出、设备选择和 DSP 音效，配合独立桌面歌词、托盘、
-系统媒体会话、媒体键与可配置快捷键，支持窗口内操作和后台播放控制。
-
 ---
 
 ## 实现概览 / Implementation Notes
 
-### 构建与版本
-
-- 技术栈：Tauri 2、Vue 3、TypeScript、Pinia、Vite、Rust 与 C++17
-- 包管理器：`pnpm@9.15.9`；Rust 工具链：`1.95.0`；CI Node.js：`20`
-- 应用内版本：`<git短哈希>.<MMddHHmm>`，另提供构建时间和 UUID
-- 原生配置：`src-tauri/tauri.conf.json`；发布矩阵：`.github/workflows/release.yml`
-- 歌词组件：`vendor/applemusic-like-lyrics` Git 子模块
-- 完整解码包需额外合并 FFmpeg 资源配置；本地开发不要求预先安装 FFmpeg 开发包
-
-### 模块结构
-
-Rust 后端是 Cargo workspace：`src-tauri/src/` 是 Tauri 应用壳层，业务逻辑拆在 `src-tauri/crates/` 下的
-6 个不依赖 Tauri 的 crate 中。依赖方向与宿主注入方式见 [实现概览](docs/implementation.md)。
-
-| 路径 | 职责 |
-| --- | --- |
-| `src/views/`、`src/components/` | 页面、播放器、歌词、菜单和设置界面 |
-| `src/stores/`、`src/modules/`、`src/integrations/` | 前端状态、播放调度、歌词、快捷键、一起听与宿主集成 |
-| `src-tauri/src/` | Tauri 命令、窗口与托盘、设置、日志、凭据持久化 |
-| `src-tauri/crates/neri-platform/` | 平台请求、登录态、签名与会话 |
-| `src-tauri/crates/neri-playback/` | 原生播放、解码、输出、FFmpeg 与 DSP（含 `native/`） |
-| `src-tauri/crates/neri-library/` | SQLite、曲库、歌词、统计、下载元数据、同步模型合并与 V4 归档 |
-| `src-tauri/crates/neri-listentogether/` | 一起听 WebSocket 会话与协议 |
-| `src-tauri/crates/neri-common/`、`neri-model/` | 错误、原子写入、凭据存储、共享数据模型 |
-| `scripts/`、`tools/quality/`、`.github/workflows/` | 回归检查、质量门禁、构建、打包和 CI |
-
-### 入口与导航
-
-主界面由首页、探索、音乐库、设置与开发者模式下的 Debug 页组成，
-Mini Player、Now Playing、队列与评论面板围绕共享播放状态工作。
-桌面歌词和托盘弹窗使用独立窗口，通过原生命令与事件同步。
+本节只说明与使用相关的行为。代码结构、crate 划分与质量门禁见 [实现概览](docs/implementation.md)，
+开发环境、扩展入口和验证命令见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ### 播放、缓存与服务
 
@@ -370,8 +323,6 @@ QQ 音乐、酷狗、LRCLIB 与 AMLL TTML 也参与歌词匹配。
 - 配置导入支持 Android 明文与密码加密备份；识别到 Android 配置后先提示部分配置项可能无法导入，确认后恢复支持的设置与文件包含的登录态。Android 专属功能和设备路径不能保证可迁移。
 - 配置加密采用与 Android 相同的 PBKDF2-HMAC-SHA256 / AES-256-GCM 封装。密码不会随文件保存；遗失后无法恢复。旧版仅支持明文的桌面端需先更新才能读取加密文件。
 - 导入的 Cookie 仍受平台有效期、网络和风控限制；YouTube Cookie 导入执行本地格式检查，不能保证真实账号授权有效。Android 备份若只有 Authorization 授权头而无 Cookie，需要重新登录。
-
-实现路径、扩展入口和验证命令请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ---
 
@@ -494,7 +445,7 @@ WebDAV 远端同样不是端到端加密备份，用户名、密码与配置导�
 ## 问题反馈 / Bug Report
 
 1. 在「设置 → 关于」复制构建版本，记录操作系统、架构和复现步骤
-2. 在设置页连续点击**版本号 7 次**开启开发者模式，进入 Debug 查看实时日志、崩溃报告或导出调试报告
+2. 在设置页连续点击**版本号 7 次**开启开发者模式，进入 Debug 查看最近日志、崩溃报告或导出调试报告
 3. 需要持久日志时，在设置中开启文件日志并重启应用后重新复现；日志级别调整即时生效
 4. 前往 [Issues](https://github.com/cwuom/NeriPlayer-Desktop/issues)，使用相应模板提交
 
@@ -584,21 +535,6 @@ WebDAV 远端同样不是端到端加密备份，用户名、密码与配置导�
 
 ---
 
-## 更新周期 / Update Cycle
-
-- 项目处于预览版持续迭代阶段，Release 按功能和维护情况发布。
-- 核心播放、本地数据、歌词、同步与跨平台兼容会持续维护。
-- CI 构建用于体验开发中的改动；变化和已知事项以对应提交及发布说明为准。
-
----
-
-## 支持方式 / Support
-
-- 项目及维护者不接受赞助、捐赠或商业资助。
-- 欢迎通过提交可复现的 Issue、PR、改进文档或参与预览版验证支持项目。
-
----
-
 ## 许可证 / License
 
 NeriPlayer Desktop 使用 **GPL-3.0-or-later** 发布，详细条款见 [LICENSE](./LICENSE)。
@@ -613,10 +549,10 @@ NeriPlayer Desktop 使用 **GPL-3.0-or-later** 发布，详细条款见 [LICENSE
 
 ---
 
-# Contributing to NeriPlayer Desktop / 贡献指南
+## 参与贡献 / Contributing
 
-贡献前请先阅读完整的 [CONTRIBUTING.md](./CONTRIBUTING.md)，并遵守
-[社区行为准则](./CODE_OF_CONDUCT.md)。
+欢迎提交可复现的 Issue、PR、文档改进，或参与预览版验证。
+贡献前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)，并遵守 [社区行为准则](./CODE_OF_CONDUCT.md)。
 
 ---
 
