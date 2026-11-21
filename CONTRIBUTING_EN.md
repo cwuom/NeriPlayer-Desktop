@@ -6,6 +6,11 @@ Thank you for contributing to NeriPlayer Desktop.
 This guide describes **the current desktop implementation**. Keep it aligned with source code and runtime behavior.
 The project is in preview; use recoverable copies of your data for development and testing.
 
+> [!CAUTION]
+> 🚧 **Work in progress**: a good part of the documentation is placeholder text and many features are incomplete;
+> in edge cases local data may be damaged. The repository may become unmaintained at any time, and desktop
+> development relies mainly on community contributions.
+
 ---
 
 ### Scope
@@ -32,14 +37,20 @@ Use the documents according to their purpose:
   - Project scope, capabilities, installation, sync, and privacy for users and new contributors.
 - [CONTRIBUTING_EN.md](CONTRIBUTING_EN.md) / [CONTRIBUTING.md](CONTRIBUTING.md)
   - Development environment, modules, extension paths, validation, and contribution requirements.
-- [src-tauri/native/ffmpeg/README.md](src-tauri/native/ffmpeg/README.md)
+- [src-tauri/crates/neri-playback/native/ffmpeg/README.md](src-tauri/crates/neri-playback/native/ffmpeg/README.md)
   - Shared libraries, runtime loading, bundle configuration, decoder testing, and distribution licensing.
-- [src-tauri/native/dsp/README.md](src-tauri/native/dsp/README.md)
+- [src-tauri/crates/neri-playback/native/dsp/README.md](src-tauri/crates/neri-playback/native/dsp/README.md)
   - Android DSP provenance, desktop bridging, parameter compatibility, and native tests.
-- [src-tauri/src/sync/archive/fixtures/README.md](src-tauri/src/sync/archive/fixtures/README.md)
+- [src-tauri/crates/neri-library/src/sync/archive/fixtures/README.md](src-tauri/crates/neri-library/src/sync/archive/fixtures/README.md)
   - Sync archive fixtures and their validation scope.
 - [.github/workflows/](.github/workflows/), [PR template](.github/PULL_REQUEST_TEMPLATE.md)
   - Actual CI, test package, release entry points, and review information.
+- [docs/implementation_EN.md](docs/implementation_EN.md) / [docs/implementation.md](docs/implementation.md)
+  - Process boundary, Rust crates, host capability injection, frontend layering, and quality gates.
+- [tools/quality/README_EN.md](tools/quality/README_EN.md) and each crate's `README.md` (`src-tauri/crates/*/`)
+  - Gate rules and baselines, plus each crate's responsibilities and constraints.
+- [SECURITY.md](SECURITY.md), [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+  - How to report security issues, and third-party sources and assets included or adapted directly.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), [LICENSE](LICENSE), [LICENSES/MIT.txt](LICENSES/MIT.txt)
   - Community standards, current licensing, and the historical MIT notice.
 
@@ -111,7 +122,7 @@ Protect these flows when making changes:
 - **Sync and Listen Together**: preserve ProtoBuf field numbers, three-way merge, causal tokens,
   deletion records, remote concurrency protection, room versions, and reconnection.
   Cross-platform compatibility requires separate acceptance testing.
-- **Credentials and diagnostics**: use `security.rs`; never log cookies, tokens, sync passwords,
+- **Credentials and diagnostics**: use `neri_common::security`; never log cookies, tokens, sync passwords,
   or signed URLs. Do not hide failures by ignoring errors, disabling rules, or removing valid tests.
 
 Frontend regressions live in `scripts/`; Rust tests live with their modules.
@@ -181,7 +192,7 @@ to use Symphonia, without guaranteeing every format remains playable.
 
 To distribute the full decoder package:
 
-1. Build libraries using the [FFmpeg guide](src-tauri/native/ffmpeg/README.md),
+1. Build libraries using the [FFmpeg guide](src-tauri/crates/neri-playback/native/ffmpeg/README.md),
    or obtain matching `ffmpeg-<target>` artifacts from trusted workflows in this repository.
 2. Place the four libraries, `LICENSE.txt`, and `BUILDINFO.txt` in `.cache/ffmpeg-build/<target>/`.
    Do not mix architectures or library sources.
@@ -224,51 +235,56 @@ The `1.0.0` in package / Cargo metadata does not mean the project has left previ
 
 - `src/main.ts`, `src/App.vue`, `src/views/`
   - App startup, routing, and pages. Desktop lyrics and tray popups mount through separate window entry points.
-- `src/stores/`, `src/modules/`
-  - Pinia state and domain logic for playback, libraries, downloads, lyrics, settings, sync, and Listen Together.
+- `src/stores/`, `src/modules/`, `src/integrations/`
+  - Pinia state and domain logic for playback, libraries, downloads, lyrics, settings, sync, and Listen Together;
+    `integrations/` installs host integrations such as the tray, desktop lyrics bridge, and clipboard.
   - `modules/persistence/userData.ts` loads snapshots before store creation and serializes persistence writes.
-- `src/components/`, `src/composables/`, `src/utils/`
-  - Player, AMLL lyrics, menus, shared interactions, and native adapters; translations live in `src/i18n/`.
-- `src-tauri/src/main.rs`, `lib.rs`, `state.rs`
-  - Tauri application and shared runtime state, command registration, windows, tray, plugins, and native events.
-- `src-tauri/src/commands/`
-  - Domain IPC entry points for playback, accounts, downloads, local files, storage, sync, and diagnostics.
-- `src-tauri/src/audio/`
-  - CPAL output, Symphonia / FFmpeg decoding, Range / HLS, buffering, queues, DSP, speed, and media sessions.
-- `src-tauri/src/api/`, `auth/`, `lyrics/`
-  - Platform requests, authentication, metadata, and lyric parsing / matching.
+- `src/components/`, `src/composables/`, `src/utils/`, `src/types/`
+  - Player, AMLL lyrics, menus, shared interactions, and helpers; translations live in `src/i18n/`.
+  - Layers only depend downwards: `types → utils → modules → composables / stores / integrations → components → views`.
+- `src-tauri/src/` (app shell `neri-player-desktop`)
+  - `main.rs`, `lib.rs`, `state.rs`: Tauri application and shared runtime state, command registration, windows,
+    tray, plugins, and native events.
+  - `commands/`: domain IPC entry points (playback, accounts, downloads, local files, storage, sync, discovery,
+    diagnostics); large command modules are split into directories such as `player_cmd/`, `sync_cmd/`,
+    `download_cmd/`, and `discover/`.
+  - `auth/cookies.rs`, `settings/`, `logging/`: credential persistence, settings, and unified logs.
+  - `events.rs`, `platform_webview/`, `sync_state.rs`: host capabilities injected into domain crates
+    (events, WebView tokens, sync state).
+- `src-tauri/crates/` (Tauri-free domain crates; see the [implementation overview](docs/implementation_EN.md) for dependency rules)
+  - `neri-playback`: CPAL output, Symphonia / FFmpeg decoding, Range / HLS, buffering, queues, DSP, speed, and
+    media sessions; the C++17 code in `native/ffmpeg/` and `native/dsp/` is compiled by this crate's `build.rs`.
+  - `neri-platform`: platform requests, authentication, metadata, and the cookie jar.
     Do not duplicate platform signatures or credential logic in the frontend.
-- `src-tauri/src/library/`, `stats/`, `db/`, `settings/`
-  - Local scans and tags, playlists, statistics, database, settings, and migration.
-- `src-tauri/src/sync/`, `src/stores/listenTogether/`, `src-tauri/src/listen_together/`
-  - Cloud models, transport, and merge; Listen Together protocol, sessions, queues, and reconnection.
-- `src-tauri/src/security.rs`, `logging/`, `fsutil.rs`
-  - Credentials, unified logs, and atomic file writes.
-- `src-tauri/native/ffmpeg/`, `src-tauri/native/dsp/`
-  - C++17 decoder-loading shim and DSP core, compiled by `src-tauri/build.rs`.
-- `scripts/`, `.github/workflows/`
-  - Frontend regressions, development startup, FFmpeg builds, interoperability helpers, CI, and releases.
+  - `neri-library`: database, local scans and tags, playlists, lyric parsing / matching, statistics,
+    download metadata, and cloud sync.
+  - `neri-listentogether`: Listen Together protocol, sessions, and WebSocket; the frontend part lives in
+    `src/stores/listenTogether/`.
+  - `neri-common`, `neri-model`: errors, atomic writes, credential storage, config backup codec, and shared models.
+- `scripts/`, `tools/quality/`, `.github/workflows/`
+  - Frontend regressions, development startup, FFmpeg builds, interoperability helpers, quality gates, CI, and releases.
 
-Adding IPC requires an implementation in `commands/`, registration in `main.rs` through
-`generate_handler!`, and aligned frontend command names, arguments, and return types.
+Adding IPC requires an implementation in `commands/` (with business logic in the matching crate), registration in
+`main.rs` through `generate_handler!`, and aligned frontend command names, arguments, and return types.
+New `invoke()` calls belong in stores / modules, not in components or views.
 Keep JavaScript arguments consistent with Rust / serde naming. Reuse existing stores / modules for shared state
 and dispose event listeners with their component or scope.
 
 #### Persistence boundaries
 
-`src-tauri/src/db/` stores playlists, favorites, history, queue, statistics, download catalog,
+The `db/` module of `neri-library` stores playlists, favorites, history, queue, statistics, download catalog,
 and sync metadata in `neri_user_data.db`, maintaining its schema and legacy migration.
 Reuse domain transactions rather than creating JSON copies of the same state;
 preserve ordering between frontend startup restoration and subsequent writes.
 
-`library/local_index.rs` stores local music folders and track indexes separately in `local-library.json`.
+`library/local_index.rs` in `neri-library` stores local music folders and track indexes separately in `local-library.json`.
 It reuses unchanged tracks by file size and modification time, coalesces native notify events into
 incremental scans, and updates indexes on startup. Folder management, direct playback, and playlist import
 are separate operations; removing a folder must not delete source files or implicitly modify playlists.
 
 Settings, credentials, caches, audio, and exports do not all belong to SQLite.
 Confirm actual locations and ownership before changing storage or cleanup;
-reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
+reuse `neri_common::fsutil` and existing atomic replacement procedures for file writes.
 
 ---
 
@@ -301,8 +317,8 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
 
 #### 1. Add a platform or search source
 
-1. Inspect existing requests and stream entry points in `src-tauri/src/api/`, `auth/`,
-   `commands/search_cmd.rs`, `commands/explore_cmd.rs`, and `commands/settings_cmd.rs`.
+1. Inspect existing requests and stream entry points in `api/` and `auth/` of `neri-platform`,
+   `commands/discover/search_cmd.rs`, `commands/discover/explore_cmd.rs`, and `commands/settings_cmd.rs`.
 2. Decide whether the source provides search, metadata completion, or playback;
    retain the distinction between original track identity and the resolved playback source.
 3. Update frontend source models, search state, routes, login, covers, lyrics, downloads, and statistics identity.
@@ -312,10 +328,10 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
 #### 2. Modify playback, queues, or audio effects
 
 1. Trace requests through `src/stores/player.ts`, `src/modules/playback/`, and
-   `src-tauri/src/commands/player_cmd.rs`, then inspect `src-tauri/src/audio/`.
+   `src-tauri/src/commands/player_cmd/`, then inspect `src-tauri/crates/neri-playback/`.
 2. Check cancellation, rapid track changes, seek, prefetch, fallback, resume, and audio information together.
    Preserve generation checks and source / client-dependent cache identity.
-3. DSP changes also require `src/modules/audioEffects/`, `audio/dsp.rs`, `audio/dsp_settings.rs`,
+3. DSP changes also require `src/modules/audioEffects/`, `processing/dsp.rs` and `processing/dsp_settings.rs` in `neri-playback`,
    and parameter layouts / provenance in `native/dsp/`. Do not introduce configuration,
    lock waits, or heap allocations into realtime audio callbacks.
 4. Beyond logic tests, verify playback, output device switching, and parameter changes in the native app.
@@ -323,10 +339,10 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
 
 #### 3. Modify downloads, local music, or tags
 
-1. Inspect `src/modules/download/`, `src/stores/download.ts`, `commands/download_cmd.rs`,
-   `download_catalog.rs`, `download_metadata.rs`, and `download_recovery.rs`.
-2. For scans and tags, inspect `commands/local_files_cmd.rs`, `library/local_index.rs`,
-   and `library/local_file_tags.rs`. Distinguish indexes, playlist entries, and actual files.
+1. Inspect `src/modules/download/`, `src/stores/download.ts`, `commands/download_cmd/` (`mod.rs`, `catalog.rs`,
+   `recovery.rs`, `artwork.rs`), and `download_metadata.rs` / `downloads.rs` in `neri-library`.
+2. For scans and tags, inspect `commands/local_files_cmd.rs` plus `library/local_index.rs`
+   and `library/local_file_tags.rs` in `neri-library`. Distinguish indexes, playlist entries, and actual files.
 3. Preserve cancellation, recovery, sidecars, and catalog consistency.
    Use test files to verify that failure / cancellation does not damage originals.
 4. For tag writes, cover lyric, artwork, and NP metadata retention and verify by reading the result back.
@@ -342,7 +358,7 @@ reuse `fsutil.rs` and existing atomic replacement procedures for file writes.
 
 #### 5. Modify lyrics or desktop lyrics
 
-1. Inspect `src-tauri/src/lyrics/manager.rs`, `src/modules/lyrics/`, `src/stores/currentLyrics.ts`,
+1. Inspect `src-tauri/crates/neri-library/src/lyrics/manager.rs`, `src/modules/lyrics/`, `src/stores/currentLyrics.ts`,
    and `src/components/LyricsView.vue`, separating parsing, matching, and rendering responsibilities.
 2. Preserve existing matches, translation / romanization, word timing, user offsets, and request generations.
    Sources do not all share one format.
@@ -359,8 +375,8 @@ authenticated video requests and desktop window rendering still require native v
 
 #### 6. Modify GitHub / WebDAV sync
 
-1. Read `sync/models.rs`, `proto_models.rs`, `serializer.rs`, `archive/`, `merge.rs`, `manager.rs`,
-   and `commands/sync_cmd.rs`. Record the Android reference commit.
+1. Read `sync/models.rs` and `sync/proto_models.rs` in `neri-model`; `sync/serializer.rs`, `sync/archive/`,
+   `sync/merge/`, and `sync/manager.rs` in `neri-library`; and `commands/sync_cmd/`. Record the Android reference commit.
 2. Preserve ProtoBuf field numbers and V4 record kinds. New fields need default reads;
    old field numbers must not be reassigned. Preserve three-way merge, causal tokens,
    deletion records, and membership restoration semantics.
@@ -378,7 +394,7 @@ authenticated video requests and desktop window rendering still require native v
 
 #### 7. Modify Listen Together
 
-1. Inspect `src/stores/listenTogether/`, `src-tauri/src/listen_together/`,
+1. Inspect `src/stores/listenTogether/`, `src-tauri/crates/neri-listentogether/`,
    and `commands/listen_together_cmd.rs` together, then compare the Android client and Worker.
 2. Preserve fields, role permissions, room versions, and legacy protocol fallback.
    Incremental queues use `baseRoomVersion`; repeated tracks use `stableKey + occurrence`.
@@ -390,7 +406,7 @@ authenticated video requests and desktop window rendering still require native v
 #### 8. Modify windows, shortcuts, or system integration
 
 1. Trace lifecycles from `src/main.ts`, `src/components/TitleBar.vue`, `src/modules/shortcuts/`,
-   `src/modules/tray/`, and corresponding Rust commands / `main.rs`.
+   `src/integrations/tray.ts`, and corresponding Rust commands / `main.rs`.
 2. Preserve single-instance behavior, window state, event cleanup, IME input, and global shortcut boundaries.
    Avoid unnecessary expansion of Tauri permissions.
 3. Check the main window, tray popup, desktop lyrics, media keys, and exit paths in the actual WebView runtime.
@@ -465,14 +481,20 @@ These compatibility strategies do not replace runtime UI validation on the targe
 Common checks:
 
 ```bash
+pnpm typecheck
+pnpm lint
 pnpm test
 pnpm build
-cargo check --manifest-path src-tauri/Cargo.toml --locked
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
-cargo clippy --manifest-path src-tauri/Cargo.toml --locked
+python3 -B tools/quality/module_boundaries.py
+python3 -B tools/quality/ipc_contract.py
+pnpm crap
+cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --workspace --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --workspace --all-targets --release -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked --workspace
 ```
 
-`pnpm test` uses `scripts/test-frontend.mjs` to enumerate and sequentially run every `test:*` in `package.json`.
+`pnpm test` first uses `scripts/test-frontend.mjs` to enumerate and sequentially run every `test:*` in `package.json`, then runs the Vitest unit tests (`src/**/__tests__/*.test.ts`; `pnpm unit` runs them alone, `pnpm unit:coverage` adds coverage).
 These scripts cover pure logic, stores, component / IPC mocks, and source constraints;
 they are not browser end-to-end tests. `test:config-backup-codec` also runs the actual Rust configuration
 codec and independent Node interoperability checks using the pinned Rust toolchain, so `pnpm test`
@@ -490,17 +512,17 @@ Examples of targeted checks:
 | Listen Together | `pnpm test:listen-together-protocol`, `pnpm test:listen-together-queue`, `pnpm test:listen-together-reconnect` |
 | Native UI and bundle configuration | `pnpm test:tray-popup`, `pnpm test:title-bar-window-state`, `pnpm test:ffmpeg-bundle` |
 
-See `package.json` for the full list. Rust supports module filters:
+See `package.json` for the full list. Rust supports crate and module filters:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib sync
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib listen_together
-cargo test --manifest-path src-tauri/Cargo.toml --locked --lib library::local_file_tags::tests
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p neri-library --lib sync::
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p neri-listentogether
+cargo test --manifest-path src-tauri/Cargo.toml --locked -p neri-library --lib library::local_file_tags::tests
 ```
 
 FFmpeg configuration tests use mock libraries; actual decoder tests require matching shared libraries.
 Without `NERI_REQUIRE_FFMPEG=1`, some tests skip when libraries are missing.
-Set `NERI_FFMPEG_DIR` and that variable as described in the [FFmpeg guide](src-tauri/native/ffmpeg/README.md),
+Set `NERI_FFMPEG_DIR` and that variable as described in the [FFmpeg guide](src-tauri/crates/neri-playback/native/ffmpeg/README.md),
 then separately verify packaged resources and playback after installation.
 
 Android JVM reverse-decoding helper:
@@ -528,9 +550,11 @@ obtain explicit authorization before operating real phones or other physical dev
 
 Current workflow boundaries:
 
-- **CI / `build.yml`**: main / master pushes, PRs, or manual dispatch. Runs frontend regressions / build,
-  locked Rust checks for four targets, and bundled FFmpeg decoder checks on Windows x64,
-  macOS arm64, and Linux x64. It does not run the full Rust unit suite or Clippy.
+- **CI / `build.yml`**: main / master pushes, PRs, or manual dispatch. Runs frontend type checks, ESLint,
+  regression scripts and Vitest (with a coverage summary), and the build; quality gates (module boundaries,
+  IPC contract, and their self-tests); rustfmt, debug / release Clippy, the full workspace test suite, and Rust
+  coverage (`cargo llvm-cov`) on Linux; locked Rust checks and selected tests for four targets; and bundled
+  FFmpeg decoder checks on Windows x64, macOS arm64, and Linux x64.
 - **Artifacts / `artifacts.yml`**: main / master pushes or manual dispatch. Produces four-target test packages,
   retaining installers for 3 days and metadata for 14 days, without publishing a GitHub Release.
 - **FFmpeg / `ffmpeg.yml`**: manual or reusable workflow producing four `ffmpeg-<target>` artifacts.
@@ -538,6 +562,7 @@ Current workflow boundaries:
   Manual runs generate a build-version tag; tag-triggered releases with hyphenated tags are marked prerelease.
   Attachments include FFmpeg source, build scripts, macOS installation notes, and `SHA256SUMS.txt`.
 
+Gate rules and baselines are described in [tools/quality/README_EN.md](tools/quality/README_EN.md); the maintainability metrics can be reproduced with `python3 -B tools/quality/maintainability.py --run`.
 CI and Artifacts ignore documentation-only, license, and template changes; missing runs do not mean checks passed.
 GitHub's prerelease flag is separate from the project's preview status.
 Workflow package inspection does not replace native acceptance after installation.
@@ -553,7 +578,7 @@ Workflow package inspection does not replace native acceptance after installatio
 - `vendor/applemusic-like-lyrics` is distributed under its own AGPL-3.0 license.
   FFmpeg libraries are built without GPL / nonfree components and distributed under LGPL-2.1-or-later;
   preserve licensing, build information, corresponding source, and build scripts.
-- See [native/dsp](src-tauri/native/dsp/README.md) for Android DSP provenance and its GPL-3.0 text.
+- See [native/dsp](src-tauri/crates/neri-playback/native/dsp/README.md) for Android DSP provenance and its GPL-3.0 text.
   Desktop DSP does not use the alternative license offered for Android USB paths.
 - Retain copyright and license notices when porting Android or other code;
   identify sources and reference revisions in the commit body. Never commit or publish cookies, tokens,

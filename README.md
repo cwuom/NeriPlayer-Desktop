@@ -37,9 +37,13 @@
 围绕「多源探索、原生播放、本地可控、跨端同步」持续打磨。
 </p>
 
-<strong>Preview / 预览版，持续迭代中</strong>
+<strong>🚧 开发中 / Work in progress</strong>
 
 </div>
+
+> [!CAUTION]
+> **项目状态**：文档中有相当部分是占位描述，许多功能实现并不完善；极端情况下可能损坏本地数据，请先备份。
+> 仓库随时可能进入无人维护状态，桌面端的理想是依靠社区共同推进。
 
 > [!WARNING]
 > 本项目仅供学习与研究使用，请勿将其用于任何非法用途。
@@ -123,7 +127,7 @@ NeriPlayer Desktop 使用 **Vue 3 + TypeScript** 构建界面，
 - **从简单调节到原生 DSP**：
   29 种内置预设、10 段图示均衡、参数均衡、AutoEQ 导入、音色与空间处理、
   压缩器、限幅器和扬声器优化，可按输出设备记忆音效。
-  原生 DSP 来源和桌面扩展见 [DSP 说明](./src-tauri/native/dsp/README.md)。
+  原生 DSP 来源和桌面扩展见 [DSP 说明](./src-tauri/crates/neri-playback/native/dsp/README.md)。
 - **完整的逐字歌词体验**：
   基于 AMLL 显示逐字高亮、翻译和音译，支持多源自动获取、手动匹配、
   编辑与偏移调整；播放页提供封面取色的 WebGL 流体背景和音频响应。
@@ -200,7 +204,7 @@ pnpm tauri dev
 
 本地发布构建与 FFmpeg 打包请阅读
 [CONTRIBUTING.md](./CONTRIBUTING.md#构建发布版--release-build)
-和 [FFmpeg 构建说明](./src-tauri/native/ffmpeg/README.md)。
+和 [FFmpeg 构建说明](./src-tauri/crates/neri-playback/native/ffmpeg/README.md)。
 普通 `pnpm tauri build` 不会自动下载或加入 FFmpeg 共享库。
 
 ---
@@ -308,17 +312,20 @@ pnpm tauri dev
 
 ### 模块结构
 
+Rust 后端是 Cargo workspace：`src-tauri/src/` 是 Tauri 应用壳层，业务逻辑拆在 `src-tauri/crates/` 下的
+6 个不依赖 Tauri 的 crate 中。依赖方向与宿主注入方式见 [实现概览](docs/implementation.md)。
+
 | 路径 | 职责 |
 | --- | --- |
 | `src/views/`、`src/components/` | 页面、播放器、歌词、菜单和设置界面 |
-| `src/stores/`、`src/modules/` | 前端状态、播放调度、歌词、快捷键与一起听 |
-| `src-tauri/src/commands/` | Tauri 命令与前后端数据边界 |
-| `src-tauri/src/api/`、`auth/` | 平台请求、登录、签名与会话 |
-| `src-tauri/src/audio/`、`src-tauri/native/` | 原生播放、解码、输出、FFmpeg 与 DSP |
-| `src-tauri/src/lyrics/`、`library/` | 歌词解析匹配、曲库、标签和统计 |
-| `src-tauri/src/db/`、`sync/` | SQLite、迁移、同步模型、合并和 V4 归档 |
-| `src-tauri/src/listen_together/` | WebSocket 会话与协议 |
-| `scripts/`、`.github/workflows/` | 回归检查、构建、打包和 CI |
+| `src/stores/`、`src/modules/`、`src/integrations/` | 前端状态、播放调度、歌词、快捷键、一起听与宿主集成 |
+| `src-tauri/src/` | Tauri 命令、窗口与托盘、设置、日志、凭据持久化 |
+| `src-tauri/crates/neri-platform/` | 平台请求、登录态、签名与会话 |
+| `src-tauri/crates/neri-playback/` | 原生播放、解码、输出、FFmpeg 与 DSP（含 `native/`） |
+| `src-tauri/crates/neri-library/` | SQLite、曲库、歌词、统计、下载元数据、同步模型合并与 V4 归档 |
+| `src-tauri/crates/neri-listentogether/` | 一起听 WebSocket 会话与协议 |
+| `src-tauri/crates/neri-common/`、`neri-model/` | 错误、原子写入、凭据存储、共享数据模型 |
+| `scripts/`、`tools/quality/`、`.github/workflows/` | 回归检查、质量门禁、构建、打包和 CI |
 
 ### 入口与导航
 
@@ -328,7 +335,7 @@ Mini Player、Now Playing、队列与评论面板围绕共享播放状态工作�
 
 ### 播放、缓存与服务
 
-- `audio/` 负责播放、seek、缓冲、解码、输出与媒体会话；
+- `neri-playback` 负责播放、seek、缓冲、解码、输出与媒体会话；
   在线播放支持 Range 拉流及分片定位，这与下载文件的断点续传是不同链路。
 - Symphonia 是内置解码后端；FFmpeg 共享库按运行时搜索顺序加载，
   缺失或不兼容时尝试回退，不能保证缺库后所有格式仍可播放。
@@ -598,10 +605,10 @@ NeriPlayer Desktop 使用 **GPL-3.0-or-later** 发布，详细条款见 [LICENSE
 
 - 2026-10-07 之前以 MIT 发布的代码保留原声明，见 [LICENSES/MIT.txt](./LICENSES/MIT.txt)。
 - `vendor/applemusic-like-lyrics` 按其 AGPL-3.0 许可证分发。
-- 移植的原生 DSP 遵循其 GPL-3.0 来源许可，详见 [DSP 说明](./src-tauri/native/dsp/README.md)；
+- 移植的原生 DSP 遵循其 GPL-3.0 来源许可，详见 [DSP 说明](./src-tauri/crates/neri-playback/native/dsp/README.md)；
   不适用 Android USB 路径的替代授权。
 - 随包精简 FFmpeg 未启用 GPL 组件，以 LGPL-2.1-or-later 分发；
-  来源、构建参数和源码获取方式见 [FFmpeg 说明](./src-tauri/native/ffmpeg/README.md)及 Release 附件。
+  来源、构建参数和源码获取方式见 [FFmpeg 说明](./src-tauri/crates/neri-playback/native/ffmpeg/README.md)及 Release 附件。
 - 第三方资源与源码保留各自许可，不能将仓库主许可证视为对全部依赖的重新授权。
 
 ---

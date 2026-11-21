@@ -37,9 +37,14 @@ built with <strong>Tauri 2 + Vue 3 + Rust</strong> for Windows, macOS, and Linux
 Development focuses on multi-source discovery, native playback, local control, and cross-device sync.
 </p>
 
-<strong>Preview / Under active development</strong>
+<strong>🚧 Work in progress / 开发中</strong>
 
 </div>
+
+> [!CAUTION]
+> **Project status**: a good part of the documentation is placeholder text and many features are incomplete.
+> In edge cases local data may be damaged, so back it up first. The repository may become unmaintained at any
+> time; the desktop app is meant to move forward through community contributions.
 
 > [!WARNING]
 > This project is for learning and research only. Do not use it for illegal purposes.
@@ -124,7 +129,7 @@ The current scope:
 - **Simple controls backed by native DSP**:
   29 built-in presets, a 10-band graphic equalizer, parametric EQ, AutoEQ import, tone and spatial processing,
   compression, limiting, and speaker optimization, with effects remembered per output device.
-  See the [DSP notes](./src-tauri/native/dsp/README.md) for native DSP sources and desktop extensions.
+  See the [DSP notes](./src-tauri/crates/neri-playback/native/dsp/README.md) for native DSP sources and desktop extensions.
 - **Rich word-synced lyrics**:
   AMLL provides word highlighting, translations, and phonetics, with automatic multi-source retrieval,
   manual matching, editing, and offset adjustment. Now Playing includes a cover-colored WebGL fluid background and audio response.
@@ -202,7 +207,7 @@ If an existing clone is missing the lyrics submodule, run `git submodule update 
 
 For local Release builds and FFmpeg packaging, read
 [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md)
-and the [FFmpeg build notes](./src-tauri/native/ffmpeg/README.md).
+and the [FFmpeg build notes](./src-tauri/crates/neri-playback/native/ffmpeg/README.md).
 A plain `pnpm tauri build` does not automatically download or bundle FFmpeg shared libraries.
 
 ---
@@ -322,17 +327,21 @@ tray controls, system media sessions, media keys, and configurable shortcuts for
 
 ### Module layout
 
+The Rust backend is a Cargo workspace: `src-tauri/src/` is the Tauri app shell, and business logic lives in six
+Tauri-free crates under `src-tauri/crates/`. Dependency rules and host injection are described in the
+[implementation overview](docs/implementation_EN.md).
+
 | Path | Responsibility |
 | --- | --- |
 | `src/views/`, `src/components/` | Pages, player, lyrics, menus, and settings |
-| `src/stores/`, `src/modules/` | Frontend state, playback coordination, lyrics, shortcuts, and Listen Together |
-| `src-tauri/src/commands/` | Tauri commands and frontend/backend data boundaries |
-| `src-tauri/src/api/`, `src-tauri/src/auth/` | Platform requests, login, signing, and sessions |
-| `src-tauri/src/audio/`, `src-tauri/native/` | Native playback, decoding, output, FFmpeg, and DSP |
-| `src-tauri/src/lyrics/`, `src-tauri/src/library/` | Lyric parsing/matching, library, tags, and stats |
-| `src-tauri/src/db/`, `src-tauri/src/sync/` | SQLite, migration, sync models, merging, and V4 archives |
-| `src-tauri/src/listen_together/` | WebSocket sessions and protocol |
-| `scripts/`, `.github/workflows/` | Regression checks, builds, packaging, and CI |
+| `src/stores/`, `src/modules/`, `src/integrations/` | Frontend state, playback coordination, lyrics, shortcuts, Listen Together, and host integration |
+| `src-tauri/src/` | Tauri commands, windows and tray, settings, logging, credential persistence |
+| `src-tauri/crates/neri-platform/` | Platform requests, login state, signing, and sessions |
+| `src-tauri/crates/neri-playback/` | Native playback, decoding, output, FFmpeg, and DSP (including `native/`) |
+| `src-tauri/crates/neri-library/` | SQLite, library, lyrics, stats, download metadata, sync models, merging, and V4 archives |
+| `src-tauri/crates/neri-listentogether/` | Listen Together WebSocket sessions and protocol |
+| `src-tauri/crates/neri-common/`, `neri-model/` | Errors, atomic writes, credential storage, shared data models |
+| `scripts/`, `tools/quality/`, `.github/workflows/` | Regression checks, quality gates, builds, packaging, and CI |
 
 ### Entry point and navigation
 
@@ -342,7 +351,7 @@ Desktop lyrics and the tray popup use separate windows synchronized through nati
 
 ### Playback, cache, and service
 
-- `src-tauri/src/audio/` handles playback, seeking, buffering, decoding, output, and media sessions.
+- `neri-playback` handles playback, seeking, buffering, decoding, output, and media sessions.
   Online playback supports HTTP Range streaming and segmented seeking; this is separate from download file resume.
 - Symphonia is the built-in decoding backend. FFmpeg shared libraries load in a runtime search order,
   with fallback attempted if libraries are missing or incompatible. Some formats may remain unavailable without them.
@@ -633,10 +642,10 @@ NeriPlayer Desktop is released under **GPL-3.0-or-later**. See [LICENSE](./LICEN
 
 - Code released under MIT before 2026-10-07 retains its original notice in [LICENSES/MIT.txt](./LICENSES/MIT.txt).
 - `vendor/applemusic-like-lyrics` is distributed under its AGPL-3.0 license.
-- The ported native DSP follows its source GPL-3.0 license; see the [DSP notes](./src-tauri/native/dsp/README.md).
+- The ported native DSP follows its source GPL-3.0 license; see the [DSP notes](./src-tauri/crates/neri-playback/native/dsp/README.md).
   The Android USB code's alternative license does not apply.
 - The bundled minimal FFmpeg build does not enable GPL components and is distributed under LGPL-2.1-or-later.
-  See the [FFmpeg notes](./src-tauri/native/ffmpeg/README.md) and Release attachments for sources, build options, and source access.
+  See the [FFmpeg notes](./src-tauri/crates/neri-playback/native/ffmpeg/README.md) and Release attachments for sources, build options, and source access.
 - Third-party resources and source code retain their own licenses.
   The repository's main license does not relicense every dependency.
 
