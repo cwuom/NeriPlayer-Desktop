@@ -1,6 +1,20 @@
-import type { TrackInfo } from '@/stores/player'
-import type { HomeFeedItem, HomeFeedShelf } from '@/stores/recommend'
+import type { TrackInfo } from '@/types/track'
 import type { HomePlaylist } from '@/modules/library/neteaseHome'
+
+export interface HomeFeedShelf {
+  title: string
+  items: HomeFeedItem[]
+}
+
+export interface HomeFeedItem {
+  title: string
+  subtitle: string
+  coverUrl: string
+  browseId?: string
+  videoId?: string
+  pageType?: string
+  durationMs?: number
+}
 
 export interface YoutubeHomeSection {
   key: string

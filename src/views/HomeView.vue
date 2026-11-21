@@ -245,7 +245,7 @@ function openPlaylistMenu(event: MouseEvent, platform: string | undefined, id: s
   collectionMenuRef.value?.open(event, platformPlaylistTarget(platform, id))
 }
 
-function openPlatformPlaylist(pl: any) {
+function openPlatformPlaylist(pl: { platform?: string; id: string | number }) {
   void router.push(platformPlaylistTarget(pl.platform, pl.id).route)
 }
 

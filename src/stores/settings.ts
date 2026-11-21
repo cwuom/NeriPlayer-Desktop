@@ -5,8 +5,14 @@ import { createLogger } from '@/utils/logger'
 import { normalizeDesktopLyricsStyle, sanitizeFontFamily, type DesktopLyricsStyle } from '@/modules/desktopLyrics/style'
 import { normalizeShortcutBindings, type ShortcutBindings } from '@/modules/shortcuts/bindings'
 import { migrateLegacyAudioEffects, normalizeAudioEffectsSettings, type AudioEffectsSettings } from '@/modules/audioEffects/model'
+import { DEFAULT_LYRIC_SOURCES, type DefaultLyricSource } from '@/modules/lyrics/lyricSourcePreference'
+import { normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN, UI_SCALE_STEP } from '@/modules/settings/uiScaleRange'
 
 const log = createLogger('settings')
+
+// 取值域已下沉到 modules，这里继续导出以兼容现有调用方
+export { DEFAULT_LYRIC_SOURCES, normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN, UI_SCALE_STEP }
+export type { DefaultLyricSource }
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type CoverStyle = 'disc' | 'card'
@@ -17,11 +23,6 @@ export const YOUTUBE_PLAYBACK_SOURCES = [
   'automatic', 'visionos', 'android_vr', 'web_remix', 'tv_html5', 'web_creator',
 ] as const
 export type YouTubePlaybackSource = typeof YOUTUBE_PLAYBACK_SOURCES[number]
-/** 与 Android LyricSourcePreference.storageValue 一致 */
-export const DEFAULT_LYRIC_SOURCES = [
-  'automatic', 'cloud_music', 'kugou', 'qq_music', 'lrclib', 'amll_ttml',
-] as const
-export type DefaultLyricSource = typeof DEFAULT_LYRIC_SOURCES[number]
 
 export interface AppSettings {
   formatVersion: number
@@ -165,10 +166,6 @@ export const MAX_DOWNLOAD_PARALLELISM = 8
 export const DEFAULT_DOWNLOAD_PARALLELISM = 6
 export const MIN_MEDIA_CACHE_SIZE_MB = 256
 export const MAX_MEDIA_CACHE_SIZE_MB = 512 * 1024
-export const UI_SCALE_DEFAULT = 100
-export const UI_SCALE_MIN = 25
-export const UI_SCALE_MAX = 1000
-export const UI_SCALE_STEP = 5
 // 对齐 Android LyricFontScale 0.5–1.6
 export const LYRIC_FONT_SCALE_MIN = 0.5
 export const LYRIC_FONT_SCALE_MAX = 1.6
@@ -591,11 +588,6 @@ function normalizeChoice(value: string, allowed: string[], fallback: string): st
 
 function canonicalNeteaseQuality(value: string): string {
   return value.trim() === 'high' ? 'higher' : value
-}
-
-export function normalizeUiScale(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return UI_SCALE_DEFAULT
-  return Math.round(Math.min(UI_SCALE_MAX, Math.max(UI_SCALE_MIN, value)) / UI_SCALE_STEP) * UI_SCALE_STEP
 }
 
 /** 歌词来源的默认偏移：按 50ms 对齐并夹到 ±5000ms（Android normalizeLyricDefaultOffsetMs）；非数值回到默认 */

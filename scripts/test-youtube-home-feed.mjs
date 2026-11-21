@@ -4,6 +4,10 @@ import * as vue from 'vue'
 import * as pinia from 'pinia'
 import ts from 'typescript'
 
+const jsonUtilSource = await readFile(new URL('../src/utils/json.ts', import.meta.url), 'utf8')
+const jsonUtil = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(jsonUtilSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText).toString('base64')}`)
 let sequence = 0
 async function loadStore(dependencies) {
   const source = await readFile(new URL('../src/stores/recommend.ts', import.meta.url), 'utf8')
@@ -47,6 +51,7 @@ async function runtime(cache = null) {
     } },
     './toast': { useToastStore: () => ({ success() {}, error() {} }) },
     '@/utils/logger': { createLogger: () => ({ error: (...args) => errors.push(args) }) },
+    '@/utils/json': jsonUtil,
     '@/utils/neteaseCover': { resolveNeteaseCover: (...values) => values.find(value => typeof value === 'string' && value) || '' },
     '@/modules/youtube/youtubePlaylistParse': {
       parseYouTubeLibraryPlaylists: () => [], parseYouTubeHomeFeed: data => data.shelves,

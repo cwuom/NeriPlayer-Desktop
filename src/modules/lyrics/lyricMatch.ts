@@ -1,6 +1,6 @@
 // 歌词「匹配」：按所选平台搜候选歌词（后端 match_lyrics 打分排序，对齐 Android EditableLyricsMatcher）
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { LyricLine } from '@/stores/player'
+import type { LyricLine } from '@/types/track'
 import { mapBackendLyrics } from './lyricsFormat'
 
 /** 平台按 Android 匹配面板的顺序排列（YouTube Music 暂不提供） */

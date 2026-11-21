@@ -2,7 +2,7 @@
  * 歌词文本往返工具
  * 有逐字时间轴时导出 YRC，否则 LRC
  */
-import type { LyricLine, LyricWord, TrackInfo } from '@/stores/player'
+import type { LyricLine, LyricWord, TrackInfo } from '@/types/track'
 
 /** Only source-provided text that adds content to the original is a visible translation. */
 export function visibleLyricTranslation(line: Pick<LyricLine, 'text' | 'words' | 'translation'>): string {
@@ -35,18 +35,15 @@ export function lyricLineToYrc(line: LyricLine): string {
   const startMs = Math.max(0, Math.floor(Number(line.startMs) || 0))
   const durationMs = Math.max(0, Math.floor(Number(line.durationMs) || 0))
   const words = Array.isArray(line.words) ? line.words : []
-  let body = ''
-  if (words.length > 0) {
-    body = words
+  const body = words.length > 0
+    ? words
       .map((word: LyricWord) => {
         const ws = Math.max(0, Math.floor(Number(word.startMs) || 0))
         const wd = Math.max(0, Math.floor(Number(word.durationMs) || 0))
         return `(${ws},${wd},0)${word.text || ''}`
       })
       .join('')
-  } else {
-    body = line.text || ''
-  }
+    : line.text || ''
   return `[${startMs},${durationMs}]${body}`
 }
 
@@ -84,23 +81,44 @@ export function toEditableRomanizationText(lines: LyricLine[]): string {
     .join('\n')
 }
 
+/** 后端 serde 输出 snake_case，缓存与同步载荷里是 camelCase，两种形态都按未知 JSON 逐字段读取 */
+type RawLyricFields = { readonly [key: string]: unknown }
+
+function isRawLyricFields(value: unknown): value is RawLyricFields {
+  return typeof value === 'object' && value !== null
+}
+
+function rawLyricTiming(fields: RawLyricFields, camel: string, snake: string): number {
+  return Number(fields[camel] ?? fields[snake] ?? 0)
+}
+
+function rawLyricText(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined
+}
+
 /** 从后端 snake_case / 前端 camelCase 统一映射 LyricLine */
-export function mapBackendLyrics(raw: any[]): LyricLine[] {
+export function mapBackendLyrics(raw: unknown): LyricLine[] {
   if (!Array.isArray(raw)) return []
-  return raw.map((l: any) => ({
-    startMs: Number(l.startMs ?? l.start_ms ?? 0),
-    durationMs: Number(l.durationMs ?? l.duration_ms ?? 0),
-    words: Array.isArray(l.words)
-      ? l.words.map((w: any) => ({
-        startMs: Number(w.startMs ?? w.start_ms ?? 0),
-        durationMs: Number(w.durationMs ?? w.duration_ms ?? 0),
-        text: String(w.text || ''),
-      }))
-      : [],
-    text: String(l.text || ''),
-    translation: l.translation || undefined,
-    roman: l.roman || undefined,
-  }))
+  return raw.map((item: unknown) => {
+    const l: RawLyricFields = isRawLyricFields(item) ? item : {}
+    return {
+      startMs: rawLyricTiming(l, 'startMs', 'start_ms'),
+      durationMs: rawLyricTiming(l, 'durationMs', 'duration_ms'),
+      words: Array.isArray(l.words)
+        ? l.words.map((wordItem: unknown) => {
+          const w: RawLyricFields = isRawLyricFields(wordItem) ? wordItem : {}
+          return {
+            startMs: rawLyricTiming(w, 'startMs', 'start_ms'),
+            durationMs: rawLyricTiming(w, 'durationMs', 'duration_ms'),
+            text: String(w.text || ''),
+          }
+        })
+        : [],
+      text: String(l.text || ''),
+      translation: rawLyricText(l.translation),
+      roman: rawLyricText(l.roman),
+    }
+  })
 }
 
 const TRANSLATION_ALIGNMENT_TOLERANCE_MS = 450

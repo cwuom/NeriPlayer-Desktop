@@ -20,10 +20,19 @@ export interface PlatformAuth {
   avatarUrl: string | null
 }
 
+/** 登录 / 资料刷新命令返回的 AuthInfo（neri_platform::auth::state，serde 默认 snake_case） */
+export interface BackendAuthInfo {
+  platform: string
+  logged_in: boolean
+  nickname: string | null
+  avatar_url: string | null
+}
+
+/** check_auth_status 的返回：三平台登录摘要 */
 export interface AuthStatusResponse {
-  netease: PlatformAuth & { platform: string }
-  bilibili: PlatformAuth & { platform: string }
-  youtube: PlatformAuth & { platform: string }
+  netease: BackendAuthInfo
+  bilibili: BackendAuthInfo
+  youtube: BackendAuthInfo
 }
 
 const emptyAuth = (): PlatformAuth => ({ loggedIn: false, nickname: null, avatarUrl: null })
@@ -38,7 +47,7 @@ function sameAuth(a: PlatformAuth, b: PlatformAuth): boolean {
 }
 
 /** 后端 snake_case -> 前端 camelCase */
-function mapAuth(raw: any): PlatformAuth {
+function mapAuth(raw: BackendAuthInfo | null | undefined): PlatformAuth {
   return {
     loggedIn: raw?.logged_in ?? false,
     nickname: raw?.nickname ?? null,
@@ -105,7 +114,7 @@ export const useAuthStore = defineStore('auth', () => {
     const revisions = { ...authRevisions }
     try {
       await ensureProfileListener()
-      const status = await invoke<any>('check_auth_status')
+      const status = await invoke<AuthStatusResponse>('check_auth_status')
       if (request !== statusSequence || disposed) return
       // 账号没变就保留原对象：页面按对象身份判断换号，设置页、同步后的例行检查不能让首页整页重载
       for (const [platform, target, raw] of [['netease', netease, status.netease], ['bilibili', bilibili, status.bilibili], ['youtube', youtube, status.youtube]] as const) {
@@ -138,7 +147,7 @@ export const useAuthStore = defineStore('auth', () => {
     youtubeProfileRefreshAttempted.value = true
     const revision = authRevisions.youtube
     try {
-      const info = await invoke<any>('refresh_youtube_profile')
+      const info = await invoke<BackendAuthInfo>('refresh_youtube_profile')
       if (revision !== authRevisions.youtube) return
       const mapped = mapAuth(info)
       if (mapped.loggedIn && !sameAuth(youtube.value, mapped)) {
@@ -193,7 +202,7 @@ export const useAuthStore = defineStore('auth', () => {
     const request = ++loginSequence
     loggingIn.value = key
     try {
-      const info = await invoke<any>(command)
+      const info = await invoke<BackendAuthInfo>(command)
       if (revision !== authRevisions[key]) return
       const mapped = mapAuth(info)
       authRevisions[key]++
@@ -206,7 +215,7 @@ export const useAuthStore = defineStore('auth', () => {
         notifyAuthChanged(key)
         toast.success(t('settings.login_success', { platform: platformLabel(key) }))
       }
-    } catch (e: any) {
+    } catch (e) {
       if (revision !== authRevisions[key] || String(e).includes('Authentication superseded')) return
       const msg = String(e)
       if (msg.includes('cancelled') || msg.includes('cancel')) {
@@ -269,7 +278,7 @@ export const useAuthStore = defineStore('auth', () => {
     const request = ++loginSequence
     loggingIn.value = platform
     try {
-      const info = await invoke<any>('login_with_cookies', { platform, rawCookies })
+      const info = await invoke<BackendAuthInfo>('login_with_cookies', { platform, rawCookies })
       if (revision !== authRevisions[platform]) return false
       const mapped = mapAuth(info)
       if (!mapped.loggedIn) return false
@@ -284,7 +293,7 @@ export const useAuthStore = defineStore('auth', () => {
         toast.success(t('settings.login_success', { platform: platformLabel(platform) }))
       }
       return true
-    } catch (e: any) {
+    } catch (e) {
       if (revision !== authRevisions[platform] || String(e).includes('Authentication superseded')) return false
       toast.error(String(e))
       log.error(`${platform} cookie login failed:`, e)

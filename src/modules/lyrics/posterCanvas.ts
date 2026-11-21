@@ -35,8 +35,6 @@ const BAR_BLUR = { radius: 6, iterations: 2 } as const
 /** 无封面占位块：安卓 drawCover 的两段色 */
 const PLACEHOLDER_FROM: Rgb = [229, 88, 112]
 const PLACEHOLDER_TO: Rgb = [90, 138, 168]
-/** 取平均色的采样密度：安卓 averageColor 走 48×48 网格 */
-const AVERAGE_SAMPLES = 48
 
 export interface PosterSource {
   /** 封面地址；取不到或加载失败时降级成无封面模板 */
@@ -179,13 +177,14 @@ function downscaleTo(source: HTMLImageElement | HTMLCanvasElement, targetWidth: 
   const firstWidth = Math.max(targetWidth, Math.round(cropWidth * firstScale))
   const firstHeight = Math.max(targetHeight, Math.round(cropHeight * firstScale))
 
-  let [canvas, ctx] = makeCanvas(firstWidth, firstHeight)
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(source,
+  const [first, firstCtx] = makeCanvas(firstWidth, firstHeight)
+  firstCtx.imageSmoothingEnabled = true
+  firstCtx.imageSmoothingQuality = 'high'
+  firstCtx.drawImage(source,
     (sourceWidth - cropWidth) / 2, (sourceHeight - cropHeight) / 2, cropWidth, cropHeight,
     0, 0, firstWidth, firstHeight)
 
+  let canvas = first
   while (canvas.width > targetWidth * 2 && canvas.height > targetHeight * 2) {
     const nextWidth = Math.max(targetWidth, Math.round(canvas.width / 2))
     const nextHeight = Math.max(targetHeight, Math.round(canvas.height / 2))
@@ -194,7 +193,6 @@ function downscaleTo(source: HTMLImageElement | HTMLCanvasElement, targetWidth: 
     nextCtx.imageSmoothingQuality = 'high'
     nextCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, nextWidth, nextHeight)
     canvas = next
-    ctx = nextCtx
   }
   if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
     const [final, finalCtx] = makeCanvas(targetWidth, targetHeight)
@@ -218,32 +216,6 @@ function blurredCoverBackground(cover: HTMLImageElement, width: number, height: 
   return canvas
 }
 
-/** 安卓 averageColor：按 48×48 网格采样求平均，跳过近透明像素 */
-function averageColor(cover: HTMLImageElement): Rgb {
-  const canvas = downscaleTo(cover, AVERAGE_SAMPLES, AVERAGE_SAMPLES)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return NO_COVER_SEED
-  try {
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
-    let red = 0
-    let green = 0
-    let blue = 0
-    let count = 0
-    for (let index = 0; index < data.length; index += 4) {
-      if (data[index + 3] <= 24) continue
-      red += data[index]
-      green += data[index + 1]
-      blue += data[index + 2]
-      count++
-    }
-    if (!count) return NO_COVER_SEED
-    return [red / count, green / count, blue / count]
-  } catch {
-    // 封面被跨域策略挡住时 getImageData 会抛；退回中性色，海报照样能出
-    return NO_COVER_SEED
-  }
-}
-
 /**
  * 歌词区的代表底色：取亮度 90 分位，而不是最亮单点。
  * 单点会被一个高光 blob 拉爆，逼出过深的补暗，整张就比安卓暗一档
@@ -251,7 +223,7 @@ function averageColor(cover: HTMLImageElement): Rgb {
 function representativeBackground(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number): Rgb {
   const sampleWidth = Math.max(1, Math.min(64, Math.round(width)))
   const sampleHeight = Math.max(1, Math.min(64, Math.round(height)))
-  const [canvas, sampleCtx] = makeCanvas(sampleWidth, sampleHeight, true)
+  const [, sampleCtx] = makeCanvas(sampleWidth, sampleHeight, true)
   sampleCtx.drawImage(ctx.canvas, x, y, width, height, 0, 0, sampleWidth, sampleHeight)
   try {
     const data = sampleCtx.getImageData(0, 0, sampleWidth, sampleHeight).data

@@ -107,7 +107,7 @@ await test('shared download action captures target, allows current download and 
     '@/stores/download': { useDownloadStore: () => store },
     '@/utils/contextMenu': { createContextMenuItem: (label, options) => ({ label, ...options }) },
     '@/utils/logger': { createLogger: () => ({ error: (...args) => errors.push(args) }) },
-    '@/utils/localTrack': { isLocalTrack: track => track.source === 'local' || track.id.startsWith('local:') },
+    '@/modules/library/localTrack': { isLocalTrack: track => track.source === 'local' || track.id.startsWith('local:') },
   }
   const compiled = ts.transpileModule(await readFile(new URL('src/composables/useTrackDownloadMenu.ts', root), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

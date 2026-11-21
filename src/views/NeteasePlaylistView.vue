@@ -29,6 +29,7 @@ import {
 } from '@/modules/library/playlistDetailCache'
 import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
+import { asArray, asRecord, dig } from '@/utils/json'
 import { resolveNeteaseCover } from '@/utils/neteaseCover'
 
 const props = defineProps<{ isAlbum?: boolean }>()
@@ -156,10 +157,10 @@ async function loadDetail() {
 
   try {
     if (props.isAlbum) {
-      const data = await invoke<any>('get_album_detail', { albumId: id })
+      const data = await invoke<unknown>('get_album_detail', { albumId: id })
       cached.markFresh()
-      const album = data?.album || {}
-      playlistName.value = album.name || ''
+      const album = asRecord(dig(data, 'album')) ?? {}
+      playlistName.value = String(album.name || '')
       const albumCover = resolveNeteaseCover(
         album.picUrl,
         album.blurPicUrl,
@@ -168,48 +169,46 @@ async function loadDetail() {
         album.pic,
       )
       coverUrl.value = albumCover
-      description.value = album.description || ''
-      creator.value = album.artist?.name || ''
+      description.value = String(album.description || '')
+      creator.value = String(dig(album, 'artist', 'name') || '')
 
-      const songs = data?.songs || []
-      tracks.value = songs.map((s: any) => ({
-        id: `netease:${s.id}`,
-        title: s.name || '',
-        artist: (s.ar || []).map((a: any) => a.name).join(', '),
-        album: s.al?.name || album.name || '',
-        durationMs: s.dt || 0,
+      tracks.value = asArray(dig(data, 'songs')).map(s => ({
+        id: `netease:${String(dig(s, 'id'))}`,
+        title: String(dig(s, 'name') || ''),
+        artist: asArray(dig(s, 'ar')).map(a => dig(a, 'name')).join(', '),
+        album: String(dig(s, 'al', 'name') || album.name || ''),
+        durationMs: Number(dig(s, 'dt')) || 0,
         // 专辑曲目 al.picUrl 常为空，回退到专辑封面
-        coverUrl: resolveNeteaseCover(s.al?.picUrl, s.al?.pic, albumCover) || albumCover,
+        coverUrl: resolveNeteaseCover(dig(s, 'al', 'picUrl'), dig(s, 'al', 'pic'), albumCover) || albumCover,
         audioUrl: '',
       }))
       trackCount.value = tracks.value.length
     } else {
-      const data = await invoke<any>('get_netease_playlist_detail', { playlistId: id })
+      const data = await invoke<unknown>('get_netease_playlist_detail', { playlistId: id })
       cached.markFresh()
-      const pl = data?.playlist || {}
-      playlistName.value = pl.name || ''
+      const pl = asRecord(dig(data, 'playlist')) ?? {}
+      playlistName.value = String(pl.name || '')
       coverUrl.value = resolveNeteaseCover(pl.coverImgUrl, pl.picUrl, pl.cover)
-      trackCount.value = pl.trackCount || 0
-      playCount.value = pl.playCount || 0
-      description.value = pl.description || ''
-      creator.value = pl.creator?.nickname || ''
+      trackCount.value = Number(pl.trackCount) || 0
+      playCount.value = Number(pl.playCount) || 0
+      description.value = String(pl.description || '')
+      creator.value = String(dig(pl, 'creator', 'nickname') || '')
 
-      const songs = pl.tracks || []
-      tracks.value = songs.map((s: any) => ({
-        id: `netease:${s.id}`,
-        title: s.name || '',
-        artist: (s.ar || []).map((a: any) => a.name).join(', '),
-        album: s.al?.name || '',
-        durationMs: s.dt || 0,
-        coverUrl: resolveNeteaseCover(s.al?.picUrl, s.al?.pic),
+      tracks.value = asArray(pl.tracks).map(s => ({
+        id: `netease:${String(dig(s, 'id'))}`,
+        title: String(dig(s, 'name') || ''),
+        artist: asArray(dig(s, 'ar')).map(a => dig(a, 'name')).join(', '),
+        album: String(dig(s, 'al', 'name') || ''),
+        durationMs: Number(dig(s, 'dt')) || 0,
+        coverUrl: resolveNeteaseCover(dig(s, 'al', 'picUrl'), dig(s, 'al', 'pic')),
         audioUrl: '',
       }))
     }
     saveDetailCache(cacheKey)
     recordOpen()
-  } catch (e: any) {
+  } catch (e) {
     if (await cached.shown()) recordOpen()
-    else error.value = e?.toString() || t('player.load_failed')
+    else error.value = String(e ?? '') || t('player.load_failed')
   } finally {
     isLoading.value = false
   }
@@ -235,7 +234,7 @@ function shufflePlay() {
   player.shufflePlay(tracks.value)
 }
 
-function playTrack(track: TrackInfo, index: number) {
+function playTrack(track: TrackInfo) {
   if (selectionMode.value) {
     toggleSelected(track.id)
     return
@@ -499,8 +498,8 @@ onMounted(() => {
           class="track-item"
           :class="{ active: player.currentTrack?.id === track.id, selected: selectionMode && selectedIds.has(track.id), 'selection-mode': selectionMode }"
           :data-track-key="track.id"
-          @click="onTrackClick($event, () => playTrack(track, index), selectionMode)"
-          @dblclick="onTrackDoubleClick($event, () => playTrack(track, index), selectionMode)"
+          @click="onTrackClick($event, () => playTrack(track), selectionMode)"
+          @dblclick="onTrackDoubleClick($event, () => playTrack(track), selectionMode)"
           @pointerenter="player.prefetchIntent(track)"
           @focusin="player.prefetchIntent(track)"
           @contextmenu.prevent.stop="openTrackContextMenu($event, track)"

@@ -45,7 +45,7 @@ if ($ExportFixtures) {
     $previousFixtureEnv = $env:NERI_CODEC_FIXTURE_DIR
     try {
         $env:NERI_CODEC_FIXTURE_DIR = $fixtureOutput
-        & cargo test --manifest-path (Join-Path $workspace 'src-tauri/Cargo.toml') --locked --lib sync::archive::tests::export_android_interop_fixtures_when_requested -- --exact --nocapture
+        & cargo test --manifest-path (Join-Path $workspace 'src-tauri/Cargo.toml') --locked -p neri-library --lib sync::archive::tests::export_android_interop_fixtures_when_requested -- --exact --nocapture
         if ($LASTEXITCODE -ne 0) { throw 'Desktop fixture export failed' }
     } finally { $env:NERI_CODEC_FIXTURE_DIR = $previousFixtureEnv }
 } else {

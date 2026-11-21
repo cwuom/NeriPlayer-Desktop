@@ -18,7 +18,7 @@ import {
   type ContextMenuActionItem,
   type ContextMenuItem,
 } from '@/utils/contextMenu'
-import { isLocalTrack, localTrackFilePath } from '@/utils/localTrack'
+import { isLocalTrack, localTrackFilePath } from '@/modules/library/localTrack'
 import { writeClipboardText } from '@/utils/clipboard'
 import { createLogger } from '@/utils/logger'
 

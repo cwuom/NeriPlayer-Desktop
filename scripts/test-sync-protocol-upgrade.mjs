@@ -55,6 +55,10 @@ const historyCommits = []
 const lyricOffsetReplacements = []
 const biliSkipReplacements = []
 let historyOutcome = 'applied'
+const jsonUtil = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/utils/json.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(jsonUtil)
 const mocks = {
   pinia, vue,
   '@tauri-apps/api/core': { invoke },
@@ -77,6 +81,7 @@ const mocks = {
   './settings': { useSettingsStore: () => ({ applySnapshot() {} }) },
   './auth': { useAuthStore: () => ({ async checkStatus() {}, notifyAuthChanged() {} }) },
   '@/i18n': { __esModule: true, default: { global: { t: key => key } }, setLocale() {} },
+  '@/utils/json': jsonUtil,
   '@/utils/logger': { createLogger: () => ({ error() {} }) },
 }
 const exports = {}

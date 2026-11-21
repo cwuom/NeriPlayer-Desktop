@@ -17,6 +17,7 @@ import {
 } from '@/modules/library/playlistDetailCache'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 import { resolveNeteaseCover, resolveNeteaseCoverSized } from '@/utils/neteaseCover'
+import { asArray, asRecord, dig } from '@/utils/json'
 import { createLogger } from '@/utils/logger'
 import { useToastStore } from '@/stores/toast'
 import { useArtistFavorite } from '@/modules/library/favoriteArtistState'
@@ -100,9 +101,15 @@ function onViewScroll(e: Event) {
   }
 }
 
-function parseHeader(raw: any): ArtistHeader {
-  const artist = raw?.data?.artist || raw?.artist || {}
-  const aliasList = Array.isArray(artist.alias) ? artist.alias.filter(Boolean) : []
+/** 专辑发行时间（毫秒时间戳）转年份，缺省为空 */
+function publishYear(value: unknown): string {
+  if (!value || (typeof value !== 'number' && typeof value !== 'string')) return ''
+  return String(new Date(value).getFullYear())
+}
+
+function parseHeader(raw: unknown): ArtistHeader {
+  const artist = asRecord(dig(raw, 'data', 'artist') || dig(raw, 'artist')) ?? {}
+  const aliasList = asArray(artist.alias).filter(Boolean)
   return {
     name: String(artist.name || route.query.name || ''),
     alias: aliasList.join(' / ') || String(route.query.subtitle || ''),
@@ -136,9 +143,9 @@ async function load() {
   try {
     // 头部/歌曲/专辑并行加载 (对齐 Android loadInitial)
     const [detailRes, songsRes, albumsRes] = await Promise.allSettled([
-      invoke<any>('get_netease_artist_detail', { artistId: id }),
-      invoke<any>('get_netease_artist_songs', { artistId: id }),
-      invoke<any>('get_netease_artist_albums', { artistId: id }),
+      invoke<unknown>('get_netease_artist_detail', { artistId: id }),
+      invoke<unknown>('get_netease_artist_songs', { artistId: id }),
+      invoke<unknown>('get_netease_artist_albums', { artistId: id }),
     ])
     cached.markFresh()
     if (request !== generation) return
@@ -150,29 +157,27 @@ async function load() {
     }
 
     if (songsRes.status === 'fulfilled') {
-      const songs = songsRes.value?.songs || []
-      tracks.value = songs.map((s: any) => ({
-        id: `netease:${s.id}`,
-        title: s.name || '',
-        artist: (s.ar || []).map((a: any) => a.name).join(', '),
-        album: s.al?.name || '',
-        durationMs: s.dt || 0,
-        coverUrl: resolveNeteaseCover(s.al?.picUrl, s.al?.pic),
+      tracks.value = asArray(dig(songsRes.value, 'songs')).map(s => ({
+        id: `netease:${String(dig(s, 'id'))}`,
+        title: String(dig(s, 'name') || ''),
+        artist: asArray(dig(s, 'ar')).map(a => dig(a, 'name')).join(', '),
+        album: String(dig(s, 'al', 'name') || ''),
+        durationMs: Number(dig(s, 'dt')) || 0,
+        coverUrl: resolveNeteaseCover(dig(s, 'al', 'picUrl'), dig(s, 'al', 'pic')),
         audioUrl: '',
       }))
       renderCount.value = Math.min(RENDER_CHUNK, tracks.value.length)
     }
 
     if (albumsRes.status === 'fulfilled') {
-      const rawAlbums = albumsRes.value?.hotAlbums || []
-      albums.value = rawAlbums
-        .filter((al: any) => al?.id && al?.name)
-        .map((al: any) => ({
-          id: Number(al.id),
-          name: String(al.name),
-          coverUrl: resolveNeteaseCover(al.picUrl, al.blurPicUrl, al.pic),
-          publishYear: al.publishTime ? String(new Date(al.publishTime).getFullYear()) : '',
-          size: Number(al.size) || 0,
+      albums.value = asArray(dig(albumsRes.value, 'hotAlbums'))
+        .filter(al => dig(al, 'id') && dig(al, 'name'))
+        .map(al => ({
+          id: Number(dig(al, 'id')),
+          name: String(dig(al, 'name')),
+          coverUrl: resolveNeteaseCover(dig(al, 'picUrl'), dig(al, 'blurPicUrl'), dig(al, 'pic')),
+          publishYear: publishYear(dig(al, 'publishTime')),
+          size: Number(dig(al, 'size')) || 0,
         }))
     }
 
@@ -188,9 +193,9 @@ async function load() {
         albums: albums.value,
       })
     }
-  } catch (e: any) {
+  } catch (e) {
     if (request !== generation) return
-    if (!(await cached.shown())) error.value = e?.toString() || t('player.load_failed')
+    if (!(await cached.shown())) error.value = String(e ?? '') || t('player.load_failed')
     log.error('load artist failed:', e)
   } finally {
     if (request === generation) isLoading.value = false

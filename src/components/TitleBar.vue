@@ -82,7 +82,9 @@ onMounted(async () => {
     const release = await appWindow.onResized(scheduleMaximizedRefresh)
     if (disposed) { release(); return }
     unlistenResize = release
-  } catch {}
+  } catch {
+    // 浏览器开发模式没有窗口事件，最大化状态只靠下面的主动刷新
+  }
   if (!disposed) await refreshMaximized()
 })
 

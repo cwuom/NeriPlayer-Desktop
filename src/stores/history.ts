@@ -16,6 +16,7 @@ import {
   type BiliVideoInfo,
 } from '@/modules/playback/biliVideoParts'
 import { normalizeCoverUrlForDisplay } from '@/utils/bilibiliCoverCache'
+import { asArray, asRecord, asString, dig } from '@/utils/json'
 import { createLogger } from '@/utils/logger'
 
 const log = createLogger('history')
@@ -40,8 +41,8 @@ interface BackendHistoryEntry {
   resume_position_ms?: number | null
 }
 
-function resumePosition(raw: any): number | undefined {
-  const value = raw?.resumePositionMs ?? raw?.resume_position_ms
+function resumePosition(raw: unknown): number | undefined {
+  const value = dig(raw, 'resumePositionMs') ?? dig(raw, 'resume_position_ms')
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : undefined
 }
 
@@ -51,6 +52,12 @@ interface BackendHistoryDeletion {
   mediaUri?: string | null
   deletedAt?: number
   deleted_at?: number
+}
+
+/** sync_github / sync_webdav 返回的 SyncResult.history（Rust sync::manager 组装的合并结果） */
+export interface HistorySyncPayload {
+  entries?: BackendHistoryEntry[]
+  deletions?: BackendHistoryDeletion[]
 }
 
 export type HistorySyncApplyOutcome = 'applied' | 'deferred' | 'skipped'
@@ -114,7 +121,8 @@ function uniqueByIdentity<T extends { track: TrackInfo }>(items: T[]): T[] {
   })
 }
 
-function normalizeTrack(raw: any): TrackInfo {
+function normalizeTrack(value: unknown): TrackInfo {
+  const raw = asRecord(value)
   return {
     id: String(raw?.id ?? ''),
     title: String(raw?.title ?? ''),
@@ -123,10 +131,10 @@ function normalizeTrack(raw: any): TrackInfo {
     durationMs: Number(raw?.durationMs ?? raw?.duration_ms ?? 0),
     coverUrl: String(raw?.coverUrl ?? raw?.cover_url ?? ''),
     audioUrl: String(raw?.audioUrl ?? raw?.audio_url ?? raw?.url ?? ''),
-    source: raw?.source,
+    source: asString(raw?.source),
     addedAt: Number(raw?.addedAt ?? raw?.added_at ?? 0),
-    syncPayload: raw?.syncPayload ?? raw?.sync_payload,
-    playlistKey: raw?.playlistKey ?? raw?.playlist_key,
+    syncPayload: asRecord(raw?.syncPayload ?? raw?.sync_payload),
+    playlistKey: asString(raw?.playlistKey ?? raw?.playlist_key),
   }
 }
 
@@ -260,23 +268,19 @@ export const useHistoryStore = defineStore('history', () => {
 
   function applyStored(parsedEntries: unknown, parsedDeletions: unknown) {
     try {
-      entries.value = Array.isArray(parsedEntries)
-        ? uniqueByIdentity(parsedEntries
-          .map((entry: any) => ({
-            track: normalizeTrack(entry?.track),
-            playedAt: Number(entry?.playedAt ?? entry?.played_at ?? 0),
-            resumePositionMs: resumePosition(entry),
-          }))
-          .filter((entry: PlayedEntry) => entry.track.id && entry.playedAt > 0))
-        : []
-      deletions.value = Array.isArray(parsedDeletions)
-        ? uniqueByIdentity(parsedDeletions
-          .map((deletion: any) => ({
-            track: normalizeTrack(deletion?.track),
-            deletedAt: Number(deletion?.deletedAt ?? deletion?.deleted_at ?? 0),
-          }))
-          .filter((deletion: HistoryDeletion) => deletion.track.id && deletion.deletedAt > 0))
-        : []
+      entries.value = uniqueByIdentity(asArray(parsedEntries)
+        .map((entry): PlayedEntry => ({
+          track: normalizeTrack(dig(entry, 'track')),
+          playedAt: Number(dig(entry, 'playedAt') ?? dig(entry, 'played_at') ?? 0),
+          resumePositionMs: resumePosition(entry),
+        }))
+        .filter(entry => entry.track.id && entry.playedAt > 0))
+      deletions.value = uniqueByIdentity(asArray(parsedDeletions)
+        .map((deletion): HistoryDeletion => ({
+          track: normalizeTrack(dig(deletion, 'track')),
+          deletedAt: Number(dig(deletion, 'deletedAt') ?? dig(deletion, 'deleted_at') ?? 0),
+        }))
+        .filter(deletion => deletion.track.id && deletion.deletedAt > 0))
     } catch {
       entries.value = []
       deletions.value = []
@@ -429,7 +433,7 @@ export const useHistoryStore = defineStore('history', () => {
    * 不能覆盖本地，调用方应补一轮同步把它们合并上去（对齐 Android 的延迟应用）
    */
   async function applySyncPayload(
-    payload: any,
+    payload: HistorySyncPayload | null | undefined,
     isCurrent: () => boolean = () => true,
     snapshotEpoch?: number,
   ): Promise<HistorySyncApplyOutcome> {

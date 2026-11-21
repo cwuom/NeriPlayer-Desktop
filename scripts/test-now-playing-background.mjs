@@ -44,10 +44,16 @@ const colorSource = colorStatements.map(statement => printer.printNode(ts.EmitHi
 const colorCode = ts.transpileModule(colorSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
+// 配色换算拆到 now-playing/dynamicColors.ts，页面里的两个计算属性仍从 NowPlaying.vue 取
+const dynamicColorsCompiled = ts.transpileModule(
+  await readFile(new URL('../src/components/now-playing/dynamicColors.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } },
+).outputText
+const { buildDynamicColorVars } = await import(`data:text/javascript;base64,${Buffer.from(dynamicColorsCompiled).toString('base64')}`)
 
 function colorsFor(seed, hasPlaybackSession = true) {
-  return new Function('computed', 'player', 'paletteResult', `${colorCode}\nreturn { vars: dynamicColorVars.value, active: sliderActiveColor.value }`)(
-    computed, { hasPlaybackSession }, ref(seed ? { ...palette, lightVibrant: seed } : null),
+  return new Function('computed', 'player', 'paletteResult', 'buildDynamicColorVars', `${colorCode}\nreturn { vars: dynamicColorVars.value, active: sliderActiveColor.value }`)(
+    computed, { hasPlaybackSession }, ref(seed ? { ...palette, lightVibrant: seed } : null), buildDynamicColorVars,
   )
 }
 

@@ -1,5 +1,5 @@
-import type { LyricLine, TrackInfo } from '@/stores/player'
-import { getCachedValue, removeCachedValue, setCachedValue } from '@/utils/persistentCache'
+import type { LyricLine, TrackInfo } from '@/types/track'
+import { getCachedValue, removeCachedValue, setCachedValue } from '@/modules/persistence/persistentCache'
 import { biliSubtitleTarget } from './biliSubtitle'
 import { lyricsIdentity } from './lyricsRequest'
 import { lyricSourceOf, rememberLyricSource } from './lyricSource'

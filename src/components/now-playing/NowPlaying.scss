@@ -1,0 +1,1498 @@
+.now-playing {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  // 确保完全不透明
+  isolation: isolate;
+  overflow: hidden;
+  // Windows/Linux 窗口为方形，圆角会让四角透出下层页面；
+  // macOS 原生窗口自带圆角，仅在 macOS 保持圆角（np--rounded-window）
+  border-radius: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: transform 460ms cubic-bezier(0.22, 1, 0.36, 1), opacity 300ms ease, background-color 0.8s ease;
+  /* 打开期间就常驻独立合成层：收起时只平移已画好的纹理。不常驻的话收起瞬间才提升图层、
+     整页现栅格化，来不及画完的几帧会透出下层（自定义背景下下层几乎全透明，于是闪白）；
+     根元素自带不透明底色，合成器补空块时也用这个颜色而不是透明 */
+  will-change: transform;
+  background-color: rgb(18, 18, 18);
+}
+
+.now-playing.np--rounded-window {
+  /* 与 macOS 窗体圆角一致，避免全屏层直角顶出 OS 圆角 */
+  border-radius: var(--radius-lg);
+}
+
+.np-empty-state {
+  position: relative;
+  z-index: 3;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.np-empty-state h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.np-empty-icon {
+  font-size: 48px;
+  opacity: 0.68;
+}
+
+.np-header-spacer {
+  width: 40px;
+  height: 40px;
+}
+
+/* 开/关由 App 层 slide-up 纯上滑负责，壳层不再二次缩放/位移 */
+.np-shell--opening,
+.np-shell--closing {
+  animation: none;
+}
+
+.np-shell--beat-active .np-ambient-glow::before {
+  animation: np-beat-shell-bloom 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+// 纯色底层：由 accentBgStyle 动态控制颜色
+.np-bg-solid {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  transition: background 0.8s ease;
+}
+
+// 封面异步取色完成后渐入，避免播放页滑入途中突然切换整屏背景
+.np-background-enter-active {
+  transition: opacity 360ms ease;
+}
+
+.np-background-enter-from {
+  opacity: 0;
+}
+
+// 对齐 Android：无全局遮罩，对比度完全由文字颜色和动态配色保证
+.np-scrim {
+  display: none;
+}
+
+/* 环境光：纯 radial 渐变，禁止 filter:blur（滤镜矩形盒会在窗角露出方框） */
+.np-ambient-glow {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.np-ambient-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 70% 58% at 28% 24%,
+      color-mix(in srgb, var(--np-primary, rgba(255,255,255,0.34)) 38%, transparent) 0%,
+      color-mix(in srgb, var(--np-primary, rgba(255,255,255,0.34)) 16%, transparent) 38%,
+      transparent 68%),
+    radial-gradient(ellipse 62% 54% at 78% 78%,
+      color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.30)) 30%, transparent) 0%,
+      color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.30)) 12%, transparent) 42%,
+      transparent 72%),
+    radial-gradient(ellipse 48% 40% at 55% 48%,
+      color-mix(in srgb, var(--np-primary, rgba(255,255,255,0.20)) 10%, transparent) 0%,
+      transparent 70%);
+  opacity: 0.48;
+  transform: scale(1);
+  transition: opacity 420ms ease, transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-shell--track-switching .np-ambient-glow::before {
+  animation: np-glow-breathe 620ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 打开/关闭时内容不做 settle 位移或缩放，只跟随外壳上滑 */
+.np-shell--opening .np-header,
+.np-shell--opening .np-body,
+.np-shell--closing .np-header,
+.np-shell--closing .np-body {
+  animation: none;
+}
+
+/* 顶栏 */
+.np-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  padding: calc(var(--titlebar-height, 36px) + 8px) 24px 14px; /* 顶栏高度 + 8px 间距 */
+  gap: 12px;
+  flex-shrink: 0;
+  transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease;
+}
+
+.np-header-center {
+  flex: 1;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.np-from-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.60);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+}
+
+.np-from-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.87);
+}
+
+.np-header-meta-swap-enter-active,
+.np-header-meta-swap-leave-active {
+  transition: opacity 220ms ease, transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-header-meta-swap-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.np-header-meta-swap-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+.np-icon-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.92);
+  transition: background 150ms, color 220ms ease;
+
+  &:hover { background: rgba(255,255,255,0.12); }
+  .material-symbols-rounded { font-size: 28px; }
+}
+
+/* 双栏主体：五五分 */
+.np-body {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  padding: 0 0 16px;
+  gap: 0;
+  overflow: hidden;
+  min-height: 0;
+  transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 300ms ease;
+
+  &.np-body--no-header {
+    /* 顶栏高度 + 16px 呼吸空间，避免内容贴红绿灯/顶栏 */
+    padding-top: calc(var(--titlebar-height, 36px) + 16px);
+  }
+
+  &.np-body--lyrics-mode {
+    .np-left {
+      flex: 0 0 0%;
+      opacity: 0;
+      transform: translateX(-18px) scale(0.985);
+      pointer-events: none;
+      overflow: hidden;
+      padding: 0;
+      gap: 0;
+    }
+
+    .np-right {
+      flex: 1 1 100%;
+      padding: 0 48px 8px;
+      transform: translateX(0);
+      filter: none;
+    }
+  }
+
+  &.np-body--cover-mode {
+    .np-left {
+      flex: 1 1 46%;
+      max-width: 560px;
+      opacity: 1;
+      transform: none;
+      pointer-events: auto;
+      justify-content: center;
+      padding: 20px 36px 24px 52px;
+    }
+
+    .np-right {
+      flex: 1 1 54%;
+      padding: 8px 48px 16px 16px;
+    }
+  }
+}
+
+/* 大屏/全屏：封面更大、左右留白更均衡 */
+@media (min-height: 900px) {
+  .cover-wrap {
+    width: min(100%, 380px, 38vh);
+  }
+
+  .np-left-stack {
+    max-width: 420px;
+    gap: 14px;
+  }
+}
+
+@media (min-width: 1400px) {
+  .np-body.np-body--cover-mode {
+    .np-left {
+      padding: 24px 40px 28px 64px;
+    }
+
+    .np-right {
+      padding: 12px 64px 20px 24px;
+    }
+  }
+}
+
+.np-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* 外层垂直居中整块 stack；stack 内部固定，切歌不重排 */
+  justify-content: center;
+  padding: 12px 28px 16px 40px;
+  transition: opacity 280ms ease;
+}
+
+.np-left-stack {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.np-left--beat-active {
+  animation: none;
+}
+
+.np-right {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  padding: 0 40px 8px 8px;
+  transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 280ms ease, filter 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 封面：全屏时更大更稳 */
+.cover-wrap {
+  position: relative;
+  width: min(100%, 340px, 40vh);
+  max-width: 100%;
+  aspect-ratio: 1;
+  flex-shrink: 0;
+  transition: filter 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
+  overflow: visible;
+}
+
+.cover-wrap--card {
+  border-radius: 24px;
+}
+
+.cover-wrap--disc {
+  border-radius: 50%;
+}
+
+.cover-wrap--switching {
+  .cover-card,
+  .cover-disc {
+    filter: drop-shadow(0 22px 54px rgba(0,0,0,0.54));
+  }
+}
+
+.cover-wrap--beat-active {
+  animation: np-cover-beat-unison 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Card 模式（圆角矩形，对齐 Android） */
+.cover-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 24px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  overflow: hidden;
+  clip-path: inset(0 round 24px);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+}
+
+.cover-card-img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  transform: scale(1.01);
+}
+
+.cover-card-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 48px;
+  opacity: 0.35;
+}
+
+/* Disc 模式（黑胶唱片）：盘面与纹路中心对称，转起来只有中间的封面在动；高光层在外面，不随盘转 */
+.cover-disc {
+  --disc-label-size: 70%;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    repeating-radial-gradient(circle closest-side, rgba(255,255,255,0.035) 0 1px, transparent 1px 3px),
+    radial-gradient(circle closest-side, #19191c 0%, #0c0c0e 82%, #1b1b1f 97%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.06),
+    0 16px 48px rgba(0,0,0,0.5);
+  animation: np-disc-spin 25s linear infinite paused;
+}
+
+.cover-disc--spinning {
+  animation-play-state: running;
+}
+
+@keyframes np-disc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.cover-inner {
+  position: relative;
+  width: var(--disc-label-size);
+  height: var(--disc-label-size);
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2a2a2f 0%, #18181b 100%);
+  box-shadow:
+    0 0 0 3px rgba(0,0,0,0.55),
+    0 0 0 4px rgba(255,255,255,0.07);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  overflow: hidden;
+}
+
+.cover-disc-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 20deg,
+    transparent 0deg,
+    rgba(255,255,255,0.12) 28deg,
+    transparent 64deg,
+    transparent 180deg,
+    rgba(255,255,255,0.08) 208deg,
+    transparent 244deg
+  );
+  -webkit-mask: radial-gradient(circle closest-side, transparent 71%, #000 72%);
+  mask: radial-gradient(circle closest-side, transparent 71%, #000 72%);
+}
+
+.cover-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.cover-disc-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 48px;
+  opacity: 0.35;
+}
+
+/* 曲目信息：固定高度 + 绝对叠层，切歌不塌布局 */
+.np-info {
+  text-align: center;
+  width: 100%;
+  max-width: 100%;
+  padding: 0 8px;
+  margin: 0;
+  position: relative;
+  height: 52px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.np-info--beat-active {
+  animation: none;
+}
+
+.np-meta {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 0 4px;
+}
+
+.np-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: white;
+  line-height: 1.25;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.3px;
+}
+
+.np-artist {
+  display: block;
+  cursor: pointer;
+  text-align: left;
+  font-size: 14px;
+  color: rgba(255,255,255,0.78);
+  margin-top: 2px;
+  font-weight: 500;
+  line-height: 1.25;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  &:hover { text-decoration: underline; }
+  &:disabled { cursor: default; }
+  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
+}
+
+/* 进度条区域：固定高度，音质行始终占位 */
+.np-slider-area {
+  width: 100%;
+  max-width: 100%;
+  /* 进度条 + 时间 + 音质/下载 chip，留足高度避免裁切；窄栏里音质行换成两行时随之长高，不压到控制栏 */
+  min-height: 80px;
+  padding-top: 10px;
+  flex-shrink: 0;
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  overflow: visible;
+}
+
+.np-slider-area--beat-active {
+  animation: np-slider-beat-glide 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-time {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,0.78);
+  padding: 4px 4px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.np-audio-info {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.68);
+  letter-spacing: 0.2px;
+  margin-top: 0;
+  /* 空参数行保持高度，切换播放来源时不推动控制栏 */
+  min-height: 24px;
+  height: auto;
+  flex-shrink: 0;
+  overflow: visible;
+  padding: 1px 2px;
+  box-sizing: border-box;
+}
+
+.np-audio-codec {
+  color: var(--np-primary-container, var(--md-primary-container, #E8DEF8));
+  transition: color 0.6s ease;
+}
+
+/* 行内排版：放不下时在分隔点后的空格处整项换行，并让两行长度接近，不在第二行孤零零剩一项 */
+.np-audio-detail {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  text-align: center;
+  text-wrap: balance;
+  line-height: 1.45;
+  color: rgba(255,255,255,0.68);
+
+  &.separated::before {
+    content: '·';
+    margin-right: 5px;
+    color: rgba(255,255,255,0.42);
+  }
+}
+
+.np-audio-detail-part {
+  /* 「1025 kbps」「多声道（E-AC-3）」这类整项不从中间断开，放不下就整项换到下一行 */
+  white-space: nowrap;
+  color: rgba(255,255,255,0.70);
+  transition: color 0.45s ease;
+}
+
+.np-audio-detail-part--accent {
+  /* 降低饱和与发光，避免「高清环绕声」等标签过于抢眼 */
+  color: color-mix(in srgb, var(--np-primary, var(--md-primary, #D0BCFF)) 58%, rgba(255,255,255,0.78));
+  text-shadow: none;
+  font-weight: 600;
+}
+
+.np-audio-detail-part--clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.45s ease, background-color 0.2s ease;
+}
+
+.np-audio-detail-part--clickable:hover,
+.np-audio-detail-part--clickable:focus-visible {
+  color: var(--np-primary, var(--md-primary, #D0BCFF));
+  background-color: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
+/* 左边距加上后面的空格，两侧间隔相当 */
+.np-audio-separator {
+  margin: 0 2px 0 5px;
+  color: rgba(255,255,255,0.34);
+}
+
+.np-audio-separator--wrapped {
+  visibility: hidden;
+}
+
+/* 左栏较窄时收紧字号，常见的六项参数尽量仍排在一行 */
+@container (max-width: 360px) {
+  .np-audio-info {
+    font-size: 10.5px;
+    letter-spacing: 0;
+  }
+
+  .np-audio-separator {
+    margin-left: 3px;
+  }
+}
+
+.np-download-chip {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  color: var(--np-primary-container, var(--md-primary-container, #E8DEF8));
+  flex-shrink: 0;
+
+  .material-symbols-rounded {
+    font-size: 16px;
+    line-height: 1;
+  }
+}
+
+/* 控制栏 */
+.np-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  transition: opacity 240ms ease;
+}
+
+.np-controls--switching {
+  animation: none;
+}
+
+.np-controls--feedback {
+  animation: np-controls-feedback-wave 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-controls--feedback-prev .ctrl-btn--transport:first-of-type {
+  --transport-glow-shift: -16px;
+  --transport-glow-rotation: -22deg;
+  --transport-glow-opacity: 1;
+  --transport-ring-opacity: 0.68;
+  --transport-ring-scale: 1.04;
+}
+
+.np-controls--feedback-next .ctrl-btn--transport:last-of-type {
+  --transport-glow-shift: 16px;
+  --transport-glow-rotation: 22deg;
+  --transport-glow-opacity: 1;
+  --transport-ring-opacity: 0.68;
+  --transport-ring-scale: 1.04;
+}
+
+.ctrl-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.87);
+  position: relative;
+  overflow: hidden;
+  transition: color 150ms, background 150ms, transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1);
+
+  &:hover { background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.95); }
+  &.active { color: var(--np-primary, white); }
+  &:active { transform: scale(0.9); }
+}
+
+.ctrl-btn--transport {
+  --transport-glow-shift: 0px;
+  --transport-glow-rotation: 0deg;
+  --transport-glow-opacity: 0;
+  --transport-ring-opacity: 0;
+  --transport-ring-scale: 0.9;
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 9px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.8)) 46%, rgba(255,255,255,0.14));
+    opacity: var(--transport-ring-opacity);
+    transform: scale(var(--transport-ring-scale));
+    transition:
+      opacity 220ms ease,
+      transform 300ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 260ms ease;
+  }
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -8px;
+    border-radius: 999px;
+    background:
+      linear-gradient(
+        90deg,
+        transparent 8%,
+        rgba(255,255,255,0.05) 24%,
+        color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.92)) 72%, white) 48%,
+        rgba(255,255,255,0.08) 72%,
+        transparent 92%
+      );
+    opacity: var(--transport-glow-opacity);
+    transform: translateX(var(--transport-glow-shift)) rotate(var(--transport-glow-rotation)) scale(1.08);
+    filter: blur(10px);
+    transition:
+      opacity 180ms ease,
+      transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+  }
+
+  &:hover::after,
+  &:focus-visible::after {
+    --transport-ring-opacity: 0.44;
+    --transport-ring-scale: 1;
+  }
+
+  &:hover::before,
+  &:focus-visible::before {
+    --transport-glow-opacity: 0.48;
+    --transport-glow-shift: 0px;
+    --transport-glow-rotation: 0deg;
+  }
+}
+
+.ctrl-btn--switching {
+  animation: np-control-pulse 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.play-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--np-primary-container, #f5f0ff);
+  color: var(--np-on-primary, rgb(20, 18, 24));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 轻阴影，不进 mask，避免中间发黑 / 四角 */
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  filter: none;
+  margin: 0 4px;
+  transition: transform 150ms var(--ease-standard), background 0.6s ease, color 0.6s ease, box-shadow 150ms ease;
+  overflow: hidden;
+  position: relative;
+  isolation: isolate;
+
+  &:hover {
+    transform: scale(1.05);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  }
+  &:active { transform: scale(0.94); }
+}
+
+.play-btn--transport {
+  overflow: hidden;
+}
+
+/* 去掉会盖住按钮中心的黑径向阴影 */
+.play-btn--transport::before {
+  content: none;
+}
+
+.play-btn--transport::after {
+  content: none;
+}
+
+.play-btn--transport:hover::before,
+.play-btn--transport:focus-visible::before,
+.play-btn--transport:hover::after,
+.play-btn--transport:focus-visible::after {
+  content: none;
+}
+
+.play-btn--switching {
+  animation: np-play-pulse 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.play-icon-inner {
+  font-size: 28px;
+  display: block;
+  position: absolute;
+  z-index: 1;
+  color: inherit;
+
+  &.spinning {
+    animation: np-spin 1s linear infinite;
+    color: inherit;
+  }
+}
+
+@keyframes np-spin { to { transform: rotate(360deg); } }
+
+@keyframes np-control-pulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(0.9); }
+  100% { transform: scale(1); }
+}
+
+@keyframes np-play-pulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+/* 壳层/内容开合动画已禁用：仅保留 App.slide-up 的 translateY */
+
+@keyframes np-glow-breathe {
+  0% {
+    opacity: 0.28;
+    transform: scale(1.02);
+  }
+  48% {
+    opacity: 0.58;
+    transform: scale(1.0);
+  }
+  100% {
+    opacity: 0.48;
+    transform: scale(1);
+  }
+}
+
+@keyframes np-controls-breathe {
+  0% {
+    transform: translateY(6px);
+    opacity: 0.72;
+  }
+  52% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes np-controls-feedback-wave {
+  0% {
+    transform: scale(0.992);
+    opacity: 0.88;
+  }
+  45% {
+    transform: scale(1.008);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes np-play-press-bounce {
+  0% {
+    transform: scale(1);
+  }
+  24% {
+    transform: scale(0.9);
+  }
+  62% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes np-beat-shell-bloom {
+  0% {
+    opacity: 0.48;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.64;
+    transform: scale(1.03);
+  }
+  100% {
+    opacity: 0.48;
+    transform: scale(1);
+  }
+}
+
+@keyframes np-left-beat-sway {
+  0% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-3px) scale(1.006); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+@keyframes np-cover-beat-unison {
+  0% {
+    transform: scale(1) translateY(0);
+    filter: drop-shadow(0 16px 48px rgba(0,0,0,0.5));
+  }
+  50% {
+    transform: scale(1.02) translateY(-4px);
+    filter: drop-shadow(0 22px 60px rgba(0,0,0,0.58));
+  }
+  100% {
+    transform: scale(1) translateY(0);
+    filter: drop-shadow(0 16px 48px rgba(0,0,0,0.5));
+  }
+}
+
+@keyframes np-info-beat-unison {
+  0% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(-2px); opacity: 1; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes np-slider-beat-glide {
+  0% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(2px); opacity: 1; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes np-toolbar-beat-bob {
+  0% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(-2px); opacity: 1; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes np-lyrics-beat-sway {
+  0% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  50% {
+    transform: translateX(-4px);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* 工具栏弹层：transition 而非一次性关键帧，连点按钮可从当前状态反向；
+   不再动画 filter: blur，它叠在 backdrop-filter 上每帧都要重算两次模糊 */
+.np-floating-popover.np-popover-enter-active {
+  transition: opacity 200ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.np-floating-popover.np-popover-leave-active {
+  transition: opacity 140ms ease, transform 160ms var(--ease-emphasized-accel);
+}
+.np-floating-popover.np-popover-enter-from,
+.np-floating-popover.np-popover-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px) scale(0.94);
+}
+
+@keyframes np-toolbar-breathe {
+  0% {
+    opacity: 0.6;
+    transform: translateY(10px);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes np-lyrics-fade-shift {
+  0% {
+    opacity: 0.56;
+    transform: translateX(18px);
+    filter: blur(10px);
+  }
+  48% {
+    opacity: 1;
+    transform: translateX(-4px);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+/* 播放/暂停图标切换动画（同时进出，绝对定位重叠） */
+.play-icon-enter-active {
+  transition: transform 200ms var(--ease-decelerate), opacity 150ms var(--ease-decelerate);
+}
+.play-icon-leave-active {
+  transition: transform 120ms var(--ease-accelerate), opacity 80ms var(--ease-accelerate);
+}
+.play-icon-enter-from { transform: scale(0.5); opacity: 0; }
+.play-icon-leave-to { transform: scale(0.5); opacity: 0; }
+
+.np-cover-swap-enter-active,
+.np-cover-swap-leave-active {
+  position: absolute;
+  inset: 0;
+  transition: opacity 280ms ease, transform 520ms cubic-bezier(0.22, 1, 0.36, 1), filter 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.np-cover-swap-enter-from,
+.np-cover-swap-leave-to {
+  opacity: 0;
+  transform: scale(0.965);
+  filter: saturate(0.94) blur(1px);
+}
+
+.np-meta-swap-enter-active,
+.np-meta-swap-leave-active {
+  transition: opacity 200ms ease;
+}
+.np-meta-swap-enter-from,
+.np-meta-swap-leave-to {
+  opacity: 0;
+  /* 不再上下位移，避免标题区看起来「跳一大截」 */
+  transform: none;
+  filter: none;
+}
+
+.np-cover-static-enter-active,
+.np-cover-static-leave-active {
+  transition: none;
+}
+
+.np-cover-flow-prev-enter-active,
+.np-cover-flow-prev-leave-active,
+.np-cover-flow-next-enter-active,
+.np-cover-flow-next-leave-active {
+  position: absolute;
+  inset: 0;
+  transition:
+    opacity 300ms ease,
+    transform 620ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 620ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-cover-flow-prev-enter-from {
+  opacity: 0;
+  transform: translateX(-22px) scale(0.972);
+  filter: saturate(0.92) blur(2px);
+}
+
+.np-cover-flow-prev-leave-to {
+  opacity: 0;
+  transform: translateX(18px) scale(1.022);
+  filter: saturate(1.08) blur(4px);
+}
+
+.np-cover-flow-next-enter-from {
+  opacity: 0;
+  transform: translateX(22px) scale(0.972);
+  filter: saturate(0.92) blur(2px);
+}
+
+.np-cover-flow-next-leave-to {
+  opacity: 0;
+  transform: translateX(-18px) scale(1.022);
+  filter: saturate(1.08) blur(4px);
+}
+
+/* 切歌标题：绝对叠层交叉淡入，不做位移，避免整列重排 */
+.np-meta-flow-prev-enter-active,
+.np-meta-flow-prev-leave-active,
+.np-meta-flow-next-enter-active,
+.np-meta-flow-next-leave-active,
+.np-meta-static-enter-active,
+.np-meta-static-leave-active {
+  transition: opacity 220ms ease;
+}
+
+.np-meta-flow-prev-enter-from,
+.np-meta-flow-prev-leave-to,
+.np-meta-flow-next-enter-from,
+.np-meta-flow-next-leave-to,
+.np-meta-static-enter-from,
+.np-meta-static-leave-to {
+  opacity: 0;
+  transform: none;
+  filter: none;
+}
+
+.np-meta-flow-prev-leave-active,
+.np-meta-flow-next-leave-active,
+.np-meta-static-leave-active {
+  position: absolute;
+  inset: 0;
+}
+
+.np-detail-swap-enter-active,
+.np-detail-swap-leave-active {
+  transition: opacity 160ms ease;
+}
+
+.np-detail-swap-enter-from,
+.np-detail-swap-leave-to {
+  opacity: 0;
+  transform: none;
+}
+
+/* 工具栏：切歌时不上下呼吸，避免整列位移 */
+.np-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+  flex-shrink: 0;
+  transition: opacity 240ms ease;
+}
+
+.np-toolbar--switching,
+.np-toolbar--beat-active {
+  animation: none;
+}
+
+.tool-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,0.72);
+  position: relative;
+  overflow: hidden;
+  transition: color 150ms, background 150ms, transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1);
+
+  .material-symbols-rounded { font-size: 20px; }
+
+  &:hover { background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.87); }
+  &.active { color: var(--np-primary, var(--md-primary-container, #E8DEF8)); }
+  &.disabled { opacity: 0.38; cursor: default; }
+  &:disabled { opacity: 0.38; cursor: default; }
+  &:disabled:hover { background: transparent; color: rgba(255,255,255,0.72); }
+  &:active { transform: scale(0.88); }
+}
+
+.tool-btn--feedback::after {
+  content: '';
+  position: absolute;
+  inset: 10px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(255,255,255,0.22) 0%, transparent 72%);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 200ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tool-btn--feedback:hover::after,
+.tool-btn--feedback:focus-visible::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+// 收藏按钮活跃态保持更鲜明的红色
+.fav-btn.active {
+  color: #FF3B30 !important;
+  text-shadow: 0 0 18px rgba(255, 59, 48, 0.28);
+}
+
+.np-favorite-swap-enter-active,
+.np-favorite-swap-leave-active {
+  transition: opacity 180ms ease, transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-favorite-swap-enter-from {
+  opacity: 0;
+  transform: scale(0.72);
+}
+
+.np-favorite-swap-leave-to {
+  opacity: 0;
+  transform: scale(1.2);
+}
+
+/* 来源徽章（对齐 Android PlaybackSourceBadge） */
+.source-badge {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 4px 7px;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* 黑胶是圆形，右下角落在唱片外：改为居中压在封面下方的盘面上（不用 transform，避免与切换动画冲突） */
+.source-badge--disc {
+  left: 0;
+  right: 0;
+  bottom: calc(7.5% - 12px);
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.source-badge-icon {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.source-badge-icon--netease {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.7);
+  mask: url('/icons/ic_netease.svg') center / contain no-repeat;
+}
+
+.source-badge-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.8);
+  letter-spacing: 0.3px;
+}
+
+.np-badge-swap-enter-active,
+.np-badge-swap-leave-active {
+  transition: opacity 220ms ease, transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-badge-swap-enter-from {
+  opacity: 0;
+  transform: translateY(8px) scale(0.9);
+}
+
+.np-badge-swap-leave-to {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.9);
+}
+
+/* 音量控制 */
+.volume-wrap {
+  position: relative;
+}
+
+.volume-popover {
+  position: absolute;
+  bottom: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(30, 28, 34, 0.95);
+  backdrop-filter: blur(20px);
+  border-radius: 14px;
+  box-sizing: border-box;
+  width: 58px;
+  min-width: 58px;
+  max-width: 58px;
+  padding: 16px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.08);
+  z-index: 10;
+}
+
+.np-floating-popover {
+  position: absolute;
+  overflow: hidden;
+  isolation: isolate;
+  /* 统一毛玻璃：半透明底 + 强模糊 */
+  background: rgba(22, 20, 26, 0.62);
+  backdrop-filter: blur(28px) saturate(1.15);
+  -webkit-backdrop-filter: blur(28px) saturate(1.15);
+  border-color: color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.14)) 26%, rgba(255,255,255,0.08));
+  box-shadow:
+    0 14px 40px rgba(0,0,0,0.46),
+    0 0 0 1px rgba(255,255,255,0.03) inset;
+}
+
+.np-floating-popover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 18% 14%, color-mix(in srgb, var(--np-primary) 16%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(255,255,255,0.05), transparent 28%);
+  opacity: 0.95;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.np-floating-popover--audiofx::before {
+  background:
+    radial-gradient(circle at 16% 12%, color-mix(in srgb, var(--np-primary-container) 22%, transparent), transparent 36%),
+    radial-gradient(circle at 82% 88%, color-mix(in srgb, var(--np-primary) 10%, transparent), transparent 40%),
+    linear-gradient(180deg, rgba(255,255,255,0.05), transparent 24%);
+}
+
+.volume-slider {
+  // 保留原生横向滑条的命中计算，避免 WebKitGTK 竖排错位
+  // 逆时针旋转让最大音量在上，数值不反转以保持方向键语义
+  appearance: none;
+  width: 100px;
+  height: 4px;
+  transform: rotate(-90deg);
+  margin: 48px 0;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--np-primary-container, white);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+  }
+}
+
+.volume-label {
+  display: block;
+  width: 42px;
+  font-size: 11px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.7)) 56%, rgba(255,255,255,0.4));
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* 播放速度 / 音效面板 */
+.speed-wrap, .sleep-wrap {
+  position: relative;
+}
+
+.sleep-wrap .tool-btn {
+  overflow: visible;
+}
+
+.speed-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.audiofx-popover {
+  position: absolute;
+  bottom: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(22, 20, 26, 0.72);
+  backdrop-filter: blur(28px) saturate(1.15);
+  -webkit-backdrop-filter: blur(28px) saturate(1.15);
+  border-radius: 16px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+  border: 1px solid rgba(255,255,255,0.08);
+  z-index: 10;
+  min-width: 300px;
+  max-height: 480px;
+  overflow-y: auto;
+
+  &::-webkit-scrollbar { width: 0; height: 0; display: none; }
+}
+
+.speed-popover, .sleep-popover {
+  position: absolute;
+  bottom: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(30, 28, 34, 0.95);
+  backdrop-filter: blur(20px);
+  border-radius: 14px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.08);
+  z-index: 10;
+  min-width: 120px;
+}
+
+.speed-option, .sleep-option {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.7);
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 8px;
+  text-align: left;
+  white-space: nowrap;
+  transition: all 0.15s;
+
+  &:hover {
+    background: color-mix(in srgb, var(--np-primary-container, rgba(255,255,255,0.12)) 16%, rgba(255,255,255,0.08));
+    color: white;
+  }
+
+  &.active {
+    color: var(--np-primary, var(--md-primary, #D0BCFF));
+    font-weight: 600;
+  }
+
+  &.cancel {
+    color: #EF5350;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    margin-top: 4px;
+    padding-top: 10px;
+  }
+}
+
+.sleep-badge {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  z-index: 2;
+  min-width: 22px;
+  height: 14px;
+  line-height: 14px;
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--md-primary, #D0BCFF);
+  /* 定时器倒计时文字白色 */
+  color: #fff;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* 歌词空状态 */
+.lyrics-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  gap: 10px;
+  color: rgba(255,255,255,0.18);
+  font-size: 14px;
+  font-weight: 500;
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
+}
+
+.lyrics-empty .spinning {
+  animation: np-spin 1s linear infinite;
+}
+
+.np-right--switching {
+  animation: np-lyrics-fade-shift 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.np-right--beat-active {
+  animation: np-lyrics-beat-sway 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}

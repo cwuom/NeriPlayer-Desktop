@@ -47,7 +47,7 @@ function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
   if (max === min) return [0, 0, l]
   const d = max - min
   const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
-  let h = 0
+  let h: number
   if (max === nr) h = ((ng - nb) / d + (ng < nb ? 6 : 0)) / 6
   else if (max === ng) h = ((nb - nr) / d + 2) / 6
   else h = ((nr - ng) / d + 4) / 6
@@ -482,11 +482,9 @@ export function extractPalette(
 }
 
 function computeAccentBg(dominant: RGB, isDark: boolean): RGB {
-  let [h, s, l] = rgbToHsl(dominant[0], dominant[1], dominant[2])
+  const [h, rawS, l] = rgbToHsl(dominant[0], dominant[1], dominant[2])
   // 抑制无意义的低饱和粉偏（常见于线稿/皮肤噪点），保留高饱和主色
-  if (s < 0.18 && (h < 0.05 || h > 0.90 || (h > 0.85 && h < 0.98))) {
-    s = 0
-  }
+  const s = rawS < 0.18 && (h < 0.05 || h > 0.90 || (h > 0.85 && h < 0.98)) ? 0 : rawS
   // 提升主色饱和参与度，让黄封面更接近黄色而不是粉紫
   const targetS = isDark
     ? Math.min(Math.max(s, 0.12) * 0.55, 0.42)

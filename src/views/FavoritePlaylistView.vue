@@ -17,6 +17,7 @@ import {
   type ContextMenuActionItem,
   type ContextMenuItem,
 } from '@/utils/contextMenu'
+import { asArray, dig } from '@/utils/json'
 import { createLogger } from '@/utils/logger'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
@@ -51,20 +52,20 @@ async function load() {
   loading.value = true
   loadFailed.value = false
   try {
-    const raw = await invoke<any[]>('list_favorite_playlists')
-    const found = (raw || []).find((item: any) => String(item?.id ?? '') === favoriteId.value)
+    const raw = await invoke<unknown>('list_favorite_playlists')
+    const found = asArray(raw).find(item => String(dig(item, 'id') ?? '') === favoriteId.value)
     if (!found) {
       tracks.value = []
       return
     }
-    name.value = found.name ?? ''
-    source.value = found.source ?? ''
-    coverUrl.value = found.coverUrl ?? found.cover_url ?? ''
+    name.value = String(dig(found, 'name') ?? '')
+    source.value = String(dig(found, 'source') ?? '')
+    coverUrl.value = String(dig(found, 'coverUrl') ?? dig(found, 'cover_url') ?? '')
     // 收藏项的曲目随同步数据一起落地，这里不需要再打平台接口，
     // 断网或平台接口异常时也能正常打开
     // tracks 由后端从同步内部模型转换而来 (id/title/coverUrl 可直接播放), songs 是原始同步数据
-    tracks.value = (found.tracks || found.songs || [])
-      .map(normalizeTrack)
+    tracks.value = asArray(dig(found, 'tracks') || dig(found, 'songs'))
+      .map(item => normalizeTrack(item))
       .filter((track: TrackInfo) => !!track.id && !!track.title)
   } catch (e) {
     log.error('load favorite playlist failed:', e)

@@ -1,6 +1,6 @@
 // 音频缓存按首选音质建键（对齐 Android），实际播放的可能是降级或候选流；
 // 这里按同一个键记下实际音质，缓存命中时用它展示，而不是把首选音质当成实际音质
-import { getCachedValue, setCachedValue } from '@/utils/persistentCache'
+import { getCachedValue, setCachedValue } from '@/modules/persistence/persistentCache'
 
 export interface PlayedQuality {
   qualityKey?: string

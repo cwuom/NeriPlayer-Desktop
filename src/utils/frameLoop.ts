@@ -12,6 +12,10 @@
  * only swap the two function names and keep their own idle-stop and restart logic.
  */
 
+import { createLogger } from './logger'
+
+const log = createLogger('frame-loop')
+
 type FrameCallback = (nowMs: number) => void
 
 /** Low performance mode caps all three loops at 30fps */
@@ -78,7 +82,7 @@ function runFrame(nowMs: number): void {
       } catch (error) {
         // One shader/lyric/waveform callback must not stop the shared scheduler or the
         // other two loops; keep the frame loop alive and report the failure.
-        console.error('[frame-loop] callback failed', error)
+        log.error('callback failed', error)
       }
     }
   } finally {

@@ -4,7 +4,8 @@
 // 保证两端对同一批本地文件分出来的歌手组完全相同。
 
 import { invoke } from '@tauri-apps/api/core'
-import { normalizeTrack, type TrackInfo } from '@/stores/player'
+import { normalizeTrack } from '@/modules/playback/trackModel'
+import type { TrackInfo } from '@/types/track'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 
 export type LocalArtistSortMode = 'name' | 'song_count' | 'recent'
@@ -113,7 +114,7 @@ export async function loadArtistSourceTracks(): Promise<TrackInfo[]> {
   const collected = await Promise.all(
     (playlists || []).map(async (playlist) => {
       try {
-        const raw = await invoke<any[]>('get_playlist_tracks', { id: playlist.id })
+        const raw = await invoke<unknown[]>('get_playlist_tracks', { id: playlist.id })
         return (raw || []).map(normalizeTrack)
       } catch {
         return [] as TrackInfo[]

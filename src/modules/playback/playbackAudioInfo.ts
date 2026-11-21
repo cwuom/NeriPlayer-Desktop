@@ -1,5 +1,21 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { AudioInfo } from '@/stores/player'
+import type { PlaybackAudioSource } from './playbackSource'
+
+// 当前音频质量信息
+export interface AudioInfo {
+  bitrate?: number  // kbps
+  codec?: string    // e.g. "MP3", "FLAC", "AAC", "Opus"
+  format?: string   // 原始格式标识
+  source?: PlaybackAudioSource
+  qualityKey?: string
+  qualityLabel?: string
+  qualityOptions?: Array<{ key: string; label: string }>
+  mimeType?: string
+  sampleRateHz?: number
+  bitDepth?: number
+  channelCount?: number
+  specLabel?: string
+}
 
 export type PlaybackAudioProperties = Pick<AudioInfo, 'bitrate' | 'codec' | 'sampleRateHz' | 'bitDepth' | 'channelCount'>
 

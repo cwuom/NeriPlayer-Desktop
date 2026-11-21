@@ -1,7 +1,7 @@
 // 向后端取歌词：结果带上歌词实际来自哪个来源（netease、qq、kugou、lrclib、amll_ttml、youtube、local）
 import { invoke } from '@tauri-apps/api/core'
-import type { LyricLine } from '@/stores/player'
-import type { DefaultLyricSource } from '@/stores/settings'
+import type { LyricLine } from '@/types/track'
+import type { DefaultLyricSource } from './lyricSourcePreference'
 import { mapBackendLyrics, toEditableRomanizationText } from './lyricsFormat'
 import { defaultLyricMatchKeyword, matchLyrics, type LyricMatchSource } from './lyricMatch'
 import { hasWordTimedLyrics } from './lyricsRequest'

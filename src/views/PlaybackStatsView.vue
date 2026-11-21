@@ -2,8 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { invoke } from '@tauri-apps/api/core'
 import { normalizeTrack, usePlayerStore, type TrackInfo } from '@/stores/player'
+import { fetchPlaybackStatTracks } from '@/modules/playback/playbackStatTracks'
 import {
   STATS_PERIODS,
   usePlaybackStatsStore,
@@ -71,9 +71,7 @@ async function resolveStatTrack(item: TrackStat): Promise<TrackInfo | null> {
   if (startingIdentity.value) return null
   startingIdentity.value = item.identityKey
   try {
-    const [raw] = await invoke<Array<Record<string, unknown> | null>>('get_playback_stat_tracks', {
-      identityKeys: [item.identityKey],
-    })
+    const [raw] = await fetchPlaybackStatTracks([item.identityKey])
     const selected = raw ? normalizeTrack(raw) : null
     if (!selected || !isPlayable(selected)) {
       toast.show(t(selected?.source === 'local' ? 'stats.local_file_unavailable' : 'stats.track_unavailable'), 'info')

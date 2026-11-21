@@ -5,6 +5,10 @@ import * as pinia from 'pinia'
 import ts from 'typescript'
 
 // 云端歌单：先显示缓存、后台刷新时有状态可显示、并发合并、失败不清缓存、换号丢弃旧结果
+const jsonUtilSource = await readFile(new URL('../src/utils/json.ts', import.meta.url), 'utf8')
+const jsonUtil = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(jsonUtilSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText).toString('base64')}`)
 let sequence = 0
 async function loadStore(dependencies) {
   const source = await readFile(new URL('../src/stores/recommend.ts', import.meta.url), 'utf8')
@@ -48,6 +52,7 @@ async function runtime(cache = null) {
     } },
     './toast': { useToastStore: () => ({ success() {}, error: message => toasts.push(message) }) },
     '@/utils/logger': { createLogger: () => ({ error: (...args) => errors.push(args), warn() {} }) },
+    '@/utils/json': jsonUtil,
     '@/utils/neteaseCover': { resolveNeteaseCover: (...values) => values.find(value => typeof value === 'string' && value) || '' },
     '@/modules/youtube/youtubePlaylistParse': {
       parseYouTubeLibraryPlaylists: data => data.playlists, parseYouTubeHomeFeed: () => [],

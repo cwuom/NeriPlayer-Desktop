@@ -44,6 +44,10 @@ function album(id, name, year) {
 }
 
 const matcher = {}
+const jsonUtil = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/utils/json.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(jsonUtil)
 new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/search/textMatcher.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(createRequire(import.meta.url), matcher)
@@ -73,6 +77,7 @@ async function mountArtist(data = fixture) {
   const played = [], opened = [], calls = []
   const imports = {
     ...matcher,
+    ...jsonUtil,
     useTrackActivation: activation.useTrackActivation,
     useRoute: () => route,
     useRouter: () => ({ push: location => opened.push(location), back() {} }),

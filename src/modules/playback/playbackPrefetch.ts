@@ -1,4 +1,4 @@
-import type { TrackInfo } from '@/stores/player'
+import type { TrackInfo } from '@/types/track'
 import {
   getPlaybackSourceKind,
   isRemotePlaybackTrack,

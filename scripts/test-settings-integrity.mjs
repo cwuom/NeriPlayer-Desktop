@@ -51,8 +51,12 @@ const settingsModule = load(await read('../src/stores/settings.ts'), {
   '@/utils/logger': { createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) },
   '@/modules/desktopLyrics/style': load(await read('../src/modules/desktopLyrics/style.ts')),
   '@/modules/shortcuts/bindings': load(await read('../src/modules/shortcuts/bindings.ts'), {
-    './platform': load(await read('../src/modules/shortcuts/platform.ts')),
+    './platform': load(await read('../src/modules/shortcuts/platform.ts'), {
+      '@/utils/platform': load(await read('../src/utils/platform.ts')),
+    }),
   }),
+  '@/modules/lyrics/lyricSourcePreference': load(await read('../src/modules/lyrics/lyricSourcePreference.ts')),
+  '@/modules/settings/uiScaleRange': load(await read('../src/modules/settings/uiScaleRange.ts')),
 })
 const { roundToStepPrecision } = load(await read('../src/utils/editableRange.ts'))
 
@@ -89,8 +93,17 @@ const between = (text, start, end) => {
   return text.slice(from, text.indexOf(end, from + start.length))
 }
 const rust = await read('../src-tauri/src/settings/store.rs')
-const settingsView = await read('../src/views/SettingsView.vue')
-const nowPlaying = await read('../src/components/NowPlaying.vue')
+// 设置页的选项表与分区面板已拆到 components/settings/，按整页源码一并检查
+const settingsView = (await Promise.all([
+  '../src/views/SettingsView.vue',
+  '../src/components/settings/usePlaybackSettings.ts',
+  '../src/components/settings/LyricsSettingsPanels.vue',
+  '../src/components/settings/SettingsSidebar.vue',
+  '../src/components/settings/SettingsDialogs.vue',
+].map(read))).join('\n')
+// 播放页的音质选项表与字号子视图已拆到 now-playing/ 目录
+const nowPlayingQualities = await read('../src/components/now-playing/audioQuality.ts')
+const nowPlayingFontSheet = await read('../src/components/now-playing/NowPlayingFontScaleView.vue')
 const rustStruct = between(rust, 'pub struct AppSettings', 'impl Default for AppSettings')
 const RUST_INTEGER_KEYS = [...rustStruct.matchAll(/pub (\w+): (?:i32|u32),/g)]
   .map(match => camel(match[1]))
@@ -381,7 +394,7 @@ await regression('NetEase playback quality uses Android "higher" everywhere', st
     assert.equal(store.neteaseQuality, 'higher', JSON.stringify(value))
   }
   const settingsValues = [...between(settingsView, 'const neteaseQualityOptions', '])').matchAll(/value: '(\w+)'/g)].map(m => m[1])
-  const sheetValues = [...between(nowPlaying, 'const neteaseQualities', ']').matchAll(/key: '(\w+)'/g)].map(m => m[1])
+  const sheetValues = [...between(nowPlayingQualities, 'const neteaseQualities', ']').matchAll(/key: '(\w+)'/g)].map(m => m[1])
   assert.deepEqual(settingsValues, sheetValues)
 })
 
@@ -393,7 +406,7 @@ await regression('lyric font scale uses the Android 0.5-1.6 range in every edito
   assert.equal(settingsModule.LYRIC_FONT_SCALE_MIN, 0.5)
   assert.equal(settingsModule.LYRIC_FONT_SCALE_MAX, 1.6)
   assert.match(rust, /clamp_f32\(self\.lyric_font_scale, 0\.5, 1\.6, 1\.0\)/)
-  const fontSheet = between(nowPlaying, "moreSheetView === 'fontsize'", '</template>')
+  const fontSheet = between(nowPlayingFontSheet, '<template>', '</template>')
   assert.match(fontSheet, /:min="LYRIC_FONT_SCALE_MIN"/)
   assert.match(fontSheet, /:max="LYRIC_FONT_SCALE_MAX"/)
   assert.doesNotMatch(settingsView, /v-model\.number="lyricFontScale" min="0\.5" max="1\.5"/)

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import ts from 'typescript'
 import * as vue from 'vue'
 import * as pinia from 'pinia'
@@ -8,7 +8,12 @@ import { loadModule, subtitle, format, deferred, flush } from './bili-subtitle-t
 const plain = text => [{ startMs: 1000, durationMs: 2000, text, words: [] }]
 const cc = (language = 'zh-CN') => ({ source: 'bilibili_cc', lines: [{ ...plain(language)[0], translation: `${language} translation` }], track: { language, label: language } })
 const bili = id => ({ id: `bilibili:${id}:22`, title: 'Video', artist: 'Uploader', album: 'Bilibili|22|BV1xx411c7mD', durationMs: 60000, audioUrl: '', source: 'bilibili' })
-const playerSource = ts.createSourceFile('player.ts', readFileSync(new URL('../src/stores/player.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
+// player store 拆成 player.ts 与 player/ 下的切片，拼接全部源码后按名称查找实现
+const playerDir = new URL('../src/stores/player/', import.meta.url)
+const playerFiles = [new URL('../src/stores/player.ts', import.meta.url),
+  ...readdirSync(playerDir).filter(name => name.endsWith('.ts')).sort().map(name => new URL(name, playerDir))]
+const playerText = playerFiles.map(file => readFileSync(file, 'utf8')).join('\n')
+const playerSource = ts.createSourceFile('player.ts', playerText, ts.ScriptTarget.ES2022, true)
 let downloadResolver
 function findDownloadResolver(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === 'downloadedTrackForPlayback') downloadResolver = node.getText(playerSource)
@@ -49,7 +54,7 @@ async function runtime() {
     preferred: async () => null, local: async () => [], cacheRead: async key => entries.get(key) ?? null,
   }
   const cache = loadModule('../src/modules/lyrics/lyricsCache.ts', {
-    '@/utils/persistentCache': {
+    '@/modules/persistence/persistentCache': {
       getCachedValue: async (_, key) => handlers.cacheRead(key),
       setCachedValue: async (_, key, value) => entries.set(key, value),
       removeCachedValue: async (_, key) => entries.delete(key),

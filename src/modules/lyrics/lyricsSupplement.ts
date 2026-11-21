@@ -1,4 +1,4 @@
-import type { LyricLine } from '@/stores/player'
+import type { LyricLine } from '@/types/track'
 import { defaultLyricMatchKeyword, matchLyrics, type LyricMatchResult } from './lyricMatch'
 import { normalizeLyricSource } from './lyricOffset'
 import {

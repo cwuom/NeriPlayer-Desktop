@@ -8,10 +8,33 @@ import * as vue from 'vue'
 const source = await readFile(new URL('../src/components/NowPlaying.vue', import.meta.url), 'utf8')
 const script = source.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
 const parsed = ts.createSourceFile('NowPlaying.ts', script, ts.ScriptTarget.ES2022, true)
+// 歌手跳转与歌词回填已拆到 now-playing/ 下的组合式函数，按声明名在页面脚本和这些文件里查找
+const extractedSources = [parsed, ...await Promise.all([
+  'useNowPlayingContextMenu.ts', 'useTrackNavigation.ts', 'useLyricsEditing.ts', 'useTrackInfoEditing.ts', 'searchResultLyrics.ts',
+].map(async file => ts.createSourceFile(file, await readFile(new URL(`../src/components/now-playing/${file}`, import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)))]
+function findFunction(name) {
+  for (const sourceFile of extractedSources) {
+    let found
+    const visit = node => {
+      if (found) return
+      if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node
+      else ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
+    // 去掉 export 修饰，与原先页面里的局部函数形态一致
+    if (found) return found.getText(sourceFile).replace(/^export\s+/, '')
+  }
+}
+// 后端命令统一经页面的 nowPlayingIpc 发出：用页面里的真实命令映射接到各用例的假 invoke 上
+const ipcStatement = parsed.statements.find(node => ts.isVariableStatement(node)
+  && node.declarationList.declarations.some(declaration => declaration.name.getText(parsed) === 'nowPlayingIpc'))
+assert.ok(ipcStatement)
+const ipcCode = ts.transpileModule(ipcStatement.getText(parsed), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+const ipcFor = invoke => new Function('invoke', `${ipcCode}\nreturn nowPlayingIpc`)(invoke)
 const navigationFunctions = ['openArtistPage', 'openCurrentArtist'].map(name => {
-  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  const declaration = findFunction(name)
   assert.ok(declaration)
-  return declaration.getText(parsed)
+  return declaration
 }).join('\n')
 const compiled = ts.transpileModule(navigationFunctions, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -84,6 +107,7 @@ function artistPage(track, options = {}) {
       routes.push(route)
     } },
     invoke,
+    ipc: ipcFor(invoke),
     emit() {},
     toast: { show: message => messages.push(message), error: message => messages.push(message) },
     t: key => key,
@@ -381,11 +405,12 @@ const offsetStoreSource = await readFile(new URL('../src/stores/lyricOffset.ts',
 const userDataSource = await readFile(new URL('../src/modules/persistence/userData.ts', import.meta.url), 'utf8')
 const lyricSource = loadModule(await readFile(new URL('../src/modules/lyrics/lyricSource.ts', import.meta.url), 'utf8'), { vue })
 const offset = loadModule(offsetSource)
+// mapBackendLyrics 不再有页面内的包装，直接用 lyricsFormat 的同名导出（已随 ...format 注入）
 const lyricFunctions = ['onLyricMatchPicked', 'commitLyricsToTrack', 'confirmApplySearchResult', 'parseLyricsFromSearchResult',
-  'lyricSourceForPlatform', 'mapBackendLyrics'].map(name => {
-  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  'lyricSourceForPlatform'].map(name => {
+  const declaration = findFunction(name)
   assert.ok(declaration)
-  return declaration.getText(parsed)
+  return declaration
 }).join('\n')
 const compiledLyrics = ts.transpileModule(lyricFunctions, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -418,7 +443,7 @@ async function lyricActions(fields, { beforeTrackWrite = async () => {} } = {}) 
     throw new Error(`unexpected command ${command}`)
   }
   const log = { warn() {}, error() {} }
-  const userData = loadModule(userDataSource, { '@tauri-apps/api/core': { invoke } })
+  const userData = loadModule(userDataSource, { '@tauri-apps/api/core': { invoke }, '@/utils/logger': { createLogger: () => log } })
   await userData.preloadUserData({ getItem: () => null, removeItem() {} })
   const sync = loadModule(syncSource, {
     '@tauri-apps/api/core': { invoke }, '@/utils/logger': { createLogger: () => log },
@@ -448,7 +473,7 @@ async function lyricActions(fields, { beforeTrackWrite = async () => {} } = {}) 
     lines: [{ startMs: 1000, durationMs: 1000, text: '新歌词', words: [] }],
   }
   const dependencies = {
-    ...format, ...sync, ...match, ...offset, ...lyricSource, player, invoke, log, lyricOffsetStore: offsetStore,
+    ...format, ...sync, ...match, ...offset, ...lyricSource, player, invoke, ipc: ipcFor(invoke), log, lyricOffsetStore: offsetStore,
     mapBackendLyricsShared: format.mapBackendLyrics,
     currentLyrics: { replace(lines) { displayedLyrics = lines } },
     cacheLyricsForTrack() {},

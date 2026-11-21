@@ -1,0 +1,608 @@
+@use '@/components/settings/settingsPrimitives.scss' as primitives;
+
+@include primitives.select-card;
+
+.settings-view {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  /* 顶部总留白（标题栏 + 本内边距）恒定 64px：
+     原 28px 是按 36px 标题栏调的，macOS 标题栏加高到 52px 后
+     继续写死会叠加出双重留白，这里随 --titlebar-height 自动收窄 */
+  padding: max(8px, calc(64px - var(--titlebar-height, 36px))) clamp(24px, 4vw, 64px) 0;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(230px, 280px) minmax(0, 760px);
+  justify-content: center;
+  align-items: stretch;
+  gap: clamp(28px, 5vw, 72px);
+  height: 100%;
+  min-height: 0;
+  max-width: 1160px;
+  margin: 0 auto;
+}
+
+:deep(.setting-card.search-highlight) {
+  animation: settings-search-flash 1.6s var(--ease-standard);
+}
+
+@keyframes settings-search-flash {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  15%, 55% { box-shadow: 0 0 0 2px var(--md-primary), 0 0 24px color-mix(in srgb, var(--md-primary) 30%, transparent); }
+}
+
+/* 右列头部固定，滚动职责移交给 .settings-content-scroll */
+.settings-content {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 18px;
+}
+
+.settings-content-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+.settings-panels {
+  min-width: 0;
+}
+
+:global(.content:has(.settings-view)) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+:global(.content:has(.settings-view)::-webkit-scrollbar) {
+  display: none;
+}
+
+.settings-content-header {
+  margin: 0 4px 24px;
+
+  h2 {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 650;
+    line-height: 1.2;
+  }
+
+  p {
+    margin: 8px 0 0;
+    color: var(--md-on-surface-variant);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+}
+
+@include primitives.section-panel;
+
+.settings-section-intro {
+  margin: -2px 4px 14px;
+  color: var(--md-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@include primitives.panel-first-label;
+
+@include primitives.card;
+
+.about-card { cursor: pointer; }
+
+.about-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--md-on-surface-variant);
+  opacity: 0.45;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity var(--duration-short), background var(--duration-short), color var(--duration-short);
+
+  .material-symbols-rounded {
+    font-size: 18px;
+  }
+
+  &:hover {
+    opacity: 0.9;
+    color: var(--md-primary);
+    background: color-mix(in srgb, var(--md-primary) 10%, transparent);
+  }
+}
+
+.copyable-setting-card {
+  cursor: pointer;
+  user-select: none;
+
+  &:hover .copy-hint-icon {
+    opacity: 0.7;
+  }
+}
+
+.mono-build-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  word-break: break-all;
+}
+
+.about-wordmark {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.about-wordmark-hand {
+  margin-left: 2px;
+  font-family: var(--font-hand);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--md-primary);
+}
+
+.copy-hint-icon {
+  font-size: 14px;
+  opacity: 0.35;
+  flex-shrink: 0;
+  transition: opacity var(--duration-short);
+}
+
+/* 账号卡片 */
+@include primitives.platform-icon;
+
+.account-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.account-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--md-surface-container-highest);
+  color: var(--md-on-surface-variant);
+  font-size: 20px;
+}
+
+.account-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  color: var(--md-on-surface-variant);
+  font-size: 11px;
+}
+
+.account-status.connected { color: var(--md-primary); }
+
+.account-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.account-login-btn {
+  padding: 6px 16px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+  cursor: pointer;
+  transition: opacity var(--duration-short);
+  white-space: nowrap;
+  flex-shrink: 0;
+
+  &:hover { opacity: 0.85; }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+.account-logout-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--md-error, #FFB4AB);
+  flex-shrink: 0;
+  transition: background var(--duration-short);
+  white-space: nowrap;
+
+  &:hover { background: color-mix(in srgb, var(--md-error, #FFB4AB) 12%, transparent); }
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+
+@include primitives.card-body;
+.ui-scale-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+.ui-scale-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.ui-scale-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+
+  .m3-slider { flex: 1 1 120px; width: auto; min-width: 80px; }
+}
+.font-setting-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+.font-setting-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+@include primitives.card-text;
+
+.download-summary-card {
+  border-color: color-mix(in srgb, var(--md-primary) 24%, var(--md-outline-variant));
+}
+
+.active-download-card {
+  align-items: flex-start;
+
+  .setting-icon-wrap {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+.settings-download-progress {
+  position: relative;
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--md-surface-container-highest);
+}
+
+.settings-download-progress-fill {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--md-primary), color-mix(in srgb, var(--md-primary) 70%, white));
+  transition: width 180ms ease;
+}
+
+.settings-download-progress.indeterminate .settings-download-progress-fill {
+  width: 36% !important;
+  animation: settings-download-indeterminate 1.2s ease-in-out infinite;
+}
+
+.settings-download-progress.error .settings-download-progress-fill {
+  background: var(--md-error);
+}
+
+.settings-download-progress.muted .settings-download-progress-fill {
+  background: var(--md-outline);
+}
+
+.download-cancel-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-error);
+  flex-shrink: 0;
+  transition: background var(--duration-short);
+
+  &:hover {
+    background: color-mix(in srgb, var(--md-error) 12%, transparent);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  .material-symbols-rounded {
+    font-size: 18px;
+  }
+}
+
+@keyframes settings-download-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(280%); }
+}
+
+/* 深色模式切换胶囊：滑动拇指 */
+.dark-mode-pills {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 36px);
+  background: var(--md-surface-container-highest);
+  border-radius: var(--radius-full);
+  padding: 3px;
+  gap: 2px;
+}
+
+.pill-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: 36px;
+  border-radius: var(--radius-full);
+  background: var(--md-primary);
+  /* 650ms 非线性 emphasized：先快后慢，滑动更有一贯性 */
+  transition: transform 650ms cubic-bezier(0.2, 0, 0, 1);
+  pointer-events: none;
+  z-index: 0;
+  will-change: transform;
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--md-primary) 35%, transparent);
+}
+
+.pill {
+  width: 36px;
+  height: 32px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-on-surface-variant);
+  position: relative;
+  z-index: 1;
+  transition: color 650ms cubic-bezier(0.2, 0, 0, 1);
+
+  &.active {
+    color: var(--md-on-primary);
+  }
+  &:hover:not(.active) { color: var(--md-on-surface); }
+}
+
+/* 主题色选择 */
+.color-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.color-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid transparent;
+  transition: transform var(--duration-short), border-color var(--duration-short);
+
+  &:hover { transform: scale(1.15); }
+  &.selected { border-color: rgba(255,255,255,0.8); }
+}
+
+@include primitives.collapsible;
+
+.setting-card.sync-frequency-card {
+  margin-left: 0;
+}
+
+/* M3 Chip 选择器 */
+.chip-row, .chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-row { flex-shrink: 0; }
+.chip-wrap { margin-top: 8px; }
+
+@include primitives.chip;
+
+.quality-card {
+  flex-wrap: wrap;
+}
+
+@include primitives.input-slider;
+
+/* 同步断开按钮 */
+.sync-disconnect-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-error);
+  transition: background var(--duration-short);
+  flex-shrink: 0;
+
+  &:hover { background: color-mix(in srgb, var(--md-error) 10%, transparent); }
+}
+
+/* 同步状态标签 */
+.sync-status-pill {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+
+  &.configured {
+    background: color-mix(in srgb, var(--md-primary) 12%, transparent);
+    color: var(--md-primary);
+  }
+}
+
+.sync-action-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--md-primary);
+  flex-shrink: 0;
+}
+
+.clear-config-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--md-error);
+  transition: background var(--duration-short);
+  cursor: pointer;
+
+  &:hover { background: color-mix(in srgb, var(--md-error) 10%, transparent); }
+}
+
+@include primitives.spinning;
+
+@media (max-width: 960px) {
+  .settings-view { padding-inline: 24px; }
+
+  .settings-layout {
+    grid-template-columns: minmax(210px, 240px) minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .settings-content { padding-top: 10px; }
+}
+
+@media (max-width: 760px) {
+  :global(.content:has(.settings-view)) {
+    height: auto;
+    overflow-y: auto;
+  }
+
+  .settings-view {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+    padding: 20px 18px 32px;
+  }
+
+  .settings-layout {
+    display: block;
+    height: auto;
+    min-height: 0;
+    max-width: none;
+  }
+
+  .settings-content {
+    max-width: none;
+    min-height: 0;
+    display: block;
+    overflow: visible;
+    padding-top: 12px;
+  }
+
+  /* 窄屏下整页滚动，内部滚动容器退化为普通块 */
+  .settings-content-scroll {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .settings-content-header {
+    margin-bottom: 18px;
+
+    h2 { font-size: 24px; }
+  }
+}
+
+@media (max-width: 480px) {
+  .settings-view { padding-inline: 14px; }
+
+  @include primitives.card-narrow;
+}
+
+/* 快捷键说明 */
+.shortcut-card { align-items: flex-start; }
+
+.shortcut-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 20px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 26px;
+}
+
+.shortcut-label {
+  font-size: 13px;
+  color: var(--md-on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.shortcut-keys kbd {
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm, 8px);
+  background: var(--md-surface-container-highest);
+  border: 1px solid var(--md-outline-variant, rgba(255, 255, 255, 0.12));
+  border-bottom-width: 2px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  color: var(--md-on-surface);
+}

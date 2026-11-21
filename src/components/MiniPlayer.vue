@@ -265,7 +265,7 @@ defineExpose({
               <div class="mp-title">{{ player.currentTrack?.title || t('player.not_playing') }}</div>
               <div class="mp-artist">{{ player.currentTrack?.artist || '' }}</div>
               <!-- 始终占位，避免切歌时时长行出现/消失导致上下跳动 -->
-              <div class="mp-time">{{ player.durationMs > 0 ? `${currentTimeFormatted} / ${durationFormatted}` : ' ' }}</div>
+              <div class="mp-time">{{ player.durationMs > 0 ? `${currentTimeFormatted} / ${durationFormatted}` : '\u00a0' }}</div>
             </div>
           </transition>
         </div>

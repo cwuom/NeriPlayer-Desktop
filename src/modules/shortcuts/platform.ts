@@ -3,21 +3,7 @@
 // macOS 用 Command，Windows / Linux 用 Ctrl。三端统一走 primaryModifier()
 // 判断，避免各处散落 metaKey/ctrlKey 分支。
 
-export type DesktopPlatform = 'mac' | 'windows' | 'linux'
-
-function rawPlatform(): string {
-  // 模块加载时就会调用；Node 20 等非浏览器环境没有全局 navigator
-  if (typeof navigator === 'undefined') return ''
-  const data = (navigator as unknown as { userAgentData?: { platform?: string } }).userAgentData
-  return (data?.platform || navigator.platform || navigator.userAgent || '').toLowerCase()
-}
-
-export function detectPlatform(): DesktopPlatform {
-  const value = rawPlatform()
-  if (/mac|iphone|ipad|darwin/.test(value)) return 'mac'
-  if (/win/.test(value)) return 'windows'
-  return 'linux'
-}
+import { detectPlatform } from '@/utils/platform'
 
 export const isMacPlatform = detectPlatform() === 'mac'
 

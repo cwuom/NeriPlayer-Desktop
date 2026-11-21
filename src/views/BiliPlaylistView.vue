@@ -28,6 +28,7 @@ import {
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { recordPlaylistOpen } from '@/modules/library/playlistUsage'
+import { asArray, asRecord, dig } from '@/utils/json'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
 const route = useRoute()
@@ -109,6 +110,11 @@ let loadGeneration = 0
 const loadingMorePages = ref(false)
 const partialLoadError = ref<string | null>(null)
 
+/** 收藏夹归属 id：接口给数字或字符串，其它形态视为缺失 */
+function biliOwnerId(value: unknown): string | number | undefined {
+  return typeof value === 'number' || typeof value === 'string' ? value : undefined
+}
+
 async function loadDetail() {
   const request = ++loadGeneration
   const mediaId = Number(route.params.mediaId)
@@ -136,38 +142,37 @@ async function loadDetail() {
 
   try {
     // 获取收藏夹信息
-    const infoData = await invoke<any>('get_bili_fav_folder_info', { mediaId })
+    const infoData = await invoke<unknown>('get_bili_fav_folder_info', { mediaId })
     if (request !== loadGeneration) return
     cached.markFresh()
-    const info = infoData?.data || {}
-    folderName.value = info.title || ''
-    coverUrl.value = info.cover || ''
-    mediaCount.value = info.media_count || 0
+    const info = asRecord(dig(infoData, 'data')) ?? {}
+    folderName.value = String(info.title || '')
+    coverUrl.value = String(info.cover || '')
+    mediaCount.value = Number(info.media_count) || 0
 
     // 获取收藏夹内容（分页加载所有）
     let page = 1
-    const allItems: any[] = []
+    const allItems: unknown[] = []
     let hasMore = true
 
     while (hasMore) {
-      const data = await invoke<any>('get_bili_favorite_items', { mediaId, page })
+      const data = await invoke<unknown>('get_bili_favorite_items', { mediaId, page })
       if (request !== loadGeneration) return
-      const items = data?.data?.medias || []
-      allItems.push(...items)
-      hasMore = data?.data?.has_more || false
+      allItems.push(...asArray(dig(data, 'data', 'medias')))
+      hasMore = Boolean(dig(data, 'data', 'has_more'))
       page++
       if (page > 50) break // 安全上限
     }
 
     tracks.value = allItems
-      .filter((item: any) => item.type === 2) // 仅视频
-      .map((item: any) => ({
-        id: `bilibili:${item.bvid || item.bv_id}`,
-        title: item.title || '',
-        artist: item.upper?.name || '',
+      .filter(item => dig(item, 'type') === 2) // 仅视频
+      .map(item => ({
+        id: `bilibili:${String(dig(item, 'bvid') || dig(item, 'bv_id'))}`,
+        title: String(dig(item, 'title') || ''),
+        artist: String(dig(item, 'upper', 'name') || ''),
         album: '',
-        durationMs: (item.duration || 0) * 1000,
-        coverUrl: item.cover || '',
+        durationMs: (Number(dig(item, 'duration')) || 0) * 1000,
+        coverUrl: String(dig(item, 'cover') || ''),
         audioUrl: '',
       }))
     saveDetailCache(cacheKey)
@@ -175,15 +180,15 @@ async function loadDetail() {
     recordPlaylistOpen({
       source: 'bili',
       id: mediaId,
-      mid: info.mid ?? info.upper?.mid,
-      fid: info.fid,
+      mid: biliOwnerId(info.mid ?? dig(info, 'upper', 'mid')),
+      fid: biliOwnerId(info.fid),
       name: folderName.value,
       coverUrl: coverUrl.value,
       trackCount: mediaCount.value || tracks.value.length,
     })
-  } catch (e: any) {
+  } catch (e) {
     if (request === loadGeneration && !(await cached.shown())) {
-      error.value = e?.toString() || t('player.load_failed')
+      error.value = String(e ?? '') || t('player.load_failed')
     }
   } finally {
     if (request === loadGeneration) isLoading.value = false
@@ -259,10 +264,10 @@ async function loadArchive(request: number, contentId: number, kind: 'collection
       coverUrl: coverUrl.value,
       trackCount: mediaCount.value || tracks.value.length,
     })
-  } catch (e: any) {
+  } catch (e) {
     if (request !== loadGeneration) return
     loadingMorePages.value = false
-    const message = e?.toString() || t('player.load_failed')
+    const message = String(e ?? '') || t('player.load_failed')
     // 已经显示了一部分（前几页或缓存）时保留列表，只在列表下方提示没加载完
     if (collected.length > 0 || showingCache) partialLoadError.value = message
     else if (!(await cached.shown())) error.value = message

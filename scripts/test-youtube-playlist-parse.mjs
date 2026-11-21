@@ -15,10 +15,13 @@ async function compileTs(relativePath) {
 
 const trackCoverCompiled = await compileTs('../src/utils/trackCover.ts')
 const trackCoverModuleUrl = `data:text/javascript;base64,${Buffer.from(trackCoverCompiled).toString('base64')}`
+const jsonCompiled = await compileTs('../src/utils/json.ts')
+const jsonModuleUrl = `data:text/javascript;base64,${Buffer.from(jsonCompiled).toString('base64')}`
 
 const playlistSourceUrl = new URL('../src/modules/youtube/youtubePlaylistParse.ts', import.meta.url)
 const playlistSource = (await readFile(playlistSourceUrl, 'utf8'))
   .replace("from '@/utils/trackCover'", `from ${JSON.stringify(trackCoverModuleUrl)}`)
+  .replace("from '@/utils/json'", `from ${JSON.stringify(jsonModuleUrl)}`)
   .replace(/import type \{ TrackInfo \} from '@\/stores\/player'\n?/, '')
 const playlistCompiled = ts.transpileModule(playlistSource, {
   compilerOptions: {

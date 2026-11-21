@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { ref } from 'vue'
-import type { LyricLine, TrackInfo } from '@/stores/player'
+import type { LyricLine, TrackInfo } from '@/types/track'
 import {
   alignBiliSubtitleLyrics, biliSubtitleCandidates, biliSubtitleTarget, matchesBiliSubtitleLanguage,
   parseBiliSubtitleCues, parseBiliSubtitleTracks, translatedBiliSubtitleTrack,

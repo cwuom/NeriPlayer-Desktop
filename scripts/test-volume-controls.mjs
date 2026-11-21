@@ -63,8 +63,12 @@ for (const [component, className] of [['NowPlaying', 'volume-slider'], ['MiniPla
   await test(`${component} places maximum volume above mute after styling`, async () => {
     const slider = await volumeSlider(component, className)
     const style = slider.descriptor.styles[0]
+    // 样式可经 src 引用外部文件（NowPlaying 的样式在 now-playing/NowPlaying.scss）
+    const styleSource = style.src
+      ? await readFile(new URL(style.src, new URL(`../src/components/${component}.vue`, import.meta.url)), 'utf8')
+      : style.content
     const compiled = await compileStyleAsync({
-      source: style.content, filename: `${component}.vue`, id: 'volume-controls-test',
+      source: styleSource, filename: `${component}.vue`, id: 'volume-controls-test',
       preprocessLang: style.lang,
     })
     assert.deepEqual(compiled.errors, [])

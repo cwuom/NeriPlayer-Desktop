@@ -21,7 +21,9 @@ function load(source, dependencies = {}) {
 const matcher = load(await read('../src/modules/search/textMatcher.ts'), { 'pinyin-pro': require('pinyin-pro') })
 const { filterAndRank, searchMatches, searchScore, searchValue, trackSearchTokens } = matcher
 const bindings = load(await read('../src/modules/shortcuts/bindings.ts'), {
-  './platform': load(await read('../src/modules/shortcuts/platform.ts')),
+  './platform': load(await read('../src/modules/shortcuts/platform.ts'), {
+    '@/utils/platform': load(await read('../src/utils/platform.ts')),
+  }),
 })
 
 let cases = 0

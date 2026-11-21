@@ -126,9 +126,12 @@ const originalClearInterval = globalThis.clearInterval
 globalThis.setInterval = callback => { const id = intervals.size + 1; intervals.set(id, callback); return id }
 globalThis.clearInterval = id => intervals.delete(id)
 try {
-  const { installDesktopLyricsBridge, openDesktopLyricsWindow } = await loadModule('../src/modules/desktopLyrics/bridge.ts', {
+  const bridgeModule = await loadModule('../src/modules/desktopLyrics/bridge.ts', {
+    vue: { ref: value => ({ value }) },
+  })
+  const { openDesktopLyricsWindow } = bridgeModule
+  const { installDesktopLyricsBridge } = await loadModule('../src/integrations/desktopLyrics.ts', {
     vue: {
-      ref: value => ({ value }),
       watch: (_, callback, options) => {
         const watcher = { callback, stopped: false }
         watchers.push(watcher)
@@ -154,9 +157,10 @@ try {
     '@/stores/settings': { useSettingsStore: () => settings },
     '@/stores/lyricOffset': { useLyricOffsetStore: () => ({ effectiveOffsetMs: () => 0 }) },
     '@/stores/currentLyrics': { useCurrentLyricsStore: () => currentLyrics },
-    './frame': frameModule,
-    './style': styleModule,
-    './timeline': timelineModule,
+    '@/modules/desktopLyrics/bridge': bridgeModule,
+    '@/modules/desktopLyrics/frame': frameModule,
+    '@/modules/desktopLyrics/style': styleModule,
+    '@/modules/desktopLyrics/timeline': timelineModule,
     '@/utils/logger': { createLogger: () => ({ warn() {} }) },
     '@/utils/logSanitizer': { summarizeLogError: String },
   })

@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import * as vue from 'vue'
 import ts from 'typescript'
 
 const sourceRoot = new URL('../src/stores/listenTogether/', import.meta.url)
 const indexSource = await readFile(new URL('index.ts', sourceRoot), 'utf8')
-const playerSource = await readFile(new URL('../src/stores/player.ts', import.meta.url), 'utf8')
+// player store 拆成 player.ts 与 player/ 下的切片，拼接全部源码后按名称查找实现
+const playerDir = new URL('../src/stores/player/', import.meta.url)
+const playerFiles = [new URL('../src/stores/player.ts', import.meta.url),
+  ...(await readdir(playerDir)).filter(name => name.endsWith('.ts')).sort().map(name => new URL(name, playerDir))]
+const playerSource = (await Promise.all(playerFiles.map(file => readFile(file, 'utf8')))).join('\n')
 const playerParsed = ts.createSourceFile('player.ts', playerSource, ts.ScriptTarget.ES2022, true)
 const playerCommandFunctions = new Map()
 let resolvedBiliTargetFunction
@@ -91,8 +95,13 @@ async function loadHelper(url) {
   return pending
 }
 
+// 依赖 Vue、Tauri 与假时钟的 store 切片随每个 harness 和 index.ts 一起加载；其余相对导入仍按纯 helper 共享
+const storeSliceSpecifiers = ['./outbound', './playerWatch', './keepalive']
+const storeSliceSources = Object.fromEntries(await Promise.all(storeSliceSpecifiers.map(async specifier =>
+  [specifier, await readFile(new URL(`${specifier}.ts`, sourceRoot), 'utf8')])))
 const helperDependencies = {}
-for (const specifier of runtimeImports(indexSource).filter(specifier => specifier.startsWith('.'))) {
+for (const specifier of new Set([indexSource, ...Object.values(storeSliceSources)].flatMap(runtimeImports))) {
+  if (!specifier.startsWith('.') || storeSliceSpecifiers.includes(specifier)) continue
   helperDependencies[specifier] = await loadHelper(new URL(`${specifier}.ts`, sourceRoot))
 }
 const protocol = helperDependencies['./protocol']
@@ -285,11 +294,15 @@ async function harness(options = {}) {
     '@/stores/toast': { useToastStore: () => ({ error: message => toasts.push(message), show: message => notices.push(message), success() {} }) },
     '@/i18n': { default: { global: { t: key => key } } },
     '@/utils/logger': { createLogger: () => Object.fromEntries(['debug', 'warn', 'error'].map(level => [level, (...args) => logs.push({ level, args })])) },
+    '@/modules/playback/streamTrust': await loadHelper(new URL('../../modules/playback/streamTrust.ts', sourceRoot)),
     ...helperDependencies,
     timers, storage: { getItem: () => '11111111-1111-4111-8111-111111111111', setItem() {} },
   }
-  const module = await loadSource(indexSource, dependencies,
-    'const { Date, setTimeout, clearTimeout, setInterval, clearInterval } = __deps.timers; const localStorage = __deps.storage;')
+  const runtimeGlobals = 'const { Date, setTimeout, clearTimeout, setInterval, clearInterval } = __deps.timers; const localStorage = __deps.storage;'
+  for (const specifier of storeSliceSpecifiers) {
+    dependencies[specifier] = await loadSource(storeSliceSources[specifier], dependencies, runtimeGlobals)
+  }
+  const module = await loadSource(indexSource, dependencies, runtimeGlobals)
   const scope = vue.effectScope()
   const store = scope.run(() => module.useListenTogetherStore())
   player.moveQueueItem = new Function(
@@ -983,7 +996,7 @@ async function sharedNeteaseFallback(h, tracks = [wireTrack(1)]) {
       return { url: biliUrl, bandwidth: 128_000, codecs: 'mp4a.40.2', quality_key: 'high',
         candidates: [], bvid: 'BVfallback', cid: 12 }
     } },
-    '@/stores/listenTogether/mapper': mapper,
+    './streamTrust': await loadHelper(new URL('../../modules/playback/streamTrust.ts', sourceRoot)),
     './playbackFailure': await loadHelper(new URL('../../modules/playback/playbackFailure.ts', sourceRoot)),
   })
   const resolver = new PlaybackUrlResolver()
