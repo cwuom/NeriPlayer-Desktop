@@ -207,7 +207,7 @@ macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构�
 `MACOSX_DEPLOYMENT_TARGET=11.0` 并覆盖 `bundle.macOS.minimumSystemVersion`，
 不能把基础值当成 arm64 支持承诺。
 
-设置页构建版本为 `<7位Git哈希>.<MMddHHmm>`，时间采用 UTC+8，另有构建 UUID 和时间戳。
+设置页构建版本为 `<7位Git哈希>.<MMddHHmm>`，时间采用 UTC+8，括号内附安装包版本（手动发布为 `YY.MMDD.HHMM`，如 `26.1121.1340`）；另有构建 UUID 和时间戳。
 `scripts/run-tauri.mjs` 注入 `NERI_BUILD_EPOCH`，CI 统一 Git SHA、epoch 与 UUID，
 用于关联多平台产物；不代表二进制逐字节可复现。`package.json` / Cargo 的 `1.0.0`
 是打包元数据，不表示项目已脱离预览阶段。

@@ -143,6 +143,7 @@
     "test:cloud-playlists": "node scripts/test-cloud-playlists.mjs",
     "test:lyric-offset-store": "node scripts/test-lyric-offset-store.mjs",
     "test:ffmpeg-bundle": "node scripts/test-ffmpeg-bundle.mjs",
+    "test:release-tools": "node scripts/test-release-tools.mjs",
     "tauri": "node scripts/run-tauri.mjs"
   },
   "dependencies": {

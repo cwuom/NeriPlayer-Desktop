@@ -13,6 +13,7 @@ import { useToastStore } from '@/stores/toast'
 import { useListenTogetherStore } from '@/stores/listenTogether'
 import { createLogger } from '@/utils/logger'
 import { formatTimeMs } from '@/utils/timeFormat'
+import { displayBuildVersion } from '@/components/settings/settingsShared'
 
 const log = createLogger('debug-view')
 
@@ -451,9 +452,9 @@ async function clearCrashes() {
     <div v-if="buildInfo" class="setting-card">
       <div class="setting-info">
         <div class="state-grid">
-          <div class="state-item copyable-state-item" @click="copyBuildValue(buildInfo.version)">
+          <div class="state-item copyable-state-item" @click="copyBuildValue(displayBuildVersion(buildInfo))">
             <span class="state-label">{{ t('settings.build_version_label') }}</span>
-            <span class="state-value mono">{{ buildInfo.version || '—' }}</span>
+            <span class="state-value mono">{{ displayBuildVersion(buildInfo) || '—' }}</span>
           </div>
           <div class="state-item copyable-state-item" @click="copyBuildValue(buildInfo.uuid)">
             <span class="state-label">{{ t('settings.build_uuid') }}</span>

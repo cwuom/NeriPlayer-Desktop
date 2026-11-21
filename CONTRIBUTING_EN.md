@@ -217,7 +217,7 @@ and adds `-adhoc` to DMG names. The base Tauri minimum system setting is 10.15;
 local arm64 release builds should mirror Release by setting `MACOSX_DEPLOYMENT_TARGET=11.0`
 and overriding `bundle.macOS.minimumSystemVersion`. The base setting is not an arm64 support promise.
 
-Settings displays `<7-characterGitHash>.<MMddHHmm>` using UTC+8, alongside a build UUID and timestamp.
+Settings displays `<7-characterGitHash>.<MMddHHmm>` using UTC+8 followed by the installer version in parentheses (`YY.MMDD.HHMM` for manual releases, for example `26.1121.1340`), alongside a build UUID and timestamp.
 `scripts/run-tauri.mjs` supplies `NERI_BUILD_EPOCH`; CI shares Git SHA, epoch, and UUID to correlate
 platform packages. This does not establish byte-for-byte reproducible binaries.
 The `1.0.0` in package / Cargo metadata does not mean the project has left preview.

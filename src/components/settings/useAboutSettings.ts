@@ -6,7 +6,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { useSettingsStore } from '@/stores/settings'
 import { usePlayerStore } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
-import { settingsLog as log, type BuildInfo, type SettingsIpc } from './settingsShared'
+import { displayBuildVersion, settingsLog as log, type BuildInfo, type SettingsIpc } from './settingsShared'
 
 export const PROJECT_REPOSITORY_URL = 'https://github.com/cwuom/NeriPlayer-Desktop'
 export const FFMPEG_LEGAL_URL = 'https://ffmpeg.org/legal.html'
@@ -46,6 +46,7 @@ export function useAboutSettings(ipc: SettingsIpc, toggleSection: (key: string) 
 
   // 构建信息
   const buildInfo = ref<BuildInfo | null>(null)
+  const buildVersionText = computed(() => (buildInfo.value ? displayBuildVersion(buildInfo.value) : ''))
 
   async function loadBuildInfo() {
     try {
@@ -88,6 +89,7 @@ export function useAboutSettings(ipc: SettingsIpc, toggleSection: (key: string) 
     handleVersionTap,
     disposeVersionTap,
     buildInfo,
+    buildVersionText,
     loadBuildInfo,
     copyBuildValue,
     ffmpegComponentText,
