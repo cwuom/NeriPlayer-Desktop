@@ -23,7 +23,14 @@
     "test:bili-video-parts": "node scripts/test-bili-video-parts.mjs",
     "test:bili-share": "node scripts/test-bili-share.mjs",
     "test:bili-downloaded-playback": "node scripts/test-bili-downloaded-playback.mjs",
-    "test": "node scripts/test-frontend.mjs",
+    "test": "node scripts/test-frontend.mjs && vitest run",
+    "unit": "vitest run",
+    "unit:watch": "vitest",
+    "unit:coverage": "vitest run --coverage",
+    "typecheck": "vue-tsc --build && vue-tsc --noEmit -p tsconfig.vitest.json",
+    "lint": "eslint . --max-warnings 0",
+    "quality": "python3 -B tools/quality/module_boundaries.py && python3 -B tools/quality/ipc_contract.py",
+    "crap": "pnpm unit:coverage && python3 -B tools/quality/crap_report.py",
     "test:debug-log-viewer": "node scripts/test-debug-log-viewer.mjs",
     "test:cover-export": "node scripts/test-cover-export.mjs",
     "test:tray-popup": "node scripts/test-tray-popup.mjs",
@@ -159,13 +166,21 @@
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "~2.12.1",
     "@types/animejs": "^3.1.12",
     "@types/node": "^26.1.1",
     "@vitejs/plugin-vue": "^5.2.4",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint": "~10.14.0",
+    "eslint-plugin-vue": "~10.12.0",
+    "globals": "^17.14.0",
+    "happy-dom": "^21.0.4",
     "sass": "^1.105.1",
     "typescript": "^5.8.3",
+    "typescript-eslint": "~8.72.1",
     "vite": "^6.4.4",
+    "vitest": "^3.2.4",
     "vue-tsc": "^2.2.10"
   }
 }
