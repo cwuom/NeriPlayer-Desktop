@@ -17,14 +17,14 @@ function element(scrollHeight: number): HTMLElement {
 
 describe('displayBuildVersion', () => {
   it('appends the installer version to the build number', () => {
-    expect(displayBuildVersion({ version: '18744b1.11211340', app_version: '26.1121.1340' }))
-      .toBe('18744b1.11211340 (26.1121.1340)')
+    expect(displayBuildVersion({ version: '18744b1.11211340', app_version: '26.11.29620' }))
+      .toBe('18744b1.11211340 (26.11.29620)')
   })
 
   it('falls back to whichever part is available', () => {
     expect(displayBuildVersion({ version: '18744b1.11211340', app_version: '' })).toBe('18744b1.11211340')
     expect(displayBuildVersion({ version: '18744b1.11211340' })).toBe('18744b1.11211340')
-    expect(displayBuildVersion({ version: ' ', app_version: '26.1121.1340' })).toBe('26.1121.1340')
+    expect(displayBuildVersion({ version: ' ', app_version: '26.11.29620' })).toBe('26.11.29620')
     expect(displayBuildVersion({ version: null, app_version: null })).toBe('')
   })
 })

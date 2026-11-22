@@ -57,8 +57,7 @@ export interface SettingsIpc {
 }
 
 /**
- * 应用内展示的版本：构建号 `<sha>.<MMddHHmm>` 后附安装包版本，例如 `18744b1.11211340 (26.1121.1340)`。
- * 构建号用来定位提交，安装包版本对应发布页与系统里看到的版本；两者缺一时只显示有的那个。
+ * 构建号用于定位提交，括号里的安装包版本用于核对发布页，例如 `18744b1.11211340 (26.11.29620)`
  */
 export function displayBuildVersion(info: { version?: string | null, app_version?: string | null }): string {
   const build = info.version?.trim() ?? ''
