@@ -8,13 +8,16 @@ import {
   DEFAULT_LOCAL_SHORTCUTS,
   SHORTCUT_ACTIONS,
   comboFromEvent,
+  comboFromMouseEvent,
   comboLabelParts,
   effectiveShortcuts,
+  isMouseCombo,
   toAccelerator,
   withShortcut,
   type ShortcutActionId,
   type ShortcutScope,
 } from '@/modules/shortcuts/bindings'
+import { detectPlatform } from '@/utils/platform'
 import { shortcutRecording } from '@/modules/shortcuts/recording'
 import { systemShortcutFailures } from '@/modules/shortcuts/systemShortcuts'
 
@@ -44,6 +47,24 @@ function isRecording(id: ShortcutActionId, scope: ShortcutScope): boolean {
   return recording.value?.id === id && recording.value.scope === scope
 }
 
+/// 全局键位的悬浮说明：鼠标键在非 Windows 上没有全局能力
+function globalTitle(id: ShortcutActionId): string | undefined {
+  if (settings.globalShortcutsEnabled && systemShortcutFailures.value.includes(id)) {
+    return t('shortcuts.global_unavailable')
+  }
+  const combo = globalMap.value[id]
+  if (combo && isMouseCombo(combo) && detectPlatform() !== 'windows') {
+    return t('shortcuts.mouse_global_windows_only')
+  }
+  return undefined
+}
+
+/// 绑定框里的辅助说明：鼠标键单独标注
+function keyHint(combo: string): string | undefined {
+  if (combo && isMouseCombo(combo)) return t('shortcuts.mouse_only')
+  return undefined
+}
+
 function startRecording(id: ShortcutActionId, scope: ShortcutScope) {
   if (isRecording(id, scope)) {
     stopRecording()
@@ -53,12 +74,14 @@ function startRecording(id: ShortcutActionId, scope: ShortcutScope) {
   recordError.value = ''
   shortcutRecording.value = true
   document.addEventListener('keydown', onRecordKeydown, true)
+  document.addEventListener('mousedown', onRecordMousedown, true)
 }
 
 function stopRecording() {
   recording.value = null
   shortcutRecording.value = false
   document.removeEventListener('keydown', onRecordKeydown, true)
+  document.removeEventListener('mousedown', onRecordMousedown, true)
 }
 
 function assign(id: ShortcutActionId, scope: ShortcutScope, combo: string) {
@@ -93,6 +116,7 @@ function onRecordKeydown(event: KeyboardEvent) {
   if (!combo) return
   if (current.scope === 'global') {
     // 系统级热键不带修饰键会吞掉所有程序里的这个键
+    // 鼠标键例外：中键与侧键本身就不参与普通操作，可以单独作为全局键
     const hasModifier = combo.includes('+')
     if (!hasModifier && !/^F\d+$/.test(combo)) {
       recordError.value = t('shortcuts.global_needs_modifier')
@@ -103,6 +127,20 @@ function onRecordKeydown(event: KeyboardEvent) {
       return
     }
   }
+  assign(current.id, current.scope, combo)
+  stopRecording()
+}
+
+/// 录制鼠标键：只认中键与侧键，左右键留给正常界面操作
+function onRecordMousedown(event: MouseEvent) {
+  const current = recording.value
+  if (!current) return
+  // 左右键不做成快捷键，不打断用户点击
+  if (event.button === 0 || event.button === 2) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  const combo = comboFromMouseEvent(event)
+  if (!combo) return
   assign(current.id, current.scope, combo)
   stopRecording()
 }
@@ -169,10 +207,11 @@ onBeforeUnmount(stopRecording)
           >
             <template v-if="isRecording(action.id, 'local')">{{ t('shortcuts.press_keys') }}</template>
             <template v-else-if="localMap[action.id]">
-              <kbd v-for="part in comboLabelParts(localMap[action.id])" :key="part">{{ part }}</kbd>
+              <kbd v-for="part in comboLabelParts(localMap[action.id], t)" :key="part">{{ part }}</kbd>
             </template>
             <template v-else>{{ t('shortcuts.unset') }}</template>
           </button>
+          <span v-if="keyHint(localMap[action.id])" class="shortcut-na">{{ keyHint(localMap[action.id]) }}</span>
         </span>
 
         <span role="cell">
@@ -187,18 +226,19 @@ onBeforeUnmount(stopRecording)
               inactive: !settings.globalShortcutsEnabled,
               failed: settings.globalShortcutsEnabled && systemShortcutFailures.includes(action.id),
             }"
-            :title="settings.globalShortcutsEnabled && systemShortcutFailures.includes(action.id) ? t('shortcuts.global_unavailable') : undefined"
+            :title="globalTitle(action.id)"
             :aria-label="`${actionLabel(action.id)} · ${t('shortcuts.global')}`"
             @click="startRecording(action.id, 'global')"
             @blur="isRecording(action.id, 'global') && stopRecording()"
           >
             <template v-if="isRecording(action.id, 'global')">{{ t('shortcuts.press_keys') }}</template>
             <template v-else-if="globalMap[action.id]">
-              <kbd v-for="part in comboLabelParts(globalMap[action.id])" :key="part">{{ part }}</kbd>
+              <kbd v-for="part in comboLabelParts(globalMap[action.id], t)" :key="part">{{ part }}</kbd>
               <span v-if="settings.globalShortcutsEnabled && systemShortcutFailures.includes(action.id)" class="material-symbols-rounded shortcut-warn">error</span>
             </template>
             <template v-else>{{ t('shortcuts.unset') }}</template>
           </button>
+          <span v-if="keyHint(globalMap[action.id])" class="shortcut-na">{{ keyHint(globalMap[action.id]) }}</span>
         </span>
 
         <span role="cell" class="shortcut-reset-cell">

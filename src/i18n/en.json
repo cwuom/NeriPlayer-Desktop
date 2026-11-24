@@ -1729,7 +1729,7 @@
     "invalid_nickname": "Nickname may only contain letters, digits, and Chinese characters (max 24)"
   },
   "shortcuts": {
-    "title": "Keyboard shortcuts",
+    "title": "Shortcuts",
     "desc": "In-app shortcuts step aside while typing; global shortcuts also work when the window is minimized or in the tray",
     "toggle_play": "Play / pause",
     "next": "Next track",
@@ -1751,10 +1751,10 @@
     "global": "Global",
     "global_enable": "Enable global shortcuts",
     "global_enable_desc": "Control playback while the window is in the background; may conflict with other apps",
-    "record_hint": "Click a key box and press a new combination. Esc cancels, Backspace clears",
+    "record_hint": "Click a key box and press a new combination or a mouse button. Esc cancels, Backspace clears",
     "reset_all": "Reset all",
     "reset": "Reset",
-    "press_keys": "Press keys…",
+    "press_keys": "Press keys or a mouse button…",
     "unset": "Not set",
     "global_only": "Global only",
     "local_only": "In-app only",
@@ -1762,6 +1762,11 @@
     "global_needs_modifier": "Global shortcuts need at least one modifier (Ctrl / Alt / Shift)",
     "global_unsupported_key": "This key can't be used as a global shortcut",
     "moved_from": "Removed this combination from \"{action}\"",
+    "mouse_only": "Mouse only",
+    "mouse_global_windows_only": "Global mouse shortcuts are only available on Windows",
+    "mouse_middle": "Middle button",
+    "mouse_back": "Mouse side button 1",
+    "mouse_forward": "Mouse side button 2",
     "like": "Like / unlike current song",
     "desktop_lyrics": "Toggle desktop lyrics",
     "show_window": "Show main window"

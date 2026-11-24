@@ -7,7 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore, displayAlbum } from '@/stores/player'
 import { usePlaybackStatsStore } from '@/stores/playbackStats'
 import { installGlobalShortcuts, type ShortcutActions } from '@/modules/shortcuts/globalShortcuts'
-import { applySystemShortcuts, clearSystemShortcuts } from '@/modules/shortcuts/systemShortcuts'
+import { applySystemShortcuts, clearSystemShortcuts, listenGlobalMouseShortcuts } from '@/modules/shortcuts/systemShortcuts'
 import { detectPlatform } from '@/utils/platform'
 import { shortcutRecording } from '@/modules/shortcuts/recording'
 import { closeDesktopLyricsWindow, desktopLyricsOpen, openDesktopLyricsWindow } from '@/modules/desktopLyrics/bridge'
@@ -80,6 +80,7 @@ const isNowPlayingOpen = ref(false)
 // 静音前的音量，取消静音时还原
 let volumeBeforeMute = 0.5
 let uninstallShortcuts: (() => void) | null = null
+let uninstallGlobalMouseShortcuts: (() => void) | null = null
 let stopSystemShortcuts: (() => void) | null = null
 let uninstallDesktopLyrics: (() => void) | null = null
 const contentRef = ref<HTMLElement | null>(null)
@@ -522,7 +523,12 @@ onMounted(async () => {
       '.m3-dialog-overlay, .dialog-overlay, .context-menu-overlay, .atp-overlay, .lt-overlay, .queue-overlay, .comments-overlay, .notif-overlay, .debug-dialog-overlay',
     ) !== null,
   }
-  uninstallShortcuts = installGlobalShortcuts(shortcutActions, () => settingsStore.shortcutBindings)
+  uninstallShortcuts = installGlobalShortcuts(
+    shortcutActions,
+    () => settingsStore.shortcutBindings,
+    () => settingsStore.globalShortcutsEnabled,
+  )
+  uninstallGlobalMouseShortcuts = listenGlobalMouseShortcuts(shortcutActions, () => settingsStore.shortcutBindings)
   stopSystemShortcuts = watch(
     () => [settingsStore.shortcutBindings, settingsStore.globalShortcutsEnabled, shortcutRecording.value] as const,
     ([bindings, enabled, recording]) => void applySystemShortcuts(bindings, enabled && !recording, shortcutActions),
@@ -598,6 +604,8 @@ onUnmounted(() => {
   void player.flushPlayerState()
   uninstallShortcuts?.()
   uninstallShortcuts = null
+  uninstallGlobalMouseShortcuts?.()
+  uninstallGlobalMouseShortcuts = null
   stopSystemShortcuts?.()
   stopSystemShortcuts = null
   void clearSystemShortcuts()

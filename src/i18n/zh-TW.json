@@ -1729,7 +1729,7 @@
     "invalid_nickname": "暱稱只能包含字母、數字與漢字（最多 24 個字元）"
   },
   "shortcuts": {
-    "title": "鍵盤快速鍵",
+    "title": "快捷鍵",
     "desc": "輸入框聚焦時應用程式內快捷鍵自動讓位；全域快捷鍵在視窗最小化或位於系統匣時同樣有效",
     "toggle_play": "播放 / 暫停",
     "next": "下一首",
@@ -1751,10 +1751,10 @@
     "global": "全域",
     "global_enable": "啟用全域快捷鍵",
     "global_enable_desc": "視窗不在前景時也能控制播放；可能與其他程式的快捷鍵衝突",
-    "record_hint": "點擊按鍵框後按下新的組合鍵，Esc 取消，Backspace 清除",
+    "record_hint": "點擊按鍵框後按下新的組合鍵或滑鼠鍵，Esc 取消，Backspace 清除",
     "reset_all": "全部恢復預設",
     "reset": "恢復預設",
-    "press_keys": "請按下組合鍵…",
+    "press_keys": "請按下組合鍵或滑鼠鍵…",
     "unset": "未設定",
     "global_only": "僅全域",
     "local_only": "僅應用程式內",
@@ -1762,6 +1762,11 @@
     "global_needs_modifier": "全域快捷鍵至少需要一個修飾鍵（Ctrl / Alt / Shift）",
     "global_unsupported_key": "這個按鍵不能用作全域快捷鍵",
     "moved_from": "已從「{action}」上移除這個組合鍵",
+    "mouse_only": "僅滑鼠",
+    "mouse_global_windows_only": "全域滑鼠鍵僅在 Windows 上可用",
+    "mouse_middle": "中鍵",
+    "mouse_back": "滑鼠側鍵 1",
+    "mouse_forward": "滑鼠側鍵 2",
     "like": "喜歡 / 取消喜歡目前歌曲",
     "desktop_lyrics": "開啟 / 關閉桌面歌詞",
     "show_window": "顯示主視窗"

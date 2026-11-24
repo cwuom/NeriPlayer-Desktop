@@ -2,6 +2,10 @@
 //
 // 组合键统一写成 "Mod+Shift+ArrowRight" 这类字符串：Mod 是主修饰键（macOS ⌘，其余 Ctrl），
 // 存储只记与默认不同的项，空字符串表示用户主动清除
+//
+// 鼠标键复用同一套字符串语法，写成 "MouseBack" / "Mod+MouseBack"：
+// 一个动作在每个作用域只对应一个键位，绑鼠标就顶替原来的键盘键位。
+// 鼠标键不进系统快捷键加速器（toAccelerator 返回 null），全局鼠标走原生钩子。
 
 import { isMacPlatform } from './platform'
 
@@ -56,6 +60,22 @@ export const SHORTCUT_ACTIONS: ShortcutActionMeta[] = [
 ]
 
 export type ShortcutMap = Partial<Record<ShortcutActionId, string>>
+
+/// 鼠标键：只用中键与两个侧键
+///
+/// 左右键留给正常界面操作（点击、拖拽、右键菜单），不做成快捷键，
+/// 否则应用内的普通点击会全部变成命令。
+export const MOUSE_KEYS = ['MouseMiddle', 'MouseBack', 'MouseForward'] as const
+export type MouseKey = (typeof MOUSE_KEYS)[number]
+
+const MOUSE_KEY_SET = new Set<string>(MOUSE_KEYS)
+
+/// DOM MouseEvent.button：1 中键，3 后退侧键，4 前进侧键
+const MOUSE_BUTTON_KEYS: Record<number, MouseKey> = {
+  1: 'MouseMiddle',
+  3: 'MouseBack',
+  4: 'MouseForward',
+}
 
 export const DEFAULT_LOCAL_SHORTCUTS: ShortcutMap = {
   toggle_play: 'Space',
@@ -175,7 +195,12 @@ function normalizeCombo(combo: string): string | null {
   if (!parts.length) return null
   // 末尾是 "+" 本身（Mod++）时 split 会丢掉它
   if (combo.endsWith('++')) parts.push('+')
-  const key = normalizeKeyName(parts.pop()!)
+  const rawKey = parts.pop()!
+  // 鼠标键直接用规范名，不走键盘的键名规整
+  const mouseKey = MOUSE_KEY_SET.has(rawKey)
+    ? rawKey
+    : MOUSE_KEYS.find(key => key.toLowerCase() === rawKey.toLowerCase())
+  const key = mouseKey ?? normalizeKeyName(rawKey)
   if (!key || MODIFIER_KEYS.has(key) || RESERVED_KEYS.has(key)) return null
   const modifiers = new Set<string>()
   for (const part of parts) {
@@ -213,11 +238,25 @@ const KEY_LABELS: Record<string, string> = {
   PageUp: 'PgUp', PageDown: 'PgDn',
 }
 
+/// 鼠标键的 i18n key；各语言的说法不同，走语言包而不是硬编码
+const MOUSE_KEY_I18N_KEYS: Record<MouseKey, string> = {
+  MouseMiddle: 'shortcuts.mouse_middle',
+  MouseBack: 'shortcuts.mouse_back',
+  MouseForward: 'shortcuts.mouse_forward',
+}
+
 /// 展示用的按键分段
-export function comboLabelParts(combo: string): string[] {
+///
+/// 鼠标键的标签要走 i18n（各语言的说法不一样），而本模块在 modules 层、
+/// 不能依赖 i18n 层，所以由调用方传入翻译函数；不传时回落到键名本身。
+export function comboLabelParts(combo: string, translate?: (key: string) => string): string[] {
   if (!combo) return []
   return combo.split('+').map((part, index, parts) => {
-    if (index === parts.length - 1) return KEY_LABELS[part] ?? part
+    if (index === parts.length - 1) {
+      const mouseKey = MOUSE_KEY_SET.has(part) ? MOUSE_KEY_I18N_KEYS[part as MouseKey] : undefined
+      if (mouseKey) return translate ? translate(mouseKey) : part
+      return KEY_LABELS[part] ?? part
+    }
     if (part === 'Mod') return isMacPlatform ? '⌘' : 'Ctrl'
     if (part === 'Alt') return isMacPlatform ? '⌥' : 'Alt'
     if (part === 'Shift') return isMacPlatform ? '⇧' : 'Shift'
@@ -233,14 +272,46 @@ const ACCELERATOR_KEYS: Record<string, string> = {
 }
 
 /// 组合键 -> Tauri 全局快捷键加速器字符串；无法表达的键返回 null
+///
+/// 鼠标键无法表达成加速器（插件的语法里没有鼠标），全局鼠标走原生钩子。
 export function toAccelerator(combo: string): string | null {
   if (!combo) return null
   const parts = combo.split('+')
   const key = parts.pop()!
+  if (MOUSE_KEY_SET.has(key)) return null
   const mapped = ACCELERATOR_KEYS[key] ?? key
   if (!/^([A-Z0-9]|F([1-9]|1\d|2[0-4])|Arrow(Left|Right|Up|Down)|Space|Enter|Backspace|Delete|Insert|Home|End|PageUp|PageDown|Equal|Minus|Comma|Period|Slash|Semicolon|Quote|BracketLeft|BracketRight|Backslash|Backquote)$/.test(mapped)) {
     return null
   }
   const modifiers = parts.map(part => ({ Mod: 'CommandOrControl', Ctrl: 'Control', Alt: 'Alt', Shift: 'Shift', Meta: 'Super' }[part] ?? part))
   return [...modifiers, mapped].join('+')
+}
+
+/// 组合键里是否带鼠标键
+export function isMouseCombo(combo: string): boolean {
+  if (!combo) return false
+  const parts = combo.split('+')
+  return MOUSE_KEY_SET.has(parts.pop() ?? '')
+}
+
+/// 组合键的主键部分：去掉修饰键后的鼠标键名，键盘键返回 null
+export function mouseKeyOfCombo(combo: string): MouseKey | null {
+  if (!combo) return null
+  const parts = combo.split('+')
+  const key = parts.pop() ?? ''
+  return MOUSE_KEY_SET.has(key) ? (key as MouseKey) : null
+}
+
+/// 鼠标事件 -> 组合键；只认中键与侧键，左右键返回 null
+export function comboFromMouseEvent(event: MouseEvent): string | null {
+  const key = MOUSE_BUTTON_KEYS[event.button]
+  if (!key) return null
+  const primary = isMacPlatform ? event.metaKey : event.ctrlKey
+  const parts: string[] = []
+  if (primary) parts.push('Mod')
+  if (isMacPlatform && event.ctrlKey) parts.push('Ctrl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+  if (!isMacPlatform && event.metaKey) parts.push('Meta')
+  return [...parts, key].join('+')
 }

@@ -10,6 +10,7 @@ pub mod events;
 #[cfg(target_os = "linux")]
 pub mod linux_graphics;
 pub mod logging;
+pub mod mouse_hook;
 pub mod platform_webview;
 pub mod settings;
 pub mod state;

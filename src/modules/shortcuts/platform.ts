@@ -7,6 +7,10 @@ import { detectPlatform } from '@/utils/platform'
 
 export const isMacPlatform = detectPlatform() === 'mac'
 
+/// 全局鼠标钩子只在 Windows 上存在：其它平台没有原生鼠标钩子，
+/// 全局鼠标键只是应用内生效，此时不能因为存在全局绑定就跳过应用内动作。
+export const hasNativeMouseHook = detectPlatform() === 'windows'
+
 /// 主修饰键是否按下：macOS 为 ⌘，其余为 Ctrl
 export function hasPrimaryModifier(event: KeyboardEvent): boolean {
   return isMacPlatform ? event.metaKey : event.ctrlKey

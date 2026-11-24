@@ -8,7 +8,7 @@ use neri_player_desktop::commands::discover::{
 };
 use neri_player_desktop::commands::{
     auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
-    listen_together_cmd, local_files_cmd, lyrics_cmd, playback_fallback_cmd, player_cmd,
+    listen_together_cmd, local_files_cmd, lyrics_cmd, mouse_cmd, playback_fallback_cmd, player_cmd,
     settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd, user_data_cmd,
 };
 use neri_player_desktop::state::AppState;
@@ -684,6 +684,7 @@ fn main() {
             tray_cmd::tray_popup_ready,
             tray_cmd::tray_popup_action,
             tray_cmd::quit_app,
+            mouse_cmd::set_global_mouse_shortcuts,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();
