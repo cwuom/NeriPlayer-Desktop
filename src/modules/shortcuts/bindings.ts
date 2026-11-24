@@ -236,14 +236,27 @@ const KEY_LABELS: Record<string, string> = {
   ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓',
   Space: 'Space', Enter: 'Enter', Backspace: '⌫', Delete: 'Del',
   PageUp: 'PgUp', PageDown: 'PgDn',
-  MouseMiddle: '中键', MouseBack: '后退键', MouseForward: '前进键',
+}
+
+/// 鼠标键的 i18n key；各语言的说法不同，走语言包而不是硬编码
+const MOUSE_KEY_I18N_KEYS: Record<MouseKey, string> = {
+  MouseMiddle: 'shortcuts.mouse_middle',
+  MouseBack: 'shortcuts.mouse_back',
+  MouseForward: 'shortcuts.mouse_forward',
 }
 
 /// 展示用的按键分段
-export function comboLabelParts(combo: string): string[] {
+///
+/// 鼠标键的标签要走 i18n（各语言的说法不一样），而本模块在 modules 层、
+/// 不能依赖 i18n 层，所以由调用方传入翻译函数；不传时回落到键名本身。
+export function comboLabelParts(combo: string, translate?: (key: string) => string): string[] {
   if (!combo) return []
   return combo.split('+').map((part, index, parts) => {
-    if (index === parts.length - 1) return KEY_LABELS[part] ?? part
+    if (index === parts.length - 1) {
+      const mouseKey = MOUSE_KEY_SET.has(part) ? MOUSE_KEY_I18N_KEYS[part as MouseKey] : undefined
+      if (mouseKey) return translate ? translate(mouseKey) : part
+      return KEY_LABELS[part] ?? part
+    }
     if (part === 'Mod') return isMacPlatform ? '⌘' : 'Ctrl'
     if (part === 'Alt') return isMacPlatform ? '⌥' : 'Alt'
     if (part === 'Shift') return isMacPlatform ? '⇧' : 'Shift'

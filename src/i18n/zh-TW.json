@@ -1764,6 +1764,9 @@
     "moved_from": "已從「{action}」上移除這個組合鍵",
     "mouse_only": "僅滑鼠",
     "mouse_global_windows_only": "全域滑鼠鍵僅在 Windows 上可用",
+    "mouse_middle": "中鍵",
+    "mouse_back": "滑鼠側鍵 1",
+    "mouse_forward": "滑鼠側鍵 2",
     "like": "喜歡 / 取消喜歡目前歌曲",
     "desktop_lyrics": "開啟 / 關閉桌面歌詞",
     "show_window": "顯示主視窗"

@@ -207,7 +207,7 @@ onBeforeUnmount(stopRecording)
           >
             <template v-if="isRecording(action.id, 'local')">{{ t('shortcuts.press_keys') }}</template>
             <template v-else-if="localMap[action.id]">
-              <kbd v-for="part in comboLabelParts(localMap[action.id])" :key="part">{{ part }}</kbd>
+              <kbd v-for="part in comboLabelParts(localMap[action.id], t)" :key="part">{{ part }}</kbd>
             </template>
             <template v-else>{{ t('shortcuts.unset') }}</template>
           </button>
@@ -233,7 +233,7 @@ onBeforeUnmount(stopRecording)
           >
             <template v-if="isRecording(action.id, 'global')">{{ t('shortcuts.press_keys') }}</template>
             <template v-else-if="globalMap[action.id]">
-              <kbd v-for="part in comboLabelParts(globalMap[action.id])" :key="part">{{ part }}</kbd>
+              <kbd v-for="part in comboLabelParts(globalMap[action.id], t)" :key="part">{{ part }}</kbd>
               <span v-if="settings.globalShortcutsEnabled && systemShortcutFailures.includes(action.id)" class="material-symbols-rounded shortcut-warn">error</span>
             </template>
             <template v-else>{{ t('shortcuts.unset') }}</template>

@@ -1764,6 +1764,9 @@
     "moved_from": "已从「{action}」上移除这个组合键",
     "mouse_only": "仅鼠标",
     "mouse_global_windows_only": "全局鼠标键仅在 Windows 上可用",
+    "mouse_middle": "中键",
+    "mouse_back": "鼠标侧键 1",
+    "mouse_forward": "鼠标侧键 2",
     "like": "喜欢 / 取消喜欢当前歌曲",
     "desktop_lyrics": "打开 / 关闭桌面歌词",
     "show_window": "显示主窗口"

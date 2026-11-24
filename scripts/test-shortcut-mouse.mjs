@@ -77,9 +77,18 @@ await test('mouse combos never convert to a system shortcut accelerator', () => 
   assert.equal(bindings.toAccelerator('Mod+Alt+Space'), 'CommandOrControl+Alt+Space')
 })
 
-await test('mouse keys are displayed with readable labels', () => {
-  assert.deepEqual(bindings.comboLabelParts('MouseBack'), ['后退键'])
-  assert.deepEqual(bindings.comboLabelParts('Mod+MouseForward'), ['Ctrl', '前进键'])
+await test('mouse keys are displayed with localized labels', () => {
+  // 不传翻译函数时回落到键名本身
+  assert.deepEqual(bindings.comboLabelParts('MouseBack'), ['MouseBack'])
+  assert.deepEqual(bindings.comboLabelParts('Mod+MouseForward'), ['Ctrl', 'MouseForward'])
+  // 传入翻译函数时走 i18n key，标签由语言包决定
+  const translate = key => `t:${key}`
+  assert.deepEqual(bindings.comboLabelParts('MouseMiddle', translate), ['t:shortcuts.mouse_middle'])
+  assert.deepEqual(bindings.comboLabelParts('MouseBack', translate), ['t:shortcuts.mouse_back'])
+  assert.deepEqual(
+    bindings.comboLabelParts('Mod+MouseForward', translate),
+    ['Ctrl', 't:shortcuts.mouse_forward'],
+  )
 })
 
 await test('a globally bound mouse key does not also fire in-app', async () => {
@@ -95,7 +104,8 @@ await test('a globally bound mouse key does not also fire in-app', async () => {
   const exports = {}
   new Function('require', 'exports', 'window', compile(globalShortcutsSource))(name => {
     if (name === './bindings') return bindings
-    if (name === './platform') return { isEditableTarget: () => false }
+    // Windows 有原生鼠标钩子，全局绑定存在时应用内让位
+    if (name === './platform') return { isEditableTarget: () => false, hasNativeMouseHook: true }
     if (name === './recording') return { shortcutRecording: { value: false } }
     throw new Error(`unexpected dependency: ${name}`)
   }, exports, window)
@@ -122,6 +132,47 @@ await test('a globally bound mouse key does not also fire in-app', async () => {
   uninstall()
 })
 
+await test('without a native mouse hook the in-app mouse binding still fires', async () => {
+  const listeners = new Set()
+  const window = {
+    addEventListener(type, handler) { listeners.add([type, handler]) },
+    removeEventListener(type, handler) {
+      for (const entry of [...listeners]) {
+        if (entry[0] === type && entry[1] === handler) listeners.delete(entry)
+      }
+    },
+  }
+  const exports = {}
+  new Function('require', 'exports', 'window', compile(globalShortcutsSource))(name => {
+    if (name === './bindings') return bindings
+    // macOS / Linux 没有原生鼠标钩子：全局鼠标键只在应用内生效
+    if (name === './platform') return { isEditableTarget: () => false, hasNativeMouseHook: false }
+    if (name === './recording') return { shortcutRecording: { value: false } }
+    throw new Error(`unexpected dependency: ${name}`)
+  }, exports, window)
+
+  const triggered = []
+  const actions = new Proxy({}, {
+    get: (_target, name) => {
+      if (name === 'isOverlayOpen') return () => false
+      return () => triggered.push(name)
+    },
+  })
+  const uninstall = exports.installGlobalShortcuts(actions, () => ({
+    local: { toggle_play: 'MouseBack' },
+    global: { toggle_play: 'MouseBack' },
+  }), () => true)
+
+  const mouseHandler = [...listeners].find(([type]) => type === 'mousedown')?.[1]
+  assert.ok(mouseHandler, 'the mouse listener is installed')
+
+  // 没有原生钩子接管，全局绑定不该让应用内的动作失效
+  mouseHandler(mouseEvent({ button: 3 }))
+  assert.deepEqual(triggered, ['togglePlay'])
+
+  uninstall()
+})
+
 await test('an in-app mouse binding triggers its action and left/right clicks do not', async () => {
   const listeners = new Set()
   const window = {
@@ -135,7 +186,7 @@ await test('an in-app mouse binding triggers its action and left/right clicks do
   const exports = {}
   new Function('require', 'exports', 'window', compile(globalShortcutsSource))(name => {
     if (name === './bindings') return bindings
-    if (name === './platform') return { isEditableTarget: target => target instanceof Object && target?.tagName === 'INPUT' }
+    if (name === './platform') return { isEditableTarget: target => target instanceof Object && target?.tagName === 'INPUT', hasNativeMouseHook: true }
     if (name === './recording') return { shortcutRecording: { value: false } }
     throw new Error(`unexpected dependency: ${name}`)
   }, exports, window)

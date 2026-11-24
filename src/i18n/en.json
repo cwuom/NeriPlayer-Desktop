@@ -1764,6 +1764,9 @@
     "moved_from": "Removed this combination from \"{action}\"",
     "mouse_only": "Mouse only",
     "mouse_global_windows_only": "Global mouse shortcuts are only available on Windows",
+    "mouse_middle": "Middle button",
+    "mouse_back": "Mouse side button 1",
+    "mouse_forward": "Mouse side button 2",
     "like": "Like / unlike current song",
     "desktop_lyrics": "Toggle desktop lyrics",
     "show_window": "Show main window"

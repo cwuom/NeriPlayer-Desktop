@@ -26,9 +26,9 @@ pub const MOUSE_EVENT: &str = "shortcut:mouse-button";
 pub enum MouseButton {
     /// 中键
     Middle,
-    /// 后退侧键（XBUTTON1）
+    /// 鼠标侧键 1（XBUTTON1）
     Back,
-    /// 前进侧键（XBUTTON2）
+    /// 鼠标侧键 2（XBUTTON2）
     Forward,
 }
 
@@ -222,7 +222,7 @@ mod platform {
     use windows_sys::Win32::Foundation::{HINSTANCE, HMODULE};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, MSG,
@@ -292,9 +292,13 @@ mod platform {
     }
 
     /// 某个虚拟键当前是否按下
+    ///
+    /// 必须用 GetAsyncKeyState 而不是 GetKeyState：GetKeyState 反映的是调用线程
+    /// 消息队列里的按键状态，而钩子线程只跑 GetMessageW、不消费键盘消息，
+    /// 修饰键状态会一直是 0，导致 "Ctrl+MouseBack" 这类组合匹配不上。
     fn key_down(virtual_key: u16) -> bool {
-        // 高位为 1 表示当前按下（GetKeyState 返回 i16，先转成无符号再取高位）
-        unsafe { (GetKeyState(virtual_key as i32) as u16 & 0x8000) != 0 }
+        // 高位为 1 表示当前按下（返回 i16，先转成无符号再取高位）
+        unsafe { (GetAsyncKeyState(virtual_key as i32) as u16 & 0x8000) != 0 }
     }
 
     /// 低级鼠标钩子回调：识别键位后入队，其余事件一律放过
@@ -375,5 +379,24 @@ mod tests {
         assert!(set_bound_bindings(&combos));
         assert!(!set_bound_bindings(&combos));
         assert!(set_bound_bindings(&[]));
+    }
+
+    #[test]
+    fn modifier_masks_must_match_exactly() {
+        let plain = MouseBinding::parse("MouseBack").expect("plain combo");
+        let with_ctrl = MouseBinding::parse("Ctrl+MouseBack").expect("ctrl combo");
+        let with_ctrl_shift =
+            MouseBinding::parse("Ctrl+Shift+MouseBack").expect("ctrl+shift combo");
+
+        // 不按任何修饰键时才匹配裸键
+        assert!(plain.matches_modifiers(0));
+        // 按住 Ctrl 时裸键不匹配，Ctrl 组合才匹配
+        assert!(!plain.matches_modifiers(modifiers::CTRL));
+        assert!(with_ctrl.matches_modifiers(modifiers::CTRL));
+        // 修饰键必须完全一致，多一个少一个都不匹配
+        assert!(!with_ctrl.matches_modifiers(0));
+        assert!(!with_ctrl.matches_modifiers(modifiers::CTRL | modifiers::SHIFT));
+        assert!(with_ctrl_shift.matches_modifiers(modifiers::CTRL | modifiers::SHIFT));
+        assert!(!with_ctrl_shift.matches_modifiers(modifiers::CTRL));
     }
 }

@@ -10,7 +10,7 @@
 // 没有绑鼠标键的动作不受影响。左右键不做成快捷键。
 
 import { comboFromEvent, comboFromMouseEvent, effectiveShortcuts, type ShortcutActionId, type ShortcutBindings } from './bindings'
-import { isEditableTarget } from './platform'
+import { hasNativeMouseHook, isEditableTarget } from './platform'
 import { shortcutRecording } from './recording'
 
 export interface ShortcutActions {
@@ -107,8 +107,9 @@ export function installGlobalShortcuts(
     const id = (Object.keys(map) as ShortcutActionId[]).find(action => map[action] === combo)
     if (!id) return
     // 同一个鼠标键同时绑了应用内和全局时，全局由原生钩子负责：
-    // 原生钩子在本进程窗口在前台时也会上报，这里让位避免触发两次
-    if (isGlobalEnabled()) {
+    // 原生钩子在本进程窗口在前台时也会上报，这里让位避免触发两次。
+    // 其它平台没有原生钩子，全局鼠标键其实只在应用内生效，不能因此把动作跳掉。
+    if (isGlobalEnabled() && hasNativeMouseHook) {
       const globalMap = effectiveShortcuts(bindings(), 'global')
       const globalId = (Object.keys(globalMap) as ShortcutActionId[]).find(
         action => globalMap[action] === combo,
