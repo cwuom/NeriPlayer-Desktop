@@ -46,11 +46,13 @@ function mount() {
   const notices = []
   const document = {
     addEventListener(type, listener, capture) {
-      assert.equal(type, 'keydown'); assert.equal(capture, true)
+      assert.ok(['keydown', 'mousedown'].includes(type), `unexpected event type: ${type}`)
+      assert.equal(capture, true)
       listeners.add(listener)
     },
     removeEventListener(type, listener, capture) {
-      assert.equal(type, 'keydown'); assert.equal(capture, true)
+      assert.ok(['keydown', 'mousedown'].includes(type), `unexpected event type: ${type}`)
+      assert.equal(capture, true)
       listeners.delete(listener)
     },
   }
@@ -62,6 +64,7 @@ function mount() {
     '@/modules/shortcuts/bindings': bindings,
     '@/modules/shortcuts/recording': { shortcutRecording },
     '@/modules/shortcuts/systemShortcuts': { systemShortcutFailures: vue.ref([]) },
+    '@/utils/platform': { detectPlatform: () => 'windows' },
   }
   const component = new Function('require', 'exports', 'document', `${compiled}\nreturn component`)(name => {
     assert.ok(name in dependencies, `unexpected dependency: ${name}`)

@@ -99,6 +99,7 @@
     "test:ui-scale-settings": "node scripts/test-ui-scale-settings.mjs",
     "test:ui-scale-runtime": "node scripts/test-ui-scale-runtime.mjs",
     "test:shortcut-settings": "node scripts/test-shortcut-settings.mjs",
+    "test:shortcut-mouse": "node scripts/test-shortcut-mouse.mjs",
     "test:playback-failure": "node scripts/test-playback-failure.mjs",
     "test:playback-ended": "node scripts/test-playback-ended.mjs",
     "test:playback-command-source": "node scripts/test-playback-command-source.mjs",

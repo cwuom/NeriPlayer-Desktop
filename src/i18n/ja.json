@@ -1729,7 +1729,7 @@
     "invalid_nickname": "ニックネームは英数字と漢字のみ使用できます（最大 24 文字）"
   },
   "shortcuts": {
-    "title": "キーボードショートカット",
+    "title": "ショートカット",
     "desc": "入力中はアプリ内ショートカットを無効化します。グローバルショートカットは最小化やトレイ常駐中も有効です",
     "toggle_play": "再生 / 一時停止",
     "next": "次の曲",
@@ -1751,7 +1751,7 @@
     "global": "グローバル",
     "global_enable": "グローバルショートカットを有効にする",
     "global_enable_desc": "ウィンドウが背面にあっても再生を操作できます。他のアプリと競合する場合があります",
-    "record_hint": "キー欄をクリックして新しい組み合わせを押してください。Esc で取消、Backspace で解除",
+    "record_hint": "キー欄をクリックして新しい組み合わせまたはマウスキーを押してください。Esc で取消、Backspace で解除",
     "reset_all": "すべてリセット",
     "reset": "リセット",
     "press_keys": "キーを押してください…",
@@ -1762,6 +1762,8 @@
     "global_needs_modifier": "グローバルショートカットには修飾キー（Ctrl / Alt / Shift）が必要です",
     "global_unsupported_key": "このキーはグローバルショートカットに使えません",
     "moved_from": "「{action}」からこの組み合わせを外しました",
+    "mouse_only": "マウスのみ",
+    "mouse_global_windows_only": "グローバルマウスショートカットは Windows でのみ利用できます",
     "like": "再生中の曲をお気に入り / 解除",
     "desktop_lyrics": "デスクトップ歌詞の切り替え",
     "show_window": "メインウィンドウを表示"
