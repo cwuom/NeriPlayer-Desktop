@@ -38,5 +38,5 @@
     "src/utils/themeColor.ts",
     "src/utils/timeFormat.ts"
   ],
-  "unscoped_failure_baseline": 705
+  "unscoped_failure_baseline": 699
 }

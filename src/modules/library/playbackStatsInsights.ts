@@ -182,23 +182,35 @@ export function sortStatTracks<T extends StatRecord>(items: readonly T[], mode: 
   }
 }
 
+/** 听得最久的一首；全都没有收听时长时为 null，并列时取先出现的 */
+function longestListenedTrack<T extends StatRecord>(items: readonly T[]): T | null {
+  let topTrack: T | null = null
+  for (const item of items) {
+    if (positive(item.totalListenMs) > 0 && (!topTrack || item.totalListenMs > topTrack.totalListenMs)) topTrack = item
+  }
+  return topTrack
+}
+
+/** 最早的首次播放时间；都没有记录时为 0 */
+function earliestFirstPlayedAt(items: readonly StatRecord[]): number {
+  let earliest = 0
+  for (const item of items) {
+    const first = positive(item.firstPlayedAt)
+    if (first && (!earliest || first < earliest)) earliest = first
+  }
+  return earliest
+}
+
 export function buildStatsInsights<T extends StatRecord>(
   items: readonly T[],
   totals: { totalPlayCount: number; totalListenMs: number },
 ): StatsInsights<T> {
-  let topTrack: T | null = null
-  let earliest = 0
-  for (const item of items) {
-    if (positive(item.totalListenMs) > 0 && (!topTrack || item.totalListenMs > topTrack.totalListenMs)) topTrack = item
-    const first = positive(item.firstPlayedAt)
-    if (first && (!earliest || first < earliest)) earliest = first
-  }
   const plays = positive(totals.totalPlayCount)
   return {
-    topTrack,
+    topTrack: longestListenedTrack(items),
     artists: rankStatArtists(items, totals.totalListenMs),
     albums: rankStatAlbums(items, totals.totalListenMs),
-    earliestListenAt: earliest || null,
+    earliestListenAt: earliestFirstPlayedAt(items) || null,
     averageListenMsPerPlay: plays ? Math.floor(positive(totals.totalListenMs) / plays) : 0,
   }
 }

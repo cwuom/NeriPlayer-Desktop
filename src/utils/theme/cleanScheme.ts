@@ -226,15 +226,46 @@ export function resolveTintColor(config: TintConfig, accent: RGB): RGB | null {
  * 生成整套颜色令牌。键集固定（--md-* + 少量 Clean 专用令牌），
  * 预设色、动态取色和系统强调色都经由这里，因此任何来源的配色层级都一致。
  */
+/** 深浅色各自的混合比例；集中成表，避免主函数里一串 dark ? a : b */
+interface ModeMix {
+  neutrals: Neutrals
+  maxTint: number
+  error: RGB
+  primaryContainer: number
+  onPrimaryContainer: number
+  selection: number
+  tertiaryContainer: number
+  errorContainer: number
+  accentSoft: number
+  sidebar: keyof Neutrals
+}
+
+const LIGHT_MIX: ModeMix = {
+  neutrals: LIGHT, maxTint: MAX_TINT_LIGHT, error: ERROR_LIGHT,
+  primaryContainer: 0.14, onPrimaryContainer: 0.45, selection: 0.12,
+  tertiaryContainer: 0.14, errorContainer: 0.12, accentSoft: 0.14, sidebar: 'container',
+}
+
+const DARK_MIX: ModeMix = {
+  neutrals: DARK, maxTint: MAX_TINT_DARK, error: ERROR_DARK,
+  primaryContainer: 0.24, onPrimaryContainer: 0.3, selection: 0.2,
+  tertiaryContainer: 0.22, errorContainer: 0.22, accentSoft: 0.2, sidebar: 'containerLowest',
+}
+
+/** 表面与文字的偏色函数；没有偏色时原样返回 */
+function tintMixers(tintColor: RGB | null, amount: number): { neutral: (color: RGB) => RGB; ink: (color: RGB) => RGB } {
+  if (!tintColor) return { neutral: color => color, ink: color => color }
+  return {
+    neutral: color => mix(color, tintColor, amount),
+    // 文字也带一点偏色才不会在暖底上显得发青，但比例远小于表面，保证对比度
+    ink: color => mix(color, tintColor, amount * 0.35),
+  }
+}
+
 export function buildCleanScheme(accent: RGB, dark: boolean, config: TintConfig): Record<string, string> {
-  const n = dark ? DARK : LIGHT
-  const tintColor = resolveTintColor(config, accent)
-  const tintAmount = tintColor
-    ? (clampTintStrength(config.strength) / 100) * (dark ? MAX_TINT_DARK : MAX_TINT_LIGHT)
-    : 0
-  const neutral = (color: RGB) => (tintColor ? mix(color, tintColor, tintAmount) : color)
-  // 文字也带一点偏色才不会在暖底上显得发青，但比例远小于表面，保证对比度
-  const ink = (color: RGB) => (tintColor ? mix(color, tintColor, tintAmount * 0.35) : color)
+  const m = dark ? DARK_MIX : LIGHT_MIX
+  const n = m.neutrals
+  const { neutral, ink } = tintMixers(resolveTintColor(config, accent), (clampTintStrength(config.strength) / 100) * m.maxTint)
 
   const background = neutral(n.background)
   const containerLow = neutral(n.containerLow)
@@ -243,17 +274,17 @@ export function buildCleanScheme(accent: RGB, dark: boolean, config: TintConfig)
 
   const primary = accent
   const onPrimary = onColor(primary)
-  const primaryContainer = mix(containerLow, primary, dark ? 0.24 : 0.14)
-  const onPrimaryContainer = readableOn(mix(onSurface, primary, dark ? 0.3 : 0.45), primaryContainer, onSurface)
+  const primaryContainer = mix(containerLow, primary, m.primaryContainer)
+  const onPrimaryContainer = readableOn(mix(onSurface, primary, m.onPrimaryContainer), primaryContainer, onSurface)
   // 选中态容器：只靠底色的淡染区分，文字保持墨色（对齐 Android selectionContainer）
-  const selection = mix(containerLow, primary, dark ? 0.2 : 0.12)
+  const selection = mix(containerLow, primary, m.selection)
   const onSelection = mix(onSurface, primary, 0.12)
   const secondary = readableOn(mix(onSurfaceVariant, primary, 0.3), background, onSurface)
   const [h, s, l] = rgbToHsl(primary)
   const tertiary = readableOn(hslToRgb(h + 0.11, s, l), background, onSurface, 3)
-  const tertiaryContainer = mix(containerLow, tertiary, dark ? 0.22 : 0.14)
-  const error = dark ? ERROR_DARK : ERROR_LIGHT
-  const errorContainer = mix(containerLow, error, dark ? 0.22 : 0.12)
+  const tertiaryContainer = mix(containerLow, tertiary, m.tertiaryContainer)
+  const error = m.error
+  const errorContainer = mix(containerLow, error, m.errorContainer)
 
   return {
     '--md-primary': rgb(primary),
@@ -290,7 +321,7 @@ export function buildCleanScheme(accent: RGB, dark: boolean, config: TintConfig)
     '--md-inverse-on-surface': rgb(n.inverseOnSurface),
     '--md-inverse-primary': rgb(accentFromSeed(primary, !dark)),
     // Clean 专用：强调色淡染填充（对话框确认按钮等）与侧栏底色
-    '--clean-accent-soft': rgb(mix(neutral(n.containerHigh), primary, dark ? 0.2 : 0.14)),
-    '--clean-sidebar': rgb(neutral(dark ? n.containerLowest : n.container)),
+    '--clean-accent-soft': rgb(mix(neutral(n.containerHigh), primary, m.accentSoft)),
+    '--clean-sidebar': rgb(neutral(n[m.sidebar])),
   }
 }

@@ -71,6 +71,23 @@ describe('rankings', () => {
     ])
   })
 
+  it('breaks listening-time ties by plays, then name, then key', () => {
+    const tied = [
+      stat('p', { artist: 'Zed', totalListenMs: 100, playCount: 1 }),
+      stat('q', { artist: 'Amy', totalListenMs: 100, playCount: 1 }),
+      stat('r', { artist: 'Kim', totalListenMs: 100, playCount: 5 }),
+    ]
+    // 同时长先比播放次数，再按名字不分大小写排序
+    expect(rankStatArtists(tied, 300).map(rank => rank.name)).toEqual(['Kim', 'Amy', 'Zed'])
+
+    // 名字也相同（不同专辑 id）时按 key 兜底，结果稳定
+    const sameName = [
+      stat('x', { album: 'Live', albumId: '9', totalListenMs: 50, playCount: 1 }),
+      stat('y', { album: 'Live', albumId: '2', totalListenMs: 50, playCount: 1 }),
+    ]
+    expect(rankStatAlbums(sameName, 100).map(rank => rank.key)).toEqual(['id:2', 'id:9'])
+  })
+
   it('clamps shares into 0..1 and tolerates an empty total', () => {
     expect(statShare(5, 0)).toBe(0)
     expect(statShare(10, 5)).toBe(1)

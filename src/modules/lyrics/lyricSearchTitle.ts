@@ -10,18 +10,25 @@ const CLOSE_PARENS = new Set([')', '）'])
 export function extractQuotedSongTitle(title: string | null | undefined): string | null {
   const text = (title ?? '').trim()
   for (const [open, close] of TITLE_MARKS) {
-    let depth = 0
-    for (let index = 0; index < text.length; index++) {
-      const char = text[index]!
-      if (OPEN_PARENS.has(char)) depth++
-      else if (CLOSE_PARENS.has(char)) depth = Math.max(0, depth - 1)
-      else if (char === open && depth === 0) {
-        const end = text.indexOf(close, index + 1)
-        if (end < 0) break
-        const inner = text.slice(index + 1, end).trim()
-        if (inner) return inner
-        index = end
-      }
+    const inner = quotedOutsideParens(text, open, close)
+    if (inner) return inner
+  }
+  return null
+}
+
+/** 按一种书名号找第一段不在圆括号里的非空内容；找不到时为 null */
+function quotedOutsideParens(text: string, open: string, close: string): string | null {
+  let depth = 0
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!
+    if (OPEN_PARENS.has(char)) depth++
+    else if (CLOSE_PARENS.has(char)) depth = Math.max(0, depth - 1)
+    else if (char === open && depth === 0) {
+      const end = text.indexOf(close, index + 1)
+      if (end < 0) return null
+      const inner = text.slice(index + 1, end).trim()
+      if (inner) return inner
+      index = end
     }
   }
   return null

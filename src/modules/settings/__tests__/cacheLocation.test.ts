@@ -58,6 +58,9 @@ describe('selectedDirectory', () => {
     expect(selectedDirectory('   ')).toBeNull()
     expect(selectedDirectory([])).toBeNull()
     expect(selectedDirectory({ path: 3 })).toBeNull()
+    expect(selectedDirectory({ path: '  ' })).toBeNull()
+    expect(selectedDirectory({ other: '/e' })).toBeNull()
+    expect(selectedDirectory(42)).toBeNull()
   })
 })
 
