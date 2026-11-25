@@ -83,6 +83,8 @@
     patchelf libasound2-dev
   ```
 
+  CI 使用的完整清单在 `scripts/linux/install-build-deps.sh`，Ubuntu 22.04 上可直接运行。
+
 构建 RPM 另需 `rpm`；FFmpeg 共享库的额外工具和目标限制见其独立文档。
 Windows 构建 MSI 还需要启用 VBScript 可选功能，排查步骤见上述 Tauri 文档。
 如需 Clippy / rustfmt，安装 `minimal` profile 不自带的组件：
@@ -201,6 +203,15 @@ pnpm tauri build -- --locked
 未指定 `--target` 时，默认产物目录是 `src-tauri/target/release/bundle/`；
 显式目标使用 `src-tauri/target/<Rust目标>/release/bundle/`，`CARGO_TARGET_DIR` 可改变根目录。
 Linux 本地生成 `.AppImage`，工作流上传时压为 `.tar.gz`。
+
+Linux 产物会把 glibc 符号版本钉在构建机上：滚动发行版本机编出的包在 Debian / Ubuntu LTS 上会报
+`GLIBC_2.xx not found`。Release 与 Artifacts 工作流在 `ubuntu:22.04` 容器里构建，下限固定为 glibc 2.35，
+并用 `scripts/linux/check-glibc.sh` 校验主程序与随包 FFmpeg。要把本地测试包发给别人时，用 Docker 或
+Podman 运行 `scripts/linux/build-in-container.sh`，产物在 `src-tauri/target/linux-glibc-2.35/`，结束时会打印所需的最高 GLIBC 版本。
+
+Flatpak 是可选渠道：`packaging/flatpak/` 把 `.deb` 重新打包进固定的 GNOME 51 运行时（WebKitGTK 版本随之固定），
+本地构建步骤见清单开头的注释。Release 会额外运行 `flatpak.yml` 生成 `.flatpak` 工作流产物，失败不影响发布；
+也可对已有 Release 手动运行该工作流。
 
 macOS 使用 ad-hoc 签名，未经 Apple 公证。Release 检查 dylib 架构和签名，DMG 带 `-adhoc` 后缀。
 基础 Tauri 配置的系统下限是 10.15；本地 arm64 发布构建应与 Release 一致设置
@@ -390,6 +401,11 @@ Bilibili CC 字幕移植依据 Android PR #575，参考提交 `43cf89ae2e331f80e
 检测到后，默认禁用 NVIDIA explicit sync、将驱动在途帧上限设为 1、关闭 DMA-BUF atlas，
 并使用 SHM 共享内存合成。这里的在途帧上限不是帧率承诺，也不等于关闭整个 DMA-BUF renderer。
 前端会将整页路由切换、播放页滑动和遮罩动画降为即时切换，减少大图层重绘。
+
+与显卡无关，`src-tauri/src/linux_webkit_compositor.rs` 在 WebKitGTK 2.54.x 上默认设置
+`WEBKIT_USE_SKIA_FOR_COMPOSITION=0`，退回 TextureMapper 合成器，规避 2.54 Skia 合成器引起的
+过渡与动态背景闪烁（上游 WebKit bug 327524 / 326841，修复未回合到 2.54.x），仍保留 GPU 加速。
+显式设置该变量（如 `=1`）或设置 `NERI_WEBKIT_KEEP_SKIA_COMPOSITOR=1` 可保留 Skia；实际版本与决定记录在 `linux-graphics` 日志中。
 
 已经显式设置的 NVIDIA / WebKit 环境变量优先，兼容层不覆盖它们。
 例如显式设置 `WEBKIT_DISABLE_DMABUF_RENDERER` 时，不再叠加强制 SHM。
