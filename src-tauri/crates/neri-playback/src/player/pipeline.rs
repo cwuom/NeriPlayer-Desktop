@@ -103,9 +103,9 @@ pub(super) fn switch_output_device_in_place(
     ensure_generation(playback_generation, previous.playback_generation)?;
     let paused = previous.shared.paused.load(Ordering::Acquire);
     previous.pause();
-    // 旧流独占着设备时，切到同一设备（开关独占）或回退共享都打不开：先让出设备。
+    // 旧流独占着设备，或新流要独占而旧共享流还开着时，新流都打不开：先让出设备。
     // 让出后旧流不能再恢复，失败时改为在原设备、原位置重建会话
-    let released_exclusive = previous.release_exclusive_output();
+    let released = previous.release_output_before_reopen(candidate.exclusive);
     let previous = &*previous;
     // 保留旧流和源，目标设备准备失败时还能回到原位置
     let prepared = prepare_session(
@@ -156,7 +156,7 @@ pub(super) fn switch_output_device_in_place(
         }
         Err(error) => {
             restore_dsp_output_identity(effects, output);
-            if released_exclusive {
+            if released {
                 restore_released_session(
                     current,
                     paused,
@@ -178,7 +178,7 @@ pub(super) fn switch_output_device_in_place(
     }
 }
 
-/// 独占流已让出设备、新设备又没建成：按原档案在原位置重建会话，避免停在无声状态
+/// 旧流已让出设备、新设备又没建成：按原档案在原位置重建会话，避免停在无声状态
 #[allow(clippy::too_many_arguments)]
 fn restore_released_session(
     current: &mut Option<PlaybackSession>,

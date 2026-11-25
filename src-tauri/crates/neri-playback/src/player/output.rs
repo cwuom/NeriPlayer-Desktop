@@ -52,7 +52,8 @@ pub(super) enum OutputStream {
     Shared(Stream),
     #[cfg(target_os = "windows")]
     Exclusive(super::wasapi_exclusive::ExclusiveStream),
-    /// 独占流已提前释放：同一设备上的新流（独占或共享回退）都要等它让出设备才打得开
+    /// 旧流已提前释放：同一设备上的新流要等它让出设备才打得开
+    /// （独占流占着设备时谁都打不开；共享流还在时，端点关闭“独占优先”就初始化不了独占）
     #[cfg(target_os = "windows")]
     Released,
 }
@@ -94,13 +95,29 @@ impl OutputStream {
     /// 释放独占流占着的设备（drop 会停掉渲染线程并归还端点）；共享流不受影响。
     /// 返回是否真的释放了
     pub(super) fn release_exclusive(&mut self) -> bool {
+        self.release_before_reopen(false)
+    }
+
+    /// 为即将打开的新流让出设备。新流要独占时共享流也得先关：
+    /// WASAPI 在端点关闭“独占优先”时，只要还有共享流就初始化不了独占，会静默回退共享。
+    /// 返回是否真的释放了
+    pub(super) fn release_before_reopen(&mut self, next_exclusive: bool) -> bool {
         #[cfg(target_os = "windows")]
-        if self.holds_device_exclusively() {
+        if !matches!(self, Self::Released)
+            && release_needed(self.holds_device_exclusively(), next_exclusive)
+        {
             *self = Self::Released;
             return true;
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = next_exclusive;
         false
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn release_needed(holds_exclusive: bool, next_exclusive: bool) -> bool {
+    holds_exclusive || next_exclusive
 }
 
 /// 按设备档案建流：请求了独占就先试独占，失败（设备被占用、格式不支持）回退共享流。
@@ -430,4 +447,18 @@ pub(super) fn render_output<T>(
         underrun,
         metrics::monotonic_ns().saturating_sub(started_ns),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_needed;
+
+    #[test]
+    fn shared_output_is_released_before_opening_an_exclusive_stream() {
+        // 回归：只释放独占流时，共享播放中打开独占会被还开着的共享流挡住，静默回退共享
+        assert!(release_needed(false, true));
+        assert!(release_needed(true, false), "独占流总要先让出设备");
+        assert!(release_needed(true, true));
+        assert!(!release_needed(false, false), "共享到共享不必中断旧流");
+    }
 }

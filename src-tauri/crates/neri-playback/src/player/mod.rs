@@ -500,9 +500,9 @@ impl PlaybackSession {
         self.stream.holds_device_exclusively()
     }
 
-    /// 只释放独占设备、保留会话本身（源、时钟、响度），失败时仍能据此重建
-    fn release_exclusive_output(&mut self) -> bool {
-        self.stream.release_exclusive()
+    /// 为新流让出设备、保留会话本身（源、时钟、响度），失败时仍能据此重建
+    fn release_output_before_reopen(&mut self, next_exclusive: bool) -> bool {
+        self.stream.release_before_reopen(next_exclusive)
     }
 
     fn is_empty(&self) -> bool {

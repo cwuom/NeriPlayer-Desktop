@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use neri_common::error::{AppError, AppResult};
@@ -22,11 +22,12 @@ const MEDIA_CACHE_SUBDIRS: [&str; 2] = [PLAYBACK_AUDIO_DIR, IMAGE_CACHE_DIR];
 const MOVABLE_EXTENSIONS: [&str; 3] = ["audio", "image", "ready"];
 /// 写入中的暂存文件：可能仍被播放线程占用，搬移时跳过，只在丢弃旧缓存时尝试删除
 const STAGING_EXTENSIONS: [&str; 2] = ["part", "tmp"];
-const WRITE_PROBE_FILE: &str = ".neri_write_test";
+const WRITE_PROBE_PREFIX: &str = ".neri_write_test";
 
 static CUSTOM_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
 static FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 static RELOCATING: AtomicBool = AtomicBool::new(false);
+static WRITE_PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
 // 普通保存与改缓存位置都是「读设置 → 改 → 写回」，串行化以免后写的一方带回旧目录
 static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
 
@@ -67,8 +68,9 @@ fn resolve_root(
     default: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     if let Some(custom) = custom {
-        // 移动硬盘拔掉或目录失去权限时退回默认目录，播放和封面不能因为缓存位置失效而失败
-        if fs::create_dir_all(custom).is_ok() {
+        // 移动硬盘拔掉、卷改成只读或目录失去写权限时退回默认目录，播放和封面不能因为缓存位置失效而失败。
+        // 目录已存在时 create_dir_all 照样成功，所以必须真写一次
+        if is_writable_dir(custom) {
             return Some(custom.to_path_buf());
         }
         if !FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
@@ -129,11 +131,23 @@ pub fn prepare_root(path: &Path) -> AppResult<PathBuf> {
     if path.exists() && !path.is_dir() {
         return Err(AppError::Other("CACHE_DIR_NOT_DIRECTORY".into()));
     }
-    fs::create_dir_all(path).map_err(|_| AppError::Other("CACHE_DIR_NOT_WRITABLE".into()))?;
-    let probe = path.join(WRITE_PROBE_FILE);
-    fs::write(&probe, b"ok").map_err(|_| AppError::Other("CACHE_DIR_NOT_WRITABLE".into()))?;
-    let _ = fs::remove_file(&probe);
+    if !is_writable_dir(path) {
+        return Err(AppError::Other("CACHE_DIR_NOT_WRITABLE".into()));
+    }
     Ok(normalized(path))
+}
+
+/// 按需创建目录并实际写入一个探测文件。探测文件名每次不同，
+/// 并发的封面和音频请求不会互删对方的探测文件而误判不可写
+fn is_writable_dir(path: &Path) -> bool {
+    if fs::create_dir_all(path).is_err() {
+        return false;
+    }
+    let seq = WRITE_PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let probe = path.join(format!("{WRITE_PROBE_PREFIX}-{}-{seq}", std::process::id()));
+    let writable = fs::write(&probe, b"ok").is_ok();
+    let _ = fs::remove_file(&probe);
+    writable
 }
 
 /// 规范化最长的已存在前缀再接回其余部分：尚未创建的目录也能和已存在的目录比较
@@ -412,6 +426,26 @@ mod tests {
         assert_eq!(resolve_root(None, || Some(default.clone())), Some(default));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn custom_root_falls_back_when_existing_directory_turns_read_only() {
+        // 回归：目录还在但变成只读时 create_dir_all 仍成功，曾继续用它导致封面缓存写入全部失败
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom");
+        let default = temp.path().join("default");
+        fs::create_dir_all(&custom).unwrap();
+        fs::set_permissions(&custom, fs::Permissions::from_mode(0o555)).unwrap();
+        let writable_anyway = fs::write(custom.join("root-check"), b"x").is_ok();
+        let resolved = resolve_root(Some(&custom), || Some(default.clone()));
+        fs::set_permissions(&custom, fs::Permissions::from_mode(0o755)).unwrap();
+        if writable_anyway {
+            // 以 root 运行时权限位不生效，无法构造只读目录
+            return;
+        }
+        assert_eq!(resolved, Some(default));
+    }
+
     #[test]
     fn prepare_root_requires_an_absolute_writable_directory() {
         let temp = tempfile::tempdir().unwrap();
@@ -421,7 +455,11 @@ mod tests {
         assert!(prepare_root(&file).is_err());
         let created = prepare_root(&temp.path().join("new").join("cache")).unwrap();
         assert!(created.is_dir());
-        assert!(!created.join(WRITE_PROBE_FILE).exists());
+        assert_eq!(
+            fs::read_dir(&created).unwrap().count(),
+            0,
+            "探测文件不能留下"
+        );
     }
 
     #[test]
