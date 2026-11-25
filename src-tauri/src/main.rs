@@ -156,6 +156,9 @@ fn main() {
 
             // 系统托盘：关闭主窗口后收进托盘继续播放
             tray_cmd::setup(app)?;
+            if let Some(win) = app.get_webview_window("main") {
+                neri_player_desktop::taskbar_thumbbar::install(&handle, &win);
+            }
 
             // 本地音乐库：读索引、开始监视文件夹，后台做一次增量校对
             neri_library::library::local_index::start(neri_player_desktop::events::event_sink(&handle));
