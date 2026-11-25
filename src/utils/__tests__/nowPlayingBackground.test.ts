@@ -12,6 +12,7 @@ const palette: PaletteResult = {
   saturateOffset: 0,
   accentBg: gray,
   primaryColor: gray,
+  themeSeed: gray,
   dominant: gray,
   lightVibrant: gray,
   muted: gray,

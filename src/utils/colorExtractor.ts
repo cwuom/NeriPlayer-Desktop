@@ -150,7 +150,7 @@ export async function applyDynamicColorFromCover(rawUrl: string, isDark: boolean
   if (token !== activeToken) return false
 
   const palette = extractPalette(imageData, 16, isDark)
-  const seed = palette.primaryColor
+  const seed = palette.themeSeed
   const accent = accentFromSeed(seed, isDark)
   // 换封面驱动的取色变化同样要平滑过渡，不能整屏瞬间跳色
   beginSmoothThemeTransition()

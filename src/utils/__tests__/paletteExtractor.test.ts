@@ -169,4 +169,65 @@ describe('extractPalette', () => {
       expect(toHsl(accentBg).s).toBeGreaterThan(0.2)
     }
   })
+
+  describe('themeSeed', () => {
+    const WHITE: RGBA = [248, 246, 244]
+    const SKIN: RGBA = [214, 160, 130]
+    const chroma = ([r, g, b]: RGB) => (Math.max(r, g, b) - Math.min(r, g, b)) / 255
+
+    it('follows the larger coloured area on a fully coloured cover', () => {
+      for (const dark of [true, false]) {
+        const result = extractPalette(makeImage([...fill(BLUE, 45), ...fill(YELLOW, 19)]), 16, dark)
+        expect(hueDistance(toHsl(result.themeSeed).h, toHsl([30, 60, 220]).h)).toBeLessThan(10)
+      }
+    })
+
+    it('takes the warm tone of a muted sepia photo with a grey sky', () => {
+      const result = extractPalette(makeImage([...fill([150, 148, 146], 70), ...fill([120, 100, 80], 30)]))
+      expect(hueDistance(toHsl(result.themeSeed).h, toHsl([120, 100, 80]).h)).toBeLessThan(12)
+      expect(toHsl(result.themeSeed).s).toBeGreaterThan(0.08)
+    })
+
+    it('keeps the cast of a muted cover that has little saturated area', () => {
+      const result = extractPalette(makeImage([...fill([90, 78, 53], 60), ...fill([40, 36, 30], 40)]))
+      expect(chroma(result.themeSeed)).toBeGreaterThan(0.08)
+      expect(hueDistance(toHsl(result.themeSeed).h, toHsl([90, 78, 53]).h)).toBeLessThan(15)
+    })
+
+    it('keeps the warm cast of a dark sepia cover', () => {
+      // 《发如雪》这类暗调棕褐封面：平均色 ≈ (38,33,23)，色度只有 0.06，但不能退成中性灰
+      const result = extractPalette(makeImage([...fill([30, 26, 18], 80), ...fill([70, 61, 42], 20)]))
+      // accentFromSeed 以 HSL 饱和度 < 0.08 判定中性
+      expect(toHsl(result.themeSeed).s).toBeGreaterThan(0.08)
+      expect(hueDistance(toHsl(result.themeSeed).h, toHsl([38, 33, 23]).h)).toBeLessThan(15)
+    })
+
+    it('falls back to neutral grey when no pixel is opaque', () => {
+      expect(chroma(extractPalette(makeImage(fill([255, 0, 0, 0]))).themeSeed)).toBe(0)
+    })
+
+    it('takes the coloured subject of a portrait on a white backdrop instead of the grey', () => {
+      // 回归：《情歌》这类白底人像封面，dominant 取到灰色，全局强调色因此退成中性灰
+      for (const dark of [true, false]) {
+        const result = extractPalette(makeImage([...fill(WHITE, 1400), ...fill([60, 58, 56], 400), ...fill(SKIN, 300)]), 16, dark)
+        expect(chroma(result.themeSeed)).toBeGreaterThan(0.12)
+        expect(hueDistance(toHsl(result.themeSeed).h, toHsl([214, 160, 130]).h)).toBeLessThan(12)
+      }
+    })
+
+    it('stays neutral for a black-and-white cover', () => {
+      const result = extractPalette(makeImage([...fill(WHITE, 40), ...fill([20, 20, 20], 40), ...fill([128, 128, 128], 20)]))
+      expect(chroma(result.themeSeed)).toBeLessThan(0.08)
+    })
+
+    it('ignores a coloured speck that covers less than 5% of the cover', () => {
+      const result = extractPalette(makeImage([...fill(WHITE, 980), ...fill([220, 30, 30], 20)]))
+      expect(chroma(result.themeSeed)).toBeLessThan(0.08)
+    })
+
+    it('picks the hue with the larger coloured area when the backdrop is grey', () => {
+      const result = extractPalette(makeImage([...fill(WHITE, 600), ...fill(BLUE, 300), ...fill(RED, 100)]))
+      expect(hueDistance(toHsl(result.themeSeed).h, toHsl([30, 60, 220]).h)).toBeLessThan(10)
+    })
+  })
 })

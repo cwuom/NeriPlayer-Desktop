@@ -20,6 +20,8 @@ export interface PaletteResult {
   accentBg: RGB
   /** 主色（未 soften 的 base 原色） */
   primaryColor: RGB
+  /** 全局主题强调色的种子：主色接近灰白时改取封面里占比最大的有色区域 */
+  themeSeed: RGB
   // 兼容旧接口
   dominant: RGB
   lightVibrant: RGB
@@ -393,6 +395,66 @@ function colorKey(c: RGB): string {
   return `${c[0]},${c[1]},${c[2]}`
 }
 
+// 主题种子：HSL 饱和度在近白/近黑处不稳定（240,236,232 的 s 也有 0.3），用色度判断是否“有颜色”
+// 20/255：高于 JPEG 噪点和白底的微弱偏色，又能收进棕褐这类低饱和封面
+const THEME_NEUTRAL_CHROMA = 0.08
+const THEME_HUE_BINS = 24
+const THEME_SEED_MIN_SHARE = 0.05
+
+function chroma(c: RGB): number {
+  return (Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2])) / 255
+}
+
+/** 暗调棕褐（如 38,33,23）色度很低但色偏明确，按 HSV 饱和度补判；近白的微弱偏色不算 */
+function hasColorCast(c: RGB): boolean {
+  const max = Math.max(c[0], c[1], c[2])
+  return chroma(c) >= THEME_NEUTRAL_CHROMA || (max >= 24 && (max - Math.min(c[0], c[1], c[2])) / max >= 0.15)
+}
+
+/**
+ * 全局强调色的种子按真实面积取：有色像素按 15° 色相分桶，取相邻三桶“色度加权面积”最大的一段求平均。
+ * 不用 dominant：median-cut 按像素数对半切，每个 bucket 人数几乎相等，排第一的只是排序顺序，
+ * 白底人像会因此拿到灰色。有色面积不到 5% 时取全图平均色，低饱和封面保留色偏，黑白封面则保持中性
+ */
+function pickThemeSource(pixels: RGB[]): RGB {
+  if (pixels.length === 0) return FALLBACK_COLOR
+  const weight = new Array<number>(THEME_HUE_BINS).fill(0)
+  const count = new Array<number>(THEME_HUE_BINS).fill(0)
+  const sum = Array.from({ length: THEME_HUE_BINS }, () => [0, 0, 0])
+  for (const pixel of pixels) {
+    const amount = chroma(pixel)
+    if (amount < THEME_NEUTRAL_CHROMA) continue
+    const [h, , l] = rgbToHsl(pixel[0], pixel[1], pixel[2])
+    if (l < 0.1 || l > 0.92) continue
+    const bin = Math.floor(h / (360 / THEME_HUE_BINS)) % THEME_HUE_BINS
+    weight[bin] += amount
+    count[bin]++
+    sum[bin][0] += pixel[0]
+    sum[bin][1] += pixel[1]
+    sum[bin][2] += pixel[2]
+  }
+  const window = (center: number) => [center - 1, center, center + 1].map(i => (i + THEME_HUE_BINS) % THEME_HUE_BINS)
+  let best = -1
+  let bestWeight = 0
+  for (let bin = 0; bin < THEME_HUE_BINS; bin++) {
+    const total = window(bin).reduce((acc, i) => acc + weight[i], 0)
+    if (total > bestWeight) {
+      best = bin
+      bestWeight = total
+    }
+  }
+  const bins = best < 0 ? [] : window(best)
+  const pixelsInWindow = bins.reduce((acc, i) => acc + count[i], 0)
+  if (pixelsInWindow / pixels.length < THEME_SEED_MIN_SHARE) {
+    // 纯黑与缺数据同等对待（同 pickColor）；近灰的平均色在 HSL 下饱和度会被 soften 放大，直接拉成纯灰
+    const mean = pickColor(averageColor(pixels))
+    if (hasColorCast(mean)) return mean
+    const grey = Math.round((mean[0] + mean[1] + mean[2]) / 3)
+    return [grey, grey, grey]
+  }
+  return [0, 1, 2].map(ch => Math.round(bins.reduce((acc, i) => acc + sum[i][ch], 0) / pixelsInWindow)) as RGB
+}
+
 // 主入口（对齐 Android buildDynamicBackgroundPalette）
 export function extractPalette(
   imageData: ImageData,
@@ -466,6 +528,9 @@ export function extractPalette(
   const saturateOffset = isDark ? 0.24 : 0.16
 
   const accentBg = computeAccentBg(baseColor, isDark)
+  // 与 primaryColor 同样经过 Base 角色的 soften，饱和度与亮度落在同一区间
+  const themeSource = pickThemeSource(pixels)
+  const themeSeed = softenPaletteColor(themeSource, themeSource, isDark, ColorRole.Base)
 
   return {
     shaderColors,
@@ -473,6 +538,7 @@ export function extractPalette(
     saturateOffset,
     accentBg,
     primaryColor: softenedBase,
+    themeSeed,
     // 兼容旧接口
     dominant: softenedBase,
     lightVibrant: softenedAccent,

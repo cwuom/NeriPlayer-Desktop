@@ -72,6 +72,7 @@ function paletteWithPrimary(primary: RGB): PaletteResult {
     saturateOffset: 0,
     accentBg: primary,
     primaryColor: primary,
+    themeSeed: primary,
     dominant: primary,
     lightVibrant: primary,
     muted: primary,
