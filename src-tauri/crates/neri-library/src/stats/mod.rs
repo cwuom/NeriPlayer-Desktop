@@ -17,6 +17,7 @@ use crate::sync::models::{
     SyncData, SyncPlaybackCounterShard, SyncPlaybackStatBucket, SyncTrackStat,
 };
 
+mod hours;
 mod storage;
 pub(crate) use storage::{import_legacy_json, LEGACY_IMPORT_KEY};
 
@@ -66,6 +67,8 @@ pub struct PlaybackStatsSummary {
     pub total_listen_ms: i64,
     pub track_count: usize,
     pub items: Vec<SyncTrackStat>,
+    /// 本期各本地小时（0..24）的收听时长，来自日分桶的小时数据（含其他设备同步来的部分）
+    pub hour_listen_ms: Vec<i64>,
 }
 
 // 按天数据的保留窗口：语义对齐 sync/merge.rs 的 STAT_BUCKET_RETENTION_DAYS
@@ -171,6 +174,7 @@ fn upsert_shard(
         play_count: play_count_increment.max(0),
         first_played_at: played_at,
         last_played_at: played_at,
+        recorded_local_date: None,
     });
 }
 
@@ -309,6 +313,8 @@ impl StatsStore {
         }
 
         // 日分桶
+        let hour_increments =
+            hours::hour_increments(&Local, device_id, epoch, day, played_at, listened);
         if let Some(bucket) = self.buckets.iter_mut().find(|bucket| {
             bucket.day_start_at == day && bucket.identity_key == session.identity_key
         }) {
@@ -325,6 +331,7 @@ impl StatsStore {
             bucket.last_played_at = bucket.last_played_at.max(played_at);
             bucket.first_played_at = min_positive(bucket.first_played_at, played_at);
             apply_session_metadata(bucket_meta_mut(bucket), session);
+            hours::add_hour_increments(&mut bucket.hourly_totals, hour_increments);
         } else {
             let mut bucket = SyncPlaybackStatBucket {
                 day_start_at: day,
@@ -336,6 +343,7 @@ impl StatsStore {
                 ..Default::default()
             };
             apply_session_metadata(bucket_meta_mut(&mut bucket), session);
+            hours::add_hour_increments(&mut bucket.hourly_totals, hour_increments);
             self.buckets.push(bucket);
         }
 
@@ -524,7 +532,27 @@ impl StatsStore {
             total_listen_ms: items.iter().map(|stat| stat.total_listen_ms).sum(),
             track_count: items.len(),
             items,
+            hour_listen_ms: self.hour_listen_ms(period_start_at(period, now_ms)),
         }
+    }
+
+    /// 按本地小时汇总小时数据；小时起点是绝对时刻，跨时区同步来的记录也能按区间筛选
+    fn hour_listen_ms(&self, start: Option<i64>) -> Vec<i64> {
+        let mut hours = vec![0_i64; 24];
+        for bucket in &self.buckets {
+            for hour in &bucket.hourly_totals {
+                let Ok(slot) = usize::try_from(hour.local_hour) else {
+                    continue;
+                };
+                if slot < hours.len()
+                    && hour.total_listen_ms > 0
+                    && start.is_none_or(|start| hour.hour_start_at >= start)
+                {
+                    hours[slot] = hours[slot].saturating_add(hour.total_listen_ms);
+                }
+            }
+        }
+        hours
     }
 }
 
@@ -853,6 +881,7 @@ mod tests {
                 play_count: 1,
                 first_played_at: now,
                 last_played_at: now,
+                ..Default::default()
             });
         save_db(&database, &store);
 
@@ -1051,6 +1080,7 @@ mod tests {
             play_count: 3,
             first_played_at: now,
             last_played_at: now,
+            ..Default::default()
         });
         stats[0].play_count = 4;
 
@@ -1610,6 +1640,119 @@ mod tests {
         assert_eq!(day.total_listen_ms, 15_000);
         assert_eq!(store.buckets.len(), 1, "今天的日分桶不得被修剪");
         assert_eq!(store.daily_shards.len(), 1, "今天的日分片不得被修剪");
+    }
+
+    fn hour_slot(
+        device: &str,
+        local_hour: i32,
+        total: i64,
+    ) -> crate::sync::models::SyncPlaybackHourTotal {
+        crate::sync::models::SyncPlaybackHourTotal {
+            device_id: device.into(),
+            epoch_started_at: 0,
+            hour_start_at: day_start_at(chrono::Utc::now().timestamp_millis()),
+            local_hour,
+            total_listen_ms: total,
+        }
+    }
+
+    #[test]
+    fn recording_splits_listening_into_local_hours_on_the_day_bucket() {
+        let mut store = StatsStore::default();
+        let day = day_start_at(chrono::Utc::now().timestamp_millis());
+        let now = day + 3 * 3_600_000 + 60_000;
+        store.record(&session("k", 30_000, 1), "desktop", now);
+        store.record(&session("k", 45_000, 0), "desktop", now);
+
+        let hours = &store.buckets[0].hourly_totals;
+        assert_eq!(hours.len(), 1);
+        let local_hour = chrono::Timelike::hour(&Local.timestamp_millis_opt(now).unwrap()) as i32;
+        assert_eq!(
+            (
+                hours[0].device_id.as_str(),
+                hours[0].local_hour,
+                hours[0].total_listen_ms
+            ),
+            ("desktop", local_hour, 75_000)
+        );
+        assert_eq!(hours[0].epoch_started_at, store.cleared_at);
+        // 只有计数、没有收听时长的增量不产生小时数据
+        store.record(&session("j", 0, 1), "desktop", now);
+        assert!(store.buckets[1].hourly_totals.is_empty());
+
+        let summary = store.summarize(StatsPeriod::Day, now);
+        assert_eq!(summary.hour_listen_ms.len(), 24);
+        assert_eq!(summary.hour_listen_ms[local_hour as usize], 75_000);
+        assert_eq!(summary.hour_listen_ms.iter().sum::<i64>(), 75_000);
+    }
+
+    #[test]
+    fn apply_merged_keeps_remote_and_own_hours_for_the_next_upload() {
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("k", 30_000, 1), "desktop", now);
+        let (stats, mut buckets, cleared_at) = store.sync_snapshot();
+        let own = buckets[0].hourly_totals.clone();
+        buckets[0].hourly_totals = vec![hour_slot("android", 22, 90_000)];
+
+        // 同步期间本机又听了一段，回写不能丢掉任何一侧
+        store.record(&session("k", 10_000, 0), "desktop", now);
+        store.apply_merged(&stats, &buckets, cleared_at, "desktop");
+        let (_, uploaded, _) = store.sync_snapshot();
+        let hours = &uploaded[0].hourly_totals;
+        assert!(hours.contains(&hour_slot("android", 22, 90_000)));
+        let desktop = hours
+            .iter()
+            .find(|hour| hour.device_id == "desktop")
+            .unwrap();
+        assert_eq!(desktop.total_listen_ms, own[0].total_listen_ms + 10_000);
+        assert_eq!(
+            store.summarize(StatsPeriod::All, now).hour_listen_ms[22],
+            90_000
+        );
+    }
+
+    #[test]
+    fn database_round_trip_preserves_hours_and_recorded_dates() {
+        let database = UserDatabase::open_in_memory().unwrap();
+        let mut store = StatsStore::default();
+        let now = day_start_at(chrono::Utc::now().timestamp_millis()) + 3_600_000;
+        store.record(&session("k", 30_000, 1), "desktop", now);
+        store.buckets[0].recorded_local_date = Some("2026-11-24".into());
+        store.buckets[0]
+            .hourly_totals
+            .push(hour_slot("android", 5, 7));
+        store.buckets[0]
+            .counter_shards
+            .push(SyncPlaybackCounterShard {
+                device_id: "android".into(),
+                play_count: 1,
+                recorded_local_date: Some("2026-11-24".into()),
+                ..Default::default()
+            });
+        save_db(&database, &store);
+
+        let restored = load_db(&database);
+        assert_eq!(
+            restored.buckets[0].hourly_totals,
+            store.buckets[0].hourly_totals
+        );
+        assert_eq!(
+            restored.buckets[0].recorded_local_date.as_deref(),
+            Some("2026-11-24")
+        );
+        assert_eq!(
+            restored.buckets[0].counter_shards,
+            store.buckets[0].counter_shards
+        );
+
+        // 只有小时数据变化时也必须落盘，摘要不能把它当成未变化的行跳过
+        let mut grown = restored.clone();
+        grown.buckets[0]
+            .hourly_totals
+            .push(hour_slot("android", 6, 1));
+        save_db(&database, &grown);
+        assert_eq!(load_db(&database).buckets[0].hourly_totals.len(), 3);
     }
 
     #[test]

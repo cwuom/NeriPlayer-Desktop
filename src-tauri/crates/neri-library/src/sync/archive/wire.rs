@@ -249,6 +249,14 @@ fn schema(context: &str) -> AppResult<Schema> {
             ("playCount", Int),
             ("firstPlayedAt", Int),
             ("lastPlayedAt", Int),
+            ("recordedLocalDate", OptionalText),
+        ],
+        "hour" => &[
+            ("deviceId", Text),
+            ("epochStartedAt", Int),
+            ("hourStartAt", Int),
+            ("localHour", Int),
+            ("totalListenMs", Int),
         ],
         "stat" => &[
             ("identityKey", Text),
@@ -286,6 +294,8 @@ fn schema(context: &str) -> AppResult<Schema> {
             ("counterBaseListenMs", Int),
             ("counterBasePlayCount", Int),
             ("counterShards", List("shard")),
+            ("recordedLocalDate", OptionalText),
+            ("hourlyTotals", List("hour")),
         ],
         "songDeletion" => &[
             ("playlistId", Int),
@@ -368,6 +378,7 @@ fn narrow_integer(context: &str, name: &str) -> bool {
             | ("favorite", "trackCount")
             | ("stat" | "bucket", "playCount" | "counterBasePlayCount")
             | ("shard", "playCount")
+            | ("hour", "localHour")
             | ("usage", "trackCount" | "openCount")
     )
 }

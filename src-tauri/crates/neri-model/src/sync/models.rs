@@ -1043,6 +1043,139 @@ pub struct SyncPlaybackCounterShard {
     pub first_played_at: i64,
     #[serde(default)]
     pub last_played_at: i64,
+    /// 记录时所在时区的本地日期（YYYY-MM-DD），对齐 Android ProtoNumber(7)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_opt_string_or_number"
+    )]
+    pub recorded_local_date: Option<String>,
+}
+
+/// 每（设备 × epoch × 小时）的累计收听时长，对齐 Android SyncPlaybackHourTotal
+///
+/// 同一槽位只会由一台设备单调累加，跨端合并取最大值即可收敛
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlaybackHourTotal {
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
+    pub device_id: String,
+    #[serde(default, deserialize_with = "deserialize_i64_or_default")]
+    pub epoch_started_at: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_default")]
+    pub hour_start_at: i64,
+    #[serde(default, deserialize_with = "deserialize_local_hour")]
+    pub local_hour: i32,
+    #[serde(default, deserialize_with = "deserialize_i64_or_default")]
+    pub total_listen_ms: i64,
+}
+
+impl SyncPlaybackHourTotal {
+    /// 槽位键：同一槽位的多份快照只保留最大值
+    pub fn slot(&self) -> (&str, i64, i64, i32) {
+        (
+            &self.device_id,
+            self.epoch_started_at,
+            self.hour_start_at,
+            self.local_hour,
+        )
+    }
+
+    fn is_valid_after(&self, cleared_at: i64) -> bool {
+        !self.device_id.trim().is_empty()
+            && self.epoch_started_at >= cleared_at
+            && self.hour_start_at >= 0
+            && (0..24).contains(&self.local_hour)
+            && self.total_listen_ms > 0
+    }
+}
+
+// 越界小时记为 -1，交给合并时按无效记录丢弃，不让整份载荷解析失败
+fn deserialize_local_hour<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = deserialize_i64_or_default(deserializer)?;
+    Ok(i32::try_from(value).unwrap_or(-1))
+}
+
+// 旧版 Gson 载荷可能整列为 null 或含 null 元素
+fn deserialize_hour_totals<'de, D>(deserializer: D) -> Result<Vec<SyncPlaybackHourTotal>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let rows = Option::<Vec<Option<SyncPlaybackHourTotal>>>::deserialize(deserializer)?;
+    Ok(rows.unwrap_or_default().into_iter().flatten().collect())
+}
+
+/// 合并两侧小时数据，对齐 Android SyncPlaybackHours.merge
+///
+/// 同槽位取较大值，丢弃无效行和清空时间点之前的 epoch，结果顺序固定以便比较
+pub fn merge_sync_playback_hours(
+    first: &[SyncPlaybackHourTotal],
+    second: &[SyncPlaybackHourTotal],
+    cleared_at: i64,
+) -> Vec<SyncPlaybackHourTotal> {
+    let epoch = cleared_at.max(0);
+    let mut totals: Vec<SyncPlaybackHourTotal> = Vec::new();
+    for row in first.iter().chain(second) {
+        if !row.is_valid_after(epoch) {
+            continue;
+        }
+        match totals.iter_mut().find(|known| known.slot() == row.slot()) {
+            Some(known) if row.total_listen_ms > known.total_listen_ms => *known = row.clone(),
+            Some(_) => {}
+            None => totals.push(row.clone()),
+        }
+    }
+    totals.sort_by(|a, b| {
+        (
+            a.hour_start_at,
+            a.local_hour,
+            &a.device_id,
+            a.epoch_started_at,
+        )
+            .cmp(&(
+                b.hour_start_at,
+                b.local_hour,
+                &b.device_id,
+                b.epoch_started_at,
+            ))
+    });
+    totals
+}
+
+/// 校验本地日期，对齐 Android validRecordedPlaybackDate
+pub fn valid_recorded_playback_date(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<u32> {
+        let part = &value[range];
+        part.bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| part.parse().ok())?
+    };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (1..=days).contains(&day).then(|| value.to_string())
+}
+
+/// 两端记录日期取较早者，对齐 Android mergeRecordedPlaybackDates
+pub fn merge_recorded_playback_dates(left: Option<&str>, right: Option<&str>) -> Option<String> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right).to_string()),
+        (left, right) => left.or(right).map(str::to_string),
+    }
 }
 
 /// 按天分桶的播放统计
@@ -1091,6 +1224,20 @@ pub struct SyncPlaybackStatBucket {
     pub counter_base_play_count: i32,
     #[serde(default)]
     pub counter_shards: Vec<SyncPlaybackCounterShard>,
+    /// 对齐 Android ProtoNumber(18)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_opt_string_or_number"
+    )]
+    pub recorded_local_date: Option<String>,
+    /// 对齐 Android ProtoNumber(19)
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_hour_totals"
+    )]
+    pub hourly_totals: Vec<SyncPlaybackHourTotal>,
 }
 
 /// 歌单内歌曲删除记录
@@ -1520,5 +1667,166 @@ mod legacy_json_tests {
         assert!(normalized.matched_lyric_source.is_none());
         assert!(normalized.custom_name.is_none());
         assert_eq!(normalized.channel_id.as_deref(), Some("netease"));
+    }
+}
+
+#[cfg(test)]
+mod playback_hour_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn hour(device: &str, epoch: i64, start: i64, local: i32, total: i64) -> SyncPlaybackHourTotal {
+        SyncPlaybackHourTotal {
+            device_id: device.into(),
+            epoch_started_at: epoch,
+            hour_start_at: start,
+            local_hour: local,
+            total_listen_ms: total,
+        }
+    }
+
+    #[test]
+    fn android_bucket_json_round_trips_hours_and_recorded_dates() {
+        let raw = json!({
+            "identityKey": "song",
+            "recordedLocalDate": "2026-11-24",
+            "counterShards": [{"deviceId": "phone", "playCount": 1, "recordedLocalDate": "2026-11-24"}],
+            "hourlyTotals": [
+                {"deviceId": "phone", "epochStartedAt": 3, "hourStartAt": 1800000, "localHour": 6, "totalListenMs": 45}
+            ]
+        });
+        let bucket: SyncPlaybackStatBucket = serde_json::from_value(raw).unwrap();
+        assert_eq!(bucket.recorded_local_date.as_deref(), Some("2026-11-24"));
+        assert_eq!(
+            bucket.counter_shards[0].recorded_local_date.as_deref(),
+            Some("2026-11-24")
+        );
+        assert_eq!(
+            bucket.hourly_totals,
+            vec![hour("phone", 3, 1_800_000, 6, 45)]
+        );
+
+        let written = serde_json::to_value(&bucket).unwrap();
+        assert_eq!(written["recordedLocalDate"], "2026-11-24");
+        assert_eq!(
+            written["counterShards"][0]["recordedLocalDate"],
+            "2026-11-24"
+        );
+        assert_eq!(
+            written["hourlyTotals"],
+            json!([{"deviceId": "phone", "epochStartedAt": 3, "hourStartAt": 1800000, "localHour": 6, "totalListenMs": 45}])
+        );
+    }
+
+    #[test]
+    fn old_payloads_without_or_with_null_hours_still_import() {
+        for raw in [
+            json!({"identityKey": "song"}),
+            json!({"identityKey": "song", "hourlyTotals": null, "recordedLocalDate": null}),
+            json!({"identityKey": "song", "hourlyTotals": [null, {"deviceId": null, "totalListenMs": 90}]}),
+        ] {
+            let bucket: SyncPlaybackStatBucket = serde_json::from_value(raw).unwrap();
+            assert!(bucket.recorded_local_date.is_none());
+            // 缺失或残缺的旧数据不能顶掉已知设备的小时量
+            let known = vec![hour("phone", 0, 0, 0, 30)];
+            assert_eq!(
+                merge_sync_playback_hours(&bucket.hourly_totals, &known, 0),
+                known
+            );
+        }
+        let empty = serde_json::to_value(SyncPlaybackStatBucket::default()).unwrap();
+        assert!(empty.get("hourlyTotals").is_none());
+        assert!(empty.get("recordedLocalDate").is_none());
+    }
+
+    #[test]
+    fn hour_merge_keeps_the_largest_valid_slot_and_a_stable_order() {
+        let first = hour("phone", 0, 0, 8, 14);
+        let later = SyncPlaybackHourTotal {
+            total_listen_ms: 26,
+            ..first.clone()
+        };
+        let other = SyncPlaybackHourTotal {
+            local_hour: 9,
+            hour_start_at: 3_600_000,
+            ..first.clone()
+        };
+        let dirty = vec![
+            other.clone(),
+            first.clone(),
+            later.clone(),
+            SyncPlaybackHourTotal {
+                device_id: " ".into(),
+                ..later.clone()
+            },
+            SyncPlaybackHourTotal {
+                epoch_started_at: -1,
+                ..first.clone()
+            },
+            SyncPlaybackHourTotal {
+                hour_start_at: -1,
+                ..first.clone()
+            },
+            SyncPlaybackHourTotal {
+                local_hour: 24,
+                ..first.clone()
+            },
+            SyncPlaybackHourTotal {
+                total_listen_ms: 0,
+                ..first.clone()
+            },
+        ];
+        assert_eq!(
+            merge_sync_playback_hours(&dirty, &[], 0),
+            vec![later.clone(), other.clone()]
+        );
+        assert_eq!(
+            merge_sync_playback_hours(
+                std::slice::from_ref(&later),
+                std::slice::from_ref(&first),
+                0
+            ),
+            merge_sync_playback_hours(&[first], &[later], 0)
+        );
+    }
+
+    #[test]
+    fn hours_from_before_a_clear_are_dropped() {
+        let old = hour("phone", 0, 0, 8, 26);
+        let next = hour("phone", 100, 0, 8, 9);
+        assert_eq!(
+            merge_sync_playback_hours(&[old, next.clone()], &[], 100),
+            vec![next]
+        );
+    }
+
+    #[test]
+    fn recorded_dates_are_validated_and_merge_to_the_earlier_day() {
+        assert_eq!(
+            valid_recorded_playback_date(Some("2024-02-29")).as_deref(),
+            Some("2024-02-29")
+        );
+        for invalid in [
+            "2023-02-29",
+            "2024-13-01",
+            "2024-1-01",
+            "2024-01-00",
+            "+202-01-01",
+            "",
+        ] {
+            assert!(
+                valid_recorded_playback_date(Some(invalid)).is_none(),
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            merge_recorded_playback_dates(Some("2026-11-25"), Some("2026-11-24")).as_deref(),
+            Some("2026-11-24")
+        );
+        assert_eq!(
+            merge_recorded_playback_dates(None, Some("2026-11-24")).as_deref(),
+            Some("2026-11-24")
+        );
+        assert_eq!(merge_recorded_playback_dates(None, None), None);
     }
 }

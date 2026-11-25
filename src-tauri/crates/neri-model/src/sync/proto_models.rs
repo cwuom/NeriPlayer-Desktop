@@ -256,6 +256,23 @@ pub struct ProtoSyncPlaybackCounterShard {
     pub first_played_at: i64,
     #[prost(int64, tag = "6")]
     pub last_played_at: i64,
+    #[prost(string, optional, tag = "7")]
+    pub recorded_local_date: Option<String>,
+}
+
+/// 每（设备 × epoch × 小时）的累计收听时长
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ProtoSyncPlaybackHourTotal {
+    #[prost(string, tag = "1")]
+    pub device_id: String,
+    #[prost(int64, tag = "2")]
+    pub epoch_started_at: i64,
+    #[prost(int64, tag = "3")]
+    pub hour_start_at: i64,
+    #[prost(int32, tag = "4")]
+    pub local_hour: i32,
+    #[prost(int64, tag = "5")]
+    pub total_listen_ms: i64,
 }
 
 /// 按天分桶的播放统计
@@ -295,6 +312,10 @@ pub struct ProtoSyncPlaybackStatBucket {
     pub counter_base_play_count: i32,
     #[prost(message, repeated, tag = "17")]
     pub counter_shards: Vec<ProtoSyncPlaybackCounterShard>,
+    #[prost(string, optional, tag = "18")]
+    pub recorded_local_date: Option<String>,
+    #[prost(message, repeated, tag = "19")]
+    pub hourly_totals: Vec<ProtoSyncPlaybackHourTotal>,
 }
 
 /// 歌单内歌曲删除记录：区别于 RecentPlayDeletion（最近播放的删除）

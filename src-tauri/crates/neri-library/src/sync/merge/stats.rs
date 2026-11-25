@@ -58,6 +58,8 @@ pub(super) fn merge_counter_shards(
             continue;
         }
         let mut shard = raw.clone();
+        shard.recorded_local_date =
+            valid_recorded_playback_date(shard.recorded_local_date.as_deref());
         shard.epoch_started_at = shard.epoch_started_at.max(0);
         shard.total_listen_ms = shard.total_listen_ms.max(0);
         shard.play_count = shard.play_count.max(0);
@@ -72,6 +74,10 @@ pub(super) fn merge_counter_shards(
         grouped
             .entry(key)
             .and_modify(|existing| {
+                existing.recorded_local_date = merge_recorded_playback_dates(
+                    existing.recorded_local_date.as_deref(),
+                    shard.recorded_local_date.as_deref(),
+                );
                 existing.total_listen_ms = existing.total_listen_ms.max(shard.total_listen_ms);
                 existing.play_count = existing.play_count.max(shard.play_count);
                 existing.first_played_at =
@@ -165,6 +171,10 @@ fn normalize_bucket_after_clear(
     normalized.total_listen_ms = normalized.total_listen_ms.max(0);
     normalized.play_count = normalized.play_count.max(0);
     normalized.counter_shards = shards;
+    normalized.recorded_local_date =
+        valid_recorded_playback_date(bucket.recorded_local_date.as_deref());
+    // 小时槽位带 epoch，清空前的 epoch 整体作废，不随计数分片一起折算
+    normalized.hourly_totals = merge_sync_playback_hours(&bucket.hourly_totals, &[], cleared_at);
     if cleared_at > 0 && !normalized.counter_shards.is_empty() {
         let totals = counters_after_clear(&normalized.counter_shards);
         normalized.total_listen_ms = totals.total_listen_ms;
@@ -365,6 +375,12 @@ pub(crate) fn merge_stat_buckets(
             merged.counter_base_listen_ms = counters.base_listen_ms;
             merged.counter_base_play_count = counters.base_play_count;
             merged.counter_shards = counters.shards;
+            merged.recorded_local_date = merge_recorded_playback_dates(
+                existing.recorded_local_date.as_deref(),
+                bucket.recorded_local_date.as_deref(),
+            );
+            merged.hourly_totals =
+                merge_sync_playback_hours(&existing.hourly_totals, &bucket.hourly_totals, 0);
             grouped.insert(key, merged);
         } else {
             grouped.insert(key, bucket);

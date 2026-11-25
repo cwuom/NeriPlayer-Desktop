@@ -1000,6 +1000,7 @@ fn playback_clear_rejects_old_epoch_despite_a_new_last_play() {
         last_played_at: 110,
         total_listen_ms: 1_000,
         play_count: 10,
+        ..Default::default()
     };
     let stat = SyncTrackStat {
         identity_key: "k".into(),
@@ -1028,6 +1029,7 @@ fn playback_clear_recomputes_totals_from_only_current_epoch_shards() {
             last_played_at: 150,
             total_listen_ms: 1_000,
             play_count: 10,
+            ..Default::default()
         },
         SyncPlaybackCounterShard {
             device_id: "cross-clear".into(),
@@ -1036,6 +1038,7 @@ fn playback_clear_recomputes_totals_from_only_current_epoch_shards() {
             last_played_at: 145,
             total_listen_ms: 20,
             play_count: 2,
+            ..Default::default()
         },
         SyncPlaybackCounterShard {
             device_id: "current-a".into(),
@@ -1044,6 +1047,7 @@ fn playback_clear_recomputes_totals_from_only_current_epoch_shards() {
             last_played_at: 130,
             total_listen_ms: 300,
             play_count: 3,
+            ..Default::default()
         },
         SyncPlaybackCounterShard {
             device_id: "current-b".into(),
@@ -1052,6 +1056,7 @@ fn playback_clear_recomputes_totals_from_only_current_epoch_shards() {
             last_played_at: 140,
             total_listen_ms: 400,
             play_count: 4,
+            ..Default::default()
         },
     ];
     let stat = SyncTrackStat {
@@ -1434,4 +1439,138 @@ fn song(id: &str, added_at: i64) -> SyncSong {
         sync_metadata_version: CURRENT_SYNC_METADATA_VERSION,
         ..Default::default()
     }
+}
+
+fn hour_total(device: &str, epoch: i64, local_hour: i32, total: i64) -> SyncPlaybackHourTotal {
+    SyncPlaybackHourTotal {
+        device_id: device.into(),
+        epoch_started_at: epoch,
+        hour_start_at: 0,
+        local_hour,
+        total_listen_ms: total,
+    }
+}
+
+// 对齐 Android SyncPlaybackStatsMergePolicyTest「hourly amounts converge …」
+#[test]
+fn hourly_amounts_converge_across_devices_retries_old_peers_and_clear_epochs() {
+    let first = hour_total("phone", 0, 8, 14);
+    let later = hour_total("phone", 0, 8, 26);
+    let tablet = hour_total("tablet", 0, 8, 26);
+    let next_epoch = hour_total("phone", 100, 8, 9);
+    let shard = |epoch: i64, listen: i64, first: i64, last: i64| SyncPlaybackCounterShard {
+        device_id: "phone".into(),
+        epoch_started_at: epoch,
+        total_listen_ms: listen,
+        play_count: 1,
+        first_played_at: first,
+        last_played_at: last,
+        ..Default::default()
+    };
+    let local = SyncPlaybackStatBucket {
+        identity_key: "song".into(),
+        first_played_at: 20,
+        last_played_at: 114,
+        counter_shards: vec![shard(0, 26, 20, 46), shard(100, 9, 105, 114)],
+        hourly_totals: vec![next_epoch.clone(), first],
+        ..Default::default()
+    };
+    let remote = SyncPlaybackStatBucket {
+        hourly_totals: vec![tablet.clone(), later.clone()],
+        ..local.clone()
+    };
+    let merge = |a: &SyncPlaybackStatBucket, b: &SyncPlaybackStatBucket, cleared_at: i64| {
+        let mut merged =
+            merge_stat_buckets(std::slice::from_ref(a), std::slice::from_ref(b), cleared_at);
+        assert_eq!(merged.len(), 1);
+        merged.remove(0)
+    };
+
+    let merged = merge(&local, &remote, 0);
+    assert_eq!(
+        merged.hourly_totals,
+        vec![later, next_epoch.clone(), tablet]
+    );
+    assert_eq!(
+        merge(&remote, &local, 0).hourly_totals,
+        merged.hourly_totals
+    );
+    assert_eq!(
+        merge(&merged, &remote, 0).hourly_totals,
+        merged.hourly_totals
+    );
+    let without_hours = SyncPlaybackStatBucket {
+        hourly_totals: Vec::new(),
+        ..merged.clone()
+    };
+    assert_eq!(
+        merge(&merged, &without_hours, 0).hourly_totals,
+        merged.hourly_totals
+    );
+
+    let after_clear = merge(&merged, &remote, 100);
+    assert_eq!(after_clear.hourly_totals, vec![next_epoch]);
+    assert_eq!(after_clear.total_listen_ms, 9);
+}
+
+#[test]
+fn recorded_bucket_and_shard_dates_merge_to_the_earlier_valid_day() {
+    let bucket = |date: Option<&str>, shard_date: Option<&str>| SyncPlaybackStatBucket {
+        identity_key: "song".into(),
+        play_count: 1,
+        last_played_at: 10,
+        recorded_local_date: date.map(Into::into),
+        counter_shards: vec![SyncPlaybackCounterShard {
+            device_id: "phone".into(),
+            play_count: 1,
+            first_played_at: 10,
+            last_played_at: 10,
+            recorded_local_date: shard_date.map(Into::into),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let merged = merge_stat_buckets(
+        &[bucket(Some("2026-11-25"), Some("2026-11-25"))],
+        &[bucket(Some("2026-11-24"), None)],
+        0,
+    );
+    assert_eq!(merged[0].recorded_local_date.as_deref(), Some("2026-11-24"));
+    assert_eq!(
+        merged[0].counter_shards[0].recorded_local_date.as_deref(),
+        Some("2026-11-25")
+    );
+    let invalid = merge_stat_buckets(&[bucket(Some("2026-02-30"), Some("bad"))], &[], 0);
+    assert!(invalid[0].recorded_local_date.is_none());
+    assert!(invalid[0].counter_shards[0].recorded_local_date.is_none());
+}
+
+#[test]
+fn hourly_only_changes_trigger_an_upload_and_dirty_rows_do_not() {
+    let base = SyncPlaybackStatBucket {
+        identity_key: "song".into(),
+        play_count: 1,
+        last_played_at: 10,
+        hourly_totals: vec![hour_total("phone", 0, 8, 14), hour_total("phone", 0, 9, 3)],
+        ..Default::default()
+    };
+    let data = |bucket: SyncPlaybackStatBucket| SyncData {
+        playback_stat_buckets: vec![bucket],
+        ..Default::default()
+    };
+    let remote = data(base.clone());
+    let mut dirty = base.clone();
+    dirty.hourly_totals.reverse();
+    dirty.hourly_totals.push(hour_total(" ", 0, 8, 99));
+    assert!(!has_data_changed(&remote, &data(dirty)));
+    let mut grown = base.clone();
+    grown.hourly_totals[0].total_listen_ms = 15;
+    assert!(has_data_changed(&remote, &data(grown)));
+    assert!(has_data_changed(
+        &remote,
+        &data(SyncPlaybackStatBucket {
+            hourly_totals: Vec::new(),
+            ..base
+        })
+    ));
 }
