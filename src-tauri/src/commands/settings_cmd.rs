@@ -1,3 +1,4 @@
+use crate::settings::media_cache;
 use crate::settings::store::{self, AppSettings, SettingsLoadResult};
 use crate::state::AppState;
 use neri_common::error::{AppError, AppResult};
@@ -57,12 +58,34 @@ pub fn ui_scale_supported() -> bool {
     }
 }
 
+/// macOS：前端告知自绘顶栏的实际高度（pt，随界面缩放变化），原生红绿灯据此垂直居中；
+/// 其他平台没有原生红绿灯，调用无副作用
 #[tauri::command]
-pub async fn save_settings(app: AppHandle, settings: AppSettings) -> AppResult<AppSettings> {
-    let previous_cache_limit = store::load_settings(&app)
-        .ok()
-        .map(|loaded| loaded.settings.max_cache_size);
-    let saved = store::save_settings(&app, settings)?;
+pub fn align_traffic_lights(app: AppHandle, titlebar_height: f64) {
+    crate::macos_traffic_lights::set_titlebar_height(titlebar_height);
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Some((x, _)) = crate::macos_traffic_lights::configured_position(&app) {
+        crate::macos_traffic_lights::apply(&window, x);
+    }
+}
+
+#[tauri::command]
+pub async fn save_settings(app: AppHandle, mut settings: AppSettings) -> AppResult<AppSettings> {
+    let (saved, previous_cache_limit) = {
+        let _write = media_cache::settings_write_lock();
+        let previous = store::load_settings(&app)
+            .ok()
+            .map(|loaded| loaded.settings);
+        // 缓存位置要连同旧缓存一起搬，只能经 set_media_cache_dir 修改；前端快照可能是旧值
+        settings.media_cache_dir = previous
+            .as_ref()
+            .map(|previous| previous.media_cache_dir.clone())
+            .unwrap_or_default();
+        let previous_cache_limit = previous.map(|previous| previous.max_cache_size);
+        (store::save_settings(&app, settings)?, previous_cache_limit)
+    };
     apply_runtime_settings(&saved);
     // 调小缓存上限后立刻按新上限裁剪，而不是等下一首下载完成
     if previous_cache_limit.is_some_and(|previous| saved.max_cache_size < previous) {
@@ -77,6 +100,7 @@ pub async fn save_settings(app: AppHandle, settings: AppSettings) -> AppResult<A
 
 /// 把需要后端立即生效的设置推到各子系统
 pub fn apply_runtime_settings(settings: &AppSettings) {
+    media_cache::set_custom_root(&settings.media_cache_dir);
     neri_platform::api::youtube::set_locale_preferences(
         settings.internationalization_enabled,
         &settings.locale,

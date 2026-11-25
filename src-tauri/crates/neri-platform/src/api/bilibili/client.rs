@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 
+use super::search::{self, BiliSearchPage, BiliSearchUploader, BiliSearchVideo};
 use super::wbi;
 use crate::api::transport::{parse_json_response, FallbackHttp};
 use neri_common::error::{AppError, AppResult};
@@ -492,20 +493,45 @@ impl BiliClient {
         Ok(video_info_from_view(&resp["data"]))
     }
 
-    /// 分页视频搜索（对齐 Android：综合排序、全部时长）
-    pub async fn search_videos(&self, keyword: &str, page: u32) -> AppResult<Value> {
-        self.wbi_get(
-            "https://api.bilibili.com/x/web-interface/wbi/search/type",
-            BTreeMap::from([
-                ("search_type".into(), "video".into()),
-                ("keyword".into(), keyword.into()),
-                ("order".into(), "totalrank".into()),
-                ("duration".into(), "0".into()),
-                ("tids".into(), "0".into()),
-                ("page".into(), page.max(1).to_string()),
-            ]),
-        )
-        .await
+    /// 分页视频搜索（对齐 Android：综合排序、全部时长、全站分区）
+    pub async fn search_videos(
+        &self,
+        keyword: &str,
+        page: u32,
+    ) -> AppResult<BiliSearchPage<BiliSearchVideo>> {
+        self.search_videos_in_zone(keyword, page, 0).await
+    }
+
+    /// 探索页「歌曲」：限定音乐分区的视频搜索
+    pub async fn search_music_videos(
+        &self,
+        keyword: &str,
+        page: u32,
+    ) -> AppResult<BiliSearchPage<BiliSearchVideo>> {
+        self.search_videos_in_zone(keyword, page, search::MUSIC_ZONE_TID)
+            .await
+    }
+
+    async fn search_videos_in_zone(
+        &self,
+        keyword: &str,
+        page: u32,
+        tids: u32,
+    ) -> AppResult<BiliSearchPage<BiliSearchVideo>> {
+        let params = search::video_search_params(keyword, page, tids);
+        let body = self.wbi_get(search::SEARCH_TYPE_URL, params).await?;
+        Ok(search::parse_video_search(&body, page.max(1)))
+    }
+
+    /// 探索页「创作者」：UP 主搜索
+    pub async fn search_uploaders(
+        &self,
+        keyword: &str,
+        page: u32,
+    ) -> AppResult<BiliSearchPage<BiliSearchUploader>> {
+        let params = search::uploader_search_params(keyword, page);
+        let body = self.wbi_get(search::SEARCH_TYPE_URL, params).await?;
+        Ok(search::parse_uploader_search(&body, page.max(1)))
     }
 
     /// 视频评论（对齐 Android）：sort 1 热门 / 0 最新

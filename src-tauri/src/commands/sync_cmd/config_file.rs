@@ -815,7 +815,12 @@ pub async fn import_config(
         settings.lt_auto_pause_on_member_change = listen_together.auto_pause_on_member_change;
         settings.lt_share_audio_links = listen_together.share_audio_links;
     }
-    let settings = store::save_settings(&app, settings)?;
+    let settings = {
+        let _write = crate::settings::media_cache::settings_write_lock();
+        // 缓存目录是本机路径，导入别处的配置不应把缓存指到这台机器上可能不存在的位置
+        settings.media_cache_dir = store::load_settings(&app)?.settings.media_cache_dir;
+        store::save_settings(&app, settings)?
+    };
     state.rebuild_http(settings.bypass_proxy);
 
     let mut changed_auth_platforms = Vec::new();

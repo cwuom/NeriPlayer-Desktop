@@ -91,8 +91,13 @@ webview2-com = "0.38"
 winreg = "0.55"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 alsa = "0.9"
+# WASAPI 独占输出；与 cpal 0.15 同版本，不会引入第二份 windows crate
+windows = { version = "0.54", features = ["Win32_Media_Audio", "Win32_Foundation", "Win32_Devices_Properties", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant"] }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSToolbar", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSToolbar", "NSWindow", "NSView", "NSControl", "NSButton"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSNotification", "NSOperation", "NSString", "block2"] }
+# 监听标题栏视图的 frame 变化（红绿灯被 AppKit 复位时立即摆回）
+block2 = "0.6"
 cc = "1"
 
 [build-dependencies]
@@ -150,6 +155,8 @@ windows-sys.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+block2.workspace = true
 
 [profile.dev.package.symphonia]
 opt-level = 2

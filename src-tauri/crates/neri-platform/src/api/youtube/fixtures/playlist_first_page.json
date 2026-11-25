@@ -1,0 +1,38 @@
+{
+  "responseContext": {"serviceTrackingParams": []},
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [{
+        "tabRenderer": {
+          "content": {
+            "sectionListRenderer": {
+              "contents": [{
+                "musicResponsiveHeaderRenderer": {
+                  "title": {"runs": [{"text": "Big Playlist"}]},
+                  "secondSubtitle": {"runs": [{"text": "250 songs"}]}
+                }
+              }]
+            }
+          }
+        }
+      }],
+      "secondaryContents": {
+        "sectionListRenderer": {
+          "contents": [{
+            "musicPlaylistShelfRenderer": {
+              "playlistId": "PLbig",
+              "contents": [
+                {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "v1"}}},
+                {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "v2"}}},
+                {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "SHELF_PAGE_2", "request": "CONTINUATION_REQUEST_TYPE_BROWSE"}}}}
+              ]
+            }
+          }],
+          "continuations": [{
+            "nextContinuationData": {"continuation": "SECTION_SUGGESTIONS"}
+          }]
+        }
+      }
+    }
+  }
+}

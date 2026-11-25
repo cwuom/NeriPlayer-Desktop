@@ -3,10 +3,12 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
 
-use super::search_cmd::{bili_search_rows, strip_bili_highlight, upgrade_youtube_thumbnail_url};
+use super::search_cmd::{strip_bili_highlight, upgrade_youtube_thumbnail_url};
 use crate::state::AppState;
 use neri_common::error::{AppError, AppResult};
+use neri_library::lyrics::matcher::fuzzy_score;
 use neri_platform::api::bilibili::client::BiliVideoInfo;
+use neri_platform::api::bilibili::search::{BiliSearchPage, BiliSearchUploader, BiliSearchVideo};
 
 const NETEASE_PAGE_SIZE: u32 = 30;
 
@@ -36,6 +38,11 @@ pub enum ExploreItem {
         name: String,
         cover_url: Option<String>,
         subtitle: String,
+        /// 目前只有 B 站创作者搜索结果带粉丝数与投稿数
+        #[serde(skip_serializing_if = "Option::is_none")]
+        follower_count: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        video_count: Option<u64>,
     },
     /// 识别到了链接但桌面端打不开（Android 同款提示）
     Notice { reason: String },
@@ -132,6 +139,8 @@ fn netease_artist(artist: &Value) -> Option<ExploreItem> {
         } else {
             String::new()
         },
+        follower_count: None,
+        video_count: None,
     })
 }
 
@@ -151,6 +160,69 @@ fn netease_page(body: &Value, kind: &str, offset: u32) -> ExplorePage {
         Some(total) => loaded < total && !raw.is_empty(),
         None => raw.len() as u32 >= NETEASE_PAGE_SIZE,
     };
+    ExplorePage { items, has_more }
+}
+
+// ---------- B 站 ----------
+
+// 歌手名命中排在标题命中之后（Android SongSearchValues 的 ARTIST_BIAS）
+const BILI_ARTIST_MATCH_BIAS: i32 = 24;
+
+fn bili_match_score(query: &str, video: &BiliSearchVideo) -> Option<i32> {
+    fuzzy_score(query, std::slice::from_ref(&video.title)).or_else(|| {
+        fuzzy_score(query, &[video.title.clone(), video.author.clone()])
+            .map(|score| score + BILI_ARTIST_MATCH_BIAS)
+    })
+}
+
+/// 对齐 Android rankExploreSongSearchResults：每页内命中的按相关度靠前，未命中的保持原序垫后
+fn rank_bili_songs(query: &str, videos: Vec<BiliSearchVideo>) -> Vec<BiliSearchVideo> {
+    let mut scored: Vec<(Option<i32>, usize, BiliSearchVideo)> = videos
+        .into_iter()
+        .enumerate()
+        .map(|(index, video)| (bili_match_score(query, &video), index, video))
+        .collect();
+    scored.sort_by_key(|(score, index, _)| (score.is_none(), score.unwrap_or(0), *index));
+    scored.into_iter().map(|(_, _, video)| video).collect()
+}
+
+/// 「歌曲」与「视频」都是整段视频：多 P 由前端在播放时展开
+fn bili_video_page(page: BiliSearchPage<BiliSearchVideo>, rank_by: Option<&str>) -> ExplorePage {
+    let has_more = page.has_more();
+    let videos = match rank_by {
+        Some(query) => rank_bili_songs(query, page.items),
+        None => page.items,
+    };
+    let items = videos
+        .into_iter()
+        .map(|video| ExploreItem::Song {
+            id: format!("bilibili:{}", video.bvid),
+            title: video.title,
+            artist: video.author,
+            album: String::new(),
+            duration_ms: video.duration_sec * 1000,
+            source: "bilibili".into(),
+            cover_url: video.cover_url,
+        })
+        .collect();
+    ExplorePage { items, has_more }
+}
+
+fn bili_creator_page(page: BiliSearchPage<BiliSearchUploader>) -> ExplorePage {
+    let has_more = page.has_more();
+    let items = page
+        .items
+        .into_iter()
+        .map(|uploader| ExploreItem::Artist {
+            platform: "bilibili".into(),
+            id: uploader.mid.to_string(),
+            name: uploader.name,
+            cover_url: uploader.face_url,
+            subtitle: uploader.sign,
+            follower_count: uploader.fans,
+            video_count: uploader.videos,
+        })
+        .collect();
     ExplorePage { items, has_more }
 }
 
@@ -210,6 +282,8 @@ pub async fn explore_search(
                             .as_deref()
                             .map(upgrade_youtube_thumbnail_url),
                         subtitle: creator.subtitle,
+                        follower_count: None,
+                        video_count: None,
                     })
                     .collect()
             } else {
@@ -237,23 +311,15 @@ pub async fn explore_search(
             })
         }
         "bilibili" => {
-            let body = state.bilibili().search_videos(&query, page).await?;
-            let rows = bili_search_rows(&body);
-            let pages = body["data"]["numPages"].as_u64().unwrap_or(1);
-            let has_more = !rows.is_empty() && u64::from(page) < pages;
-            let items = rows
-                .into_iter()
-                .map(|row| ExploreItem::Song {
-                    id: row.id,
-                    title: row.title,
-                    artist: row.artist,
-                    album: row.album,
-                    duration_ms: row.duration_ms,
-                    source: row.source,
-                    cover_url: row.cover_url,
-                })
-                .collect();
-            Ok(ExplorePage { items, has_more })
+            let client = state.bilibili();
+            Ok(match kind.as_str() {
+                "creators" => bili_creator_page(client.search_uploaders(&query, page).await?),
+                "videos" => bili_video_page(client.search_videos(&query, page).await?, None),
+                _ => bili_video_page(
+                    client.search_music_videos(&query, page).await?,
+                    Some(&query),
+                ),
+            })
         }
         other => Err(AppError::Other(format!(
             "unsupported explore platform: {other}"
@@ -561,6 +627,8 @@ async fn resolve_target(state: &AppState, target: LinkTarget) -> AppResult<Explo
                     .or_else(|| artist["cover"].as_str())
                     .and_then(https),
                 subtitle: String::new(),
+                follower_count: None,
+                video_count: None,
             })
         }
         LinkTarget::BiliVideo {
@@ -602,6 +670,8 @@ async fn resolve_target(state: &AppState, target: LinkTarget) -> AppResult<Explo
                 name: str_of(&data["name"]),
                 cover_url: data["face"].as_str().and_then(https),
                 subtitle: str_of(&data["sign"]),
+                follower_count: None,
+                video_count: None,
             })
         }
         LinkTarget::YouTubeVideo(video_id) => {
@@ -651,6 +721,8 @@ async fn resolve_target(state: &AppState, target: LinkTarget) -> AppResult<Explo
             name: String::new(),
             cover_url: None,
             subtitle: String::new(),
+            follower_count: None,
+            video_count: None,
         }),
         LinkTarget::NeteaseShort | LinkTarget::BiliShort | LinkTarget::Unsupported => {
             Ok(notice("unsupported"))
@@ -933,6 +1005,35 @@ mod tests {
     }
 
     #[test]
+    fn netease_page_maps_legacy_search_get_fallback_shape() {
+        // #61 回退到 /weapi/search/get 时歌曲用 artists/album/duration，且专辑常无封面
+        let body = serde_json::json!({"code": 200, "result": {
+            "songs": [{"id": 7, "name": "S", "artists": [{"name": "A"}], "album": {"name": "Al", "picId": 1}, "duration": 2000}],
+            "songCount": 1,
+            "artists": [{"id": 8, "name": "Ar", "picUrl": "http://p1/a.jpg", "albumSize": 3}],
+            "artistCount": 1,
+        }});
+        let songs = netease_page(&body, "songs", 0);
+        assert!(!songs.has_more);
+        assert_eq!(
+            songs.items[0],
+            ExploreItem::Song {
+                id: "netease:7".into(),
+                title: "S".into(),
+                artist: "A".into(),
+                album: "Al".into(),
+                duration_ms: 2000,
+                source: "netease".into(),
+                cover_url: None,
+            }
+        );
+        let artists = netease_page(&body, "artists", 0);
+        assert!(
+            matches!(&artists.items[0], ExploreItem::Artist { subtitle, cover_url: Some(_), .. } if subtitle == "0|3")
+        );
+    }
+
+    #[test]
     fn bilibili_clock_durations_and_highlights() {
         assert_eq!(parse_clock_duration_ms("3:45"), 225_000);
         assert_eq!(parse_clock_duration_ms("1:02:03"), 3_723_000);
@@ -940,6 +1041,132 @@ mod tests {
             strip_bili_highlight("<em class=\"keyword\">浴室</em> &amp; 现场"),
             "浴室 & 现场"
         );
+    }
+
+    fn bili_search_video(aid: u64, title: &str, author: &str) -> BiliSearchVideo {
+        BiliSearchVideo {
+            aid,
+            bvid: format!("BV{aid}"),
+            title: title.into(),
+            author: author.into(),
+            mid: 81,
+            cover_url: None,
+            duration_sec: 30,
+        }
+    }
+
+    fn song_ids(page: &ExplorePage) -> Vec<&str> {
+        page.items
+            .iter()
+            .map(|item| match item {
+                ExploreItem::Song { id, .. } => id.as_str(),
+                _ => panic!("expected song"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bilibili_songs_rank_matches_first_while_videos_keep_site_order() {
+        let page = || BiliSearchPage {
+            page: 2,
+            num_pages: 3,
+            items: vec![
+                bili_search_video(10, "First", "Uploader"),
+                bili_search_video(20, "Needle", "Uploader"),
+                bili_search_video(30, "Other", "Needle Band"),
+                bili_search_video(40, "Needles live", "Uploader"),
+            ],
+        };
+        let songs = bili_video_page(page(), Some("needle"));
+        assert_eq!(
+            song_ids(&songs),
+            [
+                "bilibili:BV20",
+                "bilibili:BV40",
+                "bilibili:BV30",
+                "bilibili:BV10"
+            ],
+            "标题完全命中 > 标题前缀 > 仅 UP 主命中 > 未命中保持原序"
+        );
+        assert!(songs.has_more);
+
+        let videos = bili_video_page(page(), None);
+        assert_eq!(
+            song_ids(&videos),
+            [
+                "bilibili:BV10",
+                "bilibili:BV20",
+                "bilibili:BV30",
+                "bilibili:BV40"
+            ]
+        );
+        assert_eq!(
+            videos.items[0],
+            ExploreItem::Song {
+                id: "bilibili:BV10".into(),
+                title: "First".into(),
+                artist: "Uploader".into(),
+                album: String::new(),
+                duration_ms: 30_000,
+                source: "bilibili".into(),
+                cover_url: None,
+            },
+            "整段视频不带分 P 标识，多 P 由播放时展开"
+        );
+    }
+
+    #[test]
+    fn bilibili_songs_without_any_match_keep_original_order() {
+        let page = BiliSearchPage {
+            page: 1,
+            num_pages: 1,
+            items: vec![
+                bili_search_video(1, "Alpha", "A"),
+                bili_search_video(2, "Beta", "B"),
+            ],
+        };
+        let songs = bili_video_page(page, Some("zzz"));
+        assert_eq!(song_ids(&songs), ["bilibili:BV1", "bilibili:BV2"]);
+        assert!(!songs.has_more);
+    }
+
+    #[test]
+    fn bilibili_creators_map_to_artist_rows_with_stats() {
+        let page = BiliSearchPage {
+            page: 1,
+            num_pages: 2,
+            items: vec![BiliSearchUploader {
+                mid: 9876543210,
+                name: "Mili".into(),
+                face_url: Some("https://i0.hdslb.com/face.jpg".into()),
+                sign: "sign".into(),
+                fans: Some(123456),
+                videos: None,
+            }],
+        };
+        let mapped = bili_creator_page(page);
+        assert!(mapped.has_more);
+        assert_eq!(
+            mapped.items,
+            vec![ExploreItem::Artist {
+                platform: "bilibili".into(),
+                id: "9876543210".into(),
+                name: "Mili".into(),
+                cover_url: Some("https://i0.hdslb.com/face.jpg".into()),
+                subtitle: "sign".into(),
+                follower_count: Some(123456),
+                video_count: None,
+            }]
+        );
+        let json = serde_json::to_value(&mapped.items[0]).unwrap();
+        assert_eq!(json["kind"], "artist");
+        assert_eq!(json["follower_count"], 123456);
+        assert!(json.get("video_count").is_none(), "缺失的统计不序列化");
+        let netease = serde_json::to_value(
+            netease_artist(&serde_json::json!({"id": 1, "name": "N"})).unwrap(),
+        )
+        .unwrap();
+        assert!(netease.get("follower_count").is_none());
     }
 
     fn multipart_bili_video() -> BiliVideoInfo {

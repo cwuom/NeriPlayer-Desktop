@@ -1,0 +1,500 @@
+//! 音频与封面缓存的根目录（#55）：默认在系统缓存目录，可改到其他磁盘。
+//!
+//! 只有 playback-audio 与 image_cache 两个大缓存跟着走；设置文件、WebView 数据、
+//! 日志与下载暂存仍留在默认位置。搬移和清理只碰这两个子目录里认得出的缓存文件，
+//! 用户选中的目录里其它文件一律不动。
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, RwLock};
+
+use neri_common::error::{AppError, AppResult};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager};
+
+pub const PLAYBACK_AUDIO_DIR: &str = "playback-audio";
+pub const IMAGE_CACHE_DIR: &str = "image_cache";
+const MEDIA_CACHE_SUBDIRS: [&str; 2] = [PLAYBACK_AUDIO_DIR, IMAGE_CACHE_DIR];
+/// 音频缓存（.audio）、封面缓存（.image）与它们的发布标记（.ready）
+const MOVABLE_EXTENSIONS: [&str; 3] = ["audio", "image", "ready"];
+/// 写入中的暂存文件：可能仍被播放线程占用，搬移时跳过，只在丢弃旧缓存时尝试删除
+const STAGING_EXTENSIONS: [&str; 2] = ["part", "tmp"];
+const WRITE_PROBE_FILE: &str = ".neri_write_test";
+
+static CUSTOM_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
+static FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static RELOCATING: AtomicBool = AtomicBool::new(false);
+// 普通保存与改缓存位置都是「读设置 → 改 → 写回」，串行化以免后写的一方带回旧目录
+static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
+
+pub fn settings_write_lock() -> MutexGuard<'static, ()> {
+    SETTINGS_WRITE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+/// 按已保存的设置切换运行时缓存根目录；空串回到默认目录
+pub fn set_custom_root(value: &str) {
+    let value = value.trim();
+    let next = (!value.is_empty()).then(|| PathBuf::from(value));
+    *CUSTOM_ROOT
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = next;
+    FALLBACK_WARNED.store(false, Ordering::Relaxed);
+}
+
+fn custom_root() -> Option<PathBuf> {
+    CUSTOM_ROOT
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+pub fn default_root(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_cache_dir().ok()
+}
+
+/// 当前生效的缓存根目录
+pub fn media_cache_root(app: &AppHandle) -> Option<PathBuf> {
+    resolve_root(custom_root().as_deref(), || default_root(app))
+}
+
+fn resolve_root(
+    custom: Option<&Path>,
+    default: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(custom) = custom {
+        // 移动硬盘拔掉或目录失去权限时退回默认目录，播放和封面不能因为缓存位置失效而失败
+        if fs::create_dir_all(custom).is_ok() {
+            return Some(custom.to_path_buf());
+        }
+        if !FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!(
+                target: "storage",
+                "自定义缓存目录不可用，暂时使用默认目录: {}",
+                custom.display()
+            );
+        }
+    }
+    default()
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCacheLocation {
+    /// 当前生效的目录（自定义目录不可用时为默认目录）
+    pub path: String,
+    pub default_path: String,
+    /// 已保存的自定义目录，空串为默认
+    pub custom_path: String,
+    pub is_default: bool,
+}
+
+pub fn location(app: &AppHandle) -> MediaCacheLocation {
+    let custom = custom_root();
+    MediaCacheLocation {
+        path: media_cache_root(app).map(display_path).unwrap_or_default(),
+        default_path: default_root(app).map(display_path).unwrap_or_default(),
+        custom_path: custom.clone().map(display_path).unwrap_or_default(),
+        is_default: custom.is_none(),
+    }
+}
+
+/// 旧缓存的处理方式：搬到新目录，或直接丢弃从头缓存
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExistingCacheAction {
+    Move,
+    Discard,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocationReport {
+    pub moved_files: u64,
+    pub moved_bytes: u64,
+    pub removed_files: u64,
+    /// 搬不动或删不掉的文件数（多为正在写入的暂存文件）；它们留在旧目录
+    pub failed_count: u64,
+}
+
+/// 校验并准备新的缓存根目录：必须是绝对路径、可创建且可写；返回规范化路径
+pub fn prepare_root(path: &Path) -> AppResult<PathBuf> {
+    if !path.is_absolute() {
+        return Err(AppError::Other("CACHE_DIR_NOT_ABSOLUTE".into()));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(AppError::Other("CACHE_DIR_NOT_DIRECTORY".into()));
+    }
+    fs::create_dir_all(path).map_err(|_| AppError::Other("CACHE_DIR_NOT_WRITABLE".into()))?;
+    let probe = path.join(WRITE_PROBE_FILE);
+    fs::write(&probe, b"ok").map_err(|_| AppError::Other("CACHE_DIR_NOT_WRITABLE".into()))?;
+    let _ = fs::remove_file(&probe);
+    Ok(normalized(path))
+}
+
+/// 规范化最长的已存在前缀再接回其余部分：尚未创建的目录也能和已存在的目录比较
+/// （macOS 的 /var 实为 /private/var，只规范化一边会误判不重叠）
+fn normalized(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    let canonical = loop {
+        if let Ok(canonical) = fs::canonicalize(existing) {
+            break rest
+                .iter()
+                .rev()
+                .fold(canonical, |path: PathBuf, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => break path.to_path_buf(),
+        }
+    };
+    // Windows canonicalize 带 \\?\ 前缀，展示和保存都用常规写法
+    match canonical
+        .to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\"))
+    {
+        Some(stripped) => PathBuf::from(stripped),
+        None => canonical,
+    }
+}
+
+fn display_path(path: PathBuf) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+pub fn same_root(left: &Path, right: &Path) -> bool {
+    normalized(left) == normalized(right)
+}
+
+/// 新旧缓存子目录互相嵌套时搬移会把目录搬进自身，直接拒绝
+pub fn ensure_no_overlap(old_root: &Path, new_root: &Path) -> AppResult<()> {
+    let old_root = normalized(old_root);
+    let new_root = normalized(new_root);
+    for old_sub in MEDIA_CACHE_SUBDIRS.map(|name| old_root.join(name)) {
+        for new_sub in MEDIA_CACHE_SUBDIRS.map(|name| new_root.join(name)) {
+            if old_sub.starts_with(&new_sub) || new_sub.starts_with(&old_sub) {
+                return Err(AppError::Other("CACHE_DIR_OVERLAPS".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 处理旧根目录下的缓存：搬到新根目录或删除。只处理两个缓存子目录里认得出的缓存文件
+pub fn relocate(old_root: &Path, new_root: &Path, action: ExistingCacheAction) -> RelocationReport {
+    let mut report = RelocationReport::default();
+    if same_root(old_root, new_root) {
+        return report;
+    }
+    for name in MEDIA_CACHE_SUBDIRS {
+        let old_sub = old_root.join(name);
+        match action {
+            ExistingCacheAction::Move => move_tree(&old_sub, &new_root.join(name), &mut report),
+            ExistingCacheAction::Discard => discard_tree(&old_sub, &mut report),
+        }
+        remove_empty_dirs(&old_sub);
+    }
+    report
+}
+
+fn extension_in(path: &Path, set: &[&str]) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| set.contains(&extension.to_ascii_lowercase().as_str()))
+}
+
+fn move_tree(source: &Path, target: &Path, report: &mut RelocationReport) {
+    let Ok(entries) = fs::read_dir(source) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            move_tree(&path, &target.join(entry.file_name()), report);
+        } else if file_type.is_file() && extension_in(&path, &MOVABLE_EXTENSIONS) {
+            match move_file(&path, &target.join(entry.file_name())) {
+                Ok(bytes) => {
+                    report.moved_files += 1;
+                    report.moved_bytes = report.moved_bytes.saturating_add(bytes);
+                }
+                Err(error) => {
+                    log::warn!(target: "storage", "搬移缓存文件失败 {}: {error}", path.display());
+                    report.failed_count += 1;
+                }
+            }
+        }
+    }
+}
+
+/// 同盘直接改名；跨盘先复制到暂存文件、核对长度后再改名，最后才删源文件
+fn move_file(source: &Path, target: &Path) -> io::Result<u64> {
+    let length = fs::metadata(source)?.len();
+    if target.exists() {
+        // 同名即同一缓存键的同一份内容，新目录里已有就只清掉旧的
+        fs::remove_file(source)?;
+        return Ok(0);
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache target has no parent"))?;
+    fs::create_dir_all(parent)?;
+    if fs::rename(source, target).is_ok() {
+        return Ok(length);
+    }
+    let mut staging = tempfile::Builder::new()
+        .prefix(".moving-")
+        .suffix(".part")
+        .tempfile_in(parent)?;
+    let copied = io::copy(&mut fs::File::open(source)?, staging.as_file_mut())?;
+    if copied != length {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "cache file changed while moving",
+        ));
+    }
+    staging.as_file().sync_all()?;
+    staging.persist(target).map_err(|error| error.error)?;
+    fs::remove_file(source)?;
+    Ok(length)
+}
+
+fn discard_tree(source: &Path, report: &mut RelocationReport) {
+    let Ok(entries) = fs::read_dir(source) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            discard_tree(&path, report);
+        } else if file_type.is_file()
+            && (extension_in(&path, &MOVABLE_EXTENSIONS)
+                || extension_in(&path, &STAGING_EXTENSIONS))
+        {
+            if fs::remove_file(&path).is_ok() {
+                report.removed_files += 1;
+            } else {
+                report.failed_count += 1;
+            }
+        }
+    }
+}
+
+/// 自底向上删除空目录；remove_dir 只删空目录，留下的非缓存文件会让目录保留
+fn remove_empty_dirs(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            remove_empty_dirs(&entry.path());
+        }
+    }
+    let _ = fs::remove_dir(path);
+}
+
+/// 同一时间只允许一个改目录操作；搬移可能要几分钟
+pub struct RelocationGuard(());
+
+impl RelocationGuard {
+    pub fn acquire() -> AppResult<Self> {
+        if RELOCATING.swap(true, Ordering::AcqRel) {
+            return Err(AppError::Other("CACHE_DIR_BUSY".into()));
+        }
+        Ok(Self(()))
+    }
+}
+
+impl Drop for RelocationGuard {
+    fn drop(&mut self) {
+        RELOCATING.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, bytes: &[u8]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn custom_root_falls_back_to_default_when_unusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom");
+        let default = temp.path().join("default");
+        assert_eq!(
+            resolve_root(Some(&custom), || Some(default.clone())),
+            Some(custom.clone())
+        );
+        assert!(custom.is_dir(), "自定义目录按需创建");
+        let blocker = temp.path().join("file");
+        write(&blocker, b"x");
+        assert_eq!(
+            resolve_root(Some(&blocker.join("nested")), || Some(default.clone())),
+            Some(default.clone())
+        );
+        assert_eq!(resolve_root(None, || Some(default.clone())), Some(default));
+    }
+
+    #[test]
+    fn prepare_root_requires_an_absolute_writable_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(prepare_root(Path::new("relative/cache")).is_err());
+        let file = temp.path().join("file");
+        write(&file, b"x");
+        assert!(prepare_root(&file).is_err());
+        let created = prepare_root(&temp.path().join("new").join("cache")).unwrap();
+        assert!(created.is_dir());
+        assert!(!created.join(WRITE_PROBE_FILE).exists());
+    }
+
+    #[test]
+    fn nested_cache_directories_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        fs::create_dir_all(old.join(PLAYBACK_AUDIO_DIR)).unwrap();
+        assert!(ensure_no_overlap(&old, &old.join(PLAYBACK_AUDIO_DIR)).is_err());
+        assert!(ensure_no_overlap(&old.join(IMAGE_CACHE_DIR).join("x"), &old).is_err());
+        assert!(ensure_no_overlap(&old, &temp.path().join("other")).is_ok());
+        // 新目录选在旧根目录本身的其它子目录里是允许的
+        assert!(ensure_no_overlap(&old, &old.join("elsewhere")).is_ok());
+    }
+
+    #[test]
+    fn moving_keeps_cache_layout_and_leaves_unknown_files_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        write(
+            &old.join(PLAYBACK_AUDIO_DIR).join("ab").join("ab12.ready"),
+            b"marker",
+        );
+        write(
+            &old.join(PLAYBACK_AUDIO_DIR)
+                .join("ab")
+                .join("ab12.x.sha.audio"),
+            b"audio-bytes",
+        );
+        write(
+            &old.join(PLAYBACK_AUDIO_DIR).join("ab").join("ab34.part"),
+            b"writing",
+        );
+        write(
+            &old.join(IMAGE_CACHE_DIR)
+                .join("cd")
+                .join("cd12.x.sha.image"),
+            b"img",
+        );
+        write(&old.join(IMAGE_CACHE_DIR).join("notes.txt"), b"user file");
+        write(&old.join("unrelated.txt"), b"keep");
+        // 新目录已有同一缓存键的文件时保留新目录那份
+        write(
+            &new.join(IMAGE_CACHE_DIR)
+                .join("cd")
+                .join("cd12.x.sha.image"),
+            b"img",
+        );
+
+        let report = relocate(&old, &new, ExistingCacheAction::Move);
+        assert_eq!(report.moved_files, 3);
+        assert_eq!(
+            report.moved_bytes,
+            (b"marker".len() + b"audio-bytes".len()) as u64
+        );
+        assert_eq!(report.failed_count, 0);
+        assert_eq!(
+            fs::read(
+                new.join(PLAYBACK_AUDIO_DIR)
+                    .join("ab")
+                    .join("ab12.x.sha.audio")
+            )
+            .unwrap(),
+            b"audio-bytes"
+        );
+        assert!(new
+            .join(PLAYBACK_AUDIO_DIR)
+            .join("ab")
+            .join("ab12.ready")
+            .is_file());
+        assert!(!old
+            .join(PLAYBACK_AUDIO_DIR)
+            .join("ab")
+            .join("ab12.ready")
+            .exists());
+        assert!(
+            !old.join(IMAGE_CACHE_DIR).join("cd").exists(),
+            "搬空的分片目录被删除"
+        );
+        assert!(old
+            .join(PLAYBACK_AUDIO_DIR)
+            .join("ab")
+            .join("ab34.part")
+            .is_file());
+        assert!(old.join(IMAGE_CACHE_DIR).join("notes.txt").is_file());
+        assert!(old.join("unrelated.txt").is_file());
+    }
+
+    #[test]
+    fn discarding_only_removes_cache_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        write(
+            &old.join(PLAYBACK_AUDIO_DIR).join("ab").join("ab12.ready"),
+            b"marker",
+        );
+        write(
+            &old.join(PLAYBACK_AUDIO_DIR).join("ab").join("ab34.part"),
+            b"writing",
+        );
+        write(&old.join(IMAGE_CACHE_DIR).join("notes.txt"), b"user file");
+        write(
+            &old.join("unrelated.audio"),
+            b"outside the cache subdirectories",
+        );
+
+        let report = relocate(&old, &new, ExistingCacheAction::Discard);
+        assert_eq!(report.removed_files, 2);
+        assert_eq!(report.moved_files, 0);
+        assert!(!old.join(PLAYBACK_AUDIO_DIR).exists());
+        assert!(old.join(IMAGE_CACHE_DIR).join("notes.txt").is_file());
+        assert!(old.join("unrelated.audio").is_file());
+        assert!(!new.exists(), "丢弃旧缓存不会创建新目录里的任何东西");
+    }
+
+    #[test]
+    fn relocating_onto_the_same_root_is_a_no_op() {
+        let temp = tempfile::tempdir().unwrap();
+        write(&temp.path().join(PLAYBACK_AUDIO_DIR).join("a.audio"), b"x");
+        let report = relocate(temp.path(), temp.path(), ExistingCacheAction::Discard);
+        assert_eq!(report, RelocationReport::default());
+        assert!(temp
+            .path()
+            .join(PLAYBACK_AUDIO_DIR)
+            .join("a.audio")
+            .is_file());
+    }
+
+    #[test]
+    fn only_one_relocation_runs_at_a_time() {
+        let guard = RelocationGuard::acquire().unwrap();
+        assert!(RelocationGuard::acquire().is_err());
+        drop(guard);
+        assert!(RelocationGuard::acquire().is_ok());
+    }
+}

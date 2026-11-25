@@ -82,6 +82,28 @@ pub async fn set_audio_output_device(
         .map_err(|error| AppError::Other(error.to_string()))?
 }
 
+/// 开关 WASAPI 独占输出。只有值真的变了、且平台支持时才强制重建当前输出流；
+/// 独占打不开时引擎会回退共享模式，这里不把它当成错误
+#[tauri::command]
+pub async fn set_audio_exclusive_mode(
+    enabled: bool,
+    name: Option<String>,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let previous = neri_playback::player::set_exclusive_output(enabled);
+    if previous == enabled || !neri_playback::player::EXCLUSIVE_OUTPUT_SUPPORTED {
+        return Ok(());
+    }
+    let name = name.filter(|value| !value.trim().is_empty());
+    let request = state
+        .player
+        .lock()
+        .request_output_device_force(name, None)?;
+    tokio::task::spawn_blocking(move || request.wait())
+        .await
+        .map_err(|error| AppError::Other(error.to_string()))?
+}
+
 #[tauri::command]
 pub async fn seek(
     position_ms: u64,

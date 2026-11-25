@@ -16,6 +16,9 @@ use neri_common::error::{AppError, AppResult};
 const BASE_URL: &str = "https://music.163.com";
 const SONG_URL_PATH: &str = "/eapi/song/enhance/player/url/v1";
 const EAPI_BASE_URL: &str = "https://interface.music.163.com";
+const CLOUDSEARCH_WEAPI_PATH: &str = "/weapi/cloudsearch/get/web";
+const CLOUDSEARCH_EAPI_PATH: &str = "/eapi/cloudsearch/pc";
+const LEGACY_SEARCH_WEAPI_PATH: &str = "/weapi/search/get";
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const EAPI_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 10; NeriPlayer) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
@@ -515,6 +518,61 @@ impl NeteaseClient {
         parse_json_response(resp, "netease api").await
     }
 
+    /// 登录态下 weapi cloudsearch 的 result 会变成十六进制密文（#61），未登录可能直接返回
+    /// 50000005；依次回退到 eapi cloudsearch 与旧版 search/get，取第一个明文可读的响应
+    async fn search_with_fallback(&self, params: &Value) -> AppResult<Value> {
+        let primary = self
+            .weapi_post(&format!("{BASE_URL}{CLOUDSEARCH_WEAPI_PATH}"), params)
+            .await;
+        if let Ok(body) = &primary {
+            if search_body_state(body) == SearchBodyState::Readable {
+                return primary;
+            }
+        }
+        for fallback in ["eapi cloudsearch", "weapi search/get"] {
+            let result = if fallback == "eapi cloudsearch" {
+                self.search_eapi_post(params).await
+            } else {
+                self.weapi_post(&format!("{BASE_URL}{LEGACY_SEARCH_WEAPI_PATH}"), params)
+                    .await
+            };
+            match result.as_ref().map(search_body_state) {
+                Ok(SearchBodyState::Readable) => {
+                    log::debug!(target: "netease", "search served by {fallback} fallback");
+                    return result;
+                }
+                Ok(state) => {
+                    log::debug!(target: "netease", "search {fallback} fallback unusable: {state:?}")
+                }
+                Err(error) => {
+                    log::debug!(target: "netease", "search {fallback} fallback failed: {error}")
+                }
+            }
+        }
+        let body = primary?;
+        Err(match search_body_state(&body) {
+            SearchBodyState::Rejected(code) => AppError::Api(format!("netease search code {code}")),
+            _ => AppError::Api("netease search returned an unreadable result".into()),
+        })
+    }
+
+    fn build_search_eapi_request(client: &Client, encrypted: &str) -> reqwest::RequestBuilder {
+        client
+            .post(format!("{EAPI_BASE_URL}{CLOUDSEARCH_EAPI_PATH}"))
+            .header("User-Agent", EAPI_USER_AGENT)
+            .header("Referer", BASE_URL)
+            .form(&[("params", encrypted)])
+    }
+
+    async fn search_eapi_post(&self, params: &Value) -> AppResult<Value> {
+        let encrypted =
+            crypto::eapi_encrypt(CLOUDSEARCH_EAPI_PATH, &serde_json::to_string(params)?);
+        let response = self
+            .send_with_fallback(|client| Self::build_search_eapi_request(client, &encrypted))
+            .await?;
+        parse_json_response(response, "netease eapi search").await
+    }
+
     /// 探索页分类搜索（对齐 Android cloudsearch）：type 1 歌曲 / 1000 歌单 / 100 歌手
     pub async fn cloudsearch(
         &self,
@@ -530,13 +588,7 @@ impl NeteaseClient {
             "offset": offset.to_string(),
             "total": "true"
         });
-        let body = self
-            .weapi_post(&format!("{}/weapi/cloudsearch/get/web", BASE_URL), &params)
-            .await?;
-        match json_i64(&body["code"]) {
-            Some(200) | None => Ok(body),
-            Some(code) => Err(AppError::Api(format!("netease search code {code}"))),
-        }
+        self.search_with_fallback(&params).await
     }
 
     /// 歌曲评论（对齐 Android getSongCommentsCancellable）：
@@ -666,33 +718,11 @@ impl NeteaseClient {
             "total": "true"
         });
 
-        let body = self
-            .weapi_post(&format!("{}/weapi/cloudsearch/get/web", BASE_URL), &params)
-            .await?;
-
-        let songs = body["result"]["songs"]
-            .as_array()
-            .ok_or_else(|| AppError::Api("No search results".into()))?;
-
-        let results = songs
-            .iter()
-            .filter_map(|s| {
-                Some(NeteaseSearchResult {
-                    id: s["id"].as_u64()?,
-                    name: s["name"].as_str()?.to_string(),
-                    artists: s["ar"]
-                        .as_array()?
-                        .iter()
-                        .filter_map(|a| a["name"].as_str().map(String::from))
-                        .collect(),
-                    album: s["al"]["name"].as_str().unwrap_or("").to_string(),
-                    duration_ms: s["dt"].as_u64().unwrap_or(0),
-                    cover_url: s["al"]["picUrl"].as_str().map(String::from),
-                })
-            })
-            .collect();
-
-        Ok(results)
+        let body = self.search_with_fallback(&params).await?;
+        if body["result"]["songs"].is_null() {
+            return Err(AppError::Api("No search results".into()));
+        }
+        Ok(parse_search_songs(&body))
     }
 
     /// 与 Android 使用同一 EAPI 取流入口
@@ -1115,6 +1145,64 @@ fn unavailable_song_url(reason: NeteasePlaybackUnavailableReason) -> NeteaseSong
         duration_ms: None,
         song_id: None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchBodyState {
+    Readable,
+    /// 业务码非 200，例如未登录时的 50000005
+    Rejected(i64),
+    /// result 不是对象，典型是登录态返回的十六进制密文字符串
+    Unreadable,
+}
+
+fn search_body_state(body: &Value) -> SearchBodyState {
+    match json_i64(&body["code"]) {
+        Some(200) | None => {}
+        Some(code) => return SearchBodyState::Rejected(code),
+    }
+    // 无匹配时 result 可能整体缺失，按空结果处理而不是当作失败
+    match &body["result"] {
+        Value::Object(_) | Value::Null => SearchBodyState::Readable,
+        _ => SearchBodyState::Unreadable,
+    }
+}
+
+/// 同时兼容 cloudsearch（ar/al/dt）与旧版 search/get（artists/album/duration）的歌曲结构
+fn parse_search_songs(body: &Value) -> Vec<NeteaseSearchResult> {
+    let Some(songs) = body["result"]["songs"].as_array() else {
+        return Vec::new();
+    };
+    songs
+        .iter()
+        .filter_map(|song| {
+            let artists = song["ar"]
+                .as_array()
+                .or_else(|| song["artists"].as_array())?;
+            let album = if song["al"].is_object() {
+                &song["al"]
+            } else {
+                &song["album"]
+            };
+            Some(NeteaseSearchResult {
+                id: song["id"].as_u64()?,
+                name: song["name"].as_str()?.to_string(),
+                artists: artists
+                    .iter()
+                    .filter_map(|artist| artist["name"].as_str().map(String::from))
+                    .collect(),
+                album: album["name"].as_str().unwrap_or("").to_string(),
+                duration_ms: song["dt"]
+                    .as_u64()
+                    .or_else(|| song["duration"].as_u64())
+                    .unwrap_or(0),
+                cover_url: album["picUrl"]
+                    .as_str()
+                    .filter(|url| !url.is_empty())
+                    .map(String::from),
+            })
+        })
+        .collect()
 }
 
 fn clean_json_string(value: &Value) -> Option<String> {
@@ -1752,5 +1840,78 @@ mod home_section_tests {
         assert_eq!(jar.cookies(&netease_url), before_netease);
         assert!(original.has_login());
         assert!(!anonymous.has_login());
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_body_state_detects_encrypted_and_rejected_results() {
+        // #61：登录态 cloudsearch 的 result 是十六进制密文字符串
+        let encrypted = json!({"code": 200, "result": "35b174dd82395f39a1c0"});
+        assert_eq!(search_body_state(&encrypted), SearchBodyState::Unreadable);
+        let rejected = json!({"code": 50000005});
+        assert_eq!(
+            search_body_state(&rejected),
+            SearchBodyState::Rejected(50000005)
+        );
+        let plain = json!({"code": 200, "result": {"songs": [], "songCount": 0}});
+        assert_eq!(search_body_state(&plain), SearchBodyState::Readable);
+        let empty = json!({"code": 200});
+        assert_eq!(search_body_state(&empty), SearchBodyState::Readable);
+    }
+
+    #[test]
+    fn parse_search_songs_supports_cloudsearch_and_legacy_shapes() {
+        let cloudsearch = json!({"code": 200, "result": {"songs": [{
+            "id": 1, "name": "晴天", "ar": [{"name": "周杰伦"}],
+            "al": {"name": "叶惠美", "picUrl": "https://p1.music.126.net/a.jpg"}, "dt": 269000
+        }]}});
+        let songs = parse_search_songs(&cloudsearch);
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].artists, vec!["周杰伦"]);
+        assert_eq!(songs[0].album, "叶惠美");
+        assert_eq!(songs[0].duration_ms, 269000);
+        assert_eq!(
+            songs[0].cover_url.as_deref(),
+            Some("https://p1.music.126.net/a.jpg")
+        );
+
+        // 旧版 /weapi/search/get：artists/album/duration，专辑通常不带封面
+        let legacy = json!({"code": 200, "result": {"songCount": 2, "songs": [
+            {"id": 2, "name": "七里香", "artists": [{"name": "周杰伦"}, {"name": "X"}],
+             "album": {"id": 9, "name": "七里香", "picId": 123}, "duration": 299000},
+            {"id": 3, "name": "缺少歌手"}
+        ]}});
+        let songs = parse_search_songs(&legacy);
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].id, 2);
+        assert_eq!(songs[0].artists, vec!["周杰伦", "X"]);
+        assert_eq!(songs[0].album, "七里香");
+        assert_eq!(songs[0].duration_ms, 299000);
+        assert_eq!(songs[0].cover_url, None);
+
+        assert!(parse_search_songs(&json!({"code": 200, "result": "abcdef"})).is_empty());
+    }
+
+    #[test]
+    fn search_eapi_fallback_targets_cloudsearch_pc_with_api_digest() {
+        let params =
+            json!({"s": "周杰伦", "type": "1", "limit": "30", "offset": "0", "total": "true"});
+        let encrypted = crypto::eapi_encrypt(CLOUDSEARCH_EAPI_PATH, &params.to_string());
+        let request = NeteaseClient::build_search_eapi_request(&reqwest::Client::new(), &encrypted)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://interface.music.163.com/eapi/cloudsearch/pc"
+        );
+        let form = request.body().unwrap().as_bytes().unwrap();
+        let values: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(form).into_owned().collect();
+        let plain = crypto::eapi_decrypt(&hex::decode(&values["params"]).unwrap()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&plain).unwrap(), params);
     }
 }

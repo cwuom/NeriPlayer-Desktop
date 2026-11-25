@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use url::Url;
 
 use crate::state::AppState;
@@ -68,10 +68,8 @@ pub async fn fetch_bilibili_cover(
             setup_host,
             cache_setup_queued_at.elapsed().as_millis(),
         );
-        let cache_root = app_for_setup
-            .path()
-            .app_cache_dir()
-            .map_err(|err| AppError::Other(err.to_string()))?
+        let cache_root = crate::settings::media_cache::media_cache_root(&app_for_setup)
+            .ok_or_else(|| AppError::Other("cache directory unavailable".into()))?
             .join(IMAGE_CACHE_DIRECTORY);
         CoverDiskCache::new(cache_root, cache_key_url.as_str(), IMAGE_CACHE_MAX_BYTES)
     })
@@ -492,9 +490,9 @@ fn prune_cover_cache(root: &Path, max_cache_bytes: u64, keep_digest: &str) {
 }
 
 /// 启动时按封面上限裁剪一次（之前只有新封面写入时才会裁剪）
-pub fn prune_cover_cache_dir(app_cache_dir: &Path) {
+pub fn prune_cover_cache_dir(media_cache_root: &Path) {
     prune_cover_cache(
-        &app_cache_dir.join(IMAGE_CACHE_DIRECTORY),
+        &media_cache_root.join(IMAGE_CACHE_DIRECTORY),
         IMAGE_CACHE_MAX_BYTES,
         "",
     );
