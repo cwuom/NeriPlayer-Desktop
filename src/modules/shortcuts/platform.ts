@@ -6,6 +6,7 @@
 import { detectPlatform } from '@/utils/platform'
 
 export const isMacPlatform = detectPlatform() === 'mac'
+export const isWindowsPlatform = detectPlatform() === 'windows'
 
 /// 主修饰键是否按下：macOS 为 ⌘，其余为 Ctrl
 export function hasPrimaryModifier(event: KeyboardEvent): boolean {

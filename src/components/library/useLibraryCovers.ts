@@ -1,10 +1,14 @@
 import { ref } from 'vue'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { toHttpsImageUrl } from '@/utils/trackCover'
+import { normalizeProxiedCoverUrl } from '@/utils/bilibiliCoverCache'
 
-export function isBilibiliCover(url?: string | null): boolean {
-  if (!url) return false
-  return /\.(hdslb|biliimg)\.com/i.test(url)
+/**
+ * 封面能否在直连失败后改走后端代理（B 站、网易云、QQ、YouTube 等图床）。
+ * WebView 直连 googleusercontent / ytimg 常被网络环境拦下，只用 <img> 会直接落成占位图
+ */
+export function hasProxiedCoverFallback(url?: string | null): boolean {
+  return !!url && !!normalizeProxiedCoverUrl(url)
 }
 
 /** CSP 只放行 https 图片，网络封面要先升级；本地路径须转成 asset 协议 WebView 才能加载 */

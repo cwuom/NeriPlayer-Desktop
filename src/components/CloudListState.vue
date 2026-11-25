@@ -56,7 +56,7 @@ const { t } = useI18n()
   align-items: center;
   gap: 6px;
   min-height: 28px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 
   .material-symbols-rounded { font-size: 16px; }
@@ -80,7 +80,7 @@ const { t } = useI18n()
   max-width: 420px;
   margin-bottom: 12px;
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   opacity: 0.6;
   text-align: center;
@@ -93,7 +93,7 @@ const { t } = useI18n()
   border-radius: var(--radius-full);
   background: var(--md-primary);
   color: var(--md-on-primary);
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   transition: opacity var(--duration-short);
 
@@ -101,7 +101,7 @@ const { t } = useI18n()
 
   &--compact {
     padding: 2px 10px;
-    font-size: 12px;
+    font-size: var(--fs-12);
   }
 }
 

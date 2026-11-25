@@ -18,6 +18,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
+import TrackListHeader from '@/components/library/TrackListHeader.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
@@ -802,7 +803,8 @@ function playTrack(track: TrackInfo) {
     return
   }
   const playlistId = String(route.params.id)
-  const playlistTracks = filteredTracks.value
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  const playlistTracks = tracks.value
   // 播放器会给队列条目补 CID，保留原歌单里的合集身份
   void biliParts.request(
     track,
@@ -871,7 +873,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="detailViewRef" class="detail-view" @scroll.passive="onDetailScroll">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
@@ -942,6 +944,7 @@ onUnmounted(() => {
           @delete="requestBatchRemove"
           @exit="leaveSelectionMode"
         />
+        <TrackListHeader album more />
         <div ref="trackListRef" class="track-list">
         <div
           class="drop-indicator"
@@ -990,8 +993,9 @@ onUnmounted(() => {
           </div>
           <div class="track-info">
             <div class="track-title">{{ track.title }}</div>
-            <div class="track-meta">{{ track.artist }}<template v-if="displayAlbum(track.album)"> · {{ displayAlbum(track.album) }}</template></div>
+            <div class="track-meta">{{ track.artist }}<span v-if="displayAlbum(track.album)" class="track-meta-album"> · {{ displayAlbum(track.album) }}</span></div>
           </div>
+          <div class="track-album">{{ displayAlbum(track.album) }}</div>
           <span
             v-if="downloadStore.isDownloaded(track.id)"
             class="track-download-badge material-symbols-rounded filled"
@@ -1054,8 +1058,8 @@ onUnmounted(() => {
 
 .sticky-selection-toolbar {
   position: sticky;
-  /* 排在常驻 detail-header（56px 高）之下，避免两个 sticky 叠死在同一位置 */
-  top: 60px;
+  /* 排在常驻 detail-header（占顶栏一行）之下，避免两个 sticky 叠死在同一位置 */
+  top: calc(var(--titlebar-height, 48px) + 4px);
   z-index: 10;
 }
 
@@ -1291,7 +1295,7 @@ onUnmounted(() => {
 }
 
 .dialog-msg {
-  font-size: 14px;
+  font-size: var(--fs-14);
   color: var(--md-on-surface-variant);
   line-height: 1.5;
 }

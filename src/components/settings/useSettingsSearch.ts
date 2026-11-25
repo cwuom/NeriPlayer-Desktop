@@ -1,7 +1,7 @@
 import { computed, nextTick, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { SETTINGS_SEARCH_INDEX } from '@/modules/settings/searchIndex'
-import { isMacPlatform } from '@/modules/shortcuts/platform'
+import { isMacPlatform, isWindowsPlatform } from '@/modules/shortcuts/platform'
 import { filterAndRank, searchValue } from '@/modules/search/textMatcher'
 import { SETTINGS_SECTION_IDS, type SettingsSectionId, type SettingsSections } from './useSettingsSections'
 
@@ -49,7 +49,7 @@ export function useSettingsSearch(sections: SettingsSections) {
         key: `section:${item.id}`, section: item.id, title: item.label, desc: item.description, keywords: [], isSection: true,
       })),
       ...SETTINGS_SEARCH_INDEX
-        .filter(entry => SETTINGS_SECTION_IDS.includes(entry.section as SettingsSectionId) && (isMacPlatform || !entry.macOnly))
+        .filter(entry => SETTINGS_SECTION_IDS.includes(entry.section as SettingsSectionId) && (isMacPlatform || !entry.macOnly) && (isWindowsPlatform || !entry.windowsOnly))
         .map(entry => ({
           key: `${entry.section}:${entry.title}`,
           section: entry.section as SettingsSectionId,

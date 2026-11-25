@@ -73,7 +73,11 @@ function mount(overrides = {}, { hidden = false, dpr = 1, softwareRenderer = fal
       draws.push({ now, width, height })
     },
   }
-  canvas.getContext = type => { assert.equal(type, 'webgl'); return gl }
+  let contextOptions = null
+  canvas.getContext = (type, options) => { assert.equal(type, 'webgl'); contextOptions = options; return gl }
+  // 画布首帧后的显示回调走原生 rAF（不进共享帧循环），单独排队由用例手动触发
+  const revealCallbacks = []
+  const requestRevealFrame = callback => { revealCallbacks.push(callback); return revealCallbacks.length }
   const dependencies = {
     vue,
     '@/utils/frameLoop': frameLoop,
@@ -85,13 +89,14 @@ function mount(overrides = {}, { hidden = false, dpr = 1, softwareRenderer = fal
     observe() {}
     disconnect() { resizeCallback = undefined }
   }
-  const component = new Function('require', 'exports', 'document', 'window', 'performance', 'ResizeObserver', `${componentCode}\nreturn component`)(
+  const component = new Function('require', 'exports', 'document', 'window', 'performance', 'ResizeObserver', 'requestAnimationFrame', `${componentCode}\nreturn component`)(
     name => { assert.ok(name in dependencies, `unexpected dependency: ${name}`); return dependencies[name] },
-    {}, document, { devicePixelRatio: dpr }, { now: () => now }, ResizeObserver,
+    {}, document, { devicePixelRatio: dpr }, { now: () => now }, ResizeObserver, requestRevealFrame,
   )
   const setup = component.setup
+  let state = null
   component.setup = (input, context) => {
-    const state = setup(input, context)
+    state = setup(input, context)
     state.canvas.value = canvas
     return () => null
   }
@@ -100,6 +105,9 @@ function mount(overrides = {}, { hidden = false, dpr = 1, softwareRenderer = fal
   return {
     props, draws, document, canvas, canvasSizes,
     get pendingFrames() { return frames.size },
+    get ready() { return state.firstFrameReady.value },
+    get contextOptions() { return contextOptions },
+    flushReveal() { for (const callback of revealCallbacks.splice(0)) callback() },
     frame(elapsed = 1000 / 60) {
       now += elapsed
       for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(now)
@@ -232,6 +240,21 @@ await test('context loss stops rendering and restoring a paused canvas paints it
     r.canvas.dispatch('webglcontextrestored')
     assert.equal(r.draws.length, 2)
     assert.equal(r.pendingFrames, 0)
+  } finally { r.dispose() }
+})
+
+await test('the canvas stays hidden until its first frame is presented, and again after context loss', () => {
+  const r = mount()
+  try {
+    // 着色器输出预乘颜色，上下文必须按预乘声明，否则部分驱动首帧合成异常（A 卡打开播放页闪一下）
+    assert.equal(r.contextOptions.premultipliedAlpha, true)
+    assert.equal(r.draws.length, 1, 'the first frame is drawn on mount')
+    assert.equal(r.ready, false, 'the drawn frame is not shown before it has been presented')
+    r.flushReveal()
+    assert.equal(r.ready, true)
+    assert.equal(r.pendingFrames, 1, 'revealing does not add frames to the shared loop')
+    r.canvas.dispatch('webglcontextlost')
+    assert.equal(r.ready, false, 'a lost context hides the empty buffer')
   } finally { r.dispose() }
 })
 

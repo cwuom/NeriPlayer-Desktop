@@ -372,14 +372,14 @@ button:focus-visible {
 }
 
 .tp-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   line-height: 20px;
 }
 
 .tp-artist {
   margin-top: 2px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 16px;
   color: var(--md-on-surface-variant);
 }
@@ -464,7 +464,7 @@ button:focus-visible {
   height: 40px;
   padding: 0 12px;
   border-radius: 10px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   text-align: left;
   transition: background-color 0.12s ease;
 }
@@ -506,7 +506,7 @@ button:focus-visible {
   width: 32px;
   height: 18px;
   border-radius: 9px;
-  border: 1.5px solid var(--md-outline-variant);
+  border: 1.5px solid var(--hairline);
   background: var(--md-surface-container-highest);
   transition: background-color 0.18s ease, border-color 0.18s ease;
 }

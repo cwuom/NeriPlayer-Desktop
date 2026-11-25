@@ -140,8 +140,8 @@ async function submit() {
   mask-repeat: no-repeat;
 }
 
-.cookie-platform-name { font-size: 12px; font-weight: 600; color: var(--md-on-surface); overflow-wrap: anywhere; }
-.cookie-description { font-size: 13px; line-height: 1.6; text-align: center; }
+.cookie-platform-name { font-size: var(--fs-12); font-weight: 600; color: var(--md-on-surface); overflow-wrap: anywhere; }
+.cookie-description { font-size: var(--fs-13); line-height: 1.6; text-align: center; }
 
 .cookie-format-card {
   display: grid;
@@ -155,7 +155,7 @@ async function submit() {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: var(--md-primary);
 
@@ -174,15 +174,15 @@ async function submit() {
     background: color-mix(in srgb, var(--md-primary) 10%, transparent);
     color: var(--md-on-surface);
     font-family: inherit;
-    font-size: 11px;
+    font-size: var(--fs-11);
     line-height: 1.5;
     overflow-wrap: anywhere;
   }
 }
 
-.cookie-login-hint { font-size: 12px; line-height: 1.6; color: var(--md-on-surface-variant); }
+.cookie-login-hint { font-size: var(--fs-12); line-height: 1.6; color: var(--md-on-surface-variant); }
 .cookie-field { display: grid; gap: 6px; min-width: 0; }
-.cookie-field-label { font-size: 12px; font-weight: 500; transition: color var(--duration-short); }
+.cookie-field-label { font-size: var(--fs-12); font-weight: 500; transition: color var(--duration-short); }
 .cookie-field-surface { display: block; overflow: hidden; border-radius: var(--radius-md) var(--radius-md) 0 0; }
 
 textarea {
@@ -198,7 +198,7 @@ textarea {
   background: var(--md-surface-container);
   color: var(--md-on-surface);
   font-family: var(--font-family);
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
   caret-color: var(--md-primary);
 
@@ -223,9 +223,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 
-  .material-symbols-rounded { font-size: 15px; }
+  .material-symbols-rounded { font-size: var(--fs-15); }
 }
 </style>

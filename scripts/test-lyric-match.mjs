@@ -28,6 +28,7 @@ async function loadModule(relativePath, dependencies) {
 }
 
 const format = await loadModule('../src/modules/lyrics/lyricsFormat.ts', {})
+const searchTitle = await loadModule('../src/modules/lyrics/lyricSearchTitle.ts', {})
 const invocations = []
 let reply = []
 let invokeMatch = async () => reply
@@ -37,12 +38,15 @@ const match = await loadModule('../src/modules/lyrics/lyricMatch.ts', {
     Channel: class { constructor(onmessage) { this.onmessage = onmessage || (() => {}) } },
   },
   './lyricsFormat': format,
+  './lyricSearchTitle': searchTitle,
 })
 
 assert.deepEqual(match.defaultLyricMatchSources('netease'), ['kugou', 'netease', 'amll_ttml'], 'Android 默认：AMLL + 网易云 + 酷狗')
 assert.deepEqual(match.defaultLyricMatchSources('youtube'), ['kugou', 'netease', 'qq', 'lrclib'], 'YouTube 曲目不查 AMLL')
 assert.equal(match.defaultLyricMatchKeyword(' Lemon ', ' 米津玄師 '), 'Lemon 米津玄師')
 assert.equal(match.defaultLyricMatchKeyword('Lemon', ''), 'Lemon')
+assert.equal(match.defaultLyricMatchKeyword('【洛天依】《歌行四方》PV', '某UP主'), '歌行四方 某UP主', '书名号内的歌名优先作为关键字')
+assert.equal(match.defaultLyricMatchKeyword('光年之外 (《太空旅客》主题曲)', '邓紫棋'), '光年之外 (《太空旅客》主题曲) 邓紫棋', '括号里的出处不当歌名')
 
 assert.equal(match.lyricMatchSourceTag('netease'), 'CLOUD_MUSIC', '与偏移来源和 Android MusicPlatform 一致')
 assert.equal(match.lyricMatchSourceTag('qq'), 'QQ_MUSIC')

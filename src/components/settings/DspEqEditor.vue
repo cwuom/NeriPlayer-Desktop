@@ -172,15 +172,15 @@ line.zero { stroke: var(--md-on-surface-variant); stroke-opacity: .5; stroke-das
 .dsp-eq-dot.active circle { r: 9; }
 .dsp-eq-scale {
   position: absolute; top: 12px; bottom: 8px; left: 6px; display: flex; flex-direction: column; justify-content: space-between;
-  padding: 10px 0; color: var(--md-on-surface-variant); font-size: 10px; font-variant-numeric: tabular-nums;
+  padding: 10px 0; color: var(--md-on-surface-variant); font-size: var(--fs-10); font-variant-numeric: tabular-nums;
 }
 .dsp-eq-tooltip {
   position: absolute; top: 2px; transform: translateX(calc(-50% + 14px)); padding: 4px 9px; border-radius: 999px;
   background: var(--md-inverse-surface, var(--md-on-surface)); color: var(--md-inverse-on-surface, var(--md-surface));
-  font-size: 11px; font-weight: 600; white-space: nowrap; pointer-events: none; animation: dsp-pop .16s ease-out;
+  font-size: var(--fs-11); font-weight: 600; white-space: nowrap; pointer-events: none; animation: dsp-pop .16s ease-out;
 }
 @keyframes dsp-pop { from { opacity: 0; transform: translate(calc(-50% + 14px), 4px) scale(.94); } }
-.dsp-eq-hint { margin: 0 2px; color: var(--md-on-surface-variant); font-size: 11.5px; line-height: 1.5; }
+.dsp-eq-hint { margin: 0 2px; color: var(--md-on-surface-variant); font-size: var(--fs-11-5); line-height: 1.5; }
 .dsp-eq-strip { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 6px; padding-left: 40px; }
 .effects-band {
   display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 2px 8px; min-width: 0;
@@ -188,8 +188,8 @@ line.zero { stroke: var(--md-on-surface-variant); stroke-opacity: .5; stroke-das
   transition: border-color .25s ease, background-color .25s ease;
 }
 .effects-band.changed { border-color: color-mix(in srgb, var(--md-primary) 30%, transparent); }
-.effects-band :deep(.editable-range-value) { color: var(--md-primary); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.effects-band .setting-title { color: var(--md-on-surface-variant); font-size: 11px; font-weight: 500; }
+.effects-band :deep(.editable-range-value) { color: var(--md-primary); font-size: var(--fs-11-5); font-weight: 600; font-variant-numeric: tabular-nums; }
+.effects-band .setting-title { color: var(--md-on-surface-variant); font-size: var(--fs-11); font-weight: 500; }
 .dsp-eq-slider { position: relative; width: 22px; height: 116px; display: flex; justify-content: center; }
 .dsp-eq-slider::before, .dsp-eq-slider::after {
   content: ''; position: absolute; left: 50%; width: 4px; border-radius: 4px; transform: translateX(-50%); pointer-events: none;

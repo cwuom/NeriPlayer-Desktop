@@ -1,14 +1,25 @@
-// 歌单/专辑详情页共享样式
+// 歌单/专辑/歌手等详情页共享样式（Clean）：全宽吸顶导航 + 大封面 Hero + 安静的曲目行。
+// 列宽、Hero 排布都按容器宽度响应，侧栏展开/折叠或窗口变窄时自动切换
 .detail-view {
   /* 迷你播放器间距由 .content.has-mini-player 负责, 这里再叠大额 padding 会在滚到底时露出大片留白 */
-  padding: 16px 28px 24px;
-  max-height: 100%;
+  --detail-gutter: clamp(18px, 3.2vw, 44px);
+  container-type: inline-size;
+  padding: 0 var(--detail-gutter) 28px;
+  /* 详情页自己滚动：整体上移到窗口顶边，让吸顶栏落在顶栏这一行 */
+  margin-top: calc(-1 * var(--titlebar-height, 48px));
+  max-height: calc(100% + var(--titlebar-height, 48px));
   overflow-y: auto;
   scroll-padding-bottom: 24px;
   /* 快滑时避免底层透出白闪 */
   background: var(--md-surface);
   transform: translateZ(0);
+  /* translateZ 让本页自成层叠上下文，吸顶栏的 z-index 出不去；
+     整页要压过 .content-drag-strip（z-index: 1）的毛玻璃，否则返回和搜索会被它盖住 */
+  position: relative;
+  z-index: 2;
   -webkit-overflow-scrolling: touch;
+
+  > * { max-width: 1480px; margin-left: auto; margin-right: auto; }
 }
 
 .detail-header {
@@ -18,36 +29,30 @@
   z-index: 11;
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-  padding: 8px 10px;
-  border-radius: 18px;
-  /* 真毛玻璃：底色留 70% 透明度让 blur 透出内容，92% 时视觉上就是实心板 */
-  background: color-mix(in srgb, var(--md-surface-container-high) 70%, transparent);
-  -webkit-backdrop-filter: blur(24px) saturate(1.5);
-  backdrop-filter: blur(24px) saturate(1.5);
-}
-
-/* Linux WebKitGTK 无 backdrop-filter 时给不透明底色，避免列表穿透 */
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .detail-header {
-    background: var(--md-surface-container-high);
-  }
+  gap: 10px;
+  max-width: none !important;
+  /* 占用窗口顶栏这一行：与红绿灯 / 窗口按钮同一中线，右侧给 Windows 窗口按钮让位 */
+  height: var(--titlebar-height, 48px);
+  margin: 0 calc(-1 * var(--detail-gutter)) 8px !important;
+  padding: 0 calc(var(--detail-gutter) + var(--window-controls-width, 0px)) 0 calc(var(--detail-gutter) + var(--content-top-inset-left, 0px));
+  /* 渐隐玻璃底由 global.scss 统一绘制 */
 }
 
 .back-btn {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-full);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--md-on-surface);
-  transition: background var(--duration-short);
+  background: var(--md-surface-container-high);
+  transition: background var(--duration-short), transform var(--duration-short);
   flex-shrink: 0;
 
-  &:hover { background: var(--md-surface-container-high); }
-  .material-symbols-rounded { font-size: 24px; }
+  &:hover { background: color-mix(in srgb, var(--md-on-surface) 8%, var(--md-surface-container-high)); }
+  &:active { transform: scale(0.94); }
+  .material-symbols-rounded { font-size: 21px; }
 }
 
 .header-search {
@@ -55,28 +60,35 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--md-surface-container);
+  background: var(--md-surface-container-high);
   border-radius: var(--radius-full);
   padding: 0 14px;
-  height: 40px;
-  max-width: 320px;
+  height: 36px;
+  max-width: 360px;
+  margin-left: auto;
+  transition: background var(--duration-short), box-shadow var(--duration-short);
+
+  &:focus-within {
+    background: var(--md-surface-container-lowest);
+    box-shadow: 0 0 0 2px var(--md-primary), var(--shadow-1);
+  }
 }
 
 .search-icon {
-  font-size: 20px;
+  font-size: 19px;
   color: var(--md-on-surface-variant);
-  opacity: 0.6;
 }
 
 .search-input {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
   color: var(--md-on-surface);
-  font-size: 14px;
+  font-size: var(--fs-14);
 
-  &::placeholder { color: var(--md-on-surface-variant); opacity: 0.5; }
+  &::placeholder { color: var(--md-on-surface-variant); opacity: 0.8; }
 }
 
 // 加载 / 错误 / 空状态
@@ -88,7 +100,7 @@
   min-height: 300px;
   gap: 12px;
   color: var(--md-on-surface-variant);
-  font-size: 14px;
+  font-size: var(--fs-14);
 }
 
 .spinning {
@@ -99,42 +111,47 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .retry-btn {
-  padding: 8px 24px;
+  padding: 8px 22px;
   border-radius: var(--radius-full);
   background: var(--md-primary);
   color: var(--md-on-primary);
-  font-size: 14px;
-  font-weight: 500;
-  transition: opacity var(--duration-short);
+  font-size: var(--fs-14);
+  font-weight: 600;
+  transition: filter var(--duration-short);
 
-  &:hover { opacity: 0.9; }
+  &:hover { filter: brightness(1.06); }
 }
 
 // Hero 区域
 .detail-hero {
   display: flex;
-  gap: 24px;
-  margin-bottom: 24px;
-  /* 信息区通常比封面矮, 顶对齐会在按钮下方留出大片空白; 居中让留白均匀分布 */
-  align-items: center;
+  gap: clamp(20px, 3cqi, 36px);
+  padding: 12px 0 28px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--hairline);
+  /* 信息区通常比封面矮, 底对齐让标题、按钮贴近列表，桌面播放器的常见排布 */
+  align-items: flex-end;
 }
 
 .hero-cover {
-  width: 180px;
-  height: 180px;
-  border-radius: var(--radius-lg);
+  width: clamp(156px, 20cqi, 232px);
+  height: clamp(156px, 20cqi, 232px);
+  border-radius: var(--radius-xl);
   background: var(--md-surface-variant);
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  box-shadow: var(--shadow-2), inset 0 0 0 1px var(--hairline);
 
   img {
     width: 100%;
     height: 100%;
     object-fit: cover;
   }
+
+  > .material-symbols-rounded { font-size: 56px; opacity: 0.35; }
 }
 
 .hero-info {
@@ -142,68 +159,75 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .hero-title {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.3px;
+  font-size: calc(clamp(24px, 3.4cqi, 40px) * var(--text-scale));
+  font-weight: 750;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  user-select: text;
 }
 
 .hero-creator {
-  font-size: 14px;
-  color: var(--md-on-surface-variant);
-  font-weight: 500;
+  font-size: var(--fs-14);
+  color: var(--md-on-surface);
+  font-weight: 600;
 }
 
 .hero-meta {
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
-  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
 }
 
 .hero-desc {
-  font-size: 12px;
+  max-width: 72ch;
+  font-size: var(--fs-13);
+  line-height: 1.55;
   color: var(--md-on-surface-variant);
-  opacity: 0.6;
-  margin-top: 4px;
+  margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  user-select: text;
 }
 
 .play-all-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 12px;
-  padding: 10px 24px;
+  margin-top: 14px;
+  height: 40px;
+  padding: 0 22px 0 16px;
   border-radius: var(--radius-full);
   background: var(--md-primary);
   color: var(--md-on-primary);
-  font-size: 14px;
-  font-weight: 600;
-  transition: opacity var(--duration-short), transform var(--duration-short);
+  font-size: var(--fs-14);
+  font-weight: 650;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--md-primary) 32%, transparent);
+  transition: filter var(--duration-short), transform var(--duration-short), box-shadow var(--duration-short);
   width: fit-content;
 
-  .material-symbols-rounded { font-size: 20px; }
-  &:hover { opacity: 0.92; transform: translateY(-1px); }
+  .material-symbols-rounded { font-size: 22px; }
+  &:hover { filter: brightness(1.06); box-shadow: 0 6px 18px color-mix(in srgb, var(--md-primary) 40%, transparent); }
   &:active { transform: scale(0.97); }
 }
 
 .hero-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .hero-actions .play-all-btn {
@@ -211,30 +235,39 @@
 }
 
 .hero-icon-btn {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-full);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--md-on-surface-variant);
-  background: var(--md-surface-container);
+  color: var(--md-on-surface);
+  background: var(--md-surface-container-high);
   transition: background var(--duration-short), color var(--duration-short), transform var(--duration-short);
 
-  .material-symbols-rounded { font-size: 22px; }
-  &:hover {
-    color: var(--md-primary);
-    background: color-mix(in srgb, var(--md-primary) 12%, var(--md-surface-container));
-    transform: translateY(-1px);
+  .material-symbols-rounded { font-size: 21px; }
+  &:hover { background: color-mix(in srgb, var(--md-on-surface) 8%, var(--md-surface-container-high)); }
+  &:active { transform: scale(0.95); }
+}
+
+/* 窄内容区：封面与信息上下排列，居中对齐 */
+@container (max-width: 560px) {
+  .detail-hero {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
   }
-  &:active { transform: scale(0.96); }
+
+  .hero-info { align-items: center; }
+  .hero-actions { justify-content: center; }
 }
 
 // 歌曲列表
 .track-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
+  padding-top: 6px;
   background: var(--md-surface);
   min-height: 0;
 }
@@ -243,7 +276,8 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px;
+  min-height: 56px;
+  padding: 6px 10px;
   border-radius: var(--radius-sm);
   min-width: 0;
   cursor: pointer;
@@ -253,18 +287,12 @@
   background: var(--md-surface);
   transition: background 120ms ease;
 
-  &:hover,
-  &.active {
-    border-radius: var(--radius-md);
-  }
-  &:hover { background: var(--md-surface-container); }
+  &:hover { background: var(--state-hover); }
+  &:active { background: var(--state-pressed); }
   &.active:not(.selected):not(.dragging):not(.landing) {
-    background: color-mix(in srgb, var(--md-primary) 12%, var(--md-surface));
+    background: color-mix(in srgb, var(--md-primary) 10%, var(--md-surface));
   }
-  &.active:not(.dragging):not(.landing) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--md-primary) 45%, transparent);
-  }
-  &.active .track-title { color: var(--md-primary); }
+  &.active .track-title { color: var(--md-primary); font-weight: 600; }
 }
 
 .track-index {
@@ -295,9 +323,10 @@
 }
 
 .index-num {
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .playing-icon {
@@ -337,6 +366,7 @@
   height: 44px;
   border-radius: var(--radius-sm);
   background: var(--md-surface-variant);
+  box-shadow: inset 0 0 0 1px var(--hairline);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -371,7 +401,7 @@
 }
 
 .track-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -380,7 +410,7 @@
 }
 
 .track-meta {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   margin-top: 2px;
   min-width: 0;
@@ -391,10 +421,29 @@
 }
 
 .track-duration {
-  font-size: 12px;
+  min-width: 44px;
+  text-align: right;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+}
+
+/* 专辑列与表头：内容区足够宽时才出现，此时副标题里不再重复专辑 */
+.track-album {
+  display: none;
+  flex: 0 0 clamp(140px, 24cqi, 320px);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-13);
+  color: var(--md-on-surface-variant);
+}
+
+@container (min-width: 760px) {
+  .track-album { display: block; }
+  .track-meta-album { display: none; }
 }
 
 .track-more {
@@ -409,8 +458,8 @@
   transition: opacity var(--duration-short), background var(--duration-short), color var(--duration-short);
   flex-shrink: 0;
 
-  .track-item:hover & { opacity: 0.6; }
-  &:hover { opacity: 1 !important; background: var(--md-surface-container-high); }
+  .track-item:hover & { opacity: 0.75; }
+  &:hover { opacity: 1 !important; background: var(--state-hover); color: var(--md-on-surface); }
   .material-symbols-rounded { font-size: 18px; }
 }
 
@@ -426,7 +475,7 @@
   background: var(--md-surface-container-high);
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.15);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   padding: 4px;
   z-index: 501;
   animation: ctx-in 120ms ease-out;
@@ -443,7 +492,7 @@
   gap: 12px;
   width: 100%;
   padding: 10px 12px;
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   color: var(--md-on-surface);
   background: none;

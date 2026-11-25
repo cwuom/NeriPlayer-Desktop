@@ -244,22 +244,22 @@ watch(() => props.options.map(option => option.value), (values, previous) => {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
+  min-height: 34px;
+  padding: 7px 10px 7px 14px;
+  border-radius: var(--radius-sm);
   background: var(--md-surface-container-high);
   color: var(--md-on-surface);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid transparent;
   transition: background 150ms, border-color 150ms;
   min-width: 0;
   width: 100%;
 
   &:hover {
-    background: var(--md-surface-container-highest);
-    border-color: var(--md-outline);
+    background: color-mix(in srgb, var(--md-on-surface) 6%, var(--md-surface-container-high));
   }
 
   &:focus-visible {
@@ -316,13 +316,15 @@ watch(() => props.options.map(option => option.value), (values, previous) => {
   box-sizing: border-box;
   position: fixed;
   z-index: 10050;
-  background: var(--md-surface-container-high);
-  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-lowest);
+  border: 0;
   border-radius: var(--radius-md);
-  padding: 4px;
+  padding: 5px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
+
+  .dark-theme & { background: var(--md-surface-container-high); }
   transform-origin: top center;
 }
 
@@ -331,13 +333,13 @@ watch(() => props.options.map(option => option.value), (values, previous) => {
   align-items: center;
   gap: 12px;
   box-sizing: border-box;
-  min-height: 40px;
+  min-height: 34px;
   width: 100%;
-  padding: 8px 14px;
+  padding: 7px 12px;
   border: none;
   background: none;
   color: var(--md-on-surface);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   font-family: inherit;
   text-align: left;
@@ -346,12 +348,14 @@ watch(() => props.options.map(option => option.value), (values, previous) => {
   transition: background 120ms;
 
   &:hover, &.highlighted {
-    background: var(--md-surface-container-highest);
+    background: var(--state-hover);
   }
 
   &.active {
-    color: var(--md-primary);
-    background: color-mix(in srgb, var(--md-primary) 10%, transparent);
+    color: var(--md-on-surface);
+    font-weight: 600;
+
+    .custom-select-check { color: var(--md-primary); }
   }
 }
 

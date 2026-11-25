@@ -201,7 +201,7 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
 
 <template>
   <div class="detail-view">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" :aria-label="t('common.back')" @click="router.back()"><span class="material-symbols-rounded">arrow_back</span></button>
       <div class="creator-page-title">{{ header.name || t('player.source_bilibili') }}</div>
     </header>
@@ -304,7 +304,7 @@ onUnmounted(() => { generation++; contentsGeneration++; collectionGeneration++ }
 }
 
 .creator-content-info { flex: 1; min-width: 0; }
-.creator-content-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.creator-content-meta { margin-top: 2px; font-size: 12px; color: var(--md-on-surface-variant); }
+.creator-content-title { font-size: var(--fs-14); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.creator-content-meta { margin-top: 2px; font-size: var(--fs-12); color: var(--md-on-surface-variant); }
 .creator-content-arrow { font-size: 18px; opacity: 0.3; }
 </style>

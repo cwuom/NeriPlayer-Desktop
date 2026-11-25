@@ -415,20 +415,23 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 .queue-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgb(0 0 0 / 0.24);
   z-index: 250;
   display: flex;
   justify-content: flex-end;
+  padding: calc(var(--titlebar-height, 36px) + 6px) 10px 10px;
 }
 
 .queue-panel {
-  width: 380px;
-  max-width: 90vw;
+  width: 400px;
+  max-width: calc(100vw - 20px);
   height: 100%;
-  background: var(--md-surface-container);
+  background: var(--clean-dialog-surface);
   display: flex;
   flex-direction: column;
-  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
 }
 
 /* 由父级 <Transition name="queue-sheet"> 驱动：开合都是 transition，半路反向会从当前位置收回 */
@@ -452,7 +455,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
   align-items: center;
   gap: 8px;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--md-outline-variant);
+  border-bottom: 1px solid var(--hairline);
   flex-shrink: 0;
 
   h3 {
@@ -462,7 +465,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 }
 
 .queue-count {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: var(--md-on-primary);
   background: var(--md-primary);
@@ -473,7 +476,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 }
 
 .queue-clear {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 500;
   color: var(--md-error, #FFB4AB);
   padding: 6px 12px;
@@ -505,9 +508,9 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
   justify-content: space-between;
   gap: 8px;
   padding: 8px 20px;
-  border-bottom: 1px solid var(--md-outline-variant);
+  border-bottom: 1px solid var(--hairline);
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 }
 
@@ -532,7 +535,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
   flex: 1;
   gap: 10px;
   color: var(--md-on-surface-variant);
-  font-size: 14px;
+  font-size: var(--fs-14);
 }
 
 .queue-list {
@@ -582,7 +585,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 }
 
 .qi-num {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   font-weight: 500;
 }
@@ -639,7 +642,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 }
 
 .qi-title {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -648,7 +651,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 }
 
 .qi-meta {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -656,7 +659,7 @@ function handleQueueContextMenuClick(item: ContextMenuActionItem) {
 }
 
 .qi-duration {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;

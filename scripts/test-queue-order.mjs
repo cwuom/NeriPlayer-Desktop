@@ -39,12 +39,13 @@ async function importSource(path) {
 }
 const { buildQueueDisplayOrder } = await importSource('../src/modules/playback/queueDisplayOrder.ts')
 const { resolvePlaybackQueueStartIndex } = await importSource('../src/modules/playback/playbackQueue.ts')
+const { shouldRestartOnPrevious } = await importSource('../src/modules/playback/playbackPolicy.ts')
 const commitTrack = compile(functions.get('commitTrack'))
 const track = (id, title = id) => ({ id, title, artist: 'artist', album: '', durationMs: 180000, source: 'netease' })
 
 function fixture({ tracks = ['a', 'b', 'c', 'd', 'e'].map(id => track(id)), current = 0,
   bag = [1, 2, 3, 4], history = [], future = [], shuffle = true, blocked = false,
-  source = 'netease', needsReload = false } = {}) {
+  source = 'netease', needsReload = false, prevRestartsTrack = true } = {}) {
   const played = [], saved = [], seeks = []
   const queue = ref(tracks), queueIndex = ref(current), currentTrack = ref(tracks[current] ?? null)
   const shuffleBag = ref([...bag]), shuffleHistory = ref([...history]), shuffleFuture = ref([...future])
@@ -64,6 +65,7 @@ function fixture({ tracks = ['a', 'b', 'c', 'd', 'e'].map(id => track(id)), curr
     startInterpolationFromRenderedPosition() {}, useSettingsStore: () => ({ fadeIn: false }),
     setLocalPlaylistSource() {}, tracePlaybackUi() {},
     resolvePlaybackQueueStartIndex, invoke: async () => {},
+    settings: { prevRestartsTrack }, shouldRestartOnPrevious,
     play: async (track, commandSource, start, force, remembered, requestedQueueIndex, shuffleNavigation = false) => {
       played.push({ track, index: requestedQueueIndex })
       const apply = new Function(...Object.keys(context), 'track', 'requestedQueueIndex', 'shuffleNavigation',
@@ -109,6 +111,39 @@ await test('previous backtracking and future next preserve the visible order', a
   await state.next()
   assert.equal(state.queueIndex.value, 2)
   assert.equal(state.queueDisplayCurrentIndex.value, 2)
+})
+
+await test('previous restarts the current track after 3 seconds by default', async () => {
+  for (const shuffle of [false, true]) {
+    const state = fixture({ current: 2, history: [0, 1], bag: [3, 4], shuffle })
+    state.positionMs.value = 3001
+    await state.previous()
+    assert.deepEqual(state.seeks, [0], 'shuffle=' + shuffle)
+    assert.equal(state.queueIndex.value, 2)
+    assert.equal(state.played.length, 0)
+  }
+  const early = fixture({ current: 2, shuffle: false })
+  early.positionMs.value = 3000
+  await early.previous()
+  assert.equal(early.queueIndex.value, 1, 'within 3 seconds previous still switches tracks')
+})
+
+await test('previous always switches tracks when restarting is turned off (#75)', async () => {
+  const ordered = fixture({ current: 2, shuffle: false, prevRestartsTrack: false })
+  ordered.positionMs.value = 120000
+  await ordered.previous()
+  assert.deepEqual(ordered.seeks, [])
+  assert.equal(ordered.queueIndex.value, 1)
+  const shuffled = fixture({ current: 2, history: [0, 4], bag: [1, 3], prevRestartsTrack: false })
+  shuffled.positionMs.value = 120000
+  await shuffled.previous()
+  assert.deepEqual(shuffled.seeks, [])
+  assert.equal(shuffled.queueIndex.value, 4, 'shuffle walks back through history')
+  // 没有可回退的曲目时只能重播当前曲目
+  const first = fixture({ current: 0, history: [], prevRestartsTrack: false })
+  first.positionMs.value = 120000
+  await first.previous()
+  assert.deepEqual(first.seeks, [0])
 })
 
 await test('direct play consumes the selected shuffle slot and records its predecessor', async () => {

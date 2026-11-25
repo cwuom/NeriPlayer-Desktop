@@ -155,7 +155,7 @@ onMounted(load)
 
 <template>
   <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
-    <div class="detail-header">
+    <div class="detail-header" data-tauri-drag-region>
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
@@ -264,7 +264,7 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   margin-bottom: 16px;
 
@@ -285,7 +285,7 @@ onMounted(load)
   height: 40px;
   padding: 0 20px;
   border-radius: var(--radius-full);
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   transition:
     background var(--duration-short) var(--easing-standard, ease),
@@ -318,7 +318,7 @@ onMounted(load)
   color: var(--md-on-surface-variant);
 
   .material-symbols-rounded { font-size: 44px; opacity: 0.4; }
-  p { font-size: 14px; opacity: 0.7; }
+  p { font-size: var(--fs-14); opacity: 0.7; }
 }
 
 .spinning { animation: fav-spin 1s linear infinite; }

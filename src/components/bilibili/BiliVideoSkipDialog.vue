@@ -379,10 +379,10 @@ onUnmounted(() => { rememberDraft(selectedKey.value); sessionGeneration++; loadG
 <style scoped lang="scss">
 .bili-skip-content { max-height: min(65vh, 600px); overflow-y: auto; padding-right: 4px; }
 .track-title { color: var(--md-on-surface); font-weight: 600; overflow-wrap: anywhere; margin: 0 0 8px; }
-.skip-hint { font-size: 12px; margin: 8px 0 12px; }
+.skip-hint { font-size: var(--fs-12); margin: 8px 0 12px; }
 .load-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0; }
 .skip-editor { min-width: 0; border: 0; padding: 0; margin: 0; }
-.part-label { display: block; font-size: 12px; margin-bottom: 6px; }
+.part-label { display: block; font-size: var(--fs-12); margin-bottom: 6px; }
 .time-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 8px 0; }
 .current-time-buttons, .playback-buttons { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin: 4px 0; }
 .current-time { font-variant-numeric: tabular-nums; }
@@ -395,9 +395,9 @@ onUnmounted(() => { rememberDraft(selectedKey.value); sessionGeneration++; loadG
 .playback-toggle, .delete-button { display: inline-flex; align-items: center; justify-content: center; }
 .playback-buttons .skip-button { padding-inline: 10px; }
 .add-button { width: 100%; margin: 10px 0; }
-.input-error { color: var(--md-error); margin: 6px 0; font-size: 12px; }
+.input-error { color: var(--md-error); margin: 6px 0; font-size: var(--fs-12); }
 .empty-intervals { text-align: center; margin: 18px 0; }
 .interval-list { padding: 0; margin: 4px 0; list-style: none; }
-.interval-list li { display: flex; align-items: center; justify-content: space-between; min-height: 44px; border-bottom: 1px solid var(--md-outline-variant); font-variant-numeric: tabular-nums; }
+.interval-list li { display: flex; align-items: center; justify-content: space-between; min-height: 44px; border-bottom: 1px solid var(--hairline); font-variant-numeric: tabular-nums; }
 .clear-button { display: block; margin: 8px 0 0 auto; }
 </style>

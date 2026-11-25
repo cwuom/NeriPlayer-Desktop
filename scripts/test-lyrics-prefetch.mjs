@@ -27,16 +27,18 @@ const hasWordTimedLyrics = lines => lines.some(line => line.words.some(word => w
 // 共享的自动取词：B 站开逐字优先先试逐字，没有才走后端瀑布；平台 ID 从曲目 ID 里拆
 const invocations = []
 let wordTimedResult = { source: 'amll_ttml', lines: timed }
+let fetchLyricsResult = () => ({ source: 'netease', lines: plain })
 const fetchModule = await loadModule('../src/modules/lyrics/lyricsFetch.ts', {
   '@tauri-apps/api/core': { invoke: async (command, args) => {
     invocations.push([command, args])
     if (command === 'fetch_word_timed_lyrics') return wordTimedResult
-    if (command === 'fetch_lyrics') return { source: 'netease', lines: plain }
+    if (command === 'fetch_lyrics') return fetchLyricsResult(args)
     return null
   } },
   './lyricsFormat': { mapBackendLyrics: lines => lines, toEditableRomanizationText: () => '' },
   './lyricMatch': { defaultLyricMatchKeyword: () => '', matchLyrics: async () => [] },
   './lyricsRequest': { hasWordTimedLyrics },
+  './lyricSearchTitle': await loadModule('../src/modules/lyrics/lyricSearchTitle.ts', {}),
 })
 const { fetchAutomaticLyrics, fetchLyricsArgsFor } = fetchModule
 
@@ -57,6 +59,23 @@ assert.equal((await fetchAutomaticLyrics(bili, 'bilibili', true)).source, 'netea
 invocations.length = 0
 await fetchAutomaticLyrics({ id: 'netease:7', title: 'T', artist: 'A' }, 'netease', true)
 assert.deepEqual(invocations.map(([command]) => command), ['fetch_lyrics'], 'only Bilibili tries word-timed lyrics first')
+
+// #53：视频标题里书名号内的歌名优先搜，搜不到再用原标题；带平台 ID 的曲目不提取
+const quotedVideo = { id: 'bilibili:BV2', title: '【洛天依】《歌行四方》PV', artist: 'UP', durationMs: 60_000 }
+invocations.length = 0
+assert.equal((await fetchAutomaticLyrics(quotedVideo, 'bilibili', false)).source, 'netease')
+assert.deepEqual(invocations.map(([, args]) => args.title), ['歌行四方'], 'extracted title hit skips the original title')
+invocations.length = 0
+fetchLyricsResult = args => args.title === quotedVideo.title ? { source: 'qq', lines: plain } : { lines: [] }
+assert.equal((await fetchAutomaticLyrics(quotedVideo, 'bilibili', false)).source, 'qq')
+assert.deepEqual(invocations.map(([, args]) => args.title), ['歌行四方', quotedVideo.title], 'original title remains the fallback query')
+invocations.length = 0
+fetchLyricsResult = () => ({ lines: [] })
+assert.deepEqual(await fetchAutomaticLyrics(quotedVideo, 'bilibili', false), { source: null, lines: [] })
+invocations.length = 0
+await fetchAutomaticLyrics({ id: 'netease:8', title: '凉凉《三生三世》', artist: 'A' }, 'netease', false)
+assert.deepEqual(invocations.map(([, args]) => args.title), ['凉凉《三生三世》'], 'platform ids keep the official title')
+fetchLyricsResult = () => ({ source: 'netease', lines: plain })
 
 // 预取判定顺序与正在播放页一致
 function prefetchRuntime(state = {}) {

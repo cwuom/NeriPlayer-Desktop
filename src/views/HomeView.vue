@@ -21,6 +21,8 @@ import { getPlaybackSourceKind } from '@/modules/playback/playbackSource'
 import { useHomeFeedStore } from '@/stores/homeFeed'
 import { NETEASE_HOME_SECTIONS } from '@/modules/library/neteaseHome'
 import HomeFeedSection from '@/components/HomeFeedSection.vue'
+import HomeShelf from '@/components/home/HomeShelf.vue'
+import { comboLabelParts, effectiveShortcuts } from '@/modules/shortcuts/bindings'
 import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
 import { collectionWebUrl, type CollectionMenuTarget } from '@/utils/collectionLinks'
@@ -36,40 +38,18 @@ const homeFeed = useHomeFeedStore()
 const history = useHistoryStore()
 const settings = useSettingsStore()
 const toast = useToastStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const log = createLogger('home')
 
 const continuePlaylists = ref<ContinuePlaylist[]>([])
 const continueLoading = ref(true)
 const continueError = ref(false)
-const continueGridRef = ref<HTMLElement | null>(null)
-const continueLimit = ref(1)
 const availableContinuePlaylists = computed(() => continuePlaylists.value.filter(playlist =>
   settings.internationalizationEnabled || playlist.source.toLowerCase() !== 'youtubemusic').slice(0, 12))
-const visibleContinuePlaylists = computed(() => availableContinuePlaylists.value.slice(0, continueLimit.value))
-let continueResizeObserver: ResizeObserver | null = null
 let continueRequest = 0
 let homeUnmounted = false
 let unlistenPlaylistsChanged: UnlistenFn | null = null
 const homeActive = ref(true)
-
-let continueLimitFrame = 0
-watch(continueGridRef, element => {
-  continueResizeObserver?.disconnect()
-  cancelAnimationFrame(continueLimitFrame)
-  if (!element) return
-  const updateLimit = () => {
-    const columns = getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
-    if (columns !== continueLimit.value) continueLimit.value = columns
-  }
-  // 在观察回调里直接改卡片数会改变网格高度，浏览器每次改窗口大小都会报 ResizeObserver 循环；放到下一帧
-  continueResizeObserver = new ResizeObserver(() => {
-    cancelAnimationFrame(continueLimitFrame)
-    continueLimitFrame = requestAnimationFrame(updateLimit)
-  })
-  continueResizeObserver.observe(element)
-  updateLimit()
-}, { flush: 'post' })
 
 /// 已有内容时静默刷新：切回首页不再闪加载态、转刷新按钮
 async function loadContinuePlaylists() {
@@ -128,8 +108,6 @@ onUnmounted(() => {
   homeUnmounted = true
   continueRequest++
   unlistenPlaylistsChanged?.()
-  continueResizeObserver?.disconnect()
-  cancelAnimationFrame(continueLimitFrame)
   homeFeed.deactivate()
 })
 
@@ -148,6 +126,23 @@ function submitHomeSearch() {
 
 const neteaseHomeSections = computed(() => settings.internationalizationEnabled ? [] :
   NETEASE_HOME_SECTIONS.filter(section => !section.requiresLogin || auth.netease.loggedIn))
+type NeteaseHomeDefinition = (typeof NETEASE_HOME_SECTIONS)[number]
+type NeteaseHomeBlock =
+  | { key: string; definition: NeteaseHomeDefinition; pair?: undefined }
+  | { key: string; pair: NeteaseHomeDefinition[]; definition?: undefined }
+
+const CHART_PAIR = new Set(['top_hot', 'top_new'])
+
+// 热歌榜与新歌榜合成一个并排块，放在原先热歌榜的位置
+const neteaseHomeBlocks = computed<NeteaseHomeBlock[]>(() => {
+  const charts = neteaseHomeSections.value.filter(section => CHART_PAIR.has(section.key))
+  const blocks: NeteaseHomeBlock[] = []
+  for (const definition of neteaseHomeSections.value) {
+    if (!CHART_PAIR.has(definition.key) || charts.length < 2) blocks.push({ key: definition.key, definition })
+    else if (definition.key === charts[0].key) blocks.push({ key: charts.map(chart => chart.key).join('+'), pair: charts })
+  }
+  return blocks
+})
 let neteaseSessionRevision = 0
 
 function refreshNeteaseHome(force = false) {
@@ -164,6 +159,13 @@ watch([() => settings.internationalizationEnabled, () => auth.netease], (_, prev
   if (accountChanged) neteaseSessionRevision++
   refreshNeteaseHome(accountChanged)
 }, { immediate: true })
+
+// 搜索框里提示当前实际绑定的快捷键（默认 Ctrl/⌘+F，可在设置里改）
+const searchShortcutLabel = computed(() => {
+  const combo = effectiveShortcuts(settings.shortcutBindings, 'local').search
+  return combo ? comboLabelParts(combo).join(' ') : ''
+})
+const todayLabel = computed(() => new Intl.DateTimeFormat(locale.value, { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date()))
 
 const greeting = computed(() => {
   const h = new Date().getHours()
@@ -193,7 +195,46 @@ const myPlaylists = computed(() => {
   return all.slice(0, 12)
 })
 
-const bilibiliPlaylists = computed(() => (recommend.userPlaylists.bilibili || []).slice(0, 6))
+interface QuickTile {
+  key: string
+  name: string
+  coverUrl?: string
+  meta: string
+  open: () => void
+  menu?: (event: MouseEvent) => void
+}
+
+const QUICK_TILE_LIMIT = 8
+
+// 快速入口：继续播放优先，余下用我的歌单补齐到 8 个，去重后保持原顺序
+const quickTiles = computed<QuickTile[]>(() => {
+  const tiles: QuickTile[] = availableContinuePlaylists.value.map(playlist => ({
+    key: `continue:${playlist.key}`,
+    name: playlist.name,
+    coverUrl: playlist.coverUrl,
+    meta: t('player.track_count', { count: playlist.trackCount }),
+    open: () => openContinuePlaylist(playlist),
+  }))
+  const names = new Set(tiles.map(tile => tile.name))
+  for (const pl of myPlaylists.value) {
+    if (tiles.length >= QUICK_TILE_LIMIT) break
+    if (names.has(pl.name)) continue
+    names.add(pl.name)
+    tiles.push({
+      key: `mine:${pl.platform}:${pl.id}`,
+      name: pl.name,
+      coverUrl: pl.coverUrl,
+      meta: t('home.my_playlists'),
+      open: () => openPlatformPlaylist(pl),
+      menu: event => openPlaylistMenu(event, pl.platform, pl.id),
+    })
+  }
+  // 双列/四列布局下奇数个会剩半行，超过 2 个时截成偶数
+  const count = Math.min(QUICK_TILE_LIMIT, tiles.length)
+  return tiles.slice(0, count > 2 ? count - (count % 2) : count)
+})
+
+const bilibiliPlaylists = computed(() => (recommend.userPlaylists.bilibili || []).slice(0, 12))
 
 // 首页 YouTube 推荐随国际化开关显示，仅在当前登录会话复用
 const showYoutubeFeed = computed(() => settings.internationalizationEnabled && auth.youtube.loggedIn)
@@ -292,19 +333,21 @@ function formatNotifTime(ts: number): string {
 
 <template>
   <div class="home-view">
-    <header class="home-header">
-      <h1 class="greeting">{{ greeting }}</h1>
+    <div class="home-inner">
+    <header class="home-topbar" data-tauri-drag-region>
       <form class="home-search" role="search" @submit.prevent="submitHomeSearch">
+        <span class="material-symbols-rounded home-search-icon" aria-hidden="true">search</span>
         <input v-model="homeSearchQuery" type="search" :placeholder="t('explore.search_placeholder')" :aria-label="t('explore.search_placeholder')" data-shortcut-search />
-        <button type="submit" :aria-label="t('explore.title')" :disabled="!homeSearchQuery.trim()">
-          <span class="material-symbols-rounded">search</span>
+        <kbd v-if="!homeSearchQuery && searchShortcutLabel" class="home-search-kbd" aria-hidden="true">{{ searchShortcutLabel }}</kbd>
+        <button v-else type="submit" class="home-search-go" :aria-label="t('explore.title')">
+          <span class="material-symbols-rounded">arrow_forward</span>
         </button>
       </form>
       <div class="notif-wrap">
         <button class="header-action" :aria-label="t('home.refresh')" :title="t('home.refresh')" :disabled="homeRefreshing" @click="refreshHome">
           <span class="material-symbols-rounded" :class="{ spinning: homeRefreshing }">refresh</span>
         </button>
-        <button class="header-action" @click="openNotifications">
+        <button class="header-action" :aria-label="t('home.notifications')" :title="t('home.notifications')" @click="openNotifications">
           <span class="material-symbols-rounded">notifications</span>
           <span v-if="toast.unreadCount > 0" class="notif-badge">{{ toast.unreadCount > 99 ? '99+' : toast.unreadCount }}</span>
         </button>
@@ -347,22 +390,31 @@ function formatNotifTime(ts: number): string {
       </div>
     </header>
 
-    <section v-if="availableContinuePlaylists.length || continueLoading || continueError" class="section continue-section">
-      <div class="section-header">
-        <h2 class="section-title">
-          <span class="material-symbols-rounded section-icon">history</span>
-          {{ t('home.continue_play') }}
-        </h2>
-      </div>
-      <div v-if="availableContinuePlaylists.length" ref="continueGridRef" class="continue-scroll">
-        <button v-for="playlist in visibleContinuePlaylists" :key="playlist.key" type="button" class="continue-card" @click="openContinuePlaylist(playlist)">
-          <div class="playlist-cover">
+    <section class="home-hero">
+      <h1 class="greeting">{{ greeting }}</h1>
+      <p class="hero-date">{{ todayLabel }}</p>
+    </section>
+
+    <!-- 快速入口：继续播放的歌单优先，不足时用我的歌单补齐，一屏内可直接点开 -->
+    <section v-if="quickTiles.length || continueLoading || continueError" class="quick-section" :aria-label="t('home.continue_play')">
+      <div v-if="quickTiles.length" class="quick-grid">
+        <button
+          v-for="tile in quickTiles"
+          :key="tile.key"
+          type="button"
+          class="quick-tile"
+          @click="tile.open()"
+          @contextmenu="tile.menu?.($event)"
+        >
+          <span class="quick-cover">
             <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
-            <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" />
-            <span class="continue-open material-symbols-rounded">arrow_forward</span>
-          </div>
-          <div class="playlist-name">{{ playlist.name }}</div>
-          <div class="daily-artist">{{ t('player.track_count', { count: playlist.trackCount }) }}</div>
+            <BilibiliCoverImage v-if="tile.coverUrl" :src="tile.coverUrl" :alt="tile.name" />
+          </span>
+          <span class="quick-text">
+            <span class="quick-name">{{ tile.name }}</span>
+            <span class="quick-meta">{{ tile.meta }}</span>
+          </span>
+          <span class="quick-go material-symbols-rounded" aria-hidden="true">arrow_forward</span>
         </button>
       </div>
       <div v-else-if="continueLoading" class="section-state">
@@ -399,235 +451,440 @@ function formatNotifTime(ts: number): string {
       <button v-if="!recommend.homeFeedLoading" class="section-state-action" @click="recommend.fetchHomeFeed()">{{ t('player.retry') }}</button>
     </div>
 
-    <template v-for="definition in neteaseHomeSections" :key="definition.key">
+    <template v-for="block in neteaseHomeBlocks" :key="block.key">
+      <!-- 两个榜单并排成一组，宽屏下减少同质的长列表堆叠 -->
+      <div v-if="block.pair" class="chart-pair">
+        <HomeFeedSection
+          v-for="definition in block.pair"
+          :key="definition.key"
+          compact
+          :definition="definition"
+          :section="homeFeed.sections[definition.key]"
+          @retry="homeFeed.retry(definition.key)"
+          @play="playHomeSongs"
+          @song-menu="openSongMenu"
+        />
+      </div>
       <HomeFeedSection
-        :definition="definition"
-        :section="homeFeed.sections[definition.key]"
-        @retry="homeFeed.retry(definition.key)"
+        v-else
+        :definition="block.definition"
+        :section="homeFeed.sections[block.definition.key]"
+        @retry="homeFeed.retry(block.definition.key)"
         @play="playHomeSongs"
         @song-menu="openSongMenu"
         @playlist-menu="(event, playlist) => openPlaylistMenu(event, 'netease', playlist.id)"
         @playlist="playlist => router.push({ name: 'netease-playlist', params: { id: playlist.id } })"
       />
-      <section v-if="definition.key === 'top_new' && bilibiliPlaylists.length" class="section">
-        <div class="section-header">
-          <h2 class="section-title">
-            <span class="platform-inline-icon" style="--platform-color: #00a1d6; mask-image: url('/icons/ic_bilibili.svg')" />
-            {{ t('library.bilibili_favorites') }}
-          </h2>
-          <button class="section-more" @click="router.push({ name: 'library', query: { tab: 'bilibili_favorites' } })">
-            <span>{{ t('home.more') }}</span>
-            <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-          </button>
-        </div>
-        <div class="daily-scroll">
-          <button v-for="playlist in bilibiliPlaylists" :key="playlist.id" type="button" class="playlist-card" @click="router.push({ name: 'bili-playlist', params: { mediaId: playlist.id } })" @contextmenu="openPlaylistMenu($event, 'bilibili', playlist.id)">
-            <div class="playlist-cover">
-              <span class="material-symbols-rounded filled cover-fallback">video_library</span>
-              <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" />
-            </div>
-            <div class="playlist-name">{{ playlist.name }}</div>
-            <div class="daily-artist">{{ t('player.track_count', { count: playlist.trackCount }) }}</div>
-          </button>
-        </div>
-      </section>
+      <HomeShelf
+        v-if="block.key.includes('top_new') && bilibiliPlaylists.length"
+        :title="t('library.bilibili_favorites')"
+        :more-label="t('home.more')"
+        @more="router.push({ name: 'library', query: { tab: 'bilibili_favorites' } })"
+      >
+        <template #icon>
+          <span class="platform-inline-icon" style="--platform-color: #00a1d6; mask-image: url('/icons/ic_bilibili.svg')" />
+        </template>
+        <button v-for="playlist in bilibiliPlaylists" :key="playlist.id" type="button" class="shelf-card" @click="router.push({ name: 'bili-playlist', params: { mediaId: playlist.id } })" @contextmenu="openPlaylistMenu($event, 'bilibili', playlist.id)">
+          <span class="shelf-cover">
+            <span class="material-symbols-rounded filled cover-fallback">video_library</span>
+            <BilibiliCoverImage v-if="playlist.coverUrl" :src="playlist.coverUrl" :alt="playlist.name" />
+          </span>
+          <span class="shelf-name">{{ playlist.name }}</span>
+          <span class="shelf-meta">{{ t('player.track_count', { count: playlist.trackCount }) }}</span>
+        </button>
+      </HomeShelf>
     </template>
 
-    <!-- 我的歌单 -->
-    <section v-if="myPlaylists.length > 0" class="section">
-      <div class="section-header">
-        <h2 class="section-title">{{ t('home.my_playlists') }}</h2>
-        <button class="section-more" @click="router.push('/library')">
-          <span>{{ t('home.more') }}</span>
-          <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-        </button>
-      </div>
-      <div class="daily-scroll">
-        <div
-          v-for="pl in myPlaylists"
-          :key="pl.id"
-          class="playlist-card"
-          @click="openPlatformPlaylist(pl)"
-          @contextmenu="openPlaylistMenu($event, pl.platform, pl.id)"
-        >
-          <div class="playlist-cover">
-            <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
-            <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy">
-              <span class="material-symbols-rounded filled">queue_music</span>
-            </BilibiliCoverImage>
-          </div>
-          <div class="playlist-name">{{ pl.name }}</div>
-        </div>
-      </div>
-    </section>
+    <HomeShelf v-if="myPlaylists.length > 0" :title="t('home.my_playlists')" :more-label="t('home.more')" @more="router.push('/library')">
+      <button
+        v-for="pl in myPlaylists"
+        :key="`${pl.platform}:${pl.id}`"
+        type="button"
+        class="shelf-card"
+        @click="openPlatformPlaylist(pl)"
+        @contextmenu="openPlaylistMenu($event, pl.platform, pl.id)"
+      >
+        <span class="shelf-cover">
+          <span class="material-symbols-rounded filled cover-fallback">queue_music</span>
+          <BilibiliCoverImage v-if="pl.coverUrl" :src="pl.coverUrl" loading="lazy" />
+        </span>
+        <span class="shelf-name">{{ pl.name }}</span>
+      </button>
+    </HomeShelf>
 
-    <!-- 最近播放 -->
-    <section v-if="recentTracks.length > 0" class="section">
-      <div class="section-header">
-        <h2 class="section-title">{{ t('home.recent_play') }}</h2>
-        <button class="section-more" @click="router.push('/recent')">
-          <span>{{ t('home.more') }}</span>
-          <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-        </button>
-      </div>
-      <div class="daily-scroll">
-        <div
-          v-for="(track, index) in recentTracks"
-          :key="track.id + '-recent-' + index"
-          class="daily-card"
-          @click="player.play(track)"
-          @contextmenu="openCardMenu($event, track)"
-        >
-          <div class="daily-cover">
-            <span class="material-symbols-rounded filled cover-fallback">music_note</span>
-            <BilibiliCoverImage
-              v-if="track.coverUrl"
-              :src="track.coverUrl"
-              loading="lazy"
-            />
-          </div>
-          <div class="daily-name">{{ track.title }}</div>
-          <div class="daily-artist">{{ track.artist }}</div>
-        </div>
-      </div>
-    </section>
+    <HomeShelf v-if="recentTracks.length > 0" :title="t('home.recent_play')" :more-label="t('home.more')" @more="router.push('/recent')">
+      <button
+        v-for="(track, index) in recentTracks"
+        :key="track.id + '-recent-' + index"
+        type="button"
+        class="shelf-card"
+        @click="player.play(track)"
+        @contextmenu="openCardMenu($event, track)"
+      >
+        <span class="shelf-cover">
+          <span class="material-symbols-rounded filled cover-fallback">music_note</span>
+          <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+          <span class="shelf-play material-symbols-rounded filled" aria-hidden="true">play_arrow</span>
+        </span>
+        <span class="shelf-name">{{ track.title }}</span>
+        <span class="shelf-meta">{{ track.artist }}</span>
+      </button>
+    </HomeShelf>
 
-    <!-- 本地音乐 -->
-    <section v-if="localTracks.length > 0" class="section">
-      <div class="section-header">
-        <h2 class="section-title">{{ t('home.local_music') }}</h2>
-        <button class="section-more" @click="router.push('/library')">
-          <span>{{ t('home.more') }}</span>
-          <span class="material-symbols-rounded" style="font-size: 18px">arrow_forward</span>
-        </button>
-      </div>
-      <div class="daily-scroll">
-        <div
-          v-for="track in localTracks"
-          :key="track.id"
-          class="daily-card"
-          @click="player.play(track)"
-          @contextmenu="openCardMenu($event, track)"
-        >
-          <div class="daily-cover">
-            <span class="material-symbols-rounded filled cover-fallback">music_note</span>
-            <BilibiliCoverImage
-              v-if="track.coverUrl"
-              :src="track.coverUrl"
-              loading="lazy"
-            />
-          </div>
-          <div class="daily-name">{{ track.title }}</div>
-          <div class="daily-artist">{{ track.artist }}</div>
-        </div>
-      </div>
-    </section>
+    <HomeShelf v-if="localTracks.length > 0" :title="t('home.local_music')" :more-label="t('home.more')" @more="router.push('/library')">
+      <button
+        v-for="track in localTracks"
+        :key="track.id"
+        type="button"
+        class="shelf-card"
+        @click="player.play(track)"
+        @contextmenu="openCardMenu($event, track)"
+      >
+        <span class="shelf-cover">
+          <span class="material-symbols-rounded filled cover-fallback">music_note</span>
+          <BilibiliCoverImage v-if="track.coverUrl" :src="track.coverUrl" loading="lazy" />
+          <span class="shelf-play material-symbols-rounded filled" aria-hidden="true">play_arrow</span>
+        </span>
+        <span class="shelf-name">{{ track.title }}</span>
+        <span class="shelf-meta">{{ track.artist }}</span>
+      </button>
+    </HomeShelf>
     <TrackContextMenu ref="trackMenuRef" @play="playFromMenu?.()" />
     <CollectionContextMenu ref="collectionMenuRef" />
+    </div>
   </div>
 </template>
 
 <style scoped lang="scss">
+/* 首页（Clean）：吸顶搜索栏 → 问候 → 快速入口 → 推荐与横向货架。
+   内容限宽居中，超宽屏上不会把卡片拉得过散；所有列数按容器宽度而非窗口宽度计算 */
 .home-view {
-  padding: 20px 28px 32px;
+  container-type: inline-size;
+  /* 切页淡入时整页 opacity < 1 会自成层叠上下文，若层级不高于 .content-drag-strip（z-index: 1），
+     淡入全程吸顶栏都被拖动条的毛玻璃盖住，动画结束才突然冒出来；固定压在拖动条之上 */
+  position: relative;
+  z-index: 2;
+  min-height: 100%;
+  padding: 0 clamp(18px, 3.2vw, 44px) 36px;
   user-select: none;
   -webkit-user-select: none;
 }
 
-.home-header {
+.home-inner {
+  max-width: 1480px;
+  margin: 0 auto;
+}
+
+/* ---------- 吸顶顶栏 ---------- */
+.home-topbar {
+  position: sticky;
+  /* 滚动容器 .content 的顶部 padding 就是顶栏这一行，sticky 以 padding 内沿为基准，需上移一行 */
+  top: calc(-1 * var(--titlebar-height, 48px));
+  z-index: 5;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 24px;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.section-icon {
-  color: var(--md-primary);
-  font-size: 23px;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-
-.continue-scroll {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 20px;
-  overflow: hidden;
-  padding: 4px 2px 12px;
-}
-
-@media (max-width: 600px) {
-  .continue-scroll { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 14px; }
-}
-
-.continue-card {
-  min-width: 0;
-  text-align: left;
-  border-radius: var(--radius-md);
-
-  .playlist-name { font-size: 14px; margin-top: 10px; font-weight: 600; }
-  .daily-artist { font-size: 12px; margin-top: 4px; }
-  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; }
-  &:hover .continue-open, &:focus-visible .continue-open { opacity: 1; }
-}
-
-.continue-open {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-full);
-  background: var(--md-primary-container);
-  color: var(--md-on-primary-container);
-  opacity: 0;
-  transition: opacity var(--duration-short);
+  gap: 12px;
+  /* 占用窗口顶栏这一行：与红绿灯 / 窗口按钮同一中线，右侧给 Windows 窗口按钮让位 */
+  height: var(--titlebar-height, 48px);
+  margin: calc(-1 * var(--titlebar-height, 48px)) calc(-1 * clamp(18px, 3.2vw, 44px)) 0;
+  padding: 0 calc(clamp(18px, 3.2vw, 44px) + var(--window-controls-width, 0px)) 0 calc(clamp(18px, 3.2vw, 44px) + var(--content-top-inset-left, 0px));
+  /* 渐隐玻璃底由 global.scss 统一绘制 */
 }
 
 .home-search {
+  position: relative;
   display: flex;
   align-items: center;
-  flex: 1 1 220px;
-  max-width: 440px;
-  height: 42px;
-  padding-left: 16px;
+  flex: 1 1 auto;
+  max-width: 560px;
+  height: 36px;
+  padding: 0 6px 0 12px;
   border-radius: var(--radius-full);
   background: var(--md-surface-container-high);
+  transition: background var(--duration-short), box-shadow var(--duration-short);
 
-  &:focus-within { outline: 2px solid var(--md-primary); }
-  input { width: 100%; min-width: 0; background: transparent; color: var(--md-on-surface); border: 0; outline: 0; }
-  button { display: grid; place-items: center; flex: 0 0 42px; height: 42px; color: var(--md-primary); }
-  button:disabled { opacity: 0.4; }
+  &:hover { background: color-mix(in srgb, var(--md-on-surface) 5%, var(--md-surface-container-high)); }
+  &:focus-within {
+    background: var(--md-surface-container-lowest);
+    box-shadow: 0 0 0 2px var(--md-primary), var(--shadow-1);
+  }
+
+  input {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding: 0 10px 0 8px;
+    background: transparent;
+    color: var(--md-on-surface);
+    font-size: var(--fs-14);
+    border: 0;
+    outline: 0;
+
+    &::placeholder { color: var(--md-on-surface-variant); opacity: 0.85; }
+    &::-webkit-search-cancel-button { display: none; }
+  }
 }
 
-.greeting {
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
+.home-search-icon {
+  font-size: 20px;
+  color: var(--md-on-surface-variant);
+}
+
+.home-search-kbd {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  margin-right: 4px;
+  border-radius: 6px;
+  background: var(--md-surface-container-lowest);
+  box-shadow: 0 0 0 1px var(--hairline), 0 1px 0 var(--hairline);
+  color: var(--md-on-surface-variant);
+  font-family: var(--font-family);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.home-search-go {
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  height: 30px;
+  border-radius: var(--radius-full);
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+
+  .material-symbols-rounded { font-size: 18px; }
+}
+
+.notif-wrap {
+  position: relative;
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
 }
 
 .header-action {
-  width: 40px;
-  height: 40px;
+  position: relative;
+  width: 38px;
+  height: 38px;
   border-radius: var(--radius-full);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--md-on-surface-variant);
-  transition: background var(--duration-short);
+  transition: background var(--duration-short), color var(--duration-short);
 
-  &:hover { background: var(--md-surface-container-high); }
+  .material-symbols-rounded { font-size: 22px; }
+  &:hover { background: var(--state-hover); color: var(--md-on-surface); }
+  &:disabled { cursor: default; }
 }
 
+.notif-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 17px;
+  height: 17px;
+  border-radius: 9px;
+  background: var(--md-error);
+  color: var(--md-on-error);
+  font-size: var(--fs-10);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  box-shadow: 0 0 0 2px var(--md-background);
+  pointer-events: none;
+}
+
+/* ---------- 问候 ---------- */
+.home-hero {
+  padding: 22px 0 18px;
+}
+
+.greeting {
+  font-size: clamp(26px, 3.4cqi, 36px);
+  font-size: calc(clamp(26px, 3.4cqi, 36px) * var(--text-scale));
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.hero-date {
+  margin-top: 6px;
+  font-size: var(--fs-14);
+  color: var(--md-on-surface-variant);
+}
+
+/* ---------- 快速入口 ---------- */
+.quick-section { margin-bottom: 36px; }
+
+.quick-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* 快速入口只是捷径，按列数截成整行，避免最后一行孤零零一个 */
+@container (max-width: 900px) {
+  .quick-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .quick-tile:nth-child(n + 7) { display: none; }
+}
+@container (max-width: 640px) {
+  .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 420px) {
+  .quick-grid { grid-template-columns: minmax(0, 1fr); }
+  .quick-tile:nth-child(n + 5) { display: none; }
+}
+
+.quick-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  height: 60px;
+  padding: 0 12px 0 0;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-container-low);
+  box-shadow: 0 0 0 1px var(--hairline);
+  text-align: left;
+  transition: background var(--duration-short), box-shadow var(--duration-short), transform var(--duration-short);
+
+  &:hover {
+    background: color-mix(in srgb, var(--md-on-surface) 3%, var(--md-surface-container-low));
+    box-shadow: 0 0 0 1px var(--hairline), var(--shadow-2);
+
+    .quick-go { opacity: 1; transform: none; }
+  }
+
+  &:active { transform: scale(0.985); }
+  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 2px; }
+}
+
+.quick-cover {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 60px;
+  height: 60px;
+  background: var(--md-surface-variant);
+
+  :deep(img) { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .cover-fallback { font-size: 24px; opacity: 0.4; }
+}
+
+.quick-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quick-name,
+.quick-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-name { font-size: var(--fs-14); font-weight: 600; }
+.quick-meta { font-size: var(--fs-12); color: var(--md-on-surface-variant); }
+
+.quick-go {
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  height: 30px;
+  border-radius: var(--radius-full);
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+  font-size: 18px;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity var(--duration-short), transform var(--duration-short) var(--ease-emphasized);
+}
+
+/* 榜单并排：容器足够宽时两列，窄时回到上下排列 */
+.chart-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 28px;
+}
+
+@container (max-width: 760px) {
+  .chart-pair { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---------- 货架卡片 ---------- */
+.shelf-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+  border-radius: var(--radius-md);
+
+  &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 3px; }
+
+  &:hover .shelf-cover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-2), inset 0 0 0 1px var(--hairline);
+  }
+
+  &:hover .shelf-play { opacity: 1; transform: none; }
+}
+
+.shelf-cover {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--md-surface-variant);
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--hairline);
+  transition: transform 220ms var(--ease-emphasized), box-shadow 220ms var(--ease-emphasized);
+
+  :deep(img) { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .cover-fallback { font-size: 34px; opacity: 0.4; }
+}
+
+.shelf-play {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-full);
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+  font-size: 26px;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.28);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity var(--duration-short), transform 220ms var(--ease-emphasized);
+}
+
+.shelf-name,
+.shelf-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shelf-name { margin-top: 10px; font-size: var(--fs-14); font-weight: 600; }
+.shelf-meta { margin-top: 2px; font-size: var(--fs-12); color: var(--md-on-surface-variant); }
 
 .platform-inline-icon {
   display: inline-block;
-  width: 23px;
-  height: 23px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
   background: var(--platform-color, var(--md-primary));
   mask-size: contain;
@@ -635,215 +892,40 @@ function formatNotifTime(ts: number): string {
   mask-position: center;
 }
 
-/* 段落 */
-.section { margin-bottom: 32px; }
-
-
-.section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-  gap: 12px;
-}
-
-.section-title {
-  display: flex;
-  align-items: center;
-  color: var(--md-primary);
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.section-more {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  color: var(--md-primary);
-  font-weight: 500;
-  padding: 6px 12px;
-  border-radius: var(--radius-full);
-  transition: background var(--duration-short);
-
-  &:hover { background: color-mix(in srgb, var(--md-primary) 8%, transparent); }
-}
-
+/* ---------- 状态行 ---------- */
 .section-state {
-  min-height: 72px;
+  min-height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
+  margin-bottom: 24px;
+  border-radius: var(--radius-lg);
+  background: var(--md-surface-container-low);
+  box-shadow: 0 0 0 1px var(--hairline);
   color: var(--md-on-surface-variant);
-  font-size: 13px;
+  font-size: var(--fs-13);
 
-  &.error {
-    color: var(--md-error);
-  }
-
-  .spinning {
-    font-size: 18px;
-    animation: spin 1s linear infinite;
-  }
+  &.error { color: var(--md-error); }
+  .spinning { font-size: 18px; }
 }
 
 .section-state-action {
-  padding: 5px 10px;
+  padding: 5px 12px;
   border-radius: var(--radius-full);
-  color: var(--md-primary);
-  background: color-mix(in srgb, var(--md-primary) 10%, transparent);
-  font-size: 12px;
+  color: var(--md-on-surface);
+  background: var(--md-surface-container-high);
+  font-size: var(--fs-12);
   font-weight: 600;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* 封面随窗口宽度调整，保留清晰的标题和来源 */
-.daily-scroll {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 20px;
-}
-
-.daily-card {
-  min-width: 0;
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: transform var(--duration-short) var(--ease-standard);
-
-  &:hover { transform: translateY(-2px); }
-}
-
-.daily-cover {
-  aspect-ratio: 1;
-  border-radius: var(--radius-md);
-  background: var(--md-surface-variant);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-
-  img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  .cover-fallback { font-size: 32px; opacity: 0.4; }
-}
-
-.daily-name {
-  font-size: 14px;
-  font-weight: 500;
-  margin-top: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.daily-artist {
-  font-size: 12px;
-  color: var(--md-on-surface-variant);
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 歌单卡片 */
-.playlist-card {
-  min-width: 0;
-  text-align: left;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: transform var(--duration-short) var(--ease-standard);
-
-  &:hover { transform: translateY(-2px); }
-}
-
-.playlist-cover {
-  aspect-ratio: 1;
-  border-radius: var(--radius-md);
-  background: var(--md-surface-variant);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-
-  img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .cover-fallback {
-    font-size: 32px;
-    opacity: 0.4;
-  }
-}
-
-.playlist-name {
-  font-size: 14px;
-  font-weight: 500;
-  margin-top: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.playlist-card:focus-visible, .daily-card:focus-visible {
-  outline: 2px solid var(--md-primary);
-  outline-offset: 3px;
-}
-
-@media (max-width: 1000px) {
-  .daily-scroll { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-}
-
-@media (max-width: 700px) {
-  .home-view { padding: 16px 20px 24px; }
-  .daily-scroll { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-  .section-title { font-size: 18px; }
-}
-
-@media (max-width: 480px) {
-  .home-view { padding: 16px; }
-  .daily-scroll { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .home-search { order: 3; max-width: none; flex-basis: 100%; }
-}
+.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .daily-card, .playlist-card, .continue-open { transition: none; }
+  .quick-tile, .quick-go, .shelf-cover, .shelf-play { transition: none; }
   .spinning { animation: none; }
 }
-
-/* 通知按钮包裹 */
-.notif-wrap {
-  position: relative;
-  display: flex;
-  gap: 8px;
-}
-
-.notif-badge {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  min-width: 18px;
-  height: 18px;
-  border-radius: 9px;
-  background: var(--md-error);
-  color: var(--md-on-error);
-  font-size: 10px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 4px;
-  pointer-events: none;
-}
-
 </style>
 
 <!-- 通知面板（Teleport to body，需要 non-scoped） -->
@@ -861,10 +943,10 @@ function formatNotifTime(ts: number): string {
   right: 24px;
   width: 360px;
   max-height: 480px;
-  background: var(--md-surface-container);
-  border-radius: 16px;
+  background: var(--clean-dialog-surface);
+  border-radius: var(--radius-lg);
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -888,7 +970,7 @@ function formatNotifTime(ts: number): string {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px 12px;
-  border-bottom: 1px solid var(--md-outline-variant);
+  border-bottom: 1px solid var(--hairline);
   flex-shrink: 0;
 
   h3 {
@@ -898,7 +980,7 @@ function formatNotifTime(ts: number): string {
 }
 
 .notif-clear {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 500;
   color: var(--md-error, #FFB4AB);
   padding: 4px 10px;
@@ -916,7 +998,7 @@ function formatNotifTime(ts: number): string {
   padding: 48px 0;
   gap: 8px;
   color: var(--md-on-surface-variant);
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 
 .notif-list {
@@ -953,14 +1035,14 @@ function formatNotifTime(ts: number): string {
 }
 
 .notif-text {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   line-height: 1.35;
   word-break: break-word;
 }
 
 .notif-time {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   opacity: 0.6;
   margin-top: 3px;

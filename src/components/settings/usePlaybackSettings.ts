@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { YOUTUBE_PLAYBACK_SOURCES, useSettingsStore } from '@/stores/settings'
 import { usePlayerStore } from '@/stores/player'
 import { useToastStore } from '@/stores/toast'
+import { isWindowsPlatform } from '@/modules/shortcuts/platform'
 import { settingsLog as log, type AudioOutputDeviceOption, type SettingsIpc, type Translate } from './settingsShared'
 
 /** KDE-style `<card> <role>` for ALSA devices; the server's own text for sinks */
@@ -50,7 +51,7 @@ export function usePlaybackSettings(ipc: SettingsIpc) {
   const player = usePlayerStore()
   const toast = useToastStore()
   const {
-    audioOutputDevice, volumeBalance, neteaseQuality, youtubeQuality, biliQuality, youtubePlaybackSource,
+    audioOutputDevice, audioExclusiveMode, volumeBalance, neteaseQuality, youtubeQuality, biliQuality, youtubePlaybackSource,
   } = storeToRefs(useSettingsStore())
 
   const youtubePlaybackSourceOptions = computed(() => YOUTUBE_PLAYBACK_SOURCES.map(value => ({
@@ -89,6 +90,23 @@ export function usePlaybackSettings(ipc: SettingsIpc) {
     } finally {
       audioOutputSwitching.value = false
       void loadAudioOutputDevices()
+    }
+  }
+
+  // 独占输出只有 Windows WASAPI 实现，其它平台不显示这个开关
+  const exclusiveOutputAvailable = isWindowsPlatform
+
+  async function changeAudioExclusiveMode(enabled: boolean) {
+    if (audioOutputSwitching.value || enabled === audioExclusiveMode.value) return
+    audioOutputSwitching.value = true
+    try {
+      await ipc.setAudioExclusiveMode(enabled, audioOutputDevice.value || null)
+      audioExclusiveMode.value = enabled
+    } catch (error) {
+      log.warn('failed to toggle exclusive output:', error)
+      toast.error(t('settings.audio_exclusive_failed'))
+    } finally {
+      audioOutputSwitching.value = false
     }
   }
 
@@ -168,6 +186,8 @@ export function usePlaybackSettings(ipc: SettingsIpc) {
     audioOutputSwitching,
     loadAudioOutputDevices,
     changeAudioOutputDevice,
+    exclusiveOutputAvailable,
+    changeAudioExclusiveMode,
     volumeBalanceLabel,
     neteaseQualityOptions,
     downloadNeteaseQualityOptions: neteaseQualityOptions,

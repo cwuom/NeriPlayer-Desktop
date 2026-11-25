@@ -54,6 +54,14 @@ const uiScaleRange = {}
 new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/settings/uiScaleRange.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(uiScaleRange)
+const textScale = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/modules/settings/textScale.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(textScale)
+const cleanScheme = {}
+new Function('exports', ts.transpileModule(await readFile(new URL('../src/utils/theme/cleanScheme.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText)(cleanScheme)
 const shortcutBindings = {}
 new Function('require', 'exports', ts.transpileModule(await readFile(new URL('../src/modules/shortcuts/bindings.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -69,6 +77,8 @@ new Function('require', 'exports', compiled)(name => {
   if (name === '@/modules/audioEffects/model') return audioEffectsModel
   if (name === '@/modules/lyrics/lyricSourcePreference') return lyricSourcePreference
   if (name === '@/modules/settings/uiScaleRange') return uiScaleRange
+  if (name === '@/modules/settings/textScale') return textScale
+  if (name === '@/utils/theme/cleanScheme') return cleanScheme
   throw new Error(`Unexpected settings dependency: ${name}`)
 }, exports)
 

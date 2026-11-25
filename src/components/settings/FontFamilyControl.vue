@@ -71,13 +71,13 @@ function applyCustomFont(event: Event): void {
   width: 100%;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   outline: none;
   background: var(--md-surface-container-highest);
   color: var(--md-on-surface);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-13);
 
   &:focus-visible { border-color: var(--md-primary); }
 }
@@ -93,7 +93,7 @@ function applyCustomFont(event: Event): void {
 
 .font-hint {
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.5;
 }
 </style>

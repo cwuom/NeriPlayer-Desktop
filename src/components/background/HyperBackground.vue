@@ -42,6 +42,10 @@ const props = withDefaults(defineProps<{
 })
 
 const canvas = ref<HTMLCanvasElement>()
+// 第一帧真正画完并提交之前画布保持透明：部分显卡（A 卡 Windows 的 ANGLE/D3D11 尤其明显）
+// 会把新建上下文未初始化的缓冲或改尺寸时被清空的缓冲合成出来，表现为打开播放页时闪一下
+const firstFrameReady = ref(false)
+let revealPending = false
 let gl: WebGLRenderingContext | null = null
 let program: WebGLProgram | null = null
 let quadBuffer: WebGLBuffer | null = null
@@ -228,7 +232,9 @@ function compileShader(gl: WebGLRenderingContext, src: string, type: number): We
 
 function initGL() {
   if (!canvas.value) return
-  gl = canvas.value.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: false })
+  // 着色器输出的就是预乘颜色（rgb * a），上下文也按预乘声明；以前声明为非预乘，
+  // 合成器会多走一条非预乘转换路径，部分驱动在这条路径上首帧异常
+  gl = canvas.value.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: true })
   if (!gl) { log.error('WebGL not supported'); return }
 
   // 诊断：记录实际 GL 渲染器，软件渲染（llvmpipe 等）直接预降档
@@ -393,6 +399,17 @@ function render(nowMs = performance.now()) {
   gl.uniform1f(uSaturateOffset, smoothSaturateOffset)
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+  // 等这一帧被合成器提交（下一帧回调）后再显示画布
+  if (!firstFrameReady.value && !revealPending) {
+    revealPending = true
+    const reveal = () => {
+      revealPending = false
+      if (gl) firstFrameReady.value = true
+    }
+    // 一次性回调，不进共享帧循环：暂停时帧循环要能完全停下来
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(reveal)
+    else reveal()
+  }
   nextRenderAt = nextRenderAt > 0 && nowMs - nextRenderAt < qualityIntervalMs
     ? nextRenderAt + qualityIntervalMs
     : nowMs + qualityIntervalMs
@@ -434,6 +451,9 @@ function handleContextLost(event: Event) {
   animFrame = 0
   program = null
   quadBuffer = null
+  // 恢复后重新等第一帧，避免把丢上下文期间的空缓冲显示出来
+  firstFrameReady.value = false
+  revealPending = false
 }
 
 function handleContextRestored() {
@@ -477,7 +497,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <canvas ref="canvas" class="hyper-bg" />
+  <canvas ref="canvas" class="hyper-bg" :class="{ 'hyper-bg--ready': firstFrameReady }" />
 </template>
 
 <style scoped>
@@ -487,6 +507,15 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   z-index: 0;
+  opacity: 0;
+  transition: opacity 280ms ease;
+}
+
+.hyper-bg--ready {
   opacity: 0.80; /* 对齐 Android graphicsLayer { alpha = 0.80f }，让底色透出 */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hyper-bg { transition: none; }
 }
 </style>

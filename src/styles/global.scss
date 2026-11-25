@@ -1,46 +1,80 @@
-/* Material You 动态主题系统 */
+/* Clean 主题令牌：中性表面 + 强调色（运行时由 utils/cleanScheme.ts 按强调色与背景偏色重算，
+   这里是首帧兜底值，对应默认紫色强调色的深色方案） */
 :root {
-  --md-seed: 103, 80, 164;
-  --md-primary: rgb(208, 188, 255);
-  --md-on-primary: rgb(56, 30, 114);
-  --md-primary-container: rgb(79, 55, 139);
-  --md-on-primary-container: rgb(234, 221, 255);
-  --md-secondary: rgb(204, 194, 220);
-  --md-on-secondary: rgb(51, 45, 65);
-  --md-secondary-container: rgb(74, 68, 88);
-  --md-on-secondary-container: rgb(232, 222, 248);
-  --md-tertiary: rgb(239, 184, 200);
-  --md-on-tertiary: rgb(73, 37, 50);
-  --md-tertiary-container: rgb(99, 59, 72);
-  --md-on-tertiary-container: rgb(255, 217, 227);
-  --md-surface: rgb(20, 18, 24);
-  --md-on-surface: rgb(230, 225, 229);
-  --md-surface-dim: rgb(20, 18, 24);
-  --md-surface-bright: rgb(59, 56, 62);
-  --md-surface-variant: rgb(73, 69, 79);
-  --md-on-surface-variant: rgb(202, 196, 208);
-  --md-surface-container-lowest: rgb(15, 13, 19);
-  --md-surface-container-low: rgb(29, 27, 32);
-  --md-surface-container: rgb(33, 31, 38);
-  --md-surface-container-high: rgb(43, 41, 48);
-  --md-surface-container-highest: rgb(54, 52, 59);
-  --md-outline: rgb(147, 143, 153);
-  --md-outline-variant: rgb(73, 69, 79);
-  --md-error: rgb(242, 184, 181);
-  --md-on-error: rgb(96, 20, 16);
-  --md-error-container: rgb(140, 29, 24);
-  --md-on-error-container: rgb(249, 222, 220);
-  --md-background: rgb(20, 18, 24);
-  --md-inverse-surface: rgb(230, 225, 229);
-  --md-inverse-on-surface: rgb(49, 47, 51);
-  --md-inverse-primary: rgb(103, 80, 164);
+  --md-seed: 172, 150, 255;
+  --md-primary: rgb(172, 150, 255);
+  --md-on-primary: rgb(20, 20, 22);
+  --md-primary-container: rgb(62, 56, 85);
+  --md-on-primary-container: rgb(220, 214, 248);
+  --md-secondary: rgb(173, 166, 204);
+  --md-on-secondary: rgb(20, 20, 22);
+  --md-secondary-container: rgb(56, 51, 76);
+  --md-on-secondary-container: rgb(233, 230, 246);
+  --md-tertiary: rgb(241, 150, 255);
+  --md-on-tertiary: rgb(20, 20, 22);
+  --md-tertiary-container: rgb(74, 53, 80);
+  --md-on-tertiary-container: rgb(241, 209, 249);
+  --md-error: rgb(255, 107, 107);
+  --md-on-error: rgb(20, 20, 22);
+  --md-error-container: rgb(77, 44, 48);
+  --md-on-error-container: rgb(248, 174, 176);
+  --md-background: rgb(18, 17, 22);
+  --md-surface: rgb(18, 17, 22);
+  --md-on-surface: rgb(241, 241, 245);
+  --md-surface-dim: rgb(14, 13, 18);
+  --md-surface-bright: rgb(46, 46, 53);
+  --md-surface-variant: rgb(47, 47, 54);
+  --md-on-surface-variant: rgb(173, 173, 182);
+  --md-surface-container-lowest: rgb(13, 12, 17);
+  --md-surface-container-low: rgb(27, 26, 31);
+  --md-surface-container: rgb(30, 30, 35);
+  --md-surface-container-high: rgb(38, 38, 44);
+  --md-surface-container-highest: rgb(47, 47, 54);
+  --md-outline: rgb(139, 138, 150);
+  --md-outline-variant: rgb(49, 48, 57);
+  --md-inverse-surface: rgb(230, 230, 235);
+  --md-inverse-on-surface: rgb(28, 28, 31);
+  --md-inverse-primary: rgb(61, 25, 200);
+  --clean-accent-soft: rgb(65, 60, 86);
+  --clean-sidebar: rgb(13, 12, 17);
 
-  --radius-xs: 4px;
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 28px;
+  /* Clean 圆角：比 M3 更柔和统一，桌面端控件密度更高所以比 Android 小一档 */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
   --radius-full: 9999px;
+
+  /* 排版：--text-scale 由「文字大小」设置驱动，只放大文字不改布局；
+     小字号整体上调半档到一档，CJK 在 Windows 上 11–12px 偏小难读 */
+  --text-scale: 1;
+  --fs-9: calc(10px * var(--text-scale));
+  --fs-10: calc(11px * var(--text-scale));
+  --fs-11: calc(12px * var(--text-scale));
+  --fs-11-5: calc(12.5px * var(--text-scale));
+  --fs-12: calc(13px * var(--text-scale));
+  --fs-12-5: calc(13px * var(--text-scale));
+  --fs-13: calc(13.5px * var(--text-scale));
+  --fs-14: calc(14px * var(--text-scale));
+  --fs-15: calc(15px * var(--text-scale));
+  --fs-body: var(--fs-14);
+  --fs-title: calc(16px * var(--text-scale));
+  --fs-headline: calc(22px * var(--text-scale));
+  --fs-display: calc(30px * var(--text-scale));
+  --tracking-tight: -0.012em;
+  --tracking-title: -0.006em;
+
+  /* 层级阴影：浅色下用柔和投影代替 M3 的色调抬升 */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.06), 0 1px 1px rgb(0 0 0 / 0.04);
+  --shadow-2: 0 4px 14px rgb(0 0 0 / 0.08), 0 1px 3px rgb(0 0 0 / 0.06);
+  --shadow-3: 0 18px 48px rgb(0 0 0 / 0.16), 0 4px 12px rgb(0 0 0 / 0.08);
+  /* 悬停 / 按下的墨色叠加层，统一所有可点区域的反馈 */
+  --state-hover: color-mix(in srgb, var(--md-on-surface) 6%, transparent);
+  --state-pressed: color-mix(in srgb, var(--md-on-surface) 10%, transparent);
+  --hairline: color-mix(in srgb, var(--md-on-surface) 8%, transparent);
+  /* 弹窗与抽屉的面：浅色为纯白卡片，深色抬高一档，统一所有对话框 */
+  --clean-dialog-surface: var(--md-surface-container-lowest);
 
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-decelerate: cubic-bezier(0, 0, 0, 1);
@@ -57,9 +91,15 @@
   /* 迷你播放器高度：MiniPlayer 与内容区 padding 共用，改动只需一处 */
   --mini-player-height: 76px;
 
-  /* 顶栏高度：TitleBar / 内容区 / NowPlaying 顶部安全区共用
-     Windows/Linux 默认 36px；macOS 由 .platform-mac 提升为 52px（IDEA 风格） */
-  --titlebar-height: 36px;
+  /* 顶栏高度：TitleBar / 内容区 / NowPlaying 顶部安全区共用。
+     内容区铺到窗口顶边，页面自己的吸顶栏（返回、搜索）就落在这一行，与窗口按钮同一中线；
+     控件 36px，上下各留 10px（Windows/Linux 56px）；macOS 由 .platform-mac 提升为 68px，
+     上下各留 16px，控件离窗口上沿有足够距离，和居中的红绿灯同一中线 */
+  --titlebar-height: 56px;
+  /* 顶栏右侧被自绘窗口按钮占用的宽度（macOS 红绿灯在左侧侧栏上方，不占内容区） */
+  --window-controls-width: 136px;
+  /* 内容区顶栏左侧需要避让的宽度：macOS 侧栏收成图标栏后红绿灯会伸进内容区（SideNav 写入） */
+  --content-top-inset-left: 0px;
 
   --font-family-default: 'MiSans', 'Inter', -apple-system, BlinkMacSystemFont,
     'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
@@ -74,12 +114,14 @@
 
 /* macOS：更高的标题栏承载垂直居中的红绿灯（trafficLightPosition 20/20） */
 html.platform-mac {
-  --titlebar-height: max(52px, calc(52px / var(--app-ui-scale, 1)));
+  --titlebar-height: max(68px, calc(68px / var(--app-ui-scale, 1)));
+  --window-controls-width: 0px;
 }
 
 /* 原生全屏时红绿灯随系统栏隐藏，内容无需继续预留较高的安全区 */
 html.platform-mac.window-fullscreen {
   --titlebar-height: 36px;
+  --content-top-inset-left: 0px;
 }
 
 *, *::before, *::after {
@@ -93,12 +135,33 @@ html, body, #app {
   height: 100%;
   overflow: hidden;
   font-family: var(--font-family);
+  font-size: var(--fs-body);
   background: var(--md-background);
   color: var(--md-on-surface);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   user-select: none;
   -webkit-user-select: none;
-  line-height: 1.4;
+  line-height: 1.45;
+  /* 禁止 WebView 自行按“字体加速”放大文字导致布局错乱（部分 Linux/Android WebView 会） */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* 深色下阴影需更重才看得出层级 */
+.dark-theme {
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-2: 0 6px 18px rgb(0 0 0 / 0.36), 0 1px 3px rgb(0 0 0 / 0.3);
+  --shadow-3: 0 22px 56px rgb(0 0 0 / 0.5), 0 4px 14px rgb(0 0 0 / 0.36);
+  --state-hover: color-mix(in srgb, var(--md-on-surface) 7%, transparent);
+  --state-pressed: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+  --hairline: color-mix(in srgb, var(--md-on-surface) 9%, transparent);
+  --clean-dialog-surface: var(--md-surface-container-high);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--md-primary) 28%, transparent);
 }
 
 img,
@@ -129,26 +192,36 @@ select,
   font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
 }
 
-/* 滚动条 */
-::-webkit-scrollbar { width: 6px; }
+/* 滚动条：细且悬浮感，透明边框把可视宽度收窄，但命中区保持 10px 方便鼠标拖动 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--md-outline-variant);
+  background: color-mix(in srgb, var(--md-on-surface) 18%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
   border-radius: var(--radius-full);
 }
-::-webkit-scrollbar-thumb:hover { background: var(--md-outline); }
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--md-on-surface) 32%, transparent);
+  border-width: 2px;
+}
 
-/* 路由页面过渡：M3 Emphasized */
-.fade-enter-active {
+/* 路由页面过渡：M3 Emphasized。
+   吸顶栏（返回、搜索）占着窗口顶栏这一行，整页位移/缩放会让它跟着下沉再弹回、红绿灯旁边一跳一跳；
+   所以整页只做透明度，位移只给吸顶栏之后的正文。没有吸顶栏的页面仍整页上滑 */
+.fade-enter-active,
+.fade-enter-active :is(.home-topbar, .detail-header) ~ * {
   transition: opacity var(--duration-medium) var(--ease-decelerate),
               transform var(--duration-medium) var(--ease-decelerate);
 }
 .fade-leave-active {
-  transition: opacity 100ms var(--ease-accelerate),
-              transform 100ms var(--ease-accelerate);
+  transition: opacity 100ms var(--ease-accelerate);
 }
-.fade-enter-from { opacity: 0; transform: translateY(8px) scale(0.98); }
-.fade-leave-to { opacity: 0; transform: scale(0.99); }
+.fade-enter-from { opacity: 0; }
+.fade-enter-from :is(.home-topbar, .detail-header) ~ *,
+.fade-enter-from:not(:has(.home-topbar, .detail-header)) { transform: translateY(8px); }
+.fade-leave-to { opacity: 0; }
 
 /* NowPlaying 覆盖层过渡：仅向上位移，禁止缩放 */
 .slide-up-enter-active {
@@ -164,10 +237,12 @@ select,
    compositor layer and flickers on repaint, so switch pages instantly; other
    platforms keep the M3 transition. */
 html.nvidia-compat .fade-enter-active,
+html.nvidia-compat .fade-enter-active :is(.home-topbar, .detail-header) ~ *,
 html.nvidia-compat .fade-leave-active {
   transition: none;
 }
 html.nvidia-compat .fade-enter-from,
+html.nvidia-compat .fade-enter-from :is(.home-topbar, .detail-header) ~ *,
 html.nvidia-compat .fade-leave-to {
   opacity: 1;
   transform: none;
@@ -196,6 +271,9 @@ html.nvidia-compat .np-background-enter-active {
 }
 html.nvidia-compat .np-background-enter-from {
   opacity: 0.8;
+}
+html.nvidia-compat .hyper-bg {
+  transition: none !important;
 }
 .slide-up-leave-to { transform: translateY(100%); }
 .slide-up-enter-to,
@@ -244,7 +322,7 @@ input[type='number'] {
 input[type='color'] {
   appearance: none;
   padding: 0;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   background: transparent;
   overflow: hidden;
@@ -266,9 +344,9 @@ input[type='checkbox']:not(:where(.m3-switch input, .audiofx-toggle input, .debu
   flex-shrink: 0;
   margin: 0;
   padding: 0;
-  border: 2px solid var(--md-on-surface-variant);
-  border-radius: var(--radius-xs);
-  background: transparent;
+  border: 1.5px solid color-mix(in srgb, var(--md-on-surface) 40%, transparent);
+  border-radius: 5px;
+  background: var(--md-surface-container-lowest);
   cursor: pointer;
   vertical-align: middle;
   transition: background var(--duration-short) var(--ease-standard),
@@ -319,6 +397,44 @@ input[type='checkbox']:not(:where(.m3-switch input, .audiofx-toggle input, .debu
   }
 }
 
+/* 滑块（Clean）：细轨道 + 白色圆形拇指；已填充部分由 --slider-fill（0–100%）驱动，未设置时只显示轨道 */
+input[type='range'].m3-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 20px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+  --slider-track: color-mix(in srgb, var(--md-on-surface) 14%, transparent);
+
+  &::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: var(--radius-full);
+    background: linear-gradient(to right, var(--md-primary) var(--slider-fill, 0%), var(--slider-track) var(--slider-fill, 0%));
+  }
+
+  &::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    margin-top: -7px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.12), 0 2px 6px rgb(0 0 0 / 0.22);
+    transition: transform var(--duration-short) var(--ease-standard);
+  }
+
+  &:hover::-webkit-slider-thumb { transform: scale(1.08); }
+  &:active::-webkit-slider-thumb { transform: scale(0.94); }
+  &:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px color-mix(in srgb, var(--md-primary) 40%, transparent), 0 2px 6px rgb(0 0 0 / 0.22); }
+  &:disabled { opacity: 0.45; cursor: default; }
+
+  &::-moz-range-track { height: 4px; border-radius: 9999px; background: var(--slider-track); }
+  &::-moz-range-progress { height: 4px; border-radius: 9999px; background: var(--md-primary); }
+  &::-moz-range-thumb { width: 18px; height: 18px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgb(0 0 0 / 0.22); }
+}
+
 /* 自定义背景图：#app 内的 surface 系变量换成半透明，背景图从页面、侧栏和卡片下透出来。
    实色先在 html 上取下（主题色以行内样式写在 html 上），teleport 到 body 的弹窗、菜单不受影响 */
 html.has-custom-bg {
@@ -352,49 +468,137 @@ html.has-custom-bg .mini-player {
   backdrop-filter: none;
 }
 
-/* 进阶高级模糊（Android enhanced_advanced_blur）：透出背景的卡片和输入框加实时玻璃模糊，文字压在图上也清楚 */
+/* 进阶高级模糊（Android enhanced_advanced_blur）：透出背景的卡片、输入框和半透明高亮都加实时玻璃模糊，文字压在图上也清楚 */
 html.has-custom-bg.enhanced-blur #app :is(
-  .setting-card, .settings-nav-group, .home-search, .search-bar, .search-box
+  .setting-card, .settings-nav-group, .home-search, .search-bar, .search-box,
+  .quick-tile, .feed-song:hover, .feed-pages button, .header-action:hover, .shelf-nav, .section-state,
+  .nav-item:hover, .nav-item.active,
+  .stats-card, .stats-hero, .spotlight, .tracks-panel,
+  /* 探索 */
+  .platform-tabs, .kind-chip, .tag-chip:hover, .link-example, .link-notice, .result-item:hover,
+  /* 音乐库 */
+  .tab-bar, .tab-search, .local-category-chip, .artist-sort-btn, .multi-select-bar,
+  .favorite-artist-header, .pl-icon:not(.has-cover), .playlist-item:hover, .playlist-item.selected,
+  /* 详情页与通用控件 */
+  .back-btn, .header-search, .hero-icon-btn, .secondary-action, .action-btn, .artist-hero-card,
+  .track-item:hover, .download-row, .text-button, .ghost-button,
+  .segmented, .custom-select-trigger, .m3-chip, .selection-toolbar
 ) {
   -webkit-backdrop-filter: blur(var(--glass-blur, 36px)) saturate(1.4);
   backdrop-filter: blur(var(--glass-blur, 36px)) saturate(1.4);
 }
 
-/* 浅色主题变量（中性灰白底，色彩由 themeColor.ts 动态注入） */
+/* 侧栏选中项原本是实色 secondary-container，压在背景图上像一块补丁；改成半透明玻璃 */
+html.has-custom-bg #app .nav-item.active {
+  background: color-mix(in srgb, var(--md-secondary-container) 58%, transparent);
+}
+
+/* 吸顶栏、顶部拖动条与滚动条列：iOS 式渐隐顶栏。
+   停在顶部时完全透明；正文滚到下面才淡入玻璃，模糊和底色从上往下渐隐，没有硬边。
+   玻璃画在 ::before 上并向下多伸出一段渐隐区；用它自己的透明度淡入淡出，backdrop-filter 不会因祖先透明度失效。
+   顶栏在滚动容器里画不到滚动条那一列，由 App 层的 .content-gutter-glass 补上同样的玻璃 */
+#app {
+  --topbar-fade: 28px;
+  --topbar-blur: 24px;
+  --topbar-tint: color-mix(in srgb, var(--md-surface) 72%, transparent);
+}
+html.has-custom-bg #app {
+  --topbar-blur: var(--glass-blur, 36px);
+  --topbar-tint: color-mix(in srgb, var(--bg-solid-container-low) 42%, transparent);
+}
+#app :is(.home-topbar, .detail-header, .content-drag-strip) {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+#app :is(.home-topbar, .detail-header, .content-drag-strip, .content-gutter-glass)::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(100% + var(--topbar-fade));
+  z-index: -1;
+  pointer-events: none;
+  background: var(--topbar-tint);
+  -webkit-backdrop-filter: blur(var(--topbar-blur)) saturate(1.4);
+  backdrop-filter: blur(var(--topbar-blur)) saturate(1.4);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+  opacity: 0;
+  transition: opacity 220ms var(--ease-standard);
+}
+#app .content[data-scrolled] > .content-drag-strip::before,
+#app .content[data-scrolled] .home-topbar::before,
+#app .detail-view[data-scrolled] > .detail-header::before,
+#app:has(.content[data-scrolled], .detail-view[data-scrolled]) .content-gutter-glass::before {
+  opacity: 1;
+}
+/* 滚动条不伸进顶栏这一行，滑块不会从玻璃旁边穿过 */
+#app :is(.content, .detail-view)::-webkit-scrollbar-track {
+  margin-top: calc(var(--titlebar-height, 48px) + 4px);
+}
+/* 不支持 backdrop-filter 的 WebKitGTK：改用不透明底色，避免正文从顶栏下透出来 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  #app { --topbar-tint: var(--md-surface); }
+  html.has-custom-bg #app { --topbar-tint: var(--bg-solid-container-low); }
+}
+
+/* 浮层（音量条等）：surface 变量在背景图模式下是半透明的，浮层没有模糊就看不清；不论是否开启进阶模糊都给玻璃 */
+html.has-custom-bg #app .mp-volume-popover {
+  background: color-mix(in srgb, var(--bg-solid-container-high) 72%, transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 36px)) saturate(1.4);
+  backdrop-filter: blur(var(--glass-blur, 36px)) saturate(1.4);
+}
+
+/* 切页：页面里的玻璃靠 backdrop-filter 采样背景图，而祖先 opacity < 1 会让整页自成背景采样边界，
+   过渡期间玻璃只能采到透明的页面层（看起来没加载），淡入结束才突然出现模糊。
+   背景图模式下不做整页透明度过渡，只保留正文上滑，玻璃从第一帧就在 */
+html.has-custom-bg .fade-enter-from,
+html.has-custom-bg .fade-leave-to {
+  opacity: 1;
+}
+html.has-custom-bg .fade-leave-active {
+  transition: none;
+}
+
+/* 浅色兜底值（默认紫色强调色），运行时同样由 cleanScheme.ts 覆盖 */
 .light-theme {
-  --md-primary: rgb(101, 78, 163);
+  --md-primary: rgb(104, 84, 204);
   --md-on-primary: rgb(255, 255, 255);
-  --md-primary-container: rgb(233, 221, 255);
-  --md-on-primary-container: rgb(34, 0, 94);
-  --md-secondary: rgb(96, 90, 113);
+  --md-primary-container: rgb(231, 228, 247);
+  --md-on-primary-container: rgb(63, 54, 109);
+  --md-secondary: rgb(97, 91, 132);
   --md-on-secondary: rgb(255, 255, 255);
-  --md-secondary-container: rgb(231, 222, 248);
-  --md-on-secondary-container: rgb(30, 25, 43);
-  --md-tertiary: rgb(124, 82, 96);
-  --md-on-tertiary: rgb(255, 255, 255);
-  --md-tertiary-container: rgb(255, 217, 227);
-  --md-on-tertiary-container: rgb(49, 17, 29);
-  --md-surface: rgb(252, 248, 253);
-  --md-on-surface: rgb(28, 27, 31);
-  --md-surface-dim: rgb(221, 217, 224);
-  --md-surface-bright: rgb(252, 248, 253);
-  --md-surface-variant: rgb(231, 225, 235);
-  --md-on-surface-variant: rgb(73, 69, 79);
-  --md-surface-container-lowest: rgb(255, 255, 255);
-  --md-surface-container-low: rgb(247, 243, 248);
-  --md-surface-container: rgb(241, 237, 243);
-  --md-surface-container-high: rgb(235, 231, 238);
-  --md-surface-container-highest: rgb(230, 226, 232);
-  --md-outline: rgb(121, 116, 126);
-  --md-outline-variant: rgb(202, 196, 207);
-  --md-error: rgb(179, 38, 30);
+  --md-secondary-container: rgb(234, 232, 248);
+  --md-on-secondary-container: rgb(38, 36, 53);
+  --md-tertiary: rgb(183, 84, 204);
+  --md-on-tertiary: rgb(20, 20, 22);
+  --md-tertiary-container: rgb(242, 228, 247);
+  --md-on-tertiary-container: rgb(83, 48, 92);
+  --md-error: rgb(217, 54, 54);
   --md-on-error: rgb(255, 255, 255);
-  --md-error-container: rgb(249, 222, 220);
-  --md-on-error-container: rgb(65, 14, 11);
-  --md-background: rgb(252, 248, 253);
-  --md-inverse-surface: rgb(49, 48, 51);
-  --md-inverse-on-surface: rgb(244, 239, 244);
-  --md-inverse-primary: rgb(208, 188, 255);
+  --md-error-container: rgb(248, 228, 230);
+  --md-on-error-container: rgb(123, 42, 43);
+  --md-background: rgb(242, 241, 246);
+  --md-surface: rgb(242, 241, 246);
+  --md-on-surface: rgb(29, 29, 32);
+  --md-surface-dim: rgb(225, 225, 232);
+  --md-surface-bright: rgb(252, 252, 254);
+  --md-surface-variant: rgb(229, 229, 235);
+  --md-on-surface-variant: rgb(94, 94, 101);
+  --md-surface-container-lowest: rgb(252, 252, 254);
+  --md-surface-container-low: rgb(252, 252, 254);
+  --md-surface-container: rgb(247, 246, 250);
+  --md-surface-container-high: rgb(237, 236, 242);
+  --md-surface-container-highest: rgb(229, 229, 235);
+  --md-outline: rgb(133, 132, 141);
+  --md-outline-variant: rgb(223, 223, 231);
+  --md-inverse-surface: rgb(44, 44, 48);
+  --md-inverse-on-surface: rgb(242, 242, 246);
+  --md-inverse-primary: rgb(151, 137, 220);
+  --clean-accent-soft: rgb(218, 215, 237);
+  --clean-sidebar: rgb(247, 246, 250);
 }
 
 /* View Transition 圆形扩散动画 */
@@ -410,27 +614,31 @@ html.has-custom-bg.enhanced-blur #app :is(
 
 ::view-transition-new(root) {
   z-index: 9999;
-  /* CSS 变量驱动圆形遮罩，确保圆外仍显示旧视图 */
-  clip-path: circle(var(--theme-ripple-r, 0px) at var(--theme-ripple-x, 50%) var(--theme-ripple-y, 50%));
-  transition: clip-path 500ms cubic-bezier(0.2, 0, 0, 1);
+  will-change: opacity;
 }
 
-/* 扩散过程中禁用 color/background 过渡，但保留深浅色拇指滑动 */
+/* 不支持伪元素 WAAPI 的 WebView 用 CSS 关键帧淡入 */
+@keyframes theme-crossfade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+html.theme-ripple-css::view-transition-new(root) {
+  animation: theme-crossfade-in 320ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
 html.theme-ripple-active,
-html.theme-ripple-active *:not(.pill-thumb):not(.dark-mode-pills):not(.pill) {
+html.theme-ripple-active *:not(.segmented-thumb) {
   transition: none !important;
 }
 
-html.theme-ripple-active .pill-thumb {
-  transition: transform 650ms cubic-bezier(0.2, 0, 0, 1) !important;
+/* 外观模式分段控件的拇指在扩散动画期间照常滑动 */
+html.theme-ripple-active .segmented-thumb {
+  transition: transform 320ms cubic-bezier(0.3, 1.2, 0.5, 1) !important;
 }
 
-html.theme-ripple-active .pill {
-  transition: color 650ms cubic-bezier(0.2, 0, 0, 1) !important;
-}
-
-html.theme-ripple-active::view-transition-new(root) {
-  transition: clip-path 500ms cubic-bezier(0.2, 0, 0, 1) !important;
+html.theme-ripple-active.theme-ripple-css::view-transition-new(root) {
+  animation: theme-crossfade-in 320ms cubic-bezier(0.2, 0, 0, 1) both !important;
 }
 
 /* 全局降级动效
@@ -486,7 +694,8 @@ html.theme-ripple-active::view-transition-new(root) {
   animation: np-locate-pulse 600ms var(--ease-standard) 1;
 }
 
-/* ===== M3 Switch：设置页与弹窗共用，结构为 .m3-switch > input + .track > .thumb ===== */
+/* ===== 开关（Clean 风格）：结构沿用 .m3-switch > input + .track > .thumb =====
+   胶囊轨道 + 白色圆形滑块，选中只用强调色填轨道；滑块里旧的勾选图标不再显示 */
 .m3-switch {
   position: relative;
   display: inline-flex;
@@ -507,53 +716,44 @@ html.theme-ripple-active::view-transition-new(root) {
   .track {
     display: flex;
     align-items: center;
-    width: 52px;
-    height: 32px;
-    border-radius: 16px;
-    background: var(--md-surface-container-highest);
-    border: 2px solid var(--md-outline);
+    width: 42px;
+    height: 24px;
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--md-on-surface) 16%, var(--md-surface-container-high));
     position: relative;
     pointer-events: none;
-    transition: background var(--duration-medium) var(--ease-standard),
-                border-color var(--duration-medium) var(--ease-standard);
+    transition: background var(--duration-medium) var(--ease-standard);
   }
 
   .thumb {
     position: absolute;
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
-    background: var(--md-outline);
-    top: 50%;
-    left: 6px;
-    transform: translateY(-50%);
-    transition: left var(--duration-medium) var(--ease-standard),
-                width var(--duration-medium) var(--ease-standard),
-                height var(--duration-medium) var(--ease-standard),
-                background var(--duration-medium) var(--ease-standard);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--md-on-primary);
+    background: #fff;
+    top: 2px;
+    left: 2px;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.22), 0 1px 1px rgb(0 0 0 / 0.08);
+    transition: transform var(--duration-medium) cubic-bezier(0.3, 1.3, 0.5, 1),
+                width var(--duration-short) var(--ease-standard);
     font-size: 0;
 
-    .material-symbols-rounded { font-size: 14px; }
+    .material-symbols-rounded { display: none; }
   }
+
+  &:hover input:not(:disabled) + .track {
+    background: color-mix(in srgb, var(--md-on-surface) 22%, var(--md-surface-container-high));
+  }
+
+  &:active input:not(:disabled) + .track .thumb { width: 24px; }
 
   input:checked + .track {
     background: var(--md-primary);
-    border-color: var(--md-primary);
 
-    // 选中态滑块为 on-primary，图标需用 on-primary-container 才可见
-    .thumb {
-      left: 22px;
-      width: 24px;
-      height: 24px;
-      background: var(--md-on-primary);
-      color: var(--md-on-primary-container);
-      font-size: 14px;
-    }
+    .thumb { transform: translateX(18px); }
   }
+
+  &:active input:checked:not(:disabled) + .track .thumb { transform: translateX(14px); }
 
   input:focus-visible + .track {
     outline: 2px solid var(--md-primary);
@@ -562,7 +762,7 @@ html.theme-ripple-active::view-transition-new(root) {
 
   &:has(input:disabled) {
     cursor: default;
-    opacity: 0.38;
+    opacity: 0.4;
   }
 }
 

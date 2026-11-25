@@ -20,6 +20,7 @@ const offset = await loadModule('../src/modules/lyrics/lyricOffset.ts')
 const match = await loadModule('../src/modules/lyrics/lyricMatch.ts', {
   '@tauri-apps/api/core': {},
   './lyricsFormat': format,
+  './lyricSearchTitle': await loadModule('../src/modules/lyrics/lyricSearchTitle.ts'),
 })
 
 async function subject(matchLyrics = async () => []) {

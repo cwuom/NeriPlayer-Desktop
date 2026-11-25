@@ -161,6 +161,24 @@ describe('exploreSearch store', () => {
       expect(router.callsOf('explore_search').map(call => call.args?.page)).toEqual([1, 2, 3])
     })
 
+    it('pages bilibili creators by uploader mid, keeping same-name creators apart', async () => {
+      const creator = (mid: string): ExploreItem => ({
+        kind: 'artist', platform: 'bilibili', id: mid, name: 'Same', cover_url: null, subtitle: '', follower_count: 1,
+      })
+      router.on('explore_search', () => page([creator('81')], true), () => page([creator('81'), creator('82')], false))
+      const store = useExploreSearchStore()
+      await store.search('bilibili', 'creators', 'Same')
+
+      await store.loadMore('bilibili', 'creators', 'Same')
+
+      expect(router.callsOf('explore_search').map(call => call.args)).toEqual([
+        { platform: 'bilibili', kind: 'creators', query: 'Same', page: 1 },
+        { platform: 'bilibili', kind: 'creators', query: 'Same', page: 2 },
+      ])
+      expect(ids(store.items)).toEqual(['81', '82'])
+      expect(store.hasMore).toBe(false)
+    })
+
     it('stops paging when a page comes back empty even if the server claims more', async () => {
       router.on('explore_search', () => page([song('1')], true), () => page([], true))
       const store = useExploreSearchStore()

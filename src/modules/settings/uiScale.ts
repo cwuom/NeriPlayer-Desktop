@@ -10,9 +10,13 @@ const log = createLogger('ui-scale')
 export const uiScaleSupported = ref(false)
 export const uiScaleError = ref(false)
 export const uiScaleMax = ref(UI_SCALE_DEFAULT)
+/** 实际生效的缩放；当前屏幕放不下用户设定值时会低于设置值，但设置本身不被改写 */
+export const uiScaleEffective = ref(UI_SCALE_DEFAULT)
 
-export const UI_LAYOUT_MIN_WIDTH = 960
-export const UI_LAYOUT_MIN_HEIGHT = 720
+// 布局可用的最小逻辑尺寸：窄窗口由响应式布局接管（侧栏收成图标栏等），
+// 所以这里只需保证核心控件不被裁掉
+export const UI_LAYOUT_MIN_WIDTH = 720
+export const UI_LAYOUT_MIN_HEIGHT = 540
 const MAC_TITLEBAR_HEIGHT = 52
 
 export function uiScaleLimitForSize(width: number, height: number, fixedTitlebarHeight = 0): number {
@@ -24,6 +28,12 @@ export function uiScaleLimitForSize(width: number, height: number, fixedTitlebar
   return Math.max(UI_SCALE_MIN, Math.min(UI_SCALE_MAX, Math.floor(capacity / UI_SCALE_STEP) * UI_SCALE_STEP))
 }
 
+/**
+ * 主窗口界面缩放。
+ * 只在用户改缩放或系统 DPI / 所在屏幕变化时调整原生窗口；普通的拖动与改尺寸不再触发
+ * 自动缩放、改尺寸或挪位置，也绝不把为适配屏幕而降低的缩放写回设置
+ * （此前在小屏上会把用户设置悄悄改成 80% 之类，表现为“字变小”“莫名其妙缩放了”）。
+ */
 export async function installUiScale(settings: { uiScale: number }): Promise<WatchStopHandle> {
   if (!isTauri()) return () => {}
   try {
@@ -40,15 +50,21 @@ export async function installUiScale(settings: { uiScale: number }): Promise<Wat
   let appliedScale = UI_SCALE_DEFAULT
   let hasAppliedScale = false
   let pending = Promise.resolve()
-  let minimumScale = 0
-  let minimumDpi = 0
-  let minimumInset = -1
+  let minimumKey = ''
   let titlebarInset = 0
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   const appWindow = getCurrentWindow()
   const unlisten: Array<() => void> = []
 
-  function apply(value: number): Promise<void> {
+  function minimumSize(factor: number, availableWidth: number, availableHeight: number) {
+    // 最小尺寸不能超过屏幕可用区域，否则窗口会被系统强行顶出屏幕
+    return {
+      width: Math.min(availableWidth, UI_LAYOUT_MIN_WIDTH * factor),
+      height: Math.min(availableHeight, UI_LAYOUT_MIN_HEIGHT * factor + Math.max(0, titlebarInset * (1 - factor))),
+    }
+  }
+
+  function apply(value: number, userChanged: boolean): Promise<void> {
     pending = pending.then(async () => {
       if (!active) return
       const [inner, outer, dpi, monitor, maximized, fullscreen] = await Promise.all([
@@ -60,23 +76,21 @@ export async function installUiScale(settings: { uiScale: number }): Promise<Wat
       const availableWidth = monitor ? (monitor.workArea.size.width - frameWidth) / dpi : inner.width / dpi
       const availableHeight = monitor ? (monitor.workArea.size.height - frameHeight) / dpi : inner.height / dpi
       titlebarInset = isMacPlatform && !fullscreen ? MAC_TITLEBAR_HEIGHT : 0
-      uiScaleMax.value = uiScaleLimitForSize(availableWidth, availableHeight, titlebarInset)
+      uiScaleMax.value = Math.max(UI_SCALE_DEFAULT, uiScaleLimitForSize(availableWidth, availableHeight, titlebarInset))
+      // 100% 永远可用：小屏靠响应式布局适配，不再强行缩小整个界面
       const percent = Math.min(normalizeUiScale(value), uiScaleMax.value)
-      if (settings.uiScale === value && value !== percent) settings.uiScale = percent
       const factor = percent / 100
-      const minWidth = UI_LAYOUT_MIN_WIDTH * factor
-      const minHeight = UI_LAYOUT_MIN_HEIGHT * factor + Math.max(0, titlebarInset * (1 - factor))
-      // 缩放后仍保留完整布局，禁止把原生窗口拖小到控件之外
-      if (minimumScale !== percent || minimumDpi !== dpi || minimumInset !== titlebarInset) {
-        await appWindow.setMinSize(new LogicalSize(minWidth, minHeight))
+      const minimum = minimumSize(factor, availableWidth, availableHeight)
+      const key = `${minimum.width}x${minimum.height}`
+      if (key !== minimumKey) {
+        await appWindow.setMinSize(new LogicalSize(minimum.width, minimum.height))
         if (!active) return
-        minimumScale = percent
-        minimumDpi = dpi
-        minimumInset = titlebarInset
+        minimumKey = key
       }
-      const width = Math.min(availableWidth, Math.max(inner.width / dpi, minWidth))
-      const height = Math.min(availableHeight, Math.max(inner.height / dpi, minHeight))
-      if (!maximized && !fullscreen && (Math.abs(width - inner.width / dpi) >= 1 || Math.abs(height - inner.height / dpi) >= 1)) {
+      // 只在用户主动调大缩放时把过小的窗口撑开并挪回屏幕内
+      const width = Math.min(availableWidth, Math.max(inner.width / dpi, minimum.width))
+      const height = Math.min(availableHeight, Math.max(inner.height / dpi, minimum.height))
+      if (userChanged && !maximized && !fullscreen && (Math.abs(width - inner.width / dpi) >= 1 || Math.abs(height - inner.height / dpi) >= 1)) {
         await appWindow.setSize(new LogicalSize(width, height))
         if (!active) return
         if (monitor) {
@@ -95,6 +109,7 @@ export async function installUiScale(settings: { uiScale: number }): Promise<Wat
       if (!active) return
       appliedScale = percent
       hasAppliedScale = true
+      uiScaleEffective.value = percent
       document.documentElement.style.setProperty('--app-ui-scale', String(factor))
       uiScaleError.value = false
     }).catch(async error => {
@@ -105,14 +120,13 @@ export async function installUiScale(settings: { uiScale: number }): Promise<Wat
         const factor = appliedScale / 100
         await appWindow.setMinSize(new LogicalSize(UI_LAYOUT_MIN_WIDTH * factor, UI_LAYOUT_MIN_HEIGHT * factor + Math.max(0, titlebarInset * (1 - factor))))
         if (!active) return
-        minimumScale = appliedScale
-        minimumDpi = 0
-        minimumInset = -1
+        minimumKey = ''
       } catch (restoreError) {
         log.warn('Could not restore UI scaling constraints:', restoreError)
       }
       if (!active) return
-      if (settings.uiScale === value) settings.uiScale = appliedScale
+      // 用户刚改的值没能生效时退回上一次成功的值，避免设置页显示一个并未生效的数字
+      if (userChanged && settings.uiScale === value) settings.uiScale = appliedScale
     })
     return pending
   }
@@ -121,14 +135,14 @@ export async function installUiScale(settings: { uiScale: number }): Promise<Wat
     if (refreshTimer) clearTimeout(refreshTimer)
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined
-      void apply(settings.uiScale)
-    }, 100)
+      void apply(settings.uiScale, false)
+    }, 150)
   }
 
-  await apply(settings.uiScale)
-  const stop = watch(() => settings.uiScale, value => { void apply(value) })
+  await apply(settings.uiScale, false)
+  const stop = watch(() => settings.uiScale, value => { void apply(value, true) })
   try {
-    unlisten.push(await appWindow.onResized(scheduleRefresh))
+    // 换屏 / DPI 变化时只重算最小尺寸与可用上限；userChanged=false 时绝不改窗口尺寸和位置
     unlisten.push(await appWindow.onMoved(scheduleRefresh))
     unlisten.push(await appWindow.onScaleChanged(scheduleRefresh))
   } catch (error) {

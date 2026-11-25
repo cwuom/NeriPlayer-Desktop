@@ -261,20 +261,21 @@ const {
   position: fixed;
   inset: 0;
   z-index: 10000;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgb(0 0 0 / 0.32);
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  backdrop-filter: blur(6px) saturate(1.1);
 }
 
 .dialog-card {
-  background: var(--md-surface-container-high);
+  background: var(--clean-dialog-surface);
   border-radius: var(--radius-xl);
   padding: 24px;
   width: 380px;
   max-width: 90vw;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
   transform-origin: center;
 }
 
@@ -333,7 +334,7 @@ const {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--md-error) 7%, var(--md-surface-container));
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
 
   div {
     display: flex;
@@ -352,7 +353,7 @@ const {
 
   label {
     display: block;
-    font-size: 12px;
+    font-size: var(--fs-12);
     font-weight: 500;
     color: var(--md-on-surface-variant);
     margin-bottom: 6px;
@@ -362,10 +363,10 @@ const {
     width: 100%;
     padding: 10px 14px;
     border-radius: var(--radius-md);
-    border: 1px solid var(--md-outline-variant);
+    border: 1px solid var(--hairline);
     background: var(--md-surface-container);
     color: var(--md-on-surface);
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-family: inherit;
     outline: none;
     transition: border-color var(--duration-short);
@@ -382,7 +383,7 @@ const {
 }
 
 .dialog-error {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-error);
   margin-bottom: 12px;
 }
@@ -392,7 +393,7 @@ const {
   align-items: flex-start;
   gap: 8px;
   margin: 12px 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.4;
   color: var(--md-on-surface);
   cursor: pointer;
@@ -404,7 +405,7 @@ const {
 }
 
 .dialog-desc {
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   line-height: 1.5;
   margin-bottom: 4px;
@@ -418,24 +419,28 @@ const {
 }
 
 .dialog-btn {
-  padding: 8px 20px;
+  min-height: 36px;
+  padding: 0 18px;
   border-radius: var(--radius-full);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--fs-14);
+  font-weight: 600;
   cursor: pointer;
-  transition: background var(--duration-short);
+  transition: background var(--duration-short), filter var(--duration-short), transform var(--duration-short);
   color: var(--md-on-surface);
+  background: var(--md-surface-container-high);
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
 
-  &:hover { background: var(--md-surface-container-highest); }
+  &:hover { background: color-mix(in srgb, var(--md-on-surface) 8%, var(--md-surface-container-high)); }
+  &:active { transform: scale(0.97); }
 
   &.primary {
     background: var(--md-primary);
     color: var(--md-on-primary);
 
-    &:hover { opacity: 0.9; }
+    &:hover { filter: brightness(1.06); }
     &:disabled { opacity: 0.5; cursor: not-allowed; }
   }
 
@@ -468,7 +473,7 @@ const {
   border-radius: var(--radius-full);
   background: var(--md-primary);
   color: var(--md-on-primary);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -482,7 +487,7 @@ const {
 }
 
 .phase-label {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
 }
 
@@ -495,12 +500,12 @@ const {
   align-items: center;
   gap: 8px;
   padding-left: 34px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
 }
 
 .field-hint {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   opacity: 0.7;
   margin: 4px 0 8px;
@@ -510,7 +515,7 @@ const {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   color: var(--md-primary);
   cursor: pointer;
@@ -530,7 +535,7 @@ const {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
   padding: 6px 0;
   color: var(--md-on-surface);
@@ -570,12 +575,12 @@ const {
   margin-bottom: 12px;
 
   .preview-label {
-    font-size: 11px;
+    font-size: var(--fs-11);
     color: var(--md-on-surface-variant);
     opacity: 0.7;
   }
   .preview-value {
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-weight: 500;
     color: var(--md-on-surface);
     word-break: break-all;

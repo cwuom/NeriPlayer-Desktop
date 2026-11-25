@@ -7,6 +7,8 @@ import { normalizeShortcutBindings, type ShortcutBindings } from '@/modules/shor
 import { migrateLegacyAudioEffects, normalizeAudioEffectsSettings, type AudioEffectsSettings } from '@/modules/audioEffects/model'
 import { DEFAULT_LYRIC_SOURCES, type DefaultLyricSource } from '@/modules/lyrics/lyricSourcePreference'
 import { normalizeUiScale, UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN, UI_SCALE_STEP } from '@/modules/settings/uiScaleRange'
+import { normalizeTextScale, TEXT_SCALE_DEFAULT } from '@/modules/settings/textScale'
+import { BACKGROUND_TINT_DEFAULT, BACKGROUND_TINT_STRENGTH_DEFAULT, clampTintStrength, normalizeBackgroundTint } from '@/utils/theme/cleanScheme'
 
 const log = createLogger('settings')
 
@@ -29,6 +31,12 @@ export interface AppSettings {
   darkMode: ThemeMode
   themeColor: string
   uiScale: number
+  /** 只缩放文字的百分比（85–150），与 uiScale 的整体缩放独立 */
+  textScale: number
+  /** 背景偏色来源：accent 跟随强调色 / neutral 纯中性 / #rrggbb 指定颜色 */
+  backgroundTint: string
+  /** 背景偏色强度 0–100 */
+  backgroundTintStrength: number
   appFontFamily: string
   lyricFontFamily: string
   locale: string
@@ -63,6 +71,8 @@ export interface AppSettings {
   keepProgress: boolean
   rememberLongFormProgress: boolean
   keepPlaybackMode: boolean
+  /** 播放超过 3 秒时「上一首」先回到本曲开头；关掉后总是直接切到上一首 */
+  prevRestartsTrack: boolean
   doubleClickPlay: boolean
   localLibrarySortBy: LocalLibrarySortBy
   localLibrarySortDescending: boolean
@@ -120,6 +130,8 @@ export interface AppSettings {
   maxCacheSize: number
   downloadNameTemplate: string
   downloadDir: string
+  /** 音频与封面缓存的自定义目录，空串为默认缓存目录；只能经 set_media_cache_dir 修改 */
+  mediaCacheDir: string
   downloadParallelism: number
   downloadAutoFillMetadata: boolean
   downloadEmbedLyrics: boolean
@@ -135,6 +147,8 @@ export interface AppSettings {
   ltShareAudioLinks: boolean
   volume: number
   audioOutputDevice: string
+  /** Windows WASAPI 独占输出；其它平台不显示、不生效 */
+  audioExclusiveMode: boolean
   playbackSpeed: number
   playbackPitch: number
   vinylEffectEnabled: boolean
@@ -198,6 +212,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   darkMode: 'dark',
   themeColor: 'purple',
   uiScale: UI_SCALE_DEFAULT,
+  textScale: TEXT_SCALE_DEFAULT,
+  backgroundTint: BACKGROUND_TINT_DEFAULT,
+  backgroundTintStrength: BACKGROUND_TINT_STRENGTH_DEFAULT,
   appFontFamily: '',
   lyricFontFamily: '',
   locale: detectLocale(),
@@ -229,6 +246,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   keepProgress: true,
   rememberLongFormProgress: true,
   keepPlaybackMode: true,
+  prevRestartsTrack: true,
   doubleClickPlay: false,
   localLibrarySortBy: 'default',
   localLibrarySortDescending: false,
@@ -279,6 +297,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxCacheSize: 1024,
   downloadNameTemplate: DEFAULT_DOWNLOAD_NAME_TEMPLATE,
   downloadDir: '',
+  mediaCacheDir: '',
   downloadParallelism: DEFAULT_DOWNLOAD_PARALLELISM,
   downloadAutoFillMetadata: true,
   downloadEmbedLyrics: false,
@@ -294,6 +313,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   ltShareAudioLinks: true,
   volume: 1,
   audioOutputDevice: '',
+  audioExclusiveMode: false,
   playbackSpeed: 1,
   playbackPitch: 1,
   vinylEffectEnabled: false,
@@ -484,6 +504,9 @@ function normalizeSnapshot(input: unknown): AppSettings {
 
   if (!['system', 'dark', 'light'].includes(result.darkMode)) result.darkMode = DEFAULT_SETTINGS.darkMode
   result.uiScale = normalizeUiScale(result.uiScale)
+  result.textScale = normalizeTextScale(result.textScale)
+  result.backgroundTint = normalizeBackgroundTint(result.backgroundTint)
+  result.backgroundTintStrength = clampTintStrength(result.backgroundTintStrength)
   result.appFontFamily = sanitizeFontFamily(result.appFontFamily)
   result.lyricFontFamily = sanitizeFontFamily(result.lyricFontFamily)
   if (!['disc', 'card'].includes(result.coverStyle)) result.coverStyle = DEFAULT_SETTINGS.coverStyle
@@ -502,6 +525,7 @@ function normalizeSnapshot(input: unknown): AppSettings {
     : DEFAULT_DOWNLOAD_PARALLELISM
   result.downloadNameTemplate = result.downloadNameTemplate.trim() || DEFAULT_DOWNLOAD_NAME_TEMPLATE
   result.downloadDir = result.downloadDir.trim()
+  result.mediaCacheDir = result.mediaCacheDir.trim()
   // 网易云「较高」的取值是 higher（与播放页、Android 一致）；旧版设置页写的是 high
   result.neteaseQuality = normalizeChoice(canonicalNeteaseQuality(result.neteaseQuality), NETEASE_QUALITIES, 'exhigh')
   result.qqMusicQuality = normalizeChoice(result.qqMusicQuality, QQ_QUALITIES, 'high')
@@ -655,6 +679,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const darkMode = ref<ThemeMode>(initial.darkMode)
   const themeColor = ref(initial.themeColor)
   const uiScale = ref(initial.uiScale)
+  const textScale = ref(initial.textScale)
+  const backgroundTint = ref(initial.backgroundTint)
+  const backgroundTintStrength = ref(initial.backgroundTintStrength)
   const appFontFamily = ref(initial.appFontFamily)
   const lyricFontFamily = ref(initial.lyricFontFamily)
   const locale = ref(initial.locale)
@@ -686,6 +713,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const keepProgress = ref(initial.keepProgress)
   const rememberLongFormProgress = ref(initial.rememberLongFormProgress)
   const keepPlaybackMode = ref(initial.keepPlaybackMode)
+  const prevRestartsTrack = ref(initial.prevRestartsTrack)
   const doubleClickPlay = ref(initial.doubleClickPlay)
   const localLibrarySortBy = ref<LocalLibrarySortBy>(initial.localLibrarySortBy)
   const localLibrarySortDescending = ref(initial.localLibrarySortDescending)
@@ -736,6 +764,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const maxCacheSize = ref(initial.maxCacheSize)
   const downloadNameTemplate = ref(initial.downloadNameTemplate)
   const downloadDir = ref(initial.downloadDir)
+  const mediaCacheDir = ref(initial.mediaCacheDir)
   const downloadParallelism = ref(initial.downloadParallelism)
   const downloadAutoFillMetadata = ref(initial.downloadAutoFillMetadata)
   const downloadEmbedLyrics = ref(initial.downloadEmbedLyrics)
@@ -751,6 +780,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const ltShareAudioLinks = ref(initial.ltShareAudioLinks)
   const volume = ref(initial.volume)
   const audioOutputDevice = ref(initial.audioOutputDevice)
+  const audioExclusiveMode = ref(initial.audioExclusiveMode)
   const playbackSpeed = ref(initial.playbackSpeed)
   const playbackPitch = ref(initial.playbackPitch)
   const vinylEffectEnabled = ref(initial.vinylEffectEnabled)
@@ -765,12 +795,12 @@ export const useSettingsStore = defineStore('settings', () => {
   const globalShortcutsEnabled = ref(initial.globalShortcutsEnabled)
 
   const settingRefs: SettingRefs = {
-    darkMode, themeColor, uiScale, appFontFamily, lyricFontFamily, locale, defaultScreen, closeToTray, showCoverBadge,
+    darkMode, themeColor, uiScale, textScale, backgroundTint, backgroundTintStrength, appFontFamily, lyricFontFamily, locale, defaultScreen, closeToTray, showCoverBadge,
     showNowPlayingTitle, showToolbarDock, showQualitySwitch, showAudioCodec,
     showAudioSpec, lyricFontScale, lyricTranslationScale, crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     fadeInDuration, fadeOutDuration, crossfadeNext, crossfadeInDuration,
-    crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
+    crossfadeOutDuration, keepProgress, rememberLongFormProgress, keepPlaybackMode, prevRestartsTrack, doubleClickPlay,
     localLibrarySortBy, localLibrarySortDescending, showTranslation,
     showRomanization, lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs, cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset,
     amllTtmlOffset, biliCcSubtitleOffset, biliCcSubtitleEnabled, biliCcSubtitleLanguage, biliCcSubtitleAiFallback, coverStyle,
@@ -782,11 +812,11 @@ export const useSettingsStore = defineStore('settings', () => {
     backgroundImageUri, backgroundImageBlur, backgroundImageAlpha, backgroundImageDim, enhancedAdvancedBlur,
     enhancedAdvancedBlurRadius, devModeEnabled,
     logToFile, logLevel,
-    maxCacheSize, downloadNameTemplate, downloadDir, ltServerUrl, ltNickname,
+    maxCacheSize, downloadNameTemplate, downloadDir, mediaCacheDir, ltServerUrl, ltNickname,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
     downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
     downloadYoutubeQuality, downloadBiliQuality,
-    ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice,
+    ltAllowMemberControl, ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, audioExclusiveMode,
     playbackSpeed, playbackPitch, vinylEffectEnabled, audioEffects, loudnessGainMb, equalizerEnabled, equalizerPresetId,
     equalizerBands, desktopLyrics, showMenuBarLyrics, shortcutBindings, globalShortcutsEnabled,
   }
@@ -887,13 +917,13 @@ export const useSettingsStore = defineStore('settings', () => {
 
   return {
     isHydrated, hydrate, snapshot, applySnapshot,
-    darkMode, themeColor, uiScale, appFontFamily, lyricFontFamily, locale, coverStyle,
+    darkMode, themeColor, uiScale, textScale, backgroundTint, backgroundTintStrength, appFontFamily, lyricFontFamily, locale, coverStyle,
     defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock,
     showQualitySwitch, showAudioCodec, showAudioSpec, lyricFontScale, lyricTranslationScale,
     showAudioBitrate, showAudioFormat, showAudioChannels, showAudioSampleRate, showAudioBitDepth,
     crossfade, normalizeVolume, multichannelDrc, volumeBalance, fadeIn, fadeInDuration, fadeOutDuration,
     crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-    keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
+    keepProgress, rememberLongFormProgress, keepPlaybackMode, prevRestartsTrack, doubleClickPlay,
     localLibrarySortBy, localLibrarySortDescending, showTranslation, showRomanization,
     lyricBlur, lyricBlurAmount, lyricEmphasisThresholdMs,
     cloudMusicOffset, qqMusicOffset, kugouOffset, lrclibOffset, amllTtmlOffset,
@@ -905,11 +935,11 @@ export const useSettingsStore = defineStore('settings', () => {
     internationalizationEnabled, exploreSearchHistoryEnabled, backgroundImageUri, backgroundImageBlur,
     backgroundImageAlpha, backgroundImageDim, enhancedAdvancedBlur, enhancedAdvancedBlurRadius,
     devModeEnabled, logToFile, logLevel, maxCacheSize, downloadNameTemplate,
-    downloadDir, ltServerUrl, ltNickname, ltAllowMemberControl,
+    downloadDir, mediaCacheDir, ltServerUrl, ltNickname, ltAllowMemberControl,
     downloadParallelism, downloadAutoFillMetadata, downloadEmbedLyrics,
     downloadFollowPlaybackQuality, downloadNeteaseQuality, downloadQqMusicQuality,
     downloadYoutubeQuality, downloadBiliQuality,
-    ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, playbackSpeed, playbackPitch, vinylEffectEnabled, audioEffects,
+    ltAutoPauseOnMemberChange, ltShareAudioLinks, volume, audioOutputDevice, audioExclusiveMode, playbackSpeed, playbackPitch, vinylEffectEnabled, audioEffects,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, desktopLyrics, showMenuBarLyrics,
     shortcutBindings, globalShortcutsEnabled,
   }

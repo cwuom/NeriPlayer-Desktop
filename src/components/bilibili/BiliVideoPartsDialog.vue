@@ -99,7 +99,7 @@ function handleNameOrderKeydown(event: KeyboardEvent) {
 
 <style scoped lang="scss">
 .video-title { margin: 0 0 12px; font-weight: 600; overflow-wrap: anywhere; color: var(--md-on-surface); }
-.hint { margin: 0 0 12px; font-size: 12px; }
+.hint { margin: 0 0 12px; font-size: var(--fs-12); }
 .name-order {
   display: flex;
   flex-wrap: wrap;
@@ -108,7 +108,7 @@ function handleNameOrderKeydown(event: KeyboardEvent) {
   margin: 0 0 12px;
   padding: 4px 0 0;
   border: 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
   legend { padding: 0; font-weight: 600; }
   label { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; cursor: pointer; }
   input { margin: 0; accent-color: var(--md-primary); }
@@ -119,7 +119,7 @@ function handleNameOrderKeydown(event: KeyboardEvent) {
   padding: 10px 12px;
   border-radius: 12px;
   background: var(--md-surface-container-highest);
-  font-size: 12px;
+  font-size: var(--fs-12);
   .preview-heading { margin: 0 0 6px; font-weight: 600; }
   dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
   dt { color: var(--md-on-surface-variant); }
@@ -134,9 +134,9 @@ function handleNameOrderKeydown(event: KeyboardEvent) {
   &.selected { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
   &:focus-visible { outline: 2px solid var(--md-primary); outline-offset: -2px; }
 }
-.part-number { min-width: 28px; font-size: 12px; opacity: 0.75; }
+.part-number { min-width: 28px; font-size: var(--fs-12); opacity: 0.75; }
 .part-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.part-duration { flex-shrink: 0; font-size: 12px; opacity: 0.75; }
+.part-duration { flex-shrink: 0; font-size: var(--fs-12); opacity: 0.75; }
 .scope-row { flex-direction: column; align-items: flex-start; gap: 2px; padding-inline: 12px; }
-.scope-row span { font-size: 12px; overflow-wrap: anywhere; }
+.scope-row span { font-size: var(--fs-12); overflow-wrap: anywhere; }
 </style>

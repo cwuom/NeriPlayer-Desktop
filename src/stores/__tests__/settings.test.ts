@@ -132,6 +132,18 @@ describe('settings store', () => {
       expect(applied({ showAudioCodec: false, showAudioFormat: true }).showAudioFormat).toBe(true)
     })
 
+    it('keeps the previous-restarts-track behaviour for old snapshots and accepts an explicit opt-out', () => {
+      expect(applied({}).prevRestartsTrack).toBe(true)
+      expect(applied({ prevRestartsTrack: 'false' }).prevRestartsTrack).toBe(true)
+      expect(applied({ prevRestartsTrack: false }).prevRestartsTrack).toBe(false)
+    })
+
+    it('defaults the media cache directory to the system location and trims custom paths', () => {
+      expect(applied({}).mediaCacheDir).toBe('')
+      expect(applied({ mediaCacheDir: '  D:\\NeriCache  ' }).mediaCacheDir).toBe('D:\\NeriCache')
+      expect(applied({ mediaCacheDir: null }).mediaCacheDir).toBe('')
+    })
+
     it('folds the legacy crossfade switch into crossfadeNext with the old fade durations', () => {
       expect(applied({ crossfade: true, crossfadeNext: false, fadeInDuration: 800, fadeOutDuration: 900 })).toMatchObject({
         crossfade: false, crossfadeNext: true, crossfadeInDuration: 800, crossfadeOutDuration: 900,

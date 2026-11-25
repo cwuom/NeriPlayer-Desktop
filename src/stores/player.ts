@@ -1232,6 +1232,10 @@ export const usePlayerStore = defineStore('player', () => {
     }).catch(error => log.warn(`playback ${parameter} not applied:`, error))
     return vinylEffectApplyChain
   }
+  /** WASAPI 独占开关；name 为当前选中的输出设备，后端据此强制重建输出流 */
+  function setAudioExclusiveMode(enabled: boolean, name: string | null) {
+    return invoke('set_audio_exclusive_mode', { enabled, name })
+  }
   async function setVinylEffect(enabled: boolean) {
     vinylEffectEnabled.value = enabled
     settings.vinylEffectEnabled = enabled
@@ -1347,6 +1351,8 @@ export const usePlayerStore = defineStore('player', () => {
 
     const restored: Array<[string, Promise<unknown>]> = [
       ['volume', invoke('set_volume', { level: volume.value })],
+      // 先登记独占开关，随后的设备恢复（或这里的强制重建）才会按独占建流
+      ['exclusive output', setAudioExclusiveMode(settings.audioExclusiveMode, settings.audioOutputDevice || null)],
       ['output device', invoke('set_audio_output_device', { name: settings.audioOutputDevice || null })
         .catch((error) => {
           log.warn('preferred output device unavailable, using the system default:', error)
@@ -1469,7 +1475,7 @@ export const usePlayerStore = defineStore('player', () => {
     hasPlaybackSession, loadedPlaybackTrackKey,
     audioLevel, beatImpulse, audioInfo, isPlayingFromDownload, isPlayingFromCache,
     lastCommandSource, lastCommandSequence, lastSeekCommand, isRemoteSyncGuardActive, nativeTrackEndCount,
-    playbackSpeed, playbackPitch, vinylEffectEnabled, effectivePlaybackPitch, setVinylEffect,
+    playbackSpeed, playbackPitch, vinylEffectEnabled, effectivePlaybackPitch, setVinylEffect, setAudioExclusiveMode,
     currentStreamUrl, sleepTimerMode, sleepRemainingSeconds,
     loudnessGainMb, equalizerEnabled, equalizerPresetId, equalizerBands, hasActiveEffects,
     audioEffects, audioEffectsProfile, audioEffectsOutputDevice, updateAudioEffects, updateAudioEffectsProfile,

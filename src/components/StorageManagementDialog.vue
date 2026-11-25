@@ -237,19 +237,19 @@ function cacheOptionDescription(kind: string) {
 .storage-dialog-body { max-height: min(56vh, 560px); overflow-y: auto; }
 .storage-loading { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 120px; }
 .storage-section { display: flex; flex-direction: column; gap: 6px; }
-.storage-section-title { color: var(--md-primary); font-size: 13px; font-weight: 700; margin-top: 4px; }
+.storage-section-title { color: var(--md-primary); font-size: var(--fs-13); font-weight: 700; margin-top: 4px; }
 .storage-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, var(--md-outline-variant) 26%, transparent); }
 .storage-row-info { min-width: 0; flex: 1; }
-.storage-row-title { color: var(--md-on-surface); font-size: 13px; font-weight: 600; }
-.storage-row-desc { color: var(--md-on-surface-variant); font-size: 11px; line-height: 1.35; }
-.storage-row-value { display: flex; flex-direction: column; align-items: flex-end; flex: 0 0 auto; color: var(--md-on-surface-variant); font-size: 11px; }
-.storage-row-value strong { color: var(--md-on-surface); font-size: 13px; }
-.storage-total { display: flex; justify-content: space-between; padding-top: 4px; color: var(--md-on-surface); font-size: 14px; }
+.storage-row-title { color: var(--md-on-surface); font-size: var(--fs-13); font-weight: 600; }
+.storage-row-desc { color: var(--md-on-surface-variant); font-size: var(--fs-11); line-height: 1.35; }
+.storage-row-value { display: flex; flex-direction: column; align-items: flex-end; flex: 0 0 auto; color: var(--md-on-surface-variant); font-size: var(--fs-11); }
+.storage-row-value strong { color: var(--md-on-surface); font-size: var(--fs-13); }
+.storage-total { display: flex; justify-content: space-between; padding-top: 4px; color: var(--md-on-surface); font-size: var(--fs-14); }
 .storage-total strong { color: var(--md-primary); }
 .storage-clear-entry { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; border-radius: 20px; background: var(--md-error-container); color: var(--md-on-error-container); font: inherit; font-weight: 600; cursor: pointer; }
 .storage-clear-entry:disabled { opacity: 0.45; cursor: not-allowed; }
 .storage-clear-dialog p { margin: 0; color: var(--md-on-surface-variant); }
-.storage-clear-label { color: var(--md-on-surface); font-size: 13px; font-weight: 700; }
+.storage-clear-label { color: var(--md-on-surface); font-size: var(--fs-13); font-weight: 700; }
 .storage-check-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 6px; border: 0; border-radius: 10px; background: transparent; color: var(--md-on-surface); font: inherit; text-align: left; cursor: pointer; }
 .storage-check-row:hover:not(:disabled) { background: color-mix(in srgb, var(--md-primary) 8%, transparent); }
 .storage-check-row:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 1px; }
@@ -257,10 +257,10 @@ function cacheOptionDescription(kind: string) {
 .storage-check-row:disabled { opacity: 0.45; cursor: not-allowed; }
 .storage-checkbox { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 18px; margin-top: 1px; border: 2px solid var(--md-outline); border-radius: 4px; color: var(--md-on-primary); transition: background 150ms, border-color 150ms; }
 .storage-checkbox.checked { border-color: var(--md-primary); background: var(--md-primary); }
-.storage-checkbox .material-symbols-rounded { font-size: 14px; font-weight: 700; }
+.storage-checkbox .material-symbols-rounded { font-size: var(--fs-14); font-weight: 700; }
 .storage-check-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.storage-check-row strong { font-size: 13px; }
-.storage-check-row small { color: var(--md-on-surface-variant); font-size: 11px; line-height: 1.35; }
+.storage-check-row strong { font-size: var(--fs-13); }
+.storage-check-row small { color: var(--md-on-surface-variant); font-size: var(--fs-11); line-height: 1.35; }
 .spinning { animation: storage-spin 1s linear infinite; }
 @keyframes storage-spin { to { transform: rotate(360deg); } }
 </style>

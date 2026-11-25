@@ -8,6 +8,7 @@ import { historyEntryKey, useHistoryStore } from '@/stores/history'
 import { useDownloadStore } from '@/stores/download'
 import { useI18n } from 'vue-i18n'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
+import TrackListHeader from '@/components/library/TrackListHeader.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
@@ -112,13 +113,15 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 function playAll() {
-  const tracks = filteredEntries.value.map(e => e.track)
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  const tracks = history.entries.map(e => e.track)
   if (tracks.length === 0) return
   player.playAll(tracks)
 }
 
 function shufflePlay() {
-  const tracks = filteredEntries.value.map(e => e.track)
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  const tracks = history.entries.map(e => e.track)
   if (tracks.length === 0) return
   player.shufflePlay(tracks)
 }
@@ -130,7 +133,8 @@ function playEntry(index: number) {
     toggleSelected(historyEntryKey(target))
     return
   }
-  const tracks = filteredEntries.value.map(e => e.track)
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  const tracks = history.entries.map(e => e.track)
   if (!target.playlistKey && tracks.some(track => track !== target && track.id === target.id)) {
     // 旧同步条目可能共用视频 ID，播放时沿用历史条目的分 P 身份区分队列行
     const keyedTracks = tracks.map(track => track.id === target.id && !track.playlistKey
@@ -252,7 +256,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
 
 <template>
   <div ref="viewRef" class="detail-view" @scroll.passive="onViewScroll">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
@@ -300,6 +304,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
         @exit="leaveSelectionMode"
       />
       <div v-if="filteredEntries.length === 0" class="search-empty">{{ t('player.no_results') }}</div>
+      <TrackListHeader album more :extra="t('library.column_played')" />
       <div class="track-list">
         <div
           v-for="(entry, index) in renderedEntries"
@@ -325,8 +330,9 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
           </div>
           <div class="track-info">
             <div class="track-title">{{ entry.track.title || t('stats.unknown_track') }}</div>
-            <div class="track-meta">{{ [entry.track.artist, displayAlbum(entry.track.album)].filter(Boolean).join(' · ') }}</div>
+            <div class="track-meta">{{ entry.track.artist }}<span v-if="displayAlbum(entry.track.album)" class="track-meta-album">{{ entry.track.artist ? ' · ' : '' }}{{ displayAlbum(entry.track.album) }}</span></div>
           </div>
+          <div class="track-album">{{ displayAlbum(entry.track.album) }}</div>
           <div class="track-time-ago">{{ formatRelativeTime(entry.playedAt) }}</div>
           <div class="track-duration">{{ formatDuration(entry.track.durationMs) }}</div>
           <button v-if="!selectionMode" class="track-more" @click.stop="openTrackMenu($event, entry.track)">
@@ -391,7 +397,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
 .search-empty {
   padding: 40px 0;
   text-align: center;
-  font-size: 14px;
+  font-size: var(--fs-14);
   color: var(--md-on-surface-variant);
 }
 
@@ -411,7 +417,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
 }
 
 .track-time-ago {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   opacity: 0.5;
   flex-shrink: 0;
@@ -454,7 +460,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
   max-width: 400px;
 
   h3 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
-  p { font-size: 14px; color: var(--md-on-surface-variant); line-height: 1.5; }
+  p { font-size: var(--fs-14); color: var(--md-on-surface-variant); line-height: 1.5; }
 }
 
 .dialog-actions {
@@ -467,7 +473,7 @@ function handleTrackMenuClick(item: ContextMenuActionItem) {
 .dialog-btn {
   padding: 8px 20px;
   border-radius: var(--radius-full);
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   transition: background var(--duration-short);
 

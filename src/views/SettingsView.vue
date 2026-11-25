@@ -32,6 +32,8 @@ import EditableRangeValue from '@/components/ui/EditableRangeValue.vue'
 import CustomSelect from '@/components/ui/CustomSelect.vue'
 import M3Dialog from '@/components/ui/M3Dialog.vue'
 import ShortcutSettings from '@/components/settings/ShortcutSettings.vue'
+import CacheLocationSetting from '@/components/settings/CacheLocationSetting.vue'
+import ThemeAppearanceSettings from '@/components/settings/appearance/ThemeAppearanceSettings.vue'
 import FontFamilyControl from '@/components/settings/FontFamilyControl.vue'
 import AudioEffectsSettings from '@/components/settings/AudioEffectsSettings.vue'
 import SettingsSidebar from '@/components/settings/SettingsSidebar.vue'
@@ -62,13 +64,13 @@ const downloadStore = useDownloadStore()
 const player = usePlayerStore()
 const lt = useListenTogetherStore()
 const {
-  darkMode, coverStyle, appFontFamily, lyricFontFamily, uiScale,
+  coverStyle, appFontFamily, lyricFontFamily, uiScale,
   defaultScreen, closeToTray, showCoverBadge, showNowPlayingTitle, showToolbarDock, showQualitySwitch,
-  normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice,
+  normalizeVolume, multichannelDrc, volumeBalance, audioOutputDevice, audioExclusiveMode,
   fadeIn, fadeInDuration, fadeOutDuration,
   crossfadeNext, crossfadeInDuration, crossfadeOutDuration,
-  keepProgress, rememberLongFormProgress, keepPlaybackMode, doubleClickPlay,
-  advancedLyrics, dynamicBackground, colorMode, audioReactive,
+  keepProgress, rememberLongFormProgress, keepPlaybackMode, prevRestartsTrack, doubleClickPlay,
+  advancedLyrics, dynamicBackground, audioReactive,
   lowPerformanceMode, coverBlurBg, coverBlurAmount, coverBlurDarken,
   neteaseQuality, youtubeQuality, biliQuality,
   youtubePlaybackSource, neteaseAutoSourceSwitch, neteaseLocalSourceFallback,
@@ -87,6 +89,7 @@ const {
 const settingsIpc: SettingsIpc = {
   listAudioOutputDevices: () => invoke('list_audio_output_devices'),
   setAudioOutputDevice: name => invoke('set_audio_output_device', { name }),
+  setAudioExclusiveMode: (enabled, name) => player.setAudioExclusiveMode(enabled, name),
   getLogDir: () => invoke<string>('get_log_dir'),
   revealInFileManager: path => invoke('reveal_in_file_manager', { path }),
   setBypassProxy: bypass => invoke('set_bypass_proxy', { bypass }),
@@ -104,9 +107,8 @@ const settingsRootRef = ref<HTMLElement | null>(null)
 
 // 调用顺序即侦听器创建顺序，与拆分前保持一致：外观（主题色、动态背景互斥）→ 分区路由 → 同步协议升级
 const {
-  uiScaleOptions, presetColors, activeColorKey, dynamicBackgroundDialogOpen, onDynamicBackgroundToggle,
-  confirmDynamicBackgroundWarning, cancelDynamicBackgroundWarning, handleColorSwitch, darkModeOptions,
-  darkModeThumbStyle, colorModeOptions, handleDarkModeSwitch, handleLocaleSwitch, defaultScreenOptions,
+  uiScaleOptions, dynamicBackgroundDialogOpen, onDynamicBackgroundToggle,
+  confirmDynamicBackgroundWarning, cancelDynamicBackgroundWarning, handleLocaleSwitch, defaultScreenOptions,
   coverStyleOptions, selectBackgroundImage, clearBackgroundImage,
 } = useAppearanceSettings(settingsIpc)
 
@@ -124,6 +126,7 @@ const {
 const {
   youtubePlaybackSourceOptions, youtubePlaybackSourceDescription, changeYouTubePlaybackSource,
   audioOutputOptions, audioOutputSwitching, loadAudioOutputDevices, changeAudioOutputDevice, volumeBalanceLabel,
+  exclusiveOutputAvailable, changeAudioExclusiveMode,
   neteaseQualityOptions, downloadNeteaseQualityOptions, youtubeQualityOptions, biliQualityOptions,
   qualitySwitching, handleQualityChange,
 } = usePlaybackSettings(settingsIpc)
@@ -229,7 +232,7 @@ useEscapeClose(
         <div :key="activeSettingsSection" class="settings-panels">
 
         <div v-show="activeSettingsSection === 'accounts'" class="settings-section-panel" data-section="accounts">
-    <div class="section-label">
+    <div class="section-label section-label--page">
       <span class="material-symbols-rounded" style="font-size: 18px">account_circle</span>
       <span>{{ t('settings.accounts') }}</span>
     </div>
@@ -296,6 +299,7 @@ useEscapeClose(
         </div>
 
         <div v-show="activeSettingsSection === 'general'" class="settings-section-panel" data-section="general">
+      <div class="section-label">{{ t('settings.group_startup') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">home</span></div>
         <div class="setting-info">
@@ -316,6 +320,7 @@ useEscapeClose(
       </div>
 
     <!-- YouTube 国际化 -->
+    <div class="section-label">{{ t('settings.group_content') }}</div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">language</span></div>
       <div class="setting-info">
@@ -348,56 +353,12 @@ useEscapeClose(
     <!-- 外观 -->
         <div v-show="activeSettingsSection === 'appearance'" class="settings-section-panel" data-section="appearance">
     <div class="section-label">
-      <span class="material-symbols-rounded" style="font-size: 18px">palette</span>
-      <span>{{ t('settings.appearance') }}</span>
+      <span>{{ t('settings.group_theme') }}</span>
     </div>
 
-    <div class="setting-card">
-      <div class="setting-icon-wrap">
-        <span class="material-symbols-rounded filled">dark_mode</span>
-      </div>
-      <div class="setting-info">
-        <div class="setting-title">{{ t('settings.dark_mode') }}</div>
-        <div class="setting-desc">{{ darkModeOptions.find(o => o.value === darkMode)?.label }}</div>
-      </div>
-      <div class="dark-mode-pills">
-        <span
-          class="pill-thumb"
-          :style="darkModeThumbStyle"
-          aria-hidden="true"
-        />
-        <button
-          v-for="opt in darkModeOptions"
-          :key="opt.value"
-          class="pill"
-          :class="{ active: darkMode === opt.value }"
-          @click="handleDarkModeSwitch(opt.value, $event)"
-        >
-          <span class="material-symbols-rounded" style="font-size: 16px">{{ opt.icon }}</span>
-        </button>
-      </div>
-    </div>
+    <ThemeAppearanceSettings />
 
-    <div class="setting-card">
-      <div class="setting-icon-wrap">
-        <span class="material-symbols-rounded filled">format_paint</span>
-      </div>
-      <div class="setting-info">
-        <div class="setting-title">{{ t('settings.theme_color') }}</div>
-        <div class="color-row" :style="colorMode !== 'default' ? { opacity: 0.4, pointerEvents: 'none' } : undefined">
-          <button
-            v-for="c in presetColors" :key="c.key"
-            class="color-dot"
-            :class="{ selected: activeColorKey === c.key }"
-            :style="{ background: c.color }"
-            @click="handleColorSwitch(c.key, $event)"
-          >
-            <span v-if="activeColorKey === c.key" class="material-symbols-rounded" style="font-size: 16px; color: white">check</span>
-          </button>
-        </div>
-      </div>
-    </div>
-
+    <div class="section-label">{{ t('settings.group_display') }}</div>
     <div class="setting-card ui-scale-card">
       <div class="ui-scale-heading">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">display_settings</span></div>
@@ -448,31 +409,12 @@ useEscapeClose(
       <FontFamilyControl v-model="lyricFontFamily" :label="t('settings.lyric_font')" :preview-text="t('settings.font_preview')" :preview-weight="850" />
     </div>
 
-    <!-- 取色方式 -->
-    <div class="setting-card">
-      <div class="setting-icon-wrap"><span class="material-symbols-rounded">colorize</span></div>
-      <div class="setting-info">
-        <div class="setting-title">{{ t('settings.color_mode') }}</div>
-        <div class="setting-desc">{{ colorModeOptions.find(o => o.value === colorMode)?.desc }}</div>
-      </div>
-      <div class="chip-row" role="radiogroup" :aria-label="t('settings.color_mode')">
-        <button
-          v-for="o in colorModeOptions"
-          :key="o.value"
-          class="m3-chip"
-          :class="{ active: colorMode === o.value }"
-          role="radio"
-          :aria-checked="colorMode === o.value"
-          @click="colorMode = o.value"
-        >{{ o.label }}</button>
-      </div>
-    </div>
-
         </div>
 
     <!-- 播放页 -->
         <div v-show="activeSettingsSection === 'now_playing'" class="settings-section-panel" data-section="now_playing">
       <!-- 封面样式 -->
+      <div class="section-label">{{ t('settings.group_cover') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">album</span></div>
         <div class="setting-info">
@@ -492,6 +434,7 @@ useEscapeClose(
         <label class="m3-switch"><input type="checkbox" v-model="showCoverBadge" /><span class="track"><span class="thumb"><span v-if="showCoverBadge" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
 
+      <div class="section-label">{{ t('settings.group_np_elements') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">title</span></div>
         <div class="setting-info">
@@ -533,6 +476,7 @@ useEscapeClose(
     <!-- 背景 -->
         <div v-show="activeSettingsSection === 'background'" class="settings-section-panel" data-section="background">
       <!-- 自定义背景图 -->
+      <div class="section-label">{{ t('settings.group_background_image') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">wallpaper</span></div>
         <div class="setting-info">
@@ -597,6 +541,7 @@ useEscapeClose(
           <input type="range" class="m3-slider" v-model.number="backgroundImageDim" min="0" max="0.8" step="0.05" />
         </div>
 
+        <div class="section-label">{{ t('settings.group_glass') }}</div>
         <div class="setting-card sub-card">
           <div class="setting-info">
             <div class="setting-title">{{ t('settings.enhanced_advanced_blur') }}</div>
@@ -642,6 +587,14 @@ useEscapeClose(
         :model-value="audioOutputDevice" :options="audioOutputOptions" :label="t('settings.audio_output')"
         :disabled="audioOutputSwitching" @open="loadAudioOutputDevices" @update:model-value="changeAudioOutputDevice" />
     </div>
+    <div v-if="exclusiveOutputAvailable" class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">speaker_group</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.audio_exclusive') }}</div>
+        <div class="setting-desc">{{ t('settings.audio_exclusive_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" :checked="audioExclusiveMode" :disabled="audioOutputSwitching" @change="changeAudioExclusiveMode(($event.target as HTMLInputElement).checked)" /><span class="track"><span class="thumb"><span v-if="audioExclusiveMode" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>
       <div class="setting-info">
@@ -686,13 +639,14 @@ useEscapeClose(
 
     <!-- 播放 -->
         <div v-show="activeSettingsSection === 'playback'" class="settings-section-panel" data-section="playback">
-    <div class="section-label clickable" @click="toggleSection('playback')">
+    <div class="section-label section-label--page clickable" @click="toggleSection('playback')">
       <span class="material-symbols-rounded" style="font-size: 18px">play_circle</span>
       <span>{{ t('settings.playback') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('playback') }">expand_more</span>
     </div>
 
     <Transition @enter="onExpandEnter" @after-enter="onExpandAfterEnter" @leave="onExpandLeave" @after-leave="onExpandAfterLeave"><div v-if="isExpanded('playback')">
+      <div class="section-label">{{ t('settings.group_fade') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">volume_up</span></div>
         <div class="setting-info">
@@ -737,6 +691,7 @@ useEscapeClose(
         </div>
       </template>
 
+      <div class="section-label">{{ t('settings.group_transition') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">sync_alt</span></div>
         <div class="setting-info">
@@ -781,6 +736,7 @@ useEscapeClose(
         </div>
       </template>
 
+      <div class="section-label">{{ t('settings.group_memory') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">ads_click</span></div>
         <div class="setting-info">
@@ -816,12 +772,21 @@ useEscapeClose(
         </div>
         <label class="m3-switch"><input type="checkbox" v-model="keepPlaybackMode" /><span class="track"><span class="thumb"><span v-if="keepPlaybackMode" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
       </div>
+
+      <div class="setting-card">
+        <div class="setting-icon-wrap"><span class="material-symbols-rounded">skip_previous</span></div>
+        <div class="setting-info">
+          <div class="setting-title">{{ t('settings.prev_restarts_track') }}</div>
+          <div class="setting-desc">{{ t('settings.prev_restarts_track_desc') }}</div>
+        </div>
+        <label class="m3-switch"><input type="checkbox" v-model="prevRestartsTrack" :aria-label="t('settings.prev_restarts_track')" /><span class="track"><span class="thumb" /></span></label>
+      </div>
     </div></Transition>
         </div>
 
     <!-- 网络 -->
         <div v-show="activeSettingsSection === 'network'" class="settings-section-panel" data-section="network">
-    <div class="section-label">
+    <div class="section-label section-label--page">
       <span class="material-symbols-rounded" style="font-size: 18px">wifi</span>
       <span>{{ t('settings.network') }}</span>
     </div>
@@ -841,13 +806,14 @@ useEscapeClose(
 
     <!-- 一起听 -->
         <div v-show="activeSettingsSection === 'listen_together'" class="settings-section-panel" data-section="listen_together">
-    <div class="section-label clickable" @click="toggleSection('listen_together')">
+    <div class="section-label section-label--page clickable" @click="toggleSection('listen_together')">
       <span class="material-symbols-rounded" style="font-size: 18px">group</span>
       <span>{{ t('listen_together.title') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('listen_together') }">expand_more</span>
     </div>
 
     <!-- 摘要卡与展开编辑区互斥，整卡可点击展开 -->
+    <div class="section-label">{{ t('settings.group_server') }}</div>
     <div
       v-if="!isExpanded('listen_together')"
       class="setting-card"
@@ -876,6 +842,7 @@ useEscapeClose(
         />
       </div>
 
+      <div class="section-label">{{ t('settings.group_identity') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">badge</span></div>
         <div class="setting-info">
@@ -893,6 +860,7 @@ useEscapeClose(
         />
       </div>
 
+      <div class="section-label">{{ t('settings.group_room') }}</div>
       <div class="setting-card">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">tune</span></div>
         <div class="setting-info">
@@ -1099,12 +1067,13 @@ useEscapeClose(
 
     <!-- 动效 & 视觉 -->
         <div v-show="activeSettingsSection === 'motion'" class="settings-section-panel" data-section="motion">
-    <div class="section-label clickable" @click="toggleSection('effects')">
+    <div class="section-label section-label--page clickable" @click="toggleSection('effects')">
       <span class="material-symbols-rounded" style="font-size: 18px">auto_awesome</span>
       <span>{{ t('settings.effects') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('effects') }">expand_more</span>
     </div>
 
+    <div class="section-label">{{ t('settings.group_lyrics_motion') }}</div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">animation</span></div>
       <div class="setting-info">
@@ -1114,6 +1083,7 @@ useEscapeClose(
       <label class="m3-switch"><input type="checkbox" v-model="advancedLyrics" /><span class="track"><span class="thumb"><span v-if="advancedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
     </div>
 
+    <div class="section-label">{{ t('settings.group_background_motion') }}</div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">wallpaper</span></div>
       <div class="setting-info">
@@ -1190,6 +1160,7 @@ useEscapeClose(
       </template>
     </div></Transition>
 
+    <div class="section-label">{{ t('settings.group_performance') }}</div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">speed</span></div>
       <div class="setting-info">
@@ -1202,11 +1173,12 @@ useEscapeClose(
 
     <!-- 播放源 -->
         <div v-show="activeSettingsSection === 'playback_sources'" class="settings-section-panel" data-section="playback_sources">
-    <div class="section-label">
+    <div class="section-label section-label--page">
       <span class="material-symbols-rounded" style="font-size: 18px">alt_route</span>
       <span>{{ t('settings.playback_sources') }}</span>
     </div>
 
+    <div class="section-label">{{ t('settings.group_playback_source') }}</div>
     <div class="setting-card setting-card--select">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">smart_display</span></div>
       <div class="setting-info">
@@ -1218,6 +1190,7 @@ useEscapeClose(
         :label="t('settings.youtube_playback_source')" @update:model-value="changeYouTubePlaybackSource" />
     </div>
 
+    <div class="section-label">{{ t('settings.group_fallback') }}</div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">library_music</span></div>
       <div class="setting-info">
@@ -1245,7 +1218,7 @@ useEscapeClose(
 
     <!-- 音质 -->
         <div v-show="activeSettingsSection === 'quality'" class="settings-section-panel" data-section="quality">
-    <div class="section-label clickable" @click="toggleSection('quality')">
+    <div class="section-label section-label--page clickable" @click="toggleSection('quality')">
       <span class="material-symbols-rounded" style="font-size: 18px">headphones</span>
       <span>{{ t('settings.audio_quality') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('quality') }">expand_more</span>
@@ -1286,7 +1259,7 @@ useEscapeClose(
 
     <!-- 存储 & 缓存 -->
         <div v-show="activeSettingsSection === 'storage'" class="settings-section-panel" data-section="storage">
-    <div class="section-label clickable" @click="toggleSection('storage')">
+    <div class="section-label section-label--page clickable" @click="toggleSection('storage')">
       <span class="material-symbols-rounded" style="font-size: 18px">folder</span>
       <span>{{ t('settings.storage') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('storage') }">expand_more</span>
@@ -1317,6 +1290,8 @@ useEscapeClose(
           step="256"
         />
       </div>
+
+      <CacheLocationSetting />
 
       <div class="setting-card" style="cursor: pointer" @click="openStorageManagement">
         <div class="setting-icon-wrap"><span class="material-symbols-rounded">database</span></div>
@@ -1365,7 +1340,7 @@ useEscapeClose(
 
     <!-- 备份 & 恢复 -->
         <div v-show="activeSettingsSection === 'backup'" class="settings-section-panel" data-section="backup">
-    <div class="section-label clickable" @click="toggleSection('backup')">
+    <div class="section-label section-label--page clickable" @click="toggleSection('backup')">
       <span class="material-symbols-rounded" style="font-size: 18px">cloud_sync</span>
       <span>{{ t('settings.backup') }}</span>
       <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('backup') }">expand_more</span>
@@ -1527,7 +1502,7 @@ useEscapeClose(
 
     <!-- 语言 -->
         <div v-show="activeSettingsSection === 'language'" class="settings-section-panel" data-section="language">
-    <div class="section-label">
+    <div class="section-label section-label--page">
       <span class="material-symbols-rounded" style="font-size: 18px">language</span>
       <span>{{ t('settings.language') }}</span>
     </div>
@@ -1546,11 +1521,12 @@ useEscapeClose(
 
     <!-- 关于 -->
         <div v-show="activeSettingsSection === 'about'" class="settings-section-panel" data-section="about">
-    <div class="section-label">
+    <div class="section-label section-label--page">
       <span class="material-symbols-rounded" style="font-size: 18px">info</span>
       <span>{{ t('settings.about') }}</span>
     </div>
 
+    <div class="section-label">{{ t('settings.group_build') }}</div>
     <div class="setting-card about-card" @click="handleVersionTap" style="cursor: pointer">
       <div class="setting-icon-wrap accent">
         <img src="/app-icon.png" alt="NeriPlayer" style="width: 24px; height: 24px; border-radius: 4px;" />
@@ -1602,6 +1578,7 @@ useEscapeClose(
       </div>
     </div></Transition>
 
+    <div class="section-label">{{ t('settings.group_links') }}</div>
     <div class="setting-card" style="cursor: pointer" @click="openExternalUrl(PROJECT_REPOSITORY_URL)">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">code</span></div>
       <div class="setting-info">

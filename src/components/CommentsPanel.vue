@@ -903,7 +903,8 @@ function enterDelay(index: number): string {
   z-index: 260;
   display: flex;
   justify-content: flex-end;
-  background: rgb(0 0 0 / 0.4);
+  padding: calc(var(--titlebar-height, 36px) + 6px) 10px 10px;
+  background: rgb(0 0 0 / 0.24);
 }
 
 .comments-panel {
@@ -913,10 +914,11 @@ function enterDelay(index: number): string {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding-top: var(--titlebar-height, 36px);
-  background: var(--bg-solid-container, var(--md-surface-container));
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  background: var(--clean-dialog-surface);
   color: var(--md-on-surface);
-  box-shadow: -4px 0 24px rgb(0 0 0 / 0.3);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
 }
 
 /* 开合都走 transition：半路关掉会从当前位置反向收回，不会闪现 */
@@ -948,7 +950,7 @@ function enterDelay(index: number): string {
   h3 { font-size: 20px; font-weight: 600; }
 }
 
-.comments-total { font-size: 12px; color: var(--md-on-surface-variant); font-variant-numeric: tabular-nums; }
+.comments-total { font-size: var(--fs-12); color: var(--md-on-surface-variant); font-variant-numeric: tabular-nums; }
 
 .comments-icon-btn {
   width: 36px;
@@ -967,7 +969,7 @@ function enterDelay(index: number): string {
 
 .comments-track {
   padding: 0 20px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -987,8 +989,8 @@ function enterDelay(index: number): string {
   align-items: center;
   gap: 4px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--md-outline-variant);
-  font-size: 13px;
+  border: 1px solid var(--hairline);
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   transition: background var(--duration-short) var(--ease-standard), color var(--duration-short) var(--ease-standard),
     border-color var(--duration-short) var(--ease-standard);
@@ -1047,15 +1049,15 @@ function enterDelay(index: number): string {
   color: var(--md-on-surface-variant);
   text-align: center;
   > .material-symbols-rounded { font-size: 36px; opacity: 0.5; }
-  p { font-size: 13px; }
+  p { font-size: var(--fs-13); }
 }
 
 .comments-pill-btn {
   padding: 6px 18px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-full);
   color: var(--md-primary);
-  font-size: 13px;
+  font-size: var(--fs-13);
   &:hover { background: var(--md-surface-container-high); }
 }
 
@@ -1109,10 +1111,10 @@ function enterDelay(index: number): string {
   white-space: nowrap;
 }
 
-.comment-user { font-size: 14px; }
+.comment-user { font-size: var(--fs-14); }
 
 .comment-time {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   flex-shrink: 0;
 }
@@ -1121,7 +1123,7 @@ function enterDelay(index: number): string {
   flex-shrink: 0;
   padding: 2px 6px;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 600;
   background: var(--md-secondary-container);
   color: var(--md-on-secondary-container);
@@ -1129,7 +1131,7 @@ function enterDelay(index: number): string {
 
 .comment-floor {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   font-variant-numeric: tabular-nums;
 }
@@ -1141,7 +1143,7 @@ function enterDelay(index: number): string {
   user-select: text;
 }
 
-.comment-content { font-size: 14px; line-height: 1.65; }
+.comment-content { font-size: var(--fs-14); line-height: 1.65; }
 
 .comment-emote {
   display: inline-block;
@@ -1189,7 +1191,7 @@ function enterDelay(index: number): string {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.5;
 }
 
@@ -1251,8 +1253,8 @@ function enterDelay(index: number): string {
   min-width: 0;
 }
 
-.reply-user { font-size: 12px; color: var(--md-primary); }
-.reply-content { font-size: 13px; line-height: 1.55; }
+.reply-user { font-size: var(--fs-12); color: var(--md-primary); }
+.reply-content { font-size: var(--fs-13); line-height: 1.55; }
 
 .reply-actions {
   display: flex;
@@ -1268,7 +1270,7 @@ function enterDelay(index: number): string {
   &:empty { display: none; }
 }
 
-.replies-empty { font-size: 12px; color: var(--md-on-surface-variant); }
+.replies-empty { font-size: var(--fs-12); color: var(--md-on-surface-variant); }
 
 .comment-actions {
   display: flex;
@@ -1285,7 +1287,7 @@ function enterDelay(index: number): string {
   align-items: center;
   gap: 4px;
   border-radius: var(--radius-full);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   background: var(--md-surface-container-highest);
   transition: background 160ms var(--ease-standard), color 160ms var(--ease-standard), opacity 160ms var(--ease-standard);
@@ -1315,7 +1317,7 @@ function enterDelay(index: number): string {
     min-width: 44px;
     padding: 0 8px;
     background: transparent;
-    .material-symbols-rounded { font-size: 15px; }
+    .material-symbols-rounded { font-size: var(--fs-15); }
     &.liked { background: var(--md-primary-container); }
   }
   .comment-like-count:empty { display: none; }
@@ -1324,7 +1326,7 @@ function enterDelay(index: number): string {
 .comment-text-btn {
   padding: 2px 8px;
   border-radius: var(--radius-full);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: var(--md-primary);
   &:hover:not(:disabled) { background: color-mix(in srgb, var(--md-primary) 10%, transparent); }
@@ -1342,7 +1344,7 @@ function enterDelay(index: number): string {
 .comments-end {
   padding: 16px 0 4px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 }
 
@@ -1352,7 +1354,7 @@ function enterDelay(index: number): string {
   flex-direction: column;
   gap: 6px;
   padding: 10px 14px 14px;
-  border-top: 1px solid var(--md-outline-variant);
+  border-top: 1px solid var(--hairline);
   background: var(--bg-solid-container, var(--md-surface-container));
 }
 
@@ -1361,7 +1363,7 @@ function enterDelay(index: number): string {
   align-items: center;
   gap: 6px;
   padding-left: 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-primary);
   > .material-symbols-rounded { font-size: 16px; }
 }
@@ -1381,7 +1383,7 @@ function enterDelay(index: number): string {
   gap: 8px;
   padding: 6px 6px 6px 16px;
   border-radius: 22px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   background: var(--md-surface-container-high);
   transition: border-color 160ms var(--ease-standard), box-shadow 160ms var(--ease-standard);
   &:focus-within {
@@ -1409,14 +1411,14 @@ function enterDelay(index: number): string {
   background: transparent;
   color: var(--md-on-surface);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-14);
   line-height: 22px;
   &::placeholder { color: var(--md-on-surface-variant); }
 }
 
 .composer-count {
   align-self: center;
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   font-variant-numeric: tabular-nums;
   &.error { color: var(--md-error); font-weight: 600; }
@@ -1443,7 +1445,7 @@ function enterDelay(index: number): string {
 
 .composer-status {
   padding-left: 8px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-primary);
   &.error { color: var(--md-error); }
 }
@@ -1467,7 +1469,7 @@ function enterDelay(index: number): string {
 
 .lightbox-close { top: calc(var(--titlebar-height, 36px) + 8px); right: 12px; }
 .lightbox-nav { top: 50%; transform: translateY(-50%); &.prev { left: 8px; } &.next { right: 8px; } }
-.lightbox-index { position: absolute; bottom: 18px; font-size: 12px; color: rgb(255 255 255 / 0.8); font-variant-numeric: tabular-nums; }
+.lightbox-index { position: absolute; bottom: 18px; font-size: var(--fs-12); color: rgb(255 255 255 / 0.8); font-variant-numeric: tabular-nums; }
 
 .lightbox-image {
   max-width: 100%;

@@ -89,7 +89,7 @@ const { t } = useI18n()
     background: var(--md-surface-container-high);
   }
 }
-.selection-count { flex: 1; font-size: 13px; font-weight: 700; color: var(--md-primary); }
+.selection-count { flex: 1; font-size: var(--fs-13); font-weight: 700; color: var(--md-primary); }
 .selection-actions { display: flex; align-items: center; gap: 4px; }
 .selection-btn { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
 .selection-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 12%, transparent); }

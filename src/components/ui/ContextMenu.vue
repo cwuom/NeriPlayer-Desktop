@@ -290,14 +290,20 @@ onBeforeUnmount(() => {
   max-height: calc(100vh - 16px);
   max-height: calc(100dvh - 16px);
   overflow-y: auto;
-  padding: 4px 0;
-  border: 1px solid var(--md-outline-variant);
-  border-radius: var(--radius-md, 12px);
-  background: var(--md-surface-container-high);
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.28),
-    0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 5px 0;
+  border: 0;
+  border-radius: var(--radius-md, 14px);
+  /* Clean 菜单：浅色白底、深色抬一档的中性面，细描边 + 柔和投影 */
+  background: color-mix(in srgb, var(--md-surface-container-lowest) 94%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
   transform-origin: top left;
+}
+
+/* 整个选择器写在 :global() 里；:global(.dark-theme) & 会被编译成只剩 .dark-theme，把菜单底色刷到整个 html 上 */
+:global(.dark-theme .context-menu-panel) {
+  background: color-mix(in srgb, var(--md-surface-container-high) 94%, transparent);
 }
 
 .context-menu-item {
@@ -305,16 +311,16 @@ onBeforeUnmount(() => {
   grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  width: calc(100% - 8px);
-  min-height: 40px;
-  margin: 0 4px;
-  padding: 8px 12px;
+  width: calc(100% - 10px);
+  min-height: 34px;
+  margin: 0 5px;
+  padding: 6px 10px;
   border: 0;
   border-radius: var(--radius-sm, 8px);
   background: transparent;
   color: var(--md-on-surface);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-13);
   font-weight: 500;
   line-height: 20px;
   text-align: left;
@@ -323,8 +329,10 @@ onBeforeUnmount(() => {
 
   &:hover,
   &:focus-visible {
-    background: var(--md-surface-container-highest);
+    background: var(--state-hover);
   }
+
+  &:active:not(:disabled) { background: var(--state-pressed); }
 
   &:focus-visible {
     outline: 2px solid var(--md-primary);
@@ -356,8 +364,10 @@ onBeforeUnmount(() => {
   justify-content: center;
   width: 24px;
   height: 24px;
-  font-size: 20px;
-  color: currentColor;
+  font-size: 19px;
+  color: var(--md-on-surface-variant);
+
+  .danger & { color: currentColor; }
 
   &.empty {
     visibility: hidden;
@@ -372,7 +382,7 @@ onBeforeUnmount(() => {
 .context-menu-item__shortcut {
   margin-left: 8px;
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 400;
   line-height: 18px;
   white-space: nowrap;
@@ -380,9 +390,8 @@ onBeforeUnmount(() => {
 
 .context-menu-separator {
   height: 1px;
-  margin: 4px 12px;
-  background: var(--md-outline-variant);
-  opacity: 0.7;
+  margin: 5px 12px;
+  background: var(--hairline);
 }
 
 .context-menu-enter-active {

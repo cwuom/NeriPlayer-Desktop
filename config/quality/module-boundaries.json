@@ -113,6 +113,11 @@
         "modules",
         "stores",
         "i18n"
+      ],
+      "dev": [
+        "types",
+        "utils",
+        "modules"
       ]
     },
     "ipc_layers": [

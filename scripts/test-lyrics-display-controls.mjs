@@ -214,6 +214,12 @@ async function mount({ lyrics = richLyrics, settingOverrides = {} } = {}) {
     assertPressed(translation, romanization) {
       assert.equal(String(button('show_translation').props['aria-pressed']), String(translation))
       assert.equal(String(button('show_romanization').props['aria-pressed']), String(romanization))
+      // 按钮文字固定为「译文 / 音译」，状态只靠高亮表达；悬停提示说明点击后的效果
+      const label = node => (node.children ?? []).map(child => child.text ?? '').filter(Boolean)
+      assert.ok(label(button('show_translation')).includes('lyrics.translation_chip'), 'translation chip keeps a fixed label')
+      assert.ok(label(button('show_romanization')).includes('lyrics.romanization_chip'), 'romanization chip keeps a fixed label')
+      assert.equal(button('show_translation').props.title, translation ? 'lyrics.hide_translation' : 'settings.show_translation')
+      assert.equal(button('show_romanization').props.title, romanization ? 'lyrics.hide_romanization' : 'settings.show_romanization')
     },
     assertAvailable(translation, romanization) {
       assert.equal(Boolean(findButton('show_translation')), translation, 'translation button availability must follow the source lyrics')

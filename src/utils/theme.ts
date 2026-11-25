@@ -1,6 +1,7 @@
 // 深色/浅色模式管理 + 圆形扩散过渡动画
 // 参考 Android 端 pending state 模式：视觉切换与持久化解耦，消除卡顿
 import { detectPlatform } from '@/utils/platform'
+import { runThemeCrossfade } from './theme/crossfade'
 
 // WebKitGTK 的 View Transition 在 Linux 上不稳定（整页快照合成可致
 // WebKit 回调内 SEGV），走 beginSmoothThemeTransition 平滑降级
@@ -15,6 +16,8 @@ import {
 } from './themeColor'
 
 export type ThemeMode = 'system' | 'dark' | 'light'
+
+
 
 export function getThemeMode(): ThemeMode {
   return (localStorage.getItem('theme-mode') as ThemeMode) || 'system'
@@ -66,61 +69,13 @@ export async function switchThemeWithRipple(mode: ThemeMode, x: number, y: numbe
     return
   }
 
-  // 计算圆形遮罩最大半径（覆盖整个屏幕）
-  const maxRadius = Math.hypot(
-    Math.max(x, window.innerWidth - x),
-    Math.max(y, window.innerHeight - y),
-  )
-
-  // 禁用 CSS color 过渡，避免圆外区域文字提前变色
-  // ripple 与平滑过渡互斥：先清掉可能残留的 theme-switching
-  const root = document.documentElement
+  // 交叉淡化与平滑过渡互斥：先清掉可能残留的 theme-switching。
+  // x / y 是点击位置，保留参数以兼容调用方（以前用于圆形扩散的圆心）
   cancelSmoothThemeTransition()
-  root.classList.add('theme-ripple-active')
-  // 用 CSS 变量驱动 clip-path，兼容 WebView2 对 WAAPI pseudoElement 支持不全的情况
-  root.style.setProperty('--theme-ripple-x', `${x}px`)
-  root.style.setProperty('--theme-ripple-y', `${y}px`)
-  root.style.setProperty('--theme-ripple-r', '0px')
-
-  const transition = document.startViewTransition(() => {
-    // 仅视觉切换，不含 localStorage 写入
-    applyThemeVisual(mode)
-  })
-
   // 异步持久化，不阻塞动画关键路径
   if (persist) queueMicrotask(() => localStorage.setItem('theme-mode', mode))
-
-  try {
-    await transition.ready
-    root.style.setProperty('--theme-ripple-r', `${maxRadius}px`)
-
-    // 双通道：CSS 变量动画 + WAAPI，谁先可用谁生效
-    const anim = root.animate(
-      {
-        clipPath: [
-          `circle(0px at ${x}px ${y}px)`,
-          `circle(${maxRadius}px at ${x}px ${y}px)`,
-        ],
-      },
-      {
-        duration: 500,
-        easing: 'cubic-bezier(0.2, 0, 0, 1)',
-        pseudoElement: '::view-transition-new(root)',
-      },
-    )
-    await Promise.race([
-      anim.finished.catch(() => {}),
-      new Promise<void>(resolve => setTimeout(resolve, 520)),
-    ])
-    await transition.finished.catch(() => {})
-  } catch {
-    // transition 被中断也没关系
-  } finally {
-    root.classList.remove('theme-ripple-active')
-    root.style.removeProperty('--theme-ripple-x')
-    root.style.removeProperty('--theme-ripple-y')
-    root.style.removeProperty('--theme-ripple-r')
-  }
+  // 仅视觉切换，不含 localStorage 写入
+  await runThemeCrossfade(() => applyThemeVisual(mode))
 }
 
 // 初始化

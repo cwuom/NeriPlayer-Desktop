@@ -43,55 +43,54 @@ defineExpose({ focus })
 </template>
 
 <style scoped lang="scss">
+/* Clean 输入框：安静的墨色填充，聚焦时变白底并套强调色光环（替代 M3 下划线） */
 .m3-input {
   position: relative;
   padding: 8px 0 0;
 
-  &.disabled { opacity: 0.38; }
+  &.disabled { opacity: 0.4; }
 }
 
 .input-label {
   display: block;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--fs-12);
+  font-weight: 600;
   color: var(--md-on-surface-variant);
-  margin-bottom: 4px;
+  margin: 0 2px 6px;
   transition: color 200ms;
 
-  .focused & { color: var(--md-primary); }
+  .focused & { color: var(--md-on-surface); }
 }
 
 input {
   display: block;
   width: 100%;
-  height: 48px;
-  padding: 0 16px;
-  font-size: 16px;
+  height: 42px;
+  padding: 0 14px;
+  font-size: var(--fs-14);
   font-family: inherit;
   color: var(--md-on-surface);
-  background: var(--md-surface-container);
-  border: none;
-  border-radius: 12px 12px 0 0;
+  background: var(--md-surface-container-high);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   outline: none;
   caret-color: var(--md-primary);
+  transition: background 150ms, border-color 150ms, box-shadow 150ms;
+
+  &:hover { background: color-mix(in srgb, var(--md-on-surface) 4%, var(--md-surface-container-high)); }
 
   &::placeholder {
     color: var(--md-on-surface-variant);
-    opacity: 0.6;
+    opacity: 0.7;
   }
-}
-
-.input-underline {
-  height: 2px;
-  background: var(--md-on-surface-variant);
-  opacity: 0.5;
-  border-radius: 0 0 1px 1px;
-  transition: background 200ms, opacity 200ms, height 200ms;
 
   .focused & {
-    height: 2px;
-    background: var(--md-primary);
-    opacity: 1;
+    background: var(--md-surface-container-lowest);
+    border-color: var(--md-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--md-primary) 18%, transparent);
   }
 }
+
+/* 下划线保留节点以兼容结构，Clean 下不再显示 */
+.input-underline { display: none; }
 </style>

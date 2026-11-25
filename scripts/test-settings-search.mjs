@@ -55,13 +55,21 @@ const searchStatement = searchBody.find(statement => ts.isVariableStatement(stat
 const searchCompiled = ts.transpileModule(searchStatement.getText(parsed), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
-for (const mac of [false, true]) {
-  const results = new Function('computed', 'settingsQuery', 'settingsNavGroups', 'SETTINGS_SEARCH_INDEX', 'SETTINGS_SECTION_IDS', 't', 'filterAndRank', 'searchValue', 'isMacPlatform', `${searchCompiled}\nreturn settingsSearchResults`)(
-    callback => callback(), { value: 'macOS' }, { value: [] }, index, sectionIds, key => key,
-    matcher.filterAndRank, matcher.searchValue, mac,
+function searchSettings(query, { mac = false, windows = false } = {}) {
+  return new Function('computed', 'settingsQuery', 'settingsNavGroups', 'SETTINGS_SEARCH_INDEX', 'SETTINGS_SECTION_IDS', 't', 'filterAndRank', 'searchValue', 'isMacPlatform', 'isWindowsPlatform', `${searchCompiled}\nreturn settingsSearchResults`)(
+    callback => callback(), { value: query }, { value: [] }, index, sectionIds, key => key,
+    matcher.filterAndRank, matcher.searchValue, mac, windows,
   )
+}
+for (const mac of [false, true]) {
+  const results = searchSettings('macOS', { mac })
   assert.equal(results.some(result => result.key === 'desktop_lyrics:desktop_lyrics.menu_bar'), mac,
     'macOS-only controls must only appear in search on macOS')
+}
+for (const windows of [false, true]) {
+  const results = searchSettings('WASAPI', { windows })
+  assert.equal(results.some(result => result.key === 'audio:settings.audio_exclusive'), windows,
+    'WASAPI exclusive output must only appear in search on Windows')
 }
 
 for (const [query, expected] of [
@@ -70,10 +78,7 @@ for (const [query, expected] of [
   ['滚动', 'desktop_lyrics:desktop_lyrics.max_width'],
   ['max width', 'desktop_lyrics:desktop_lyrics.max_width'],
 ]) {
-  const results = new Function('computed', 'settingsQuery', 'settingsNavGroups', 'SETTINGS_SEARCH_INDEX', 'SETTINGS_SECTION_IDS', 't', 'filterAndRank', 'searchValue', 'isMacPlatform', `${searchCompiled}\nreturn settingsSearchResults`)(
-    callback => callback(), { value: query }, { value: [] }, index, sectionIds, key => key,
-    matcher.filterAndRank, matcher.searchValue, false,
-  )
+  const results = searchSettings(query)
   assert.ok(results.some(result => result.key === expected),
     `lyric preferences must be discoverable with ${query}`)
 }

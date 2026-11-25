@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import {
   PlaybackDemandArbiter,
   PlaybackStartupWatchdog,
+  PREVIOUS_RESTART_THRESHOLD_MS,
   resolvePlaybackFailureAdvanceAction,
+  shouldRestartOnPrevious,
   type PlaybackStartupWatchdogOptions,
 } from '@/modules/playback/playbackPolicy'
 
@@ -48,6 +50,19 @@ describe('resolvePlaybackFailureAdvanceAction', () => {
     expect(advance({ shuffle: true, currentIndex: 0 })).toBe('stop')
     expect(advance({ shuffle: true, currentIndex: 0, repeatAll: true })).toBe('wrap')
     expect(advance({ shuffle: true, currentIndex: 0, queueSize: 1, repeatAll: true })).toBe('stop')
+  })
+})
+
+describe('shouldRestartOnPrevious', () => {
+  it('restarts only after the threshold while the preference is on', () => {
+    expect(shouldRestartOnPrevious(PREVIOUS_RESTART_THRESHOLD_MS + 1, true)).toBe(true)
+    expect(shouldRestartOnPrevious(PREVIOUS_RESTART_THRESHOLD_MS, true)).toBe(false)
+    expect(shouldRestartOnPrevious(0, true)).toBe(false)
+  })
+
+  it('never restarts when the preference is off (#75)', () => {
+    expect(shouldRestartOnPrevious(PREVIOUS_RESTART_THRESHOLD_MS + 1, false)).toBe(false)
+    expect(shouldRestartOnPrevious(10 * 60_000, false)).toBe(false)
   })
 })
 

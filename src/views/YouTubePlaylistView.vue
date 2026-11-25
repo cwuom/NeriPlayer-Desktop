@@ -178,7 +178,8 @@ function playTrack(track: TrackInfo) {
     toggleSelected(track.id)
     return
   }
-  player.playAll(filteredTracks.value, track.id)
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  player.playAll(tracks.value, track.id)
 }
 
 function playSelected() {
@@ -339,7 +340,7 @@ onMounted(() => {
 
 <template>
   <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>

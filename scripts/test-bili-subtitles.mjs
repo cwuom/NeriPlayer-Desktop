@@ -48,6 +48,18 @@ await test('cue parsing handles seconds, missing ends, duplicates and malformed 
   ])
 })
 
+await test('AI subtitle music-note decorations are stripped and note-only rows are dropped', () => {
+  assert.deepEqual(s.parseBiliSubtitleCues(payload([
+    row(0, 2, '♪ 苍山的月亮又圆了 ♪'), row(2, 3, '♪'), row(3, 4, ' ♫♬ '), row(4, 6, '♩洱海的风♩ 吹过来 ♪'), row(6, 8, '♪ 上句 ♪\n♪'),
+  ])), [
+    { startMs: 0, endMs: 2000, text: '苍山的月亮又圆了' },
+    { startMs: 4000, endMs: 6000, text: '洱海的风 吹过来' },
+    { startMs: 6000, endMs: 8000, text: '上句' },
+  ])
+  const lines = s.alignBiliSubtitleLyrics(s.parseBiliSubtitleCues(payload([row(0, 2, '♪ 原文 ♪')])), s.parseBiliSubtitleCues(payload([row(0, 2, '♪ source ♪')])))
+  assert.deepEqual(lines.map(line => [line.text, line.translation]), [['原文', 'source']])
+})
+
 const align = (a, b) => s.alignBiliSubtitleLyrics(s.parseBiliSubtitleCues(payload(a)), s.parseBiliSubtitleCues(payload(b)))
 await test('a long translation stays on every matching original row without moving to the next sentence', () => {
   const result = align([row(50, 52, '甲'), row(52, 54, '乙'), row(54, 57, '丙'), row(57, 60, '丁')], [row(50, 54, 'AB'), row(54, 57, 'C'), row(57, 60, 'D')])

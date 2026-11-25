@@ -176,7 +176,7 @@ function onSettingsSearchKeydown(event: KeyboardEvent) {
     background: transparent;
     color: var(--md-on-surface);
     font: inherit;
-    font-size: 14px;
+    font-size: var(--fs-14);
     &::placeholder { color: var(--md-on-surface-variant); }
     &::-webkit-search-cancel-button { display: none; }
   }
@@ -208,7 +208,7 @@ function onSettingsSearchKeydown(event: KeyboardEvent) {
 .settings-search-empty {
   padding: 24px 12px;
   text-align: center;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
 }
 
@@ -258,7 +258,7 @@ function onSettingsSearchKeydown(event: KeyboardEvent) {
   }
 
   strong {
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-weight: 600;
     line-height: 1.25;
   }
@@ -266,7 +266,7 @@ function onSettingsSearchKeydown(event: KeyboardEvent) {
   small {
     margin-top: 3px;
     color: var(--md-on-surface-variant);
-    font-size: 11px;
+    font-size: var(--fs-11);
     line-height: 1.35;
     white-space: nowrap;
   }
