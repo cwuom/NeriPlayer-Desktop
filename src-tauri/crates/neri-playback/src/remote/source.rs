@@ -3,6 +3,14 @@
 use super::*;
 
 impl RemoteAudioSource {
+    /// 正在使用的磁盘缓存条目（未开缓存时为 None）
+    pub fn cache_entry_id(&self) -> Option<String> {
+        self.inner
+            .disk_cache
+            .as_ref()
+            .map(|cache| cache.entry_id().to_owned())
+    }
+
     pub async fn open(
         client: reqwest::Client,
         url: String,

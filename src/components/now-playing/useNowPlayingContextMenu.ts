@@ -28,10 +28,11 @@ interface ContextMenuDeps {
   coverUrl: Readonly<Ref<string>>
   shareSong: () => Promise<void>
   openAddToPlaylist: () => void
+  openCoverPreview: () => void
 }
 
 /** 右键菜单（歌曲名/歌手复制 + 封面保存）与点击歌手名跳转歌手页 */
-export function useNowPlayingContextMenu({ ipc, emit, coverUrl, shareSong, openAddToPlaylist }: ContextMenuDeps) {
+export function useNowPlayingContextMenu({ ipc, emit, coverUrl, shareSong, openAddToPlaylist, openCoverPreview }: ContextMenuDeps) {
   const player = usePlayerStore()
   const settings = useSettingsStore()
   const toast = useToastStore()
@@ -141,6 +142,7 @@ export function useNowPlayingContextMenu({ ipc, emit, coverUrl, shareSong, openA
       ]
     }
     return [
+      createContextMenuItem(t('player.cover_preview'), { id: 'preview-cover', icon: 'zoom_in', disabled: !coverUrl.value }),
       createContextMenuItem(t('player.save_cover'), { id: 'save-cover', icon: 'save', disabled: !coverUrl.value }),
       createContextMenuSeparator('cover-style'),
       createContextMenuItem(t('settings.cover_style_card'), { id: 'cover-style-card', icon: settings.coverStyle === 'card' ? 'check' : 'crop_square' }),
@@ -185,6 +187,7 @@ export function useNowPlayingContextMenu({ ipc, emit, coverUrl, shareSong, openA
       case 'share': closeContextMenu(); void shareSong(); break
       case 'add-to-playlist': closeContextMenu(); openAddToPlaylist(); break
       case 'open-artist': closeContextMenu(); void openArtistPage(new MouseEvent('click', { clientX: x, clientY: y })); break
+      case 'preview-cover': closeContextMenu(); openCoverPreview(); break
       case 'save-cover': void saveCoverArt(); break
       case 'cover-style-card': settings.coverStyle = 'card'; closeContextMenu(); break
       case 'cover-style-disc': settings.coverStyle = 'disc'; closeContextMenu(); break
@@ -216,5 +219,6 @@ export function useNowPlayingContextMenu({ ipc, emit, coverUrl, shareSong, openA
     closeContextMenu,
     copyText,
     handleContextMenuClick,
+    saveCoverArt,
   }
 }

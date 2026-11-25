@@ -2,6 +2,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { LyricLine } from '@/types/track'
 import { mapBackendLyrics } from './lyricsFormat'
+import { extractQuotedSongTitle } from './lyricSearchTitle'
 
 /** 平台按 Android 匹配面板的顺序排列（YouTube Music 暂不提供） */
 export const LYRIC_MATCH_SOURCES = ['kugou', 'netease', 'qq', 'lrclib', 'amll_ttml'] as const
@@ -43,8 +44,9 @@ export function defaultLyricMatchSources(playbackSource?: string | null): LyricM
     : ['kugou', 'netease', 'amll_ttml']
 }
 
+/** 标题带书名号时用其中的歌名；原标题仍作为后端 search_queries 的「歌名 歌手」「歌名」兜底搜索词 */
 export function defaultLyricMatchKeyword(title?: string | null, artist?: string | null): string {
-  return [title, artist].map(value => (value || '').trim()).filter(Boolean).join(' ')
+  return [extractQuotedSongTitle(title) ?? title, artist].map(value => (value || '').trim()).filter(Boolean).join(' ')
 }
 
 function isSource(value: unknown): value is LyricMatchSource {

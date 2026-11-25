@@ -189,12 +189,13 @@ await test('opening a local artist records one open for Continue playing', async
     assert.equal(page.opened[0].trackCount, 123)
   } finally { page.stop() }
 })
-await test('filtered rows play the selected song while bulk actions retain the complete artist queue', async () => {
+await test('filtered rows play the selected song from the complete artist queue', async () => {
   const page = await mountArtist()
   try {
     await page.search('needle')
     byClass(page.root, 'track-item')[1].props.onClick()
-    assert.deepEqual(page.played[0][0].map(track => track.id), ['alpha', 'beta'])
+    // 搜索只用来定位，队列不能缩成搜索结果
+    assert.equal(page.played[0][0].length, 123, 'search must not shrink the queue')
     assert.equal(page.played[0][1], 'beta', 'filtered index must not select an unrelated original track')
     byClass(page.root, 'primary-action')[0].props.onClick()
     byClass(page.root, 'secondary-action')[0].props.onClick()

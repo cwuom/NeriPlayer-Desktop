@@ -9,7 +9,11 @@ pub mod events;
 /// Linux WebKitGTK/NVIDIA graphics compatibility (sets env vars before startup).
 #[cfg(target_os = "linux")]
 pub mod linux_graphics;
+/// WebKitGTK 2.54 Skia 合成器闪烁规避；决策逻辑与平台无关，便于单测。
+pub mod linux_webkit_compositor;
 pub mod logging;
+/// macOS 红绿灯在 AppKit 重新布局后复位到配置位置
+pub mod macos_traffic_lights;
 pub mod platform_webview;
 pub mod settings;
 pub mod state;

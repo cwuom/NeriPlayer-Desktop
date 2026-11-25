@@ -52,8 +52,9 @@ function onAction(msg: ToastMessage) {
 <style scoped>
 .toast-container {
   position: fixed;
-  bottom: 100px;
-  left: 50%;
+  bottom: calc(var(--mini-player-height, 76px) + 20px);
+  /* 居中到内容区而不是整个窗口，避开左侧侧栏 */
+  left: calc(50% + var(--sidebar-width, 0px) / 2);
   transform: translateX(-50%);
   z-index: 10000;
   display: flex;
@@ -66,13 +67,13 @@ function onAction(msg: ToastMessage) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 20px;
-  border-radius: 12px;
+  padding: 11px 18px;
+  border-radius: var(--radius-md);
   background: var(--md-inverse-surface, #313033);
   color: var(--md-inverse-on-surface, #F4EFF4);
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 450;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-2);
   pointer-events: auto;
   cursor: pointer;
   min-width: 200px;
@@ -139,7 +140,7 @@ function onAction(msg: ToastMessage) {
   background: color-mix(in srgb, var(--md-primary, #D0BCFF) 22%, transparent);
   color: var(--md-primary, #D0BCFF);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 650;
   letter-spacing: 0.01em;
   cursor: pointer;

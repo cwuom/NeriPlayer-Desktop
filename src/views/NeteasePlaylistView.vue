@@ -9,6 +9,7 @@ import { useDelayedFlag } from '@/composables/useDelayedFlag'
 import { useI18n } from 'vue-i18n'
 import { invoke } from '@tauri-apps/api/core'
 import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
+import TrackListHeader from '@/components/library/TrackListHeader.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
@@ -239,7 +240,8 @@ function playTrack(track: TrackInfo) {
     toggleSelected(track.id)
     return
   }
-  player.playAll(filteredTracks.value, track.id)
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  player.playAll(tracks.value, track.id)
 }
 
 function playSelected() {
@@ -412,7 +414,7 @@ onMounted(() => {
 
 <template>
   <div ref="viewRef" class="detail-view" @scroll="onTrackListScroll">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
@@ -491,6 +493,7 @@ onMounted(() => {
           @download="downloadSelected"
           @exit="leaveSelectionMode"
         />
+        <TrackListHeader album more />
         <div class="track-list">
         <div
           v-for="(track, index) in visibleTracks"
@@ -521,8 +524,9 @@ onMounted(() => {
           </div>
           <div class="track-info">
             <div class="track-title">{{ track.title }}</div>
-            <div class="track-meta">{{ track.artist }}<template v-if="track.album"> · {{ track.album }}</template></div>
+            <div class="track-meta">{{ track.artist }}<span v-if="track.album" class="track-meta-album"> · {{ track.album }}</span></div>
           </div>
+          <div class="track-album">{{ track.album }}</div>
           <div class="track-duration">{{ formatDuration(track.durationMs) }}</div>
           <button v-if="!selectionMode" class="track-more" @click.stop="openTrackMenu($event, track)">
             <span class="material-symbols-rounded">more_vert</span>

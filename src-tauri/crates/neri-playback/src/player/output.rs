@@ -47,6 +47,171 @@ pub(super) fn wait_until_ready(
     Ok(())
 }
 
+/// 会话持有的输出流：cpal 共享流，或 Windows 上的 WASAPI 独占流
+pub(super) enum OutputStream {
+    Shared(Stream),
+    #[cfg(target_os = "windows")]
+    Exclusive(super::wasapi_exclusive::ExclusiveStream),
+    /// 旧流已提前释放：同一设备上的新流要等它让出设备才打得开
+    /// （独占流占着设备时谁都打不开；共享流还在时，端点关闭“独占优先”就初始化不了独占）
+    #[cfg(target_os = "windows")]
+    Released,
+}
+
+impl OutputStream {
+    pub(super) fn play(&self) -> Result<(), String> {
+        match self {
+            Self::Shared(stream) => stream
+                .play()
+                .map_err(|error| format!("Could not start audio output: {error}")),
+            #[cfg(target_os = "windows")]
+            Self::Exclusive(stream) => stream.play(),
+            #[cfg(target_os = "windows")]
+            Self::Released => Err("Exclusive audio output was released".into()),
+        }
+    }
+
+    pub(super) fn pause(&self) -> Result<(), String> {
+        match self {
+            Self::Shared(stream) => stream.pause().map_err(|error| error.to_string()),
+            #[cfg(target_os = "windows")]
+            Self::Exclusive(stream) => stream.pause(),
+            #[cfg(target_os = "windows")]
+            Self::Released => Ok(()),
+        }
+    }
+
+    /// 是否独占着输出设备（只有 Windows 独占流会）
+    #[cfg(target_os = "windows")]
+    pub(super) fn holds_device_exclusively(&self) -> bool {
+        matches!(self, Self::Exclusive(_))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn holds_device_exclusively(&self) -> bool {
+        false
+    }
+
+    /// 释放独占流占着的设备（drop 会停掉渲染线程并归还端点）；共享流不受影响。
+    /// 返回是否真的释放了
+    pub(super) fn release_exclusive(&mut self) -> bool {
+        self.release_before_reopen(false)
+    }
+
+    /// 为即将打开的新流让出设备。新流要独占时共享流也得先关：
+    /// WASAPI 在端点关闭“独占优先”时，只要还有共享流就初始化不了独占，会静默回退共享。
+    /// 返回是否真的释放了
+    pub(super) fn release_before_reopen(&mut self, next_exclusive: bool) -> bool {
+        #[cfg(target_os = "windows")]
+        if !matches!(self, Self::Released)
+            && release_needed(self.holds_device_exclusively(), next_exclusive)
+        {
+            *self = Self::Released;
+            return true;
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = next_exclusive;
+        false
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn release_needed(holds_exclusive: bool, next_exclusive: bool) -> bool {
+    holds_exclusive || next_exclusive
+}
+
+/// 按设备档案建流：请求了独占就先试独占，失败（设备被占用、格式不支持）回退共享流。
+/// 独占流沿用共享混音格式的采样率和声道数，所以回退不需要重建 ring 与时钟
+pub(super) fn open_output_stream(
+    profile: &OutputDeviceProfile,
+    shared: Arc<PlaybackShared>,
+    loopback_tx: mpsc::Sender<AudioCmd>,
+    playback_generation: u64,
+) -> Result<OutputStream, String> {
+    #[cfg(target_os = "windows")]
+    if profile.exclusive {
+        match build_exclusive_stream(
+            profile,
+            Arc::clone(&shared),
+            loopback_tx.clone(),
+            playback_generation,
+        ) {
+            Ok(stream) => return Ok(OutputStream::Exclusive(stream)),
+            Err(error) => log::warn!(
+                target: "cpal-output",
+                "exclusive output unavailable on {}, falling back to shared mode: {error}",
+                profile.name
+            ),
+        }
+    }
+    build_output_stream(
+        &profile.device,
+        &profile.config,
+        profile.sample_format,
+        shared,
+        loopback_tx,
+        playback_generation,
+    )
+    .map(OutputStream::Shared)
+}
+
+/// 设备失效时与 cpal 错误回调一致：进入重缓冲，并向控制线程报告一次 DeviceLost
+fn report_device_lost(
+    shared: &Arc<PlaybackShared>,
+    loopback_tx: &mpsc::Sender<AudioCmd>,
+    playback_generation: u64,
+) {
+    shared.begin_rebuffering();
+    if !shared.device_lost.swap(true, Ordering::AcqRel) {
+        let _ = loopback_tx.send(AudioCmd::DeviceLost {
+            playback_generation,
+            session_cancelled: Arc::clone(&shared.cancelled),
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn build_exclusive_stream(
+    profile: &OutputDeviceProfile,
+    shared: Arc<PlaybackShared>,
+    loopback_tx: mpsc::Sender<AudioCmd>,
+    playback_generation: u64,
+) -> Result<super::wasapi_exclusive::ExclusiveStream, String> {
+    use super::wasapi_exclusive::{ExclusiveBuffer, ExclusiveStream};
+    let callback_shared = Arc::clone(&shared);
+    let mut chain = OutputChain::new(&shared);
+    // 默认设备也按名字找：名字就是 cpal 取的端点友好名称，与当前默认端点一致
+    ExclusiveStream::open(
+        Some(profile.name.clone()),
+        profile.config.sample_rate.0,
+        profile.config.channels,
+        move |buffer| match buffer {
+            ExclusiveBuffer::F32(output) => render_output(
+                &callback_shared,
+                output,
+                &mut chain,
+                &metrics::OUTPUT_METRICS,
+            ),
+            ExclusiveBuffer::I32(output) => render_output(
+                &callback_shared,
+                output,
+                &mut chain,
+                &metrics::OUTPUT_METRICS,
+            ),
+            ExclusiveBuffer::I16(output) => render_output(
+                &callback_shared,
+                output,
+                &mut chain,
+                &metrics::OUTPUT_METRICS,
+            ),
+        },
+        move |error| {
+            log::error!(target: "cpal-output", "exclusive stream error: {error}");
+            report_device_lost(&shared, &loopback_tx, playback_generation);
+        },
+    )
+}
+
 pub(super) fn build_output_stream(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -115,16 +280,10 @@ where
             },
             move |error| {
                 log::error!(target: "cpal-output", "stream error: {error}");
-                shared.begin_rebuffering();
                 // 输出设备失效（拔耳机/蓝牙断连）恢复：向控制线程上报一次
                 // DeviceLost，由它以默认设备原地重建会话。此回调运行在音频
                 // 线程，仅做无阻塞 send（std mpsc 无界通道，不会等待）
-                if !shared.device_lost.swap(true, Ordering::AcqRel) {
-                    let _ = loopback_tx.send(AudioCmd::DeviceLost {
-                        playback_generation,
-                        session_cancelled: Arc::clone(&shared.cancelled),
-                    });
-                }
+                report_device_lost(&shared, &loopback_tx, playback_generation);
             },
             None,
         )
@@ -288,4 +447,18 @@ pub(super) fn render_output<T>(
         underrun,
         metrics::monotonic_ns().saturating_sub(started_ns),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_needed;
+
+    #[test]
+    fn shared_output_is_released_before_opening_an_exclusive_stream() {
+        // 回归：只释放独占流时，共享播放中打开独占会被还开着的共享流挡住，静默回退共享
+        assert!(release_needed(false, true));
+        assert!(release_needed(true, false), "独占流总要先让出设备");
+        assert!(release_needed(true, true));
+        assert!(!release_needed(false, false), "共享到共享不必中断旧流");
+    }
 }

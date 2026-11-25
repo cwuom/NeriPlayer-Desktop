@@ -207,7 +207,8 @@ function playAll() {
 }
 
 function playTrack(track: TrackInfo) {
-  player.playAll(filteredTracks.value, track.id)
+  // 搜索只用来定位歌曲：点击后仍按完整列表排队，从这首开始播放，不把队列缩成搜索结果
+  player.playAll(tracks.value, track.id)
 }
 
 function openAlbum(album: ArtistAlbum) {
@@ -239,7 +240,7 @@ onUnmounted(() => { generation++ })
 
 <template>
   <div class="detail-view" @scroll.passive="onViewScroll">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" @click="router.back()">
         <span class="material-symbols-rounded">arrow_back</span>
       </button>
@@ -512,7 +513,7 @@ onUnmounted(() => { generation++ })
 
   p {
     margin: 2px 0 0;
-    font-size: 13px;
+    font-size: var(--fs-13);
     color: rgba(255, 255, 255, 0.82);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -536,15 +537,15 @@ onUnmounted(() => { generation++ })
   height: 30px;
   padding: 0 14px;
   border-radius: var(--radius-full);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
 }
 
 .artist-brief {
   margin: 12px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
   color: var(--md-on-surface-variant);
   display: -webkit-box;
@@ -567,9 +568,9 @@ onUnmounted(() => { generation++ })
   align-items: center;
   gap: 6px;
   padding: 10px 18px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-full);
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-primary);
 
   &.active { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
@@ -622,7 +623,7 @@ onUnmounted(() => { generation++ })
 }
 
 .artist-album-name {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -631,7 +632,7 @@ onUnmounted(() => { generation++ })
 
 .artist-album-meta {
   margin-top: 2px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 }
 </style>

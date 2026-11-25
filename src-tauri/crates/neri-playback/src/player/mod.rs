@@ -33,13 +33,19 @@ use neri_common::error::{AppError, AppResult};
 // 按职责拆分的子模块，通过 `use super::*` 共享本模块的类型与常量
 mod control_loop;
 mod engine;
+mod exclusive_format;
 mod loudness;
 mod output;
 mod output_device;
 mod pipeline;
 mod resample;
 mod transition;
+#[cfg(target_os = "windows")]
+mod wasapi_exclusive;
 use control_loop::*;
+pub use exclusive_format::{
+    exclusive_output_requested, set_exclusive_output, EXCLUSIVE_OUTPUT_SUPPORTED,
+};
 use loudness::*;
 use output::*;
 use output_device::*;
@@ -113,6 +119,14 @@ impl AudioSource {
         // seek 重建会共享下载缓冲，只有最后一个源释放时才停止生产者
         let lifetime = Arc::new(GrowingSourceLifetime(reader.clone()));
         Self::Growing(reader, hint, lifetime)
+    }
+
+    /// 远程流边播边读写的磁盘缓存条目：换缓存目录时不能搬走或删掉它的文件
+    fn cache_entry_id(&self) -> Option<String> {
+        match self {
+            Self::Remote(reader, _) => reader.cache_entry_id(),
+            Self::Bytes(..) | Self::File(..) | Self::Growing(..) => None,
+        }
     }
 
     fn duration_hint_ms(&self) -> u64 {
@@ -281,6 +295,7 @@ pub struct PlaybackStarted {
     pub duration_ms: u64,
     pub clock: Arc<PlaybackClock>,
     pub audio_info: SourceAudioInfo,
+    pub cache_entry: Option<String>,
 }
 
 pub struct PlaybackClock {
@@ -396,7 +411,7 @@ impl PlaybackShared {
 
 struct PlaybackSession {
     source: AudioSource,
-    stream: Stream,
+    stream: OutputStream,
     shared: Arc<PlaybackShared>,
     worker: Option<JoinHandle<()>>,
     duration_ms: u64,
@@ -409,6 +424,8 @@ struct OutputDeviceProfile {
     config: StreamConfig,
     sample_format: SampleFormat,
     name: String,
+    /// 打开时是否请求了独占输出，切换开关后通过强制重建生效
+    exclusive: bool,
 }
 
 impl OutputDeviceProfile {
@@ -444,6 +461,7 @@ impl OutputDeviceProfile {
             config,
             sample_format,
             name,
+            exclusive: EXCLUSIVE_OUTPUT_SUPPORTED && exclusive_output_requested(),
         })
     }
 }
@@ -465,9 +483,7 @@ impl PlaybackSession {
         self.shared.paused.store(false, Ordering::Release);
         // 唤醒可能在暂停态长睡的解码线程（见 spawn_decode_worker 的暂停等待）
         self.shared.wake.notify_all();
-        self.stream
-            .play()
-            .map_err(|error| format!("Could not start audio output: {error}"))
+        self.stream.play()
     }
 
     fn pause(&self) {
@@ -481,9 +497,21 @@ impl PlaybackSession {
         self.shared.cancelled.store(true, Ordering::Release);
         self.shared.wake.notify_all();
         let _ = self.stream.pause();
+        // stop 是会话终态，此后只会读它的 source 重建新会话（seek 回滚也是）。
+        // 独占流不能等会话 drop 才归还设备，否则同一设备上的新会话打不开
+        self.stream.release_exclusive();
         if let Some(worker) = self.worker.take() {
             finish_decode_worker(&self.source, &self.shared, worker);
         }
+    }
+
+    fn holds_output_exclusively(&self) -> bool {
+        self.stream.holds_device_exclusively()
+    }
+
+    /// 为新流让出设备、保留会话本身（源、时钟、响度），失败时仍能据此重建
+    fn release_output_before_reopen(&mut self, next_exclusive: bool) -> bool {
+        self.stream.release_before_reopen(next_exclusive)
     }
 
     fn is_empty(&self) -> bool {
@@ -517,6 +545,8 @@ pub struct PlayerEngine {
     pub volume: f32,
     pub speed: f32,
     pub current_path: Option<String>,
+    /// 当前远程流使用的磁盘缓存条目，见 [`AudioSource::cache_entry_id`]
+    pub current_cache_entry: Option<String>,
     pub duration_ms: u64,
     pub shared_audio_level: Arc<Mutex<SharedAudioLevel>>,
     effects: Arc<EffectsControl>,

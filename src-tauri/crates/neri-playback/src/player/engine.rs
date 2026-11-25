@@ -28,6 +28,7 @@ impl PlayerEngine {
             volume: 1.0,
             speed: 1.0,
             current_path: None,
+            current_cache_entry: None,
             duration_ms: 0,
             shared_audio_level,
             effects,
@@ -125,6 +126,7 @@ impl PlayerEngine {
         self.ensure_request_current(expected_generation)?;
         self.is_playing = true;
         self.current_path = Some(current_path);
+        self.current_cache_entry = result.cache_entry;
         self.duration_ms = result.duration_ms;
         self.loaded_generation = Some(expected_generation);
         self.ended_transition = None;
@@ -314,6 +316,7 @@ impl PlayerEngine {
     fn clear_playback_state(&mut self) {
         self.is_playing = false;
         self.current_path = None;
+        self.current_cache_entry = None;
         self.duration_ms = 0;
         self.loaded_generation = None;
         self.ended_transition = None;

@@ -7,9 +7,9 @@ use rusqlite::Connection;
 
 use neri_common::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const V1: &str = r#"
 CREATE TABLE migration_metadata (
@@ -265,6 +265,12 @@ const V3: &str = r#"
 ALTER TABLE play_history ADD COLUMN resume_position_ms INTEGER;
 "#;
 
+// 日分桶的记录日期与小时收听量（对齐 Android SyncPlaybackStatBucket 18/19 号字段）
+const V4: &str = r#"
+ALTER TABLE playback_stat_bucket ADD COLUMN recorded_local_date TEXT;
+ALTER TABLE playback_stat_bucket ADD COLUMN hourly_totals_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
 pub fn migrate(connection: &Connection) -> AppResult<()> {
     let current: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > SCHEMA_VERSION {
@@ -300,6 +306,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tables, 1);
+    }
+
+    #[test]
+    fn v4_keeps_existing_stat_buckets_readable_with_empty_hours() {
+        let connection = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..3] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection
+            .execute(
+                "INSERT INTO playback_stat_bucket VALUES
+                 (1, 'song', '', '', '', '', '', NULL, 0, 5, 1, 1, 1, NULL, 0, 0, '[]', 0)",
+                [],
+            )
+            .unwrap();
+        migrate(&connection).unwrap();
+        let (date, hours): (Option<String>, String) = connection
+            .query_row(
+                "SELECT recorded_local_date, hourly_totals_json FROM playback_stat_bucket",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((date, hours.as_str()), (None, "[]"));
     }
 
     #[test]

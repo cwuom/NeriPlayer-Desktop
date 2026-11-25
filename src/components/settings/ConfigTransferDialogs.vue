@@ -162,7 +162,7 @@ async function confirm() {
   white-space: normal;
 }
 
-.config-transfer p { margin: 0; font-size: 13px; line-height: 1.6; }
+.config-transfer p { margin: 0; font-size: var(--fs-13); line-height: 1.6; }
 
 .config-option {
   display: flex;
@@ -180,8 +180,8 @@ async function confirm() {
 }
 
 .config-option-copy { display: grid; gap: 4px; min-width: 0; }
-.config-option-title { font-size: 14px; font-weight: 600; color: var(--md-on-surface); }
-.config-option-description { font-size: 12px; line-height: 1.5; color: var(--md-on-surface-variant); }
+.config-option-title { font-size: var(--fs-14); font-weight: 600; color: var(--md-on-surface); }
+.config-option-description { font-size: var(--fs-12); line-height: 1.5; color: var(--md-on-surface-variant); }
 
 .config-notice {
   display: flex;

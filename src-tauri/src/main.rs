@@ -74,6 +74,9 @@ fn main() {
     // NERI_DISABLE_NVIDIA_QUIRK=1 to skip this layer. Explicit env vars always win.
     #[cfg(target_os = "linux")]
     neri_player_desktop::linux_graphics::apply_nvidia_webkit_workarounds();
+    // WebKitGTK 2.54.x 的 Skia 合成器会让过渡与动态背景闪烁，与显卡无关，所有 Linux 都要在 WebView 启动前处理
+    #[cfg(target_os = "linux")]
+    neri_player_desktop::linux_webkit_compositor::apply_skia_compositor_workaround();
 
     // 在其余插件之前初始化统一日志：启动期直接读取持久化设置决定
     // 是否写文件与日志级别（此时尚无 app handle）
@@ -110,6 +113,12 @@ fn main() {
                     quirk.dmabuf_atlas_disabled, quirk.vblank_timer_forced, quirk.dmabuf_shm_forced,
                     quirk.dmabuf_disabled, quirk.software_compositing,
                 );
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let (version, decision) =
+                    neri_player_desktop::linux_webkit_compositor::apply_skia_compositor_workaround();
+                log::info!(target: "linux-graphics", "WebKitGTK {version:?}: skia compositor {decision:?}");
             }
 
             // 安装包把 FFmpeg 放在资源目录的 ffmpeg/ 下，各平台、各包格式的位置由 Tauri 给出
@@ -472,6 +481,7 @@ fn main() {
             player_cmd::set_volume,
             player_cmd::list_audio_output_devices,
             player_cmd::set_audio_output_device,
+            player_cmd::set_audio_exclusive_mode,
             player_cmd::seek,
             player_cmd::stop,
             player_cmd::set_speed,
@@ -561,6 +571,7 @@ fn main() {
             lyrics_cmd::match_lyrics,
             settings_cmd::get_settings,
             settings_cmd::ui_scale_supported,
+            settings_cmd::align_traffic_lights,
             settings_cmd::save_settings,
             settings_cmd::get_app_data_dir,
             settings_cmd::import_background_image,
@@ -587,6 +598,10 @@ fn main() {
             debug_cmd::debug_trigger_crash,
             storage_cmd::get_storage_usage,
             storage_cmd::clear_storage_cache,
+            storage_cmd::get_media_cache_dir,
+            storage_cmd::set_media_cache_dir,
+            storage_cmd::reset_media_cache_dir,
+            storage_cmd::open_media_cache_dir,
             auth_cmd::login_netease,
             auth_cmd::login_bilibili,
             auth_cmd::login_youtube,
@@ -726,7 +741,21 @@ fn main() {
                 label,
                 event: WindowEvent::Focused(true),
                 ..
-            } if label == "main" => tray_cmd::main_window_focused(app_handle),
+            } if label == "main" => {
+                reapply_traffic_lights(app_handle);
+                tray_cmd::main_window_focused(app_handle)
+            }
+            // AppKit 在改尺寸、换屏、切换外观后会把红绿灯放回默认位置
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::WindowEvent {
+                label,
+                event:
+                    WindowEvent::Resized(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+                    | WindowEvent::ThemeChanged(_)
+                    | WindowEvent::Focused(false),
+                ..
+            } if label == "main" => reapply_traffic_lights(app_handle),
             tauri::RunEvent::WindowEvent {
                 label,
                 event: WindowEvent::Destroyed,
@@ -804,9 +833,34 @@ fn window_command_allowed(label: &str, command: &str) -> bool {
             ))
 }
 
+/// 把主窗口红绿灯重新摆回 tauri.conf.json 里配置的位置（非 macOS 为空操作）
+fn reapply_traffic_lights(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Some((x, _)) = neri_player_desktop::macos_traffic_lights::configured_position(app) {
+        neri_player_desktop::macos_traffic_lights::apply(&window, x);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_playback_finish, PlaybackFinishState};
+
+    /// macOS 14+ 的 WKWebView 默认在窗口隐藏后挂起整个页面进程：收进托盘时前端计时器全停，
+    /// 挂起久了再显示窗口会停在一片背景色上。主窗口必须关掉这项挂起，帧循环已按
+    /// document.hidden 自行暂停，不会因此空转
+    #[test]
+    fn main_window_is_not_suspended_while_hidden() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let windows = config["app"]["windows"].as_array().expect("windows");
+        let main = windows
+            .iter()
+            .find(|window| window["label"].as_str().unwrap_or("main") == "main")
+            .expect("main window");
+        assert_eq!(main["backgroundThrottling"], "disabled");
+    }
 
     #[test]
     fn desktop_lyrics_window_only_reads_its_snapshot() {

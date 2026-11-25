@@ -15,16 +15,17 @@
         "title": "NeriPlayer",
         "width": 1280,
         "height": 800,
-        "minWidth": 960,
-        "minHeight": 720,
+        "minWidth": 720,
+        "minHeight": 540,
         "decorations": true,
         "titleBarStyle": "Overlay",
         "trafficLightPosition": { "x": 20, "y": 20 },
         "hiddenTitle": true,
         "transparent": false,
-        "backgroundColor": "#141218",
+        "backgroundColor": "#101014",
         "visible": false,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling --disable-background-timer-throttling"
+        "backgroundThrottling": "disabled",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling --disable-background-timer-throttling --disable-pinch"
       }
     ],
     "security": {

@@ -171,12 +171,13 @@ await test('song search finds loaded matches beyond the first render window', as
   } finally { page.stop() }
 })
 
-await test('clicking a filtered song plays the filtered queue and selected track id', async () => {
+await test('clicking a filtered song queues the whole artist list and starts at that song', async () => {
   const page = await mountArtist()
   try {
     await page.search('needle')
     byClass(page.root, 'track-item')[1].props.onClick()
-    assert.deepEqual(page.played[0][0].map(track => track.id), ['netease:501', 'netease:502'])
+    // 搜索只用来定位，队列不能缩成搜索结果
+    assert.equal(page.played[0][0].length, 122, 'search must not shrink the queue')
     assert.equal(page.played[0][1], 'netease:502')
     byClass(page.root, 'play-all-btn')[0].props.onClick()
     assert.equal(page.played[1][0].length, 122, 'artist play-all must retain its complete queue')

@@ -21,6 +21,11 @@ export function installHostBackgroundSync(): () => void {
 
   const sync = () => {
     timer = null
+    // 主题扩散动画期间不打断：IPC 与原生改色挪到动画结束后
+    if (root.classList.contains('theme-ripple-active')) {
+      timer = setTimeout(sync, SETTLE_MS)
+      return
+    }
     const rgb = parseRgb(getComputedStyle(root).getPropertyValue('--md-background'))
     if (!rgb) return
     const key = rgb.join(',')

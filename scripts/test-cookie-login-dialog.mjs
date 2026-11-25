@@ -120,7 +120,7 @@ async function mount({ platform = 'netease', login = async () => true } = {}) {
     await flush()
   }
   const submit = async () => { button('filled').props.onClick(); await flush() }
-  const cancel = async () => { button('text').props.onClick(); await flush() }
+  const cancel = async () => { button('tonal').props.onClick(); await flush() }
   return { calls, updates, props, root, textarea, button, input, submit, cancel, stop: () => app.unmount() }
 }
 

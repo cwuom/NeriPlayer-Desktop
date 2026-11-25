@@ -278,8 +278,9 @@ function toBackendTrack(track: TrackInfo) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  background: rgb(0 0 0 / 0.32);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  backdrop-filter: blur(6px) saturate(1.1);
 }
 
 .atp-dialog {
@@ -287,15 +288,13 @@ function toBackendTrack(track: TrackInfo) {
   max-width: calc(100vw - 48px);
   height: min(70vh, 640px);
   max-height: calc(100vh - 48px);
-  background: var(--md-surface-container-high);
-  border-radius: 28px;
+  background: var(--clean-dialog-surface);
+  border-radius: var(--radius-xl);
   padding: 24px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.35),
-    0 2px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
 }
 
 .atp-header {
@@ -352,7 +351,7 @@ function toBackendTrack(track: TrackInfo) {
 }
 
 .atp-create-label {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: var(--md-primary);
 }
@@ -371,8 +370,8 @@ function toBackendTrack(track: TrackInfo) {
 }
 
 .atp-create-btn {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   margin-bottom: 2px;
   border-radius: var(--radius-full);
   background: var(--md-primary);
@@ -445,7 +444,7 @@ function toBackendTrack(track: TrackInfo) {
 .atp-item-info { flex: 1; min-width: 0; }
 
 .atp-item-name {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -453,7 +452,7 @@ function toBackendTrack(track: TrackInfo) {
 }
 
 .atp-item-count {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   margin-top: 2px;
 }
@@ -462,7 +461,7 @@ function toBackendTrack(track: TrackInfo) {
   text-align: center;
   padding: 24px;
   color: var(--md-on-surface-variant);
-  font-size: 14px;
+  font-size: var(--fs-14);
 }
 
 .atp-loading {

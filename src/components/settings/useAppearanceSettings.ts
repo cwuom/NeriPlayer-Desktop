@@ -3,11 +3,9 @@ import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
 import { setLocaleWithTransition } from '@/i18n'
-import { UI_SCALE_MIN, UI_SCALE_STEP, useSettingsStore, type ColorMode, type CoverStyle } from '@/stores/settings'
+import { UI_SCALE_MIN, UI_SCALE_STEP, useSettingsStore, type CoverStyle } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { uiScaleMax } from '@/modules/settings/uiScale'
-import { switchThemeWithRipple, type ThemeMode } from '@/utils/theme'
-import { THEME_COLORS, getSavedThemeColor, switchThemeColorWithRipple } from '@/utils/themeColor'
 import { isLinuxDesktop } from '@/utils/linuxNotice'
 import { dialogSelectionPath, settingsLog as log, type SettingsIpc } from './settingsShared'
 
@@ -19,17 +17,12 @@ export const audioDisplayOptions = [
   { key: 'showAudioBitDepth', label: 'audio_bit_depth', icon: 'equalizer' },
 ] as const
 
-const presetColors = THEME_COLORS.map(c => ({
-  key: c.key,
-  color: c.dark['--md-primary'],
-}))
-
-/** 外观、播放页、背景与动效分区：主题 / 取色 / 缩放 / 背景图，以及动态背景的互斥与警告流程 */
+/** 外观、播放页、背景与动效分区：缩放 / 背景图，以及动态背景的互斥与警告流程（主题与配色见 appearance/ThemeAppearanceSettings.vue） */
 export function useAppearanceSettings(ipc: SettingsIpc) {
   const { t } = useI18n()
   const toast = useToastStore()
   const {
-    themeColor: selectedColor, darkMode, locale: settingLocale, backgroundImageUri,
+    locale: settingLocale, backgroundImageUri,
     dynamicBackground, coverBlurBg,
   } = storeToRefs(useSettingsStore())
 
@@ -40,12 +33,6 @@ export function useAppearanceSettings(ipc: SettingsIpc) {
       return { value: String(value), label: `${value}%` }
     },
   ))
-
-  const activeColorKey = ref(selectedColor.value || getSavedThemeColor())
-
-  watch(selectedColor, value => {
-    activeColorKey.value = value
-  })
 
   // 动态背景与封面模糊互斥（对齐 Android effectiveDynamicBackgroundEnabled = dynamic && !coverBlur）:
   // 启用一方即关闭另一方，避免 coverBlurBg 残留导致动态背景开关看似失效
@@ -108,47 +95,6 @@ export function useAppearanceSettings(ipc: SettingsIpc) {
     dynamicBackground.value = false
   }
 
-  function handleColorSwitch(key: string, event: MouseEvent) {
-    activeColorKey.value = key
-    selectedColor.value = key
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-    const x = rect.left + rect.width / 2
-    const y = rect.top + rect.height / 2
-    switchThemeColorWithRipple(key, x, y, false)
-  }
-
-  const darkModeOptions = computed<{ value: ThemeMode; label: string; icon: string }[]>(() => [
-    { value: 'system', label: t('settings.dark_mode_system'), icon: 'brightness_auto' },
-    { value: 'dark', label: t('settings.dark_mode_on'), icon: 'dark_mode' },
-    { value: 'light', label: t('settings.dark_mode_off'), icon: 'light_mode' },
-  ])
-
-  const darkModeThumbIndex = computed(() => {
-    const idx = darkModeOptions.value.findIndex(o => o.value === darkMode.value)
-    return idx < 0 ? 0 : idx
-  })
-
-  // 拇指位移：36px 宽 + 2px gap
-  const darkModeThumbStyle = computed(() => ({
-    transform: `translateX(${darkModeThumbIndex.value * 38}px)`,
-  }))
-
-  const colorModeOptions = computed<{ value: ColorMode; label: string; desc: string }[]>(() => [
-    { value: 'default', label: t('settings.color_mode_default'), desc: t('settings.color_mode_default_desc') },
-    { value: 'cover', label: t('settings.color_mode_cover'), desc: t('settings.color_mode_cover_desc') },
-    { value: 'system', label: t('settings.color_mode_system'), desc: t('settings.color_mode_system_desc') },
-  ])
-
-  function handleDarkModeSwitch(mode: ThemeMode, event: MouseEvent) {
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-    const x = rect.left + rect.width / 2
-    const y = rect.top + rect.height / 2
-    // 同步改 mode：拇指 650ms 滑动；ripple 不再禁用 .pill-thumb 的 transition
-    darkMode.value = mode
-    document.documentElement.classList.add('theme-ripple-active')
-    void switchThemeWithRipple(mode, x, y, false)
-  }
-
   function handleLocaleSwitch(code: string, event: MouseEvent) {
     settingLocale.value = code
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
@@ -193,17 +139,10 @@ export function useAppearanceSettings(ipc: SettingsIpc) {
 
   return {
     uiScaleOptions,
-    presetColors,
-    activeColorKey,
     dynamicBackgroundDialogOpen,
     onDynamicBackgroundToggle,
     confirmDynamicBackgroundWarning,
     cancelDynamicBackgroundWarning,
-    handleColorSwitch,
-    darkModeOptions,
-    darkModeThumbStyle,
-    colorModeOptions,
-    handleDarkModeSwitch,
     handleLocaleSwitch,
     defaultScreenOptions,
     coverStyleOptions,

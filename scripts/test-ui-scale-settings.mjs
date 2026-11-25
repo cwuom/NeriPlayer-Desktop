@@ -58,6 +58,8 @@ const settingsModule = load(await read('../src/stores/settings.ts'), {
   }),
   '@/modules/lyrics/lyricSourcePreference': load(await read('../src/modules/lyrics/lyricSourcePreference.ts')),
   '@/modules/settings/uiScaleRange': load(await read('../src/modules/settings/uiScaleRange.ts')),
+  '@/modules/settings/textScale': load(await read('../src/modules/settings/textScale.ts')),
+  '@/utils/theme/cleanScheme': load(await read('../src/utils/theme/cleanScheme.ts')),
 })
 
 let cases = 0

@@ -621,7 +621,7 @@ function progressWidth(task: ActiveDownloadTask) {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 
 .icon-action {
@@ -675,7 +675,7 @@ function progressWidth(task: ActiveDownloadTask) {
 }
 
 .task-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -689,7 +689,7 @@ function progressWidth(task: ActiveDownloadTask) {
   padding: 3px 8px;
   background: color-mix(in srgb, var(--md-primary) 10%, transparent);
   color: var(--md-primary);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 700;
 }
 
@@ -698,7 +698,7 @@ function progressWidth(task: ActiveDownloadTask) {
 .track-size,
 .track-date {
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .progress-track {
@@ -738,7 +738,7 @@ function progressWidth(task: ActiveDownloadTask) {
   padding: 0 10px 0 12px;
   border-radius: var(--radius-full);
   background: var(--md-surface-container);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   color: var(--md-on-surface-variant);
 
   .material-symbols-rounded { font-size: 18px; }
@@ -751,7 +751,7 @@ function progressWidth(task: ActiveDownloadTask) {
     background: transparent;
     color: var(--md-on-surface);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-13);
     user-select: text;
   }
 
@@ -829,7 +829,7 @@ function progressWidth(task: ActiveDownloadTask) {
 }
 
 .track-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -888,14 +888,14 @@ function progressWidth(task: ActiveDownloadTask) {
   p {
     margin-top: 6px;
     max-width: 320px;
-    font-size: 13px;
+    font-size: var(--fs-13);
     opacity: 0.72;
   }
 }
 
 .dialog-msg {
   color: var(--md-on-surface-variant);
-  font-size: 14px;
+  font-size: var(--fs-14);
   line-height: 1.55;
 }
 
@@ -947,7 +947,7 @@ function progressWidth(task: ActiveDownloadTask) {
   p {
     margin-top: 3px;
     color: var(--md-on-surface-variant);
-    font-size: 13px;
+    font-size: var(--fs-13);
   }
 }
 
@@ -969,7 +969,7 @@ function progressWidth(task: ActiveDownloadTask) {
   height: 38px;
   border-radius: var(--radius-full);
   padding: 0 12px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
   transition: background var(--duration-short), color var(--duration-short), opacity var(--duration-short), transform var(--duration-short);
 
@@ -1008,7 +1008,7 @@ function progressWidth(task: ActiveDownloadTask) {
 
   h2 {
     color: var(--md-on-surface);
-    font-size: 14px;
+    font-size: var(--fs-14);
     font-weight: 700;
   }
 
@@ -1070,7 +1070,7 @@ function progressWidth(task: ActiveDownloadTask) {
   p {
     margin-top: 2px;
     color: var(--md-on-surface-variant);
-    font-size: 13px;
+    font-size: var(--fs-13);
   }
 }
 

@@ -159,45 +159,62 @@ function updateOffset(value: number) {
 <style scoped lang="scss">
 .bili-subtitle-settings { padding: 16px; border-radius: 20px; background: var(--md-surface-container); }
 .subtitle-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 0; }
-.subtitle-row + .subtitle-row { border-top: 1px solid var(--md-outline-variant); }
-.subtitle-title { font-size: 14px; font-weight: 600; }
+.subtitle-row + .subtitle-row { border-top: 1px solid var(--hairline); }
+.subtitle-title { font-size: var(--fs-14); font-weight: 600; }
 .subtitle-info { flex: 1; min-width: 0; }
 .subtitle-icon { display: none; }
 .subtitle-row--select { flex-wrap: wrap; }
 .subtitle-row--select .subtitle-info { flex-basis: 180px; }
 .subtitle-select { flex: 0 1 200px; max-width: 100%; margin-left: auto; }
-.subtitle-select :deep(.custom-select-trigger) { min-height: 44px; padding: 10px 14px; font-size: 14px; }
+.subtitle-select :deep(.custom-select-trigger) { min-height: 44px; padding: 10px 14px; font-size: var(--fs-14); }
 .bili-subtitle-settings--page {
   padding: 0;
+  margin-bottom: 8px;
   background: transparent;
   border-radius: 0;
+  /* 设置页里与相邻设置行同一套分组列表样式：一个圆角容器 + 缩进分隔线 */
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 0 1px var(--hairline);
   .subtitle-row {
+    position: relative;
     gap: 14px;
-    padding: 14px 16px;
-    margin-bottom: 8px;
+    min-height: 64px;
+    padding: 14px 18px;
+    margin-bottom: 0;
     border: 0;
-    border-radius: var(--radius-lg);
-    background: var(--md-surface-container);
+    border-radius: 0;
+    background: var(--md-surface-container-low);
     transition: background var(--duration-short);
-    &:hover { background: var(--md-surface-container-high); }
+    &:hover { background: color-mix(in srgb, var(--md-on-surface) 2.5%, var(--md-surface-container-low)); }
+  }
+  .subtitle-row + .subtitle-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 68px;
+    right: 18px;
+    height: 1px;
+    background: var(--hairline);
   }
   .subtitle-icon {
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius-md);
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+    border-radius: var(--radius-sm);
     background: var(--md-surface-container-high);
     color: var(--md-on-surface-variant);
   }
   .subtitle-row--select .subtitle-info { flex-basis: 240px; }
-  .subtitle-title { font-weight: 500; }
-  p { margin-top: 2px; }
+  .subtitle-title { font-weight: 600; }
+  p { margin-top: 3px; }
 }
-p { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--md-on-surface-variant); }
+p { margin: 6px 0 0; font-size: var(--fs-12); line-height: 1.6; color: var(--md-on-surface-variant); }
 .m3-switch { flex-shrink: 0; }
-.thumb .material-symbols-rounded { font-size: 14px; }
+.thumb .material-symbols-rounded { font-size: var(--fs-14); }
 .subtitle-offset-disabled { opacity: 0.38; white-space: nowrap; }
 </style>

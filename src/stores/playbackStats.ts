@@ -40,6 +40,8 @@ export interface StatsSummary {
   totalListenMs: number
   trackCount: number
   items: TrackStat[]
+  /** 本期 0..23 时的收听毫秒数；旧版后端没有这个字段 */
+  hourListenMs?: number[]
 }
 
 interface TrackedPlayback extends StatsTrackKey {

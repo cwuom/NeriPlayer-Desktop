@@ -6,7 +6,9 @@ import {
   shouldThrottlePlaybackRefresh,
   type PlaybackFailure,
 } from '@/modules/playback/playbackFailure'
-import { resolvePlaybackFailureAdvanceAction, type PlaybackStartupWatchdog } from '@/modules/playback/playbackPolicy'
+import {
+  resolvePlaybackFailureAdvanceAction, shouldRestartOnPrevious, type PlaybackStartupWatchdog,
+} from '@/modules/playback/playbackPolicy'
 import { createLogger } from '@/utils/logger'
 import { summarizeLogError } from '@/utils/logSanitizer'
 import type { TrackInfo } from '@/types/track'
@@ -64,7 +66,7 @@ export interface QueueNavigationContext extends PlayerCoreState {
  */
 export function createQueueNavigation(ctx: QueueNavigationContext) {
   const {
-    queue, queueIndex, currentTrack, positionMs, isPlaying, isLoadingAudio, queueSelectionNeedsPlayback,
+    settings, queue, queueIndex, currentTrack, positionMs, isPlaying, isLoadingAudio, queueSelectionNeedsPlayback,
     repeatMode, shuffleEnabled, shuffleBag, shuffleHistory, shuffleFuture,
     play, pause, seekTo, markCommandSource, blockedByListenTogether, internalFollowUpSource,
     rebuildShuffleBag, shiftShuffleIndicesForPlayNext, shiftShuffleIndicesForRemove, savePlayerState,
@@ -260,7 +262,7 @@ export function createQueueNavigation(ctx: QueueNavigationContext) {
 
   /**
    * 用户手动上一首（对齐 Android previousImpl）
-   * - 播放超过 3 秒则回到开头
+   * - 播放超过 3 秒则回到开头（可在设置里关闭，关闭后总是切到上一首）
    * - Shuffle 模式使用 history 栈回溯
    * - 非 shuffle：只有 repeat_all 才回绕到末尾
    */
@@ -272,8 +274,8 @@ export function createQueueNavigation(ctx: QueueNavigationContext) {
     consecutiveLoginSkips = 0
     if (queue.value.length === 0) return
 
-    // 播放超过 3 秒则回到开头
-    if (positionMs.value > 3000) {
+    // 媒体键、托盘、全局快捷键、桌面歌词都汇到这里，偏好只需在此判断一次
+    if (shouldRestartOnPrevious(positionMs.value, settings.prevRestartsTrack)) {
       seekTo(0, commandSource)
       return
     }

@@ -3218,6 +3218,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -3225,6 +3226,7 @@ name = "neri-player-desktop"
 version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
+ "block2",
  "chrono",
  "dirs-next",
  "ecb",
@@ -3242,6 +3244,7 @@ dependencies = [
  "neri-playback",
  "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "parking_lot",
  "raw-window-handle",
  "regex",

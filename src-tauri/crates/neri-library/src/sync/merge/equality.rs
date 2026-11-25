@@ -252,5 +252,8 @@ fn same_buckets(left: &[SyncPlaybackStatBucket], right: &[SyncPlaybackStatBucket
             && a.counter_base_play_count == b.counter_base_play_count
             && merge_counter_shards(&a.counter_shards, &[])
                 == merge_counter_shards(&b.counter_shards, &[])
+            && a.recorded_local_date == b.recorded_local_date
+            && merge_sync_playback_hours(&a.hourly_totals, &[], 0)
+                == merge_sync_playback_hours(&b.hourly_totals, &[], 0)
     })
 }

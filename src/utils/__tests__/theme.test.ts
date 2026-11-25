@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { applyTheme, getThemeMode, initTheme, switchThemeWithRipple } from '@/utils/theme'
 import { THEME_COLORS, cancelSmoothThemeTransition, type ThemeColorScheme } from '@/utils/themeColor'
+import { rgb } from '@/utils/theme/cleanScheme'
 import { installMemoryStorage, type MemoryStorage } from './memoryStorage'
 
 const reapplyDynamicColorForTheme = vi.hoisted(() => vi.fn<(isDark: boolean) => boolean>())
@@ -102,7 +103,7 @@ describe('applyTheme', () => {
     applyTheme('dark')
 
     expect(themeClasses()).toEqual({ dark: true, light: false })
-    expect(cssVar('--md-primary')).toBe(scheme('teal').dark['--md-primary'])
+    expect(cssVar('--md-primary')).toBe(rgb(scheme('teal').dark))
     expect(root().classList.contains('theme-switching')).toBe(true)
     expect(storage.getItem('theme-mode')).toBe('dark')
   })
@@ -113,7 +114,7 @@ describe('applyTheme', () => {
     applyTheme('light', false)
 
     expect(themeClasses()).toEqual({ dark: false, light: true })
-    expect(cssVar('--md-primary')).toBe(scheme('purple').light['--md-primary'])
+    expect(cssVar('--md-primary')).toBe(rgb(scheme('purple').light))
     expect(storage.getItem('theme-mode')).toBeNull()
   })
 
@@ -152,7 +153,7 @@ describe('initTheme', () => {
     initTheme()
 
     expect(themeClasses()).toEqual({ dark: false, light: true })
-    expect(cssVar('--md-primary')).toBe(scheme('rose').light['--md-primary'])
+    expect(cssVar('--md-primary')).toBe(rgb(scheme('rose').light))
     expect(storage.getItem('theme-mode')).toBe('light')
     expect(storage.getItem('theme-color')).toBe('rose')
   })
@@ -189,29 +190,25 @@ describe('switchThemeWithRipple', () => {
     expect(storage.getItem('theme-mode')).toBe('dark')
   })
 
-  it('drives the ripple through CSS variables and cleans them up afterwards', async () => {
-    const { start, animate, radiusAtAnimate } = installViewTransition()
+  it('cross-fades the new theme in with one compositor animation and cleans up afterwards', async () => {
+    const { start, animate } = installViewTransition()
     root().classList.add('theme-switching')
 
     const done = switchThemeWithRipple('light', 30, 40)
 
     expect(root().classList.contains('theme-switching')).toBe(false)
     expect(root().classList.contains('theme-ripple-active')).toBe(true)
-    expect(cssVar('--theme-ripple-x')).toBe('30px')
-    expect(cssVar('--theme-ripple-y')).toBe('40px')
-    expect(cssVar('--theme-ripple-r')).toBe('0px')
     await done
 
-    const radius = Math.hypot(Math.max(30, window.innerWidth - 30), Math.max(40, window.innerHeight - 40))
     expect(start).toHaveBeenCalledTimes(1)
-    expect(radiusAtAnimate).toEqual([`${radius}px`])
+    expect(animate).toHaveBeenCalledTimes(1)
     expect(animate).toHaveBeenCalledWith(
-      { clipPath: ['circle(0px at 30px 40px)', `circle(${radius}px at 30px 40px)`] },
-      expect.objectContaining({ pseudoElement: '::view-transition-new(root)' }),
+      { opacity: [0, 1] },
+      expect.objectContaining({ duration: 320, fill: 'forwards', pseudoElement: '::view-transition-new(root)' }),
     )
+    expect(root().classList.contains('theme-ripple-css')).toBe(false)
     expect(themeClasses()).toEqual({ dark: false, light: true })
     expect(root().classList.contains('theme-ripple-active')).toBe(false)
-    for (const prop of ['--theme-ripple-x', '--theme-ripple-y', '--theme-ripple-r']) expect(cssVar(prop)).toBe('')
     expect(storage.getItem('theme-mode')).toBe('light')
   })
 
@@ -222,13 +219,26 @@ describe('switchThemeWithRipple', () => {
     expect(themeClasses()).toEqual({ dark: true, light: false })
   })
 
-  it('stops waiting after 520ms when the WAAPI animation never finishes', async () => {
+  it('falls back to CSS keyframes when pseudo-element WAAPI is unsupported', async () => {
+    vi.useFakeTimers()
+    installViewTransition()
+    Object.defineProperty(root(), 'animate', { value: () => { throw new TypeError('pseudoElement unsupported') }, configurable: true })
+    const done = switchThemeWithRipple('light', 10, 10)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(root().classList.contains('theme-ripple-css')).toBe(true)
+    await vi.advanceTimersByTimeAsync(360)
+    await done
+    expect(root().classList.contains('theme-ripple-css')).toBe(false)
+    expect(themeClasses()).toEqual({ dark: false, light: true })
+  })
+
+  it('stops waiting after 360ms when the WAAPI animation never finishes', async () => {
     vi.useFakeTimers()
     installViewTransition(new Promise<void>(() => {}))
     let settled = false
 
     const done = switchThemeWithRipple('dark', 0, 0).then(() => { settled = true })
-    await vi.advanceTimersByTimeAsync(519)
+    await vi.advanceTimersByTimeAsync(359)
     expect(settled).toBe(false)
     expect(root().classList.contains('theme-ripple-active')).toBe(true)
 

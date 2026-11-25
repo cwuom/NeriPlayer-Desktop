@@ -82,6 +82,47 @@ pub async fn set_audio_output_device(
         .map_err(|error| AppError::Other(error.to_string()))?
 }
 
+/// 开关 WASAPI 独占输出。只有值真的变了、且平台支持时才强制重建当前输出流；
+/// 独占打不开时引擎会回退共享模式，这里不把它当成错误
+#[tauri::command]
+pub async fn set_audio_exclusive_mode(
+    enabled: bool,
+    name: Option<String>,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let previous = neri_playback::player::set_exclusive_output(enabled);
+    if previous == enabled || !neri_playback::player::EXCLUSIVE_OUTPUT_SUPPORTED {
+        return Ok(());
+    }
+    let name = name.filter(|value| !value.trim().is_empty());
+    let rebuilt = async {
+        let request = state
+            .player
+            .lock()
+            .request_output_device_force(name, None)?;
+        tokio::task::spawn_blocking(move || request.wait())
+            .await
+            .map_err(|error| AppError::Other(error.to_string()))?
+    }
+    .await;
+    restore_exclusive_on_failure(rebuilt, previous, |value| {
+        neri_playback::player::set_exclusive_output(value);
+    })
+}
+
+/// 重建失败时前端保留旧设置，后端偏好也要回到旧值：
+/// 否则重试同一开关会命中 previous == enabled 直接返回成功，输出流却从没按新模式重建
+fn restore_exclusive_on_failure<T>(
+    result: AppResult<T>,
+    previous: bool,
+    set_exclusive: impl FnOnce(bool),
+) -> AppResult<T> {
+    if result.is_err() {
+        set_exclusive(previous);
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn seek(
     position_ms: u64,
@@ -279,4 +320,26 @@ pub async fn resume_with_fade(duration_ms: u32, state: State<'_, AppState>) -> A
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_exclusive_rebuild_restores_the_previous_preference() {
+        // 回归：独占切换失败后偏好停在新值，重试同一开关被当成“未变化”而跳过重建
+        let mut restored = None;
+        let result: AppResult<()> = restore_exclusive_on_failure(
+            Err(AppError::Other("DEVICE_GONE".into())),
+            false,
+            |value| restored = Some(value),
+        );
+        assert!(result.is_err());
+        assert_eq!(restored, Some(false));
+
+        let mut touched = false;
+        restore_exclusive_on_failure(Ok(()), true, |_| touched = true).unwrap();
+        assert!(!touched, "成功时保留新偏好");
+    }
 }

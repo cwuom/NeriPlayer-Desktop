@@ -412,22 +412,21 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  background: rgb(0 0 0 / 0.32);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  backdrop-filter: blur(6px) saturate(1.1);
 }
 
 .lt-dialog {
   width: 400px;
   max-width: calc(100vw - 48px);
   max-height: min(80vh, 680px);
-  background: var(--md-surface-container-high);
-  border-radius: 28px;
+  background: var(--clean-dialog-surface);
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.35),
-    0 2px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
 }
 
 .lt-header {
@@ -483,7 +482,7 @@ onUnmounted(() => {
 }
 
 .lt-status-text {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 }
 
@@ -520,7 +519,7 @@ onUnmounted(() => {
 }
 
 .lt-center-desc {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 }
 
@@ -530,7 +529,7 @@ onUnmounted(() => {
   gap: 6px;
 
   label {
-    font-size: 12px;
+    font-size: var(--fs-12);
     font-weight: 600;
     color: var(--md-on-surface-variant);
     margin-left: 4px;
@@ -544,7 +543,7 @@ onUnmounted(() => {
   border: 1.5px solid transparent;
   background: var(--md-surface-container);
   color: var(--md-on-surface);
-  font-size: 14px;
+  font-size: var(--fs-14);
   outline: none;
   transition: border-color 160ms, background 160ms;
 
@@ -572,10 +571,10 @@ onUnmounted(() => {
   align-items: center;
   gap: 4px;
   margin-left: 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 
-  .material-symbols-rounded { font-size: 15px; }
+  .material-symbols-rounded { font-size: var(--fs-15); }
   &.ready { color: var(--md-primary); }
   &.error { color: var(--md-error); }
 }
@@ -593,13 +592,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 46px;
+  height: 40px;
   padding: 0 16px;
   border-radius: var(--radius-full);
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
-  background: var(--md-secondary-container);
-  color: var(--md-on-secondary-container);
+  background: var(--md-surface-container-high);
+  color: var(--md-on-surface);
   transition: background 150ms, filter 150ms, transform 120ms var(--easing-emphasized, cubic-bezier(0.2, 0, 0, 1));
 
   .material-symbols-rounded { font-size: 19px; }
@@ -624,7 +623,7 @@ onUnmounted(() => {
     flex-shrink: 0;
     height: 36px;
     padding: 0 14px;
-    font-size: 13px;
+    font-size: var(--fs-13);
 
     .material-symbols-rounded { font-size: 17px; }
   }
@@ -633,7 +632,7 @@ onUnmounted(() => {
 .lt-leave { margin-top: 2px; }
 
 .lt-error {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-error);
   padding: 8px;
   background: var(--md-error-container);
@@ -662,10 +661,10 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 2px;
 
-  strong { font-size: 13px; }
+  strong { font-size: var(--fs-13); }
 
   small {
-    font-size: 11px;
+    font-size: var(--fs-11);
     line-height: 1.4;
     opacity: 0.8;
   }
@@ -673,7 +672,7 @@ onUnmounted(() => {
 
 .lt-role-badge {
   display: inline-block;
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 500;
   padding: 2px 8px;
   border-radius: 10px;
@@ -688,7 +687,7 @@ onUnmounted(() => {
 
 .lt-section {
   h4 {
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-weight: 600;
     margin: 0 0 6px;
   }
@@ -723,11 +722,11 @@ onUnmounted(() => {
   gap: 2px;
 
   strong {
-    font-size: 13px;
+    font-size: var(--fs-13);
   }
 
   small {
-    font-size: 11px;
+    font-size: var(--fs-11);
     opacity: 0.8;
   }
 }
@@ -745,24 +744,24 @@ onUnmounted(() => {
   padding: 10px 12px;
   border-radius: 12px;
   background: var(--md-surface-container-low);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
 
   // 奇数张时最后一张占满一行，避免右侧留空
   &:last-child:nth-child(odd) { grid-column: 1 / -1; }
 
   small {
-    font-size: 11px;
+    font-size: var(--fs-11);
     color: var(--md-on-surface-variant);
   }
 }
 
 .lt-meta-label {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
 }
 
 .lt-meta-value {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
 }
 
@@ -772,7 +771,7 @@ onUnmounted(() => {
   width: fit-content;
   padding: 3px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 600;
 
   &.success {
@@ -802,7 +801,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   padding: 6px 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 
 .lt-member-icon {
@@ -815,7 +814,7 @@ onUnmounted(() => {
 }
 
 .lt-member-role {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
 }
 
@@ -824,7 +823,7 @@ onUnmounted(() => {
   flex-direction: column;
   border-radius: 12px;
   background: var(--md-surface-container-low);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   overflow: hidden;
 }
 
@@ -836,7 +835,7 @@ onUnmounted(() => {
   cursor: pointer;
   transition: background var(--duration-short, 150ms);
 
-  & + & { border-top: 1px solid var(--md-outline-variant); }
+  & + & { border-top: 1px solid var(--hairline); }
   &:hover { background: var(--md-surface-container); }
 }
 
@@ -849,12 +848,12 @@ onUnmounted(() => {
 }
 
 .lt-setting-title {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
 }
 
 .lt-setting-desc {
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.4;
   color: var(--md-on-surface-variant);
 }

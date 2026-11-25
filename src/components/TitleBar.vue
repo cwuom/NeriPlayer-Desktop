@@ -389,7 +389,7 @@ onUnmounted(() => {
 
 .tb-title {
   font-family: var(--font-family);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 700;
   color: inherit;
   letter-spacing: 0.2px;
@@ -463,7 +463,7 @@ onUnmounted(() => {
 }
 
 .tb-np-label {
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 600;
   color: inherit;
   opacity: 0.45;
@@ -476,7 +476,7 @@ onUnmounted(() => {
 }
 
 .tb-np-track {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: inherit;
   opacity: 0.85;
@@ -500,7 +500,21 @@ onUnmounted(() => {
 /* 公共 */
 .tb-drag {
   flex: 1;
-  pointer-events: auto;
+  /* 普通模式下内容区顶栏这一行归页面（吸顶栏自带拖动区），这里不再拦截点击 */
+  pointer-events: none;
+
+  .tb-np-mode & { pointer-events: auto; }
+}
+
+/* 侧栏收成图标栏时品牌会伸进内容区与页面顶栏重叠，隐藏。
+   空出来的左槽也要放行点击，否则这块透明区域会盖住下面页面的返回按钮。
+   整个选择器必须都写在 :global() 里：Vue 会丢掉 :global(X) 后面的部分，
+   写成 :global(html.sidebar-collapsed) .tb-brand 实际编译成 html.sidebar-collapsed，整页被隐藏 */
+:global(html.sidebar-collapsed .title-bar:not(.tb-np-mode) .tb-brand) {
+  opacity: 0;
+}
+:global(html.sidebar-collapsed .title-bar:not(.tb-np-mode) :is(.tb-left-slot, .tb-left-stack, .tb-brand)) {
+  pointer-events: none;
 }
 
 /* macOS 原生红绿灯安全区：trafficLightPosition x=20，按钮组宽 ~52px，
@@ -527,13 +541,13 @@ onUnmounted(() => {
 }
 
 .tb-mac:not(.tb-fullscreen) .tb-np-label {
-  font-size: 12px;
+  font-size: var(--fs-12);
   letter-spacing: 1px;
   line-height: 1.25;
 }
 
 .tb-mac:not(.tb-fullscreen) .tb-np-track {
-  font-size: 15px;
+  font-size: var(--fs-15);
   line-height: 1.35;
 }
 

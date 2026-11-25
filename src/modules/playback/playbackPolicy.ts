@@ -30,6 +30,14 @@ export function resolvePlaybackFailureAdvanceAction(options: {
   return repeatAll && queueSize > 1 ? 'wrap' : 'stop'
 }
 
+/** 播放超过该位置后，「上一首」先回到本曲开头（对齐 Android previousImpl） */
+export const PREVIOUS_RESTART_THRESHOLD_MS = 3000
+
+/** 「上一首」是否只回到本曲开头；关闭该偏好时总是切到上一首 */
+export function shouldRestartOnPrevious(positionMs: number, restartEnabled: boolean): boolean {
+  return restartEnabled && positionMs > PREVIOUS_RESTART_THRESHOLD_MS
+}
+
 export class PlaybackDemandArbiter {
   private readonly activePlaybackKeys = new Set<string>()
 

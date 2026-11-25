@@ -110,6 +110,7 @@ The current scope:
 - **An audio pipeline independent of the WebView**:
   built-in Symphonia handles common formats, while bundled FFmpeg libraries extend decoding and demuxing.
   Choose an output device, adjust speed and pitch independently, normalize loudness, and use fades or crossfades.
+  On Windows, WASAPI exclusive output is available and falls back to shared mode when the device refuses it.
 - **Simple controls backed by native DSP**:
   29 built-in presets, a 10-band graphic equalizer, parametric EQ, AutoEQ import, tone and spatial processing,
   compression, limiting, and speaker optimization, with effects remembered per output device.
@@ -158,6 +159,8 @@ Read the included `macOS-install.txt` first; for system security prompts, see
 Extract the Linux AppImage archive, then make the `.AppImage` executable.
 Install deb/rpm packages with your distribution's package manager; the packaging configuration includes
 dependencies such as WebKitGTK 4.1, GTK 3, and ALSA.
+Linux packages are built in an Ubuntu 22.04 container and need glibc ≥ 2.35 (Debian 12, Ubuntu 22.04, Fedora 36, or newer).
+An optional Flatpak bundle (pinned GNOME runtime and WebKitGTK) is provided as a Release workflow artifact and is still experimental.
 The OS minimums above come from build configuration and do not mean every version and desktop environment has been verified.
 
 ### b. Download a CI build
@@ -508,7 +511,8 @@ do not attach full configuration exports or databases.
 - **System integration**: tray behavior, click-through, global shortcuts, and media sessions depend on the OS and desktop environment.
   Shortcuts may conflict with other applications.
 - **Linux rendering**: the Linux build is a test environment and rendering depends on WebKitGTK; proprietary NVIDIA drivers additionally enable compatibility handling and reduced full-page transitions.
-  Since WebKitGTK 2.54 replaced its compositor, the dynamic background and page switches flicker intermittently (upstream WebKit bug 327524, still unfixed in 2.54.2), so the first run disables the background and says why.
+  Since WebKitGTK 2.54 replaced its compositor, the dynamic background and page switches flicker intermittently (upstream WebKit bug 327524, unfixed in 2.54.x).
+  On 2.54.x the app falls back to the previous compositor by default (`WEBKIT_USE_SKIA_FOR_COMPOSITION=0`), but the first run still disables the background and says why.
   If flickering remains, follow the [contribution guide](./CONTRIBUTING_EN.md).
 - **Sync boundary**: remote sync transfers metadata only. Prepare local audio, downloads, device paths, and account authorization separately.
   Back up and confirm client compatibility before V4 upgrades or concurrent multi-device use.

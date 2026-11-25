@@ -212,8 +212,10 @@ try {
   byLabel(detailTree, 'dsp.tone_section').props.onChange({ target: { checked: true } })
   assert.equal(player.audioEffectsProfile.enabled, true)
   await vue.nextTick()
-  button(detailTree, 'dsp.compare_original').props.onClick()
-  assert.equal(player.audioEffectsProfile.enabled, false, 'A/B comparison changes the master bypass')
+  // A/B 对比与总开关重复，已移除；关闭音效只走总开关
+  assert.equal(findAll(detailTree, node => node.type === 'button' && /dsp\.compare_(original|effect)/.test(node.text ?? '')).length, 0, 'A/B compare card is removed')
+  byLabel(detailTree, 'dsp.enabled').props.onChange({ target: { checked: false } })
+  assert.equal(player.audioEffectsProfile.enabled, false, 'master switch bypasses DSP')
   assert.equal(player.audioEffectsProfile.sound.virtualBass, 0.35)
   const addFilter = findAll(detailTree, node => node.type === 'button' && node.matches('.effects-add'))[0]
   assert.ok(addFilter)
@@ -283,7 +285,7 @@ try {
     assert.equal(vue.toRaw(focusCalls.at(-1)), editors[0])
     editors[0].props.onKeydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} }); await vue.nextTick()
   }
-  console.log('PASS full DSP parameter wiring, A/B, PEQ, AutoEQ, named presets, per-output settings and independent real editors')
+  console.log('PASS full DSP parameter wiring, master bypass, PEQ, AutoEQ, named presets, per-output settings and independent real editors')
 } finally { detailApp.unmount(); assert.equal(intervals.size, 0, 'detail unmount clears stats polling'); globalThis.setInterval = originalSetInterval; globalThis.clearInterval = originalClearInterval }
 
 const nowPlaying = await read('../src/components/NowPlaying.vue')

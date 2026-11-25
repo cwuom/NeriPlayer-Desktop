@@ -14,7 +14,7 @@
   gap: 6px;
   height: 42px;
   border-radius: 20px;
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: var(--md-on-surface-variant);
   transition: background var(--duration-short, 150ms), color var(--duration-short, 150ms);

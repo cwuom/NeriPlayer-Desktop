@@ -1203,7 +1203,7 @@ const CONTAINS_MATCH_SCORE: i32 = 48;
 const FUZZY_MATCH_SCORE: i32 = 96;
 
 /// 每个查询词取最佳候选的分数之和，越小越好；有词完全对不上时为 None
-fn fuzzy_score(query: &str, values: &[String]) -> Option<i32> {
+pub fn fuzzy_score(query: &str, values: &[String]) -> Option<i32> {
     let tokens = search_tokens(&fold_search_text(query, true));
     if tokens.is_empty() {
         return Some(0);

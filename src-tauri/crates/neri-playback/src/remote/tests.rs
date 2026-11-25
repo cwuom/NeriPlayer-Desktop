@@ -248,10 +248,13 @@ fn open_returns_before_the_first_block_finishes_streaming() {
         stream.write_all(&served[40 * 1024..]).unwrap();
     });
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    // 客户端构建在 Linux 上要加载系统根证书，并行测试时可能耗时上百毫秒；
+    // 计时只应覆盖 open 本身
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let started = Instant::now();
     let mut source = runtime
         .block_on(RemoteAudioSource::open(
-            reqwest::Client::builder().no_proxy().build().unwrap(),
+            client,
             url,
             String::new(),
             None,

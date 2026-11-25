@@ -57,6 +57,8 @@ const settingsModule = load(await read('../src/stores/settings.ts'), {
   }),
   '@/modules/lyrics/lyricSourcePreference': load(await read('../src/modules/lyrics/lyricSourcePreference.ts')),
   '@/modules/settings/uiScaleRange': load(await read('../src/modules/settings/uiScaleRange.ts')),
+  '@/modules/settings/textScale': load(await read('../src/modules/settings/textScale.ts')),
+  '@/utils/theme/cleanScheme': load(await read('../src/utils/theme/cleanScheme.ts')),
 })
 const { roundToStepPrecision } = load(await read('../src/utils/editableRange.ts'))
 
@@ -436,6 +438,28 @@ await regression('Rust-normalized values are adopted when nothing changed during
   store.ltServerUrl = ' https://example.test/ '
   await flushPersist()
   assert.equal(store.ltServerUrl, 'https://example.test')
+})
+
+await regression('previous-restart preference defaults on and survives hydration and IPC save', async store => {
+  loadResult = { settings: { prevRestartsTrack: false }, persisted: true }
+  await store.hydrate()
+  assert.equal(store.prevRestartsTrack, false)
+  store.prevRestartsTrack = true
+  await flushPersist()
+  assert.equal(saved.at(-1).prevRestartsTrack, true)
+  store.applySnapshot({})
+  assert.equal(store.prevRestartsTrack, true, 'old snapshots keep restarting the current track')
+})
+
+await regression('the backend-owned cache directory wins over a stale frontend snapshot', async store => {
+  loadResult = { settings: { mediaCacheDir: 'D:\\NeriCache' }, persisted: true }
+  await store.hydrate()
+  assert.equal(store.mediaCacheDir, 'D:\\NeriCache')
+  // save_settings 总是沿用后端已保存的目录（只能经 set_media_cache_dir 修改）
+  saveResponse = settings => ({ ...settings, mediaCacheDir: 'D:\\NeriCache' })
+  store.mediaCacheDir = 'C:\\Elsewhere'
+  await flushPersist()
+  assert.equal(store.mediaCacheDir, 'D:\\NeriCache')
 })
 
 for (const [value, step, min, max, expected] of [

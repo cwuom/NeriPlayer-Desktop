@@ -43,6 +43,7 @@ export interface AudioOutputDeviceOption {
 export interface SettingsIpc {
   listAudioOutputDevices(): Promise<AudioOutputDeviceOption[]>
   setAudioOutputDevice(name: string | null): Promise<unknown>
+  setAudioExclusiveMode(enabled: boolean, name: string | null): Promise<unknown>
   getLogDir(): Promise<string>
   revealInFileManager(path: string): Promise<unknown>
   setBypassProxy(bypass: boolean): Promise<unknown>

@@ -17,7 +17,7 @@ const parse = (name, source) => ts.createSourceFile(name, source, ts.ScriptTarge
 const playerTree = parse('player.ts', playerSource)
 const settingsTree = parse('settings.ts', settingsSource)
 const names = new Set(['setSpeed', 'setPitch', 'effectivePlaybackSpeed', 'setListenTogetherSyncPlaybackRate',
-  'setVinylEffect', 'effectivePlaybackPitch', 'resetAudioEffects', 'setLoudnessGain', 'setEqualizer', 'setEqualizerPreset', 'applyPersistedSettings',
+  'setVinylEffect', 'effectivePlaybackPitch', 'resetAudioEffects', 'setLoudnessGain', 'setEqualizer', 'setEqualizerPreset', 'applyPersistedSettings', 'setAudioExclusiveMode',
   'applyNativeAudioEffects', 'scheduleNativeAudioEffects', 'applyPlaybackParameter', 'updateAudioEffects', 'updateAudioEffectsProfile', 'updateAudioEffectsSound',
   'setAudioEffectsPreset', 'setListeningTuning', 'resetListeningTuning', 'resetAudioEffectsSection', 'saveAudioEffectsPreset', 'deleteAudioEffectsPreset',
   'exportAudioEffectsPreset', 'importAudioEffectsPreset', 'mergeImportedPresets', 'importedPresetId', 'androidRouteLabel',
@@ -162,6 +162,17 @@ await regression('startup reapplies saved pitch and speed through separate IPC c
   await r.flush()
   assert.ok(r.calls.some(([command, args]) => command === 'set_pitch' && args.pitch === 0.8))
   assert.ok(r.calls.some(([command, args]) => command === 'set_speed' && args.speed === 1.25))
+})
+
+await regression('startup registers WASAPI exclusive mode before restoring the output device', async r => {
+  r.settings.audioExclusiveMode = true
+  r.settings.audioOutputDevice = 'Speakers (USB DAC)'
+  await r.applyPersistedSettings()
+  await r.flush()
+  const exclusive = r.calls.findIndex(([command]) => command === 'set_audio_exclusive_mode')
+  const device = r.calls.findIndex(([command]) => command === 'set_audio_output_device')
+  assert.ok(exclusive >= 0 && device > exclusive, 'exclusive flag must be sent before the device restore')
+  assert.deepEqual(r.calls[exclusive][1], { enabled: true, name: 'Speakers (USB DAC)' })
 })
 
 await regression('Android EQ presets use the referenced frequency gains', async r => {

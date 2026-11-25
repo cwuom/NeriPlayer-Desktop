@@ -833,26 +833,27 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
         type="button"
         class="lyrics-display-toggle"
         :class="{ active: settings.showTranslation }"
-        :title="t('lyrics.translation_source_hint')"
+        :title="t(settings.showTranslation ? 'lyrics.hide_translation' : 'settings.show_translation')"
         :aria-label="t('settings.show_translation')"
         :aria-pressed="settings.showTranslation"
         @click.stop="toggleTranslation"
       >
+        <!-- 开关状态由高亮和 aria-pressed 表达，文字固定，避免按钮宽度随状态跳动 -->
         <span class="material-symbols-rounded" aria-hidden="true">translate</span>
-        <span>{{ t(settings.showTranslation ? 'lyrics.hide_translation' : 'settings.show_translation') }}</span>
+        <span>{{ t('lyrics.translation_chip') }}</span>
       </button>
       <button
         v-if="hasRomanization"
         type="button"
         class="lyrics-display-toggle"
         :class="{ active: settings.showRomanization }"
-        :title="t('settings.show_romanization')"
+        :title="t(settings.showRomanization ? 'lyrics.hide_romanization' : 'settings.show_romanization')"
         :aria-label="t('settings.show_romanization')"
         :aria-pressed="settings.showRomanization"
         @click.stop="settings.showRomanization = !settings.showRomanization"
       >
         <span class="material-symbols-rounded" aria-hidden="true">record_voice_over</span>
-        <span>{{ t('player.lyrics_editor_romanization') }}</span>
+        <span>{{ t('lyrics.romanization_chip') }}</span>
       </button>
       <span v-if="translationNotice" class="translation-notice" role="status">{{ t('lyrics.translation_unavailable_here') }}</span>
     </div>
@@ -915,7 +916,7 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
   border-radius: 12px;
   background: rgba(20, 20, 24, 0.9);
   color: white;
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.5;
   text-align: center;
 }
@@ -944,7 +945,7 @@ watch(() => props.seekSeq, (seq, oldSeq) => {
   background: transparent;
   color: rgba(255, 255, 255, 0.6);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
   line-height: 20px;
   white-space: nowrap;

@@ -85,6 +85,8 @@ Follow the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisit
     patchelf libasound2-dev
   ```
 
+  The full list used by CI is `scripts/linux/install-build-deps.sh`, which runs as-is on Ubuntu 22.04.
+
 RPM packaging also needs `rpm`. See the FFmpeg guide for its additional tools and target restrictions.
 Windows MSI packaging also requires the VBScript optional feature; see the Tauri guide above for troubleshooting.
 Install optional Clippy / rustfmt components, which are not included in the `minimal` profile, as needed:
@@ -211,6 +213,17 @@ it does not add files to installers. See the FFmpeg guide for full Linux / macOS
 Without `--target`, bundles default to `src-tauri/target/release/bundle/`.
 Explicit targets use `src-tauri/target/<RustTarget>/release/bundle/`; `CARGO_TARGET_DIR` changes the root.
 Linux builds `.AppImage` locally; workflows compress it as `.tar.gz` for upload.
+
+Linux binaries pin glibc symbol versions to the build machine: a package built on a rolling distribution fails on
+Debian / Ubuntu LTS with `GLIBC_2.xx not found`. The Release and Artifacts workflows build inside an `ubuntu:22.04`
+container, fixing the floor at glibc 2.35, and `scripts/linux/check-glibc.sh` verifies the main binary and bundled FFmpeg.
+To share a local test build, run `scripts/linux/build-in-container.sh` with Docker or Podman; output goes to
+`src-tauri/target/linux-glibc-2.35/`, and the script prints the highest GLIBC version required.
+
+Flatpak is an optional channel: `packaging/flatpak/` repackages the `.deb` into a pinned GNOME 51 runtime (which also
+pins WebKitGTK); local build steps are in the comment at the top of the manifest. Releases additionally run
+`flatpak.yml` to produce a `.flatpak` workflow artifact without blocking publication; the workflow can also be run
+manually against an existing release.
 
 macOS uses ad-hoc signing without Apple notarization. Release checks dylib architectures and signatures,
 and adds `-adhoc` to DMG names. The base Tauri minimum system setting is 10.15;
@@ -433,6 +446,12 @@ When detected, defaults disable NVIDIA explicit sync, set the driver's in-flight
 disable the DMA-BUF atlas, and use SHM shared-memory compositing. An in-flight limit is not an FPS guarantee
 and does not disable the entire DMA-BUF renderer. The frontend also makes full-page route changes,
 now-playing slides, and scrim transitions instant to reduce large-layer repaints.
+
+Independently of the GPU, `src-tauri/src/linux_webkit_compositor.rs` sets `WEBKIT_USE_SKIA_FOR_COMPOSITION=0`
+on WebKitGTK 2.54.x, falling back to the TextureMapper compositor to avoid the transition and dynamic-background
+flicker caused by the 2.54 Skia compositor (upstream WebKit bugs 327524 / 326841; the fix was not backported to 2.54.x).
+GPU acceleration stays on. Set the variable explicitly (for example `=1`) or set `NERI_WEBKIT_KEEP_SKIA_COMPOSITOR=1`
+to keep Skia; the detected version and decision are logged under `linux-graphics`.
 
 Explicitly set NVIDIA / WebKit environment variables take priority; the compatibility layer does not overwrite them.
 For example, an explicit `WEBKIT_DISABLE_DMABUF_RENDERER` prevents additional forced SHM.

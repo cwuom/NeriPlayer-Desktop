@@ -22,6 +22,12 @@ const UI_SCALE_DEFAULT: i32 = 100;
 const UI_SCALE_MIN: i32 = 25;
 const UI_SCALE_MAX: i32 = 1000;
 const UI_SCALE_STEP: i32 = 5;
+const TEXT_SCALE_DEFAULT: i32 = 100;
+const TEXT_SCALE_MIN: i32 = 85;
+const TEXT_SCALE_MAX: i32 = 150;
+const TEXT_SCALE_STEP: i32 = 5;
+const BACKGROUND_TINT_DEFAULT: &str = "accent";
+const BACKGROUND_TINT_STRENGTH_DEFAULT: i32 = 12;
 
 #[cfg(test)]
 mod bili_subtitle_settings_tests {
@@ -68,6 +74,14 @@ pub struct AppSettings {
     pub theme_color: String,
     #[serde(deserialize_with = "deserialize_ui_scale")]
     pub ui_scale: i32,
+    /// 只缩放文字的百分比（85–150，步长 5），与 ui_scale 的整体缩放独立
+    #[serde(deserialize_with = "deserialize_text_scale")]
+    pub text_scale: i32,
+    /// 背景偏色来源：accent / neutral / #rrggbb
+    pub background_tint: String,
+    /// 背景偏色强度 0–100
+    #[serde(deserialize_with = "deserialize_tint_strength")]
+    pub background_tint_strength: i32,
     pub app_font_family: String,
     pub lyric_font_family: String,
     pub locale: String,
@@ -109,6 +123,8 @@ pub struct AppSettings {
     /// 15 分钟以上内容记住播放位置并随同步续播（对齐 Android remember_long_form_playback_progress）
     pub remember_long_form_progress: bool,
     pub keep_playback_mode: bool,
+    /// 播放超过 3 秒时「上一首」先回到本曲开头；旧配置没有该字段时保持这一行为
+    pub prev_restarts_track: bool,
     pub double_click_play: bool,
     pub local_library_sort_by: String,
     pub local_library_sort_descending: bool,
@@ -181,6 +197,9 @@ pub struct AppSettings {
     pub max_cache_size: i32,
     pub download_name_template: String,
     pub download_dir: String,
+    /// 音频与封面缓存的自定义根目录，空串为系统默认缓存目录。
+    /// 只由 set_media_cache_dir 修改（需要搬移旧缓存），普通保存与配置导入都沿用本机现值
+    pub media_cache_dir: String,
     #[serde(deserialize_with = "lenient_i32")]
     pub download_parallelism: i32,
     pub download_auto_fill_metadata: bool,
@@ -197,6 +216,8 @@ pub struct AppSettings {
     pub lt_share_audio_links: bool,
     pub volume: f32,
     pub audio_output_device: String,
+    /// Windows WASAPI 独占输出；其它平台忽略
+    pub audio_exclusive_mode: bool,
     pub playback_speed: f32,
     pub playback_pitch: f32,
     pub vinyl_effect_enabled: bool,
@@ -228,6 +249,53 @@ fn legacy_audio_effects_settings() -> AudioEffectsSettings {
         version: 0,
         ..AudioEffectsSettings::default()
     }
+}
+
+/// 与前端 normalizeBackgroundTint 一致：只接受 accent、neutral 或 #rrggbb，其余回到默认
+fn normalize_background_tint(value: &str) -> String {
+    let value = value.trim();
+    if value == "accent" || value == "neutral" {
+        return value.into();
+    }
+    let is_hex = value.len() == 7
+        && value.starts_with('#')
+        && value[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if is_hex {
+        value.to_ascii_lowercase()
+    } else {
+        BACKGROUND_TINT_DEFAULT.into()
+    }
+}
+
+fn normalize_text_scale(value: f64) -> i32 {
+    if !value.is_finite() {
+        return TEXT_SCALE_DEFAULT;
+    }
+    let clamped = value.clamp(f64::from(TEXT_SCALE_MIN), f64::from(TEXT_SCALE_MAX));
+    (clamped / f64::from(TEXT_SCALE_STEP)).round() as i32 * TEXT_SCALE_STEP
+}
+
+// 数值类外观设置容忍小数和错误类型，坏值只回到该项默认，不连带丢弃整份设置
+fn deserialize_text_scale<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(normalize_text_scale(
+        value.as_f64().unwrap_or(f64::from(TEXT_SCALE_DEFAULT)),
+    ))
+}
+
+fn deserialize_tint_strength<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .and_then(round_to_i32)
+        .unwrap_or(BACKGROUND_TINT_STRENGTH_DEFAULT)
+        .clamp(0, 100))
 }
 
 fn deserialize_ui_scale<'de, D>(deserializer: D) -> Result<i32, D::Error>
@@ -295,6 +363,9 @@ impl Default for AppSettings {
             dark_mode: "dark".into(),
             theme_color: "purple".into(),
             ui_scale: UI_SCALE_DEFAULT,
+            text_scale: TEXT_SCALE_DEFAULT,
+            background_tint: BACKGROUND_TINT_DEFAULT.into(),
+            background_tint_strength: BACKGROUND_TINT_STRENGTH_DEFAULT,
             app_font_family: String::new(),
             lyric_font_family: String::new(),
             locale: "zh-CN".into(),
@@ -326,6 +397,7 @@ impl Default for AppSettings {
             keep_progress: true,
             remember_long_form_progress: true,
             keep_playback_mode: true,
+            prev_restarts_track: true,
             double_click_play: false,
             local_library_sort_by: "default".into(),
             local_library_sort_descending: false,
@@ -377,6 +449,7 @@ impl Default for AppSettings {
             max_cache_size: 1024,
             download_name_template: DEFAULT_DOWNLOAD_NAME_TEMPLATE.into(),
             download_dir: String::new(),
+            media_cache_dir: String::new(),
             download_parallelism: DEFAULT_DOWNLOAD_PARALLELISM,
             download_auto_fill_metadata: true,
             download_embed_lyrics: false,
@@ -392,6 +465,7 @@ impl Default for AppSettings {
             lt_share_audio_links: true,
             volume: 1.0,
             audio_output_device: String::new(),
+            audio_exclusive_mode: false,
             playback_speed: 1.0,
             playback_pitch: 1.0,
             vinyl_effect_enabled: false,
@@ -415,6 +489,9 @@ impl AppSettings {
         self.dark_mode = normalize_choice(&self.dark_mode, &["system", "dark", "light"], "dark");
         self.theme_color = normalize_theme_color(&self.theme_color);
         self.ui_scale = normalize_ui_scale(f64::from(self.ui_scale));
+        self.text_scale = normalize_text_scale(f64::from(self.text_scale));
+        self.background_tint = normalize_background_tint(&self.background_tint);
+        self.background_tint_strength = self.background_tint_strength.clamp(0, 100);
         self.app_font_family = normalize_font_family(&self.app_font_family);
         self.lyric_font_family = normalize_font_family(&self.lyric_font_family);
         self.locale = normalize_choice(&self.locale, &["zh-CN", "zh-TW", "en", "ja"], "zh-CN");
@@ -585,6 +662,7 @@ impl AppSettings {
         self.download_name_template =
             non_empty_or_default(&self.download_name_template, DEFAULT_DOWNLOAD_NAME_TEMPLATE);
         self.download_dir = self.download_dir.trim().into();
+        self.media_cache_dir = self.media_cache_dir.trim().into();
         self.audio_output_device = self.audio_output_device.trim().into();
         self.lt_server_url = self.lt_server_url.trim().trim_end_matches('/').into();
         self.lt_nickname = self.lt_nickname.trim().into();
@@ -757,7 +835,8 @@ fn normalize_choice(value: &str, allowed: &[&str], fallback: &str) -> String {
 fn normalize_theme_color(value: &str) -> String {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green" => normalized,
+        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green"
+        | "graphite" => normalized,
         "#6750a4" => "purple".into(),
         _ => "purple".into(),
     }
@@ -830,6 +909,17 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_frontend_theme_preset_survives_normalization() {
+        // 回归：前端新增的 graphite 预设曾被后端规范化成 purple，保存后重启又变回紫色
+        for key in [
+            "purple", "blue", "teal", "green", "olive", "orange", "rose", "brown", "graphite",
+        ] {
+            assert_eq!(super::normalize_theme_color(key), key);
+        }
+        assert_eq!(super::normalize_theme_color("unknown"), "purple");
+    }
+
     #[test]
     fn library_interaction_preferences_default_for_old_settings() {
         let settings: super::AppSettings = serde_json::from_str("{}").unwrap();
@@ -1100,11 +1190,13 @@ mod tests {
     fn android_alignment_output_device_settings_are_backward_compatible() {
         let mut settings: AppSettings = serde_json::from_str("{}").expect("old settings");
         assert_eq!(settings.audio_output_device, "");
+        assert!(!settings.audio_exclusive_mode);
         settings.audio_output_device = "  Headphones  ".into();
         settings.normalize();
         assert_eq!(settings.audio_output_device, "Headphones");
         let json = serde_json::to_value(&settings).expect("settings");
         assert_eq!(json["audioOutputDevice"], "Headphones");
+        assert_eq!(json["audioExclusiveMode"], false);
     }
 
     use super::{AppSettings, MAX_MEDIA_CACHE_SIZE_MB, MIN_MEDIA_CACHE_SIZE_MB};
@@ -1153,6 +1245,37 @@ mod tests {
             assert_eq!(settings.lyric_font_scale, 1.25);
             assert_eq!(settings.locale, "ja");
         }
+    }
+
+    #[test]
+    fn appearance_text_scale_and_background_tint_default_and_normalize() {
+        let old: AppSettings = serde_json::from_value(serde_json::json!({ "locale": "ja" }))
+            .expect("old snapshots without appearance fields must load");
+        assert_eq!(old.text_scale, 100);
+        assert_eq!(old.background_tint, "accent");
+        assert_eq!(old.background_tint_strength, 12);
+
+        let mut parsed: AppSettings = serde_json::from_value(serde_json::json!({
+            "textScale": 127.4, "backgroundTint": " #A0B1C2 ", "backgroundTintStrength": 250.6,
+            "locale": "ja",
+        }))
+        .expect("numeric appearance values must not discard the payload");
+        parsed.normalize();
+        assert_eq!(parsed.text_scale, 125);
+        assert_eq!(parsed.background_tint, "#a0b1c2");
+        assert_eq!(parsed.background_tint_strength, 100);
+        assert_eq!(parsed.locale, "ja");
+
+        let mut bad: AppSettings = serde_json::from_value(serde_json::json!({
+            "textScale": "huge", "backgroundTint": "red", "backgroundTintStrength": [1],
+        }))
+        .expect("bad appearance types fall back per field");
+        bad.normalize();
+        assert_eq!(bad.text_scale, 100);
+        assert_eq!(bad.background_tint, "accent");
+        assert_eq!(bad.background_tint_strength, 12);
+        assert_eq!(super::normalize_text_scale(10.0), 85);
+        assert_eq!(super::normalize_text_scale(f64::NAN), 100);
     }
 
     #[test]
@@ -1620,6 +1743,50 @@ mod tests {
         assert_eq!(settings.lyric_font_scale, 1.6);
         assert_eq!(settings.cover_blur_amount, 8.0);
         assert_eq!(AppSettings::default().cloud_music_offset, 1000);
+    }
+
+    #[test]
+    fn previous_restart_preference_defaults_on_and_survives_config_round_trip() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Config {
+            #[serde(deserialize_with = "super::deserialize_app_settings")]
+            settings: AppSettings,
+        }
+        let old: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert!(old.prev_restarts_track, "旧配置保持超过 3 秒回到开头");
+        assert!(AppSettings::default().prev_restarts_track);
+
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "settings": { "prevRestartsTrack": false, "keepPlaybackMode": false },
+        }))
+        .expect("config with previous preference");
+        let settings = config.settings.normalized();
+        assert!(!settings.prev_restarts_track);
+        assert!(!settings.keep_playback_mode);
+        let exported = serde_json::to_value(Config { settings }).expect("exported config");
+        assert_eq!(exported["settings"]["prevRestartsTrack"], false);
+        let imported: Config = serde_json::from_value(exported.clone()).expect("imported config");
+        assert!(!imported.settings.prev_restarts_track);
+        assert_eq!(
+            serde_json::to_value(imported).expect("imported JSON"),
+            exported
+        );
+    }
+
+    #[test]
+    fn media_cache_dir_defaults_to_system_cache_and_trims() {
+        let old: AppSettings = serde_json::from_str("{}").expect("old settings");
+        assert_eq!(old.media_cache_dir, "");
+        let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "mediaCacheDir": "  D:\\NeriCache  ",
+        }))
+        .expect("custom cache dir");
+        settings.normalize();
+        assert_eq!(settings.media_cache_dir, "D:\\NeriCache");
+        let saved = serde_json::to_value(&settings).expect("saved settings");
+        assert_eq!(saved["mediaCacheDir"], "D:\\NeriCache");
+        let restored: AppSettings = serde_json::from_value(saved).expect("restored settings");
+        assert_eq!(restored, settings);
     }
 
     #[test]

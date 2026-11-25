@@ -5,6 +5,7 @@ import type { DefaultLyricSource } from './lyricSourcePreference'
 import { mapBackendLyrics, toEditableRomanizationText } from './lyricsFormat'
 import { defaultLyricMatchKeyword, matchLyrics, type LyricMatchSource } from './lyricMatch'
 import { hasWordTimedLyrics } from './lyricsRequest'
+import { lyricSearchTitles } from './lyricSearchTitle'
 
 export interface FetchedLyrics {
   /** 没找到歌词时为空 */
@@ -65,6 +66,22 @@ export function fetchLyricsArgsFor(track: AutomaticLyricsTrack): FetchLyricsArgs
  * 正在播放页、桌面歌词、下一首预取共用，经 loadLyricsSingleFlight 合并时三处拿到的是同一种结果
  */
 export async function fetchAutomaticLyrics(
+  track: AutomaticLyricsTrack,
+  playbackSource: string | null | undefined,
+  preferWordTimed: boolean,
+): Promise<FetchedLyrics> {
+  const args = fetchLyricsArgsFor(track)
+  // 带平台 ID 的曲目按 ID 取词，标题就是正式歌名，不做书名号提取
+  const titles = args.neteaseId !== null || args.qqSongMid ? [track.title] : lyricSearchTitles(track.title)
+  let result: FetchedLyrics = { source: null, lines: [] }
+  for (const title of titles) {
+    result = await fetchAutomaticLyricsByTitle({ ...track, title }, playbackSource, preferWordTimed)
+    if (result.lines.length) return result
+  }
+  return result
+}
+
+async function fetchAutomaticLyricsByTitle(
   track: AutomaticLyricsTrack,
   playbackSource: string | null | undefined,
   preferWordTimed: boolean,

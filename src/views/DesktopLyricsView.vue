@@ -265,7 +265,7 @@ onUnmounted(() => {
   gap: 6px;
   min-width: 0;
   color: rgb(255 255 255 / 70%);
-  font-size: 12px;
+  font-size: var(--fs-12);
   text-shadow: 0 1px 4px rgb(0 0 0 / 70%);
 }
 

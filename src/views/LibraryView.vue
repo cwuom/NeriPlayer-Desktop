@@ -25,7 +25,7 @@ import {
 } from '@/modules/library/favoriteArtists'
 import { favoriteRoute, favoriteWebUrl } from '@/components/library/favoriteLinks'
 import { isProtectedPlaylist, playlistDragKey, type LocalPlaylistSummary } from '@/components/library/libraryPlaylists'
-import { isBilibiliCover, toDisplayableLibraryCoverUrl, useLibraryCovers } from '@/components/library/useLibraryCovers'
+import { hasProxiedCoverFallback, toDisplayableLibraryCoverUrl, useLibraryCovers } from '@/components/library/useLibraryCovers'
 import { useLibraryTabs } from '@/components/library/useLibraryTabs'
 import { useLocalPlaylists } from '@/components/library/useLocalPlaylists'
 import { usePlaylistActions } from '@/components/library/usePlaylistActions'
@@ -432,7 +432,7 @@ onUnmounted(() => {
           </span>
         </div>
         <div class="pl-icon" :class="{ 'has-cover': pl.cover_url && !isLibraryCoverFailed('local', pl.id, pl.cover_url) }">
-          <BilibiliCoverImage v-if="isBilibiliCover(pl.cover_url) && !isLibraryCoverFailed('local', pl.id, pl.cover_url)" :src="pl.cover_url!" class="pl-cover-img">
+          <BilibiliCoverImage v-if="hasProxiedCoverFallback(pl.cover_url) && !isLibraryCoverFailed('local', pl.id, pl.cover_url)" :src="pl.cover_url!" class="pl-cover-img">
             <span class="material-symbols-rounded filled" style="font-size: 22px">library_music</span>
           </BilibiliCoverImage>
           <img
@@ -821,8 +821,15 @@ onUnmounted(() => {
           @contextmenu="collectionMenuRef?.open($event, { route: { name: 'youtube-playlist', params: { browseId: ypl.id } }, webUrl: collectionWebUrl('youtube', 'playlist', ypl.id) })"
         >
           <div class="pl-icon youtube" :class="{ 'has-cover': ypl.coverUrl && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl) }">
+            <BilibiliCoverImage
+              v-if="hasProxiedCoverFallback(ypl.coverUrl) && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl)"
+              :src="ypl.coverUrl!"
+              class="pl-cover-img"
+            >
+              <span class="material-symbols-rounded filled" style="font-size: 22px">subscriptions</span>
+            </BilibiliCoverImage>
             <img
-              v-if="ypl.coverUrl && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl)"
+              v-else-if="ypl.coverUrl && !isLibraryCoverFailed('youtube', ypl.id, ypl.coverUrl)"
               :src="toDisplayableLibraryCoverUrl(ypl.coverUrl)"
               referrerpolicy="no-referrer"
               class="pl-cover-img"

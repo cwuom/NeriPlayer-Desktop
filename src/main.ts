@@ -11,6 +11,10 @@ import { installHostBackgroundSync } from './integrations/hostBackground'
 import { preloadUserData } from './modules/persistence/userData'
 import { removeLegacyCacheBuckets } from './modules/persistence/persistentCache'
 import { installNativeContextMenuPolicy } from './integrations/nativeContextMenu'
+import { installZoomGuard } from './integrations/zoomGuard'
+import { installDragClickGuard } from './integrations/dragClickGuard'
+import { installMacTrafficLightAlignment } from './integrations/macTrafficLights'
+import { installRangeFill } from './integrations/rangeFill'
 import { installClipboardPasteGuard } from './integrations/clipboardPaste'
 import { useSettingsStore } from './stores/settings'
 import { installUiScale } from './modules/settings/uiScale'
@@ -24,10 +28,16 @@ import './styles/global.scss'
 initTheme()
 setViewTransitionSupported(detectPlatform() !== 'linux')
 installNativeContextMenuPolicy()
+installZoomGuard()
+installDragClickGuard()
 
 const windowKind = new URLSearchParams(window.location.search).get('window')
 
 async function mountWindow() {
+  if (import.meta.env.DEV && !isTauri()) {
+    const { installBrowserPreview } = await import('./dev/browserPreview')
+    installBrowserPreview()
+  }
   if (windowKind === 'desktop-lyrics') {
     const { default: DesktopLyricsView } = await import('./views/DesktopLyricsView.vue')
     createApp(DesktopLyricsView).use(i18n).mount('#app')
@@ -93,6 +103,8 @@ async function mountWindow() {
   app.mount('#app')
   installClipboardPasteGuard()
   installHostBackgroundSync()
+  installMacTrafficLightAlignment()
+  installRangeFill()
 
   // Vue 挂载完成后显示窗口，避免闪烁
   if (isTauri()) void getCurrentWindow().show().catch(() => {})

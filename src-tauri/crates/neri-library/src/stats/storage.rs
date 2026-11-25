@@ -10,7 +10,9 @@ use rusqlite::{params, Connection, Row, Transaction};
 
 use super::{daily_shard_key, StatsStore};
 use crate::db;
-use crate::sync::models::{SyncPlaybackCounterShard, SyncPlaybackStatBucket, SyncTrackStat};
+use crate::sync::models::{
+    SyncPlaybackCounterShard, SyncPlaybackHourTotal, SyncPlaybackStatBucket, SyncTrackStat,
+};
 use neri_common::error::{AppError, AppResult};
 
 pub(crate) const LEGACY_IMPORT_KEY: &str = "legacy_import.playback_stats";
@@ -22,6 +24,9 @@ const STAT_COLUMNS: &str =
     "identity_key, id, name, artist, album, album_id, cover_url, duration_ms,
     total_listen_ms, play_count, last_played_at, first_played_at, media_uri,
     counter_base_listen_ms, counter_base_play_count, provenance_shards_json";
+
+// 日分桶独有的列，紧跟在 STAT_COLUMNS 之后
+const BUCKET_EXTRA_COLUMNS: &str = "recorded_local_date, hourly_totals_json";
 
 const SHARD_COLUMNS: &str =
     "device_id, epoch_started_at, total_listen_ms, play_count, first_played_at, last_played_at";
@@ -35,12 +40,19 @@ pub(crate) fn load_from(connection: &Connection) -> AppResult<StatsStore> {
         .collect::<AppResult<Vec<_>>>()?;
     let buckets = connection
         .prepare(&format!(
-            "SELECT day_start_at, {STAT_COLUMNS} FROM playback_stat_bucket
+            "SELECT day_start_at, {STAT_COLUMNS}, {BUCKET_EXTRA_COLUMNS} FROM playback_stat_bucket
              ORDER BY day_start_at, identity_key"
         ))?
         .query_and_then([], |row| -> AppResult<SyncPlaybackStatBucket> {
             let day_start_at: i64 = row.get(0)?;
-            Ok(bucket_from_stat(day_start_at, stat_from_row(row, 1)?))
+            let hours: String = row.get(18)?;
+            let mut bucket = bucket_from_stat(day_start_at, stat_from_row(row, 1)?);
+            bucket.recorded_local_date = row.get(17)?;
+            bucket.hourly_totals = serde_json::from_str::<Vec<SyncPlaybackHourTotal>>(&hours)
+                .map_err(|error| {
+                    AppError::Other(format!("Stored playback hour totals are invalid: {error}"))
+                })?;
+            Ok(bucket)
         })?
         .collect::<AppResult<Vec<_>>>()?;
 
@@ -173,8 +185,8 @@ fn save_buckets(transaction: &Transaction<'_>, store: &StatsStore) -> AppResult<
         .query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))?
         .collect::<Result<_, _>>()?;
     let mut upsert = transaction.prepare_cached(&format!(
-        "INSERT INTO playback_stat_bucket (day_start_at, {STAT_COLUMNS}, row_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+        "INSERT INTO playback_stat_bucket (day_start_at, {STAT_COLUMNS}, {BUCKET_EXTRA_COLUMNS}, row_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(day_start_at, identity_key) DO UPDATE SET id = excluded.id,
              name = excluded.name, artist = excluded.artist, album = excluded.album,
              album_id = excluded.album_id, cover_url = excluded.cover_url,
@@ -183,7 +195,9 @@ fn save_buckets(transaction: &Transaction<'_>, store: &StatsStore) -> AppResult<
              first_played_at = excluded.first_played_at, media_uri = excluded.media_uri,
              counter_base_listen_ms = excluded.counter_base_listen_ms,
              counter_base_play_count = excluded.counter_base_play_count,
-             provenance_shards_json = excluded.provenance_shards_json, row_hash = excluded.row_hash"
+             provenance_shards_json = excluded.provenance_shards_json,
+             recorded_local_date = excluded.recorded_local_date,
+             hourly_totals_json = excluded.hourly_totals_json, row_hash = excluded.row_hash"
     ))?;
     let mut kept = HashSet::new();
     for bucket in &store.buckets {
@@ -219,6 +233,8 @@ fn save_buckets(transaction: &Transaction<'_>, store: &StatsStore) -> AppResult<
             bucket.counter_base_listen_ms,
             bucket.counter_base_play_count,
             serde_json::to_string(&bucket.counter_shards)?,
+            bucket.recorded_local_date,
+            serde_json::to_string(&bucket.hourly_totals)?,
             hash,
         ])?;
         transaction.execute(
@@ -316,6 +332,8 @@ fn bucket_from_stat(day_start_at: i64, stat: SyncTrackStat) -> SyncPlaybackStatB
         counter_base_listen_ms: stat.counter_base_listen_ms,
         counter_base_play_count: stat.counter_base_play_count,
         counter_shards: stat.counter_shards,
+        recorded_local_date: None,
+        hourly_totals: Vec::new(),
     }
 }
 
@@ -327,6 +345,7 @@ fn shard_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<SyncPlayback
         play_count: row.get(offset + 3)?,
         first_played_at: row.get(offset + 4)?,
         last_played_at: row.get(offset + 5)?,
+        recorded_local_date: None,
     })
 }
 
@@ -339,6 +358,10 @@ fn hash_shards(hasher: &mut impl Hasher, shards: &[SyncPlaybackCounterShard]) {
         shard.play_count.hash(hasher);
         shard.first_played_at.hash(hasher);
         shard.last_played_at.hash(hasher);
+        // 只在有值时计入，升级后未变化的旧行摘要不变，不会被整表重写
+        if let Some(date) = &shard.recorded_local_date {
+            date.hash(hasher);
+        }
     }
 }
 
@@ -413,5 +436,15 @@ fn bucket_hash(bucket: &SyncPlaybackStatBucket, own: &[SyncPlaybackCounterShard]
         &bucket.counter_shards,
         own,
     );
+    if let Some(date) = &bucket.recorded_local_date {
+        date.hash(&mut hasher);
+    }
+    for hour in &bucket.hourly_totals {
+        hour.device_id.hash(&mut hasher);
+        hour.epoch_started_at.hash(&mut hasher);
+        hour.hour_start_at.hash(&mut hasher);
+        hour.local_hour.hash(&mut hasher);
+        hour.total_listen_ms.hash(&mut hasher);
+    }
     hasher.finish() as i64
 }

@@ -386,7 +386,7 @@ defineExpose({ startEditing })
   border-radius: 5px;
   background: var(--md-surface-container-high, #2b2930);
   color: var(--md-error, #ba1a1a);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 500;
   line-height: 1.35;
   white-space: normal;

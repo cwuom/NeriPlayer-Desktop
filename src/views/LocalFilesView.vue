@@ -368,20 +368,20 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .local-files-view { padding: 24px 32px 100px; &.embedded { padding: 8px 0 32px; } }
-.scan-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; h2 { font-size: 22px; margin: 0 0 8px; } p { margin: 0; color: var(--md-on-surface-variant); font-size: 13px; } }
+.scan-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; h2 { font-size: 22px; margin: 0 0 8px; } p { margin: 0; color: var(--md-on-surface-variant); font-size: var(--fs-13); } }
 .scan-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.scan-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; border-radius: 24px; color: var(--md-on-primary); background: var(--md-primary); font-size: 13px; font-weight: 600; cursor: pointer; &.secondary { background: var(--md-surface-container-high); color: var(--md-on-surface); } &:disabled { opacity: .4; cursor: default; } }
-.scan-directory { color: var(--md-on-surface-variant); font-size: 12px; overflow-wrap: anywhere; margin: 12px 0 20px; }
-.scan-icon-button.outlined { width: 40px; height: 40px; border: 1px solid var(--md-outline-variant); }
+.scan-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; border-radius: 24px; color: var(--md-on-primary); background: var(--md-primary); font-size: var(--fs-13); font-weight: 600; cursor: pointer; &.secondary { background: var(--md-surface-container-high); color: var(--md-on-surface); } &:disabled { opacity: .4; cursor: default; } }
+.scan-directory { color: var(--md-on-surface-variant); font-size: var(--fs-12); overflow-wrap: anywhere; margin: 12px 0 20px; }
+.scan-icon-button.outlined { width: 40px; height: 40px; border: 1px solid var(--hairline); }
 .folder-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
 .folder-chip {
   display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-height: 36px; padding: 0 4px 0 12px;
-  border-radius: var(--radius-sm); background: var(--md-surface-container); color: var(--md-on-surface); font-size: 13px;
+  border-radius: var(--radius-sm); background: var(--md-surface-container); color: var(--md-on-surface); font-size: var(--fs-13);
   > .material-symbols-rounded { font-size: 18px; color: var(--md-primary); }
   &.unavailable { color: var(--md-on-surface-variant); > .material-symbols-rounded { color: var(--md-error); } }
 }
 .folder-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.folder-chip-count { color: var(--md-on-surface-variant); font-size: 12px; font-variant-numeric: tabular-nums; }
+.folder-chip-count { color: var(--md-on-surface-variant); font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
 .folder-chip-remove {
   width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: var(--md-on-surface-variant);
   transition: background var(--duration-short) var(--ease-standard), color var(--duration-short) var(--ease-standard);
@@ -391,20 +391,20 @@ onMounted(() => {
 .folder-chip-enter-active, .folder-chip-leave-active { transition: opacity 180ms var(--ease-standard), transform 180ms var(--ease-standard); }
 .folder-chip-enter-from, .folder-chip-leave-to { opacity: 0; transform: scale(0.94); }
 .folder-chip-leave-active { position: absolute; }
-.scan-status { display: flex; align-items: center; gap: 16px; background: var(--md-surface-container); border-radius: 16px; padding: 14px 16px; margin: 16px 0; min-width: 0; > div { min-width: 0; flex: 1; } p { color: var(--md-on-surface-variant); font-size: 13px; margin: 4px 0 0; } .scan-current-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; } }
+.scan-status { display: flex; align-items: center; gap: 16px; background: var(--md-surface-container); border-radius: 16px; padding: 14px 16px; margin: 16px 0; min-width: 0; > div { min-width: 0; flex: 1; } p { color: var(--md-on-surface-variant); font-size: var(--fs-13); margin: 4px 0 0; } .scan-current-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-12); } }
 .scan-cancel { flex-shrink: 0; padding: 8px 14px; }
 .scan-banner-enter-active, .scan-banner-leave-active { transition: opacity 200ms var(--ease-standard), transform 200ms var(--ease-standard); }
 .scan-banner-enter-from, .scan-banner-leave-to { opacity: 0; transform: translateY(-4px); }
 .scan-track-info.playing strong { color: var(--md-primary); }
 .scanning-icon { color: var(--md-primary); animation: local-scan-spin 1s linear infinite; }
-.scan-error { color: var(--md-error); overflow-wrap: anywhere; font-size: 13px; }
-.scan-message, .scan-summary { color: var(--md-on-surface-variant); font-size: 13px; margin: 16px 0; }
-.scan-search { display: flex; align-items: center; gap: 12px; background: var(--md-surface-container-high); border-radius: 28px; padding: 12px 18px; margin: 20px 0 16px; color: var(--md-on-surface-variant); input { width: 100%; border: 0; outline: none; background: none; font-size: 14px; color: var(--md-on-surface); } }
+.scan-error { color: var(--md-error); overflow-wrap: anywhere; font-size: var(--fs-13); }
+.scan-message, .scan-summary { color: var(--md-on-surface-variant); font-size: var(--fs-13); margin: 16px 0; }
+.scan-search { display: flex; align-items: center; gap: 12px; background: var(--md-surface-container-high); border-radius: 28px; padding: 12px 18px; margin: 20px 0 16px; color: var(--md-on-surface-variant); input { width: 100%; border: 0; outline: none; background: none; font-size: var(--fs-14); color: var(--md-on-surface); } }
 .scan-filters {
   display: flex; gap: 8px 16px; flex-wrap: wrap; margin-top: 8px;
   label {
     display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px 12px;
-    border-radius: var(--radius-sm); font-size: 13px; cursor: pointer;
+    border-radius: var(--radius-sm); font-size: var(--fs-13); cursor: pointer;
     transition: background var(--duration-short) var(--ease-standard);
     &:hover:not(:has(input:disabled)) { background: var(--md-surface-container); }
     &:has(input:disabled) { cursor: default; color: var(--md-outline); }
@@ -426,18 +426,18 @@ onMounted(() => {
   &:hover { background: color-mix(in srgb, var(--md-primary) 10%, transparent); }
 }
 .scan-cover { width: 48px; height: 48px; flex-shrink: 0; border-radius: 10px; overflow: hidden; display: grid; place-items: center; background: var(--md-surface-container-high); color: var(--md-on-surface-variant); img { width: 100%; height: 100%; object-fit: cover; } }
-.scan-track-info { text-align: left; flex: 1; min-width: 0; color: var(--md-on-surface); cursor: pointer; strong, span, small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } strong { font-size: 14px; } span { font-size: 12px; color: var(--md-on-surface-variant); margin-top: 4px; } small { font-size: 11px; color: var(--md-on-surface-variant); margin-top: 4px; opacity: .7; } }
-.scan-badge { font-size: 11px; color: var(--md-on-surface-variant); background: var(--md-surface-container-high); border-radius: 8px; padding: 4px 7px; }
-.scan-duration { font-size: 12px; color: var(--md-on-surface-variant); }
+.scan-track-info { text-align: left; flex: 1; min-width: 0; color: var(--md-on-surface); cursor: pointer; strong, span, small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } strong { font-size: var(--fs-14); } span { font-size: var(--fs-12); color: var(--md-on-surface-variant); margin-top: 4px; } small { font-size: var(--fs-11); color: var(--md-on-surface-variant); margin-top: 4px; opacity: .7; } }
+.scan-badge { font-size: var(--fs-11); color: var(--md-on-surface-variant); background: var(--md-surface-container-high); border-radius: 8px; padding: 4px 7px; }
+.scan-duration { font-size: var(--fs-12); color: var(--md-on-surface-variant); }
 .scan-icon-button { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: var(--md-on-surface-variant); cursor: pointer; &:hover { color: var(--md-primary); background: var(--md-primary-container); } }
 .scan-empty { text-align: center; padding: 64px 16px; color: var(--md-on-surface-variant); > .material-symbols-rounded { font-size: 54px; opacity: .5; } }
 .scan-empty--state {
   display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 72px 16px 56px;
-  p { margin: 0; font-size: 14px; }
+  p { margin: 0; font-size: var(--fs-14); }
   .scan-button { margin-top: 8px; }
 }
 .scan-show-more { display: flex; margin: 20px auto; }
-.scan-skipped { margin: 24px 0; font-size: 12px; color: var(--md-on-surface-variant); summary { cursor: pointer; } > div { padding: 12px 0; overflow-wrap: anywhere; } p { margin: 5px 0 0; } }
+.scan-skipped { margin: 24px 0; font-size: var(--fs-12); color: var(--md-on-surface-variant); summary { cursor: pointer; } > div { padding: 12px 0; overflow-wrap: anywhere; } p { margin: 5px 0 0; } }
 @keyframes local-scan-spin { to { transform: rotate(360deg); } }
 @media (max-width: 700px) { .scan-badge, .scan-duration { display: none; } .scan-track { gap: 8px; padding: 8px 4px; } .scan-track-select { margin: 0; } }
 @media (prefers-reduced-motion: reduce) { .scanning-icon { animation: none; } .scan-filters label, .scan-track-select { transition: none; } }

@@ -129,6 +129,17 @@ export function translatedBiliSubtitleTrack(primary: BiliSubtitleTrack, tracks: 
     .sort((a, b) => Number(a.isAi) - Number(b.isAi) || a.language.localeCompare(b.language))[0]
 }
 
+const MUSIC_NOTE_PATTERN = /\s*[♪♫♬♩]+\s*/g
+
+/** AI 字幕每句首尾都包着 ♪ 装饰（#71），当歌词显示时只保留正文；纯 ♪ 行返回空串以便丢弃 */
+function stripBiliSubtitleMusicNotes(text: string): string {
+  if (!/[♪♫♬♩]/.test(text)) return text.trim()
+  return text.split(/\r?\n/)
+    .map(line => line.replace(MUSIC_NOTE_PATTERN, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
 /** Convert valid seconds to ordered millisecond cues and remove duplicate rows. */
 export function parseBiliSubtitleCues(payload: unknown): BiliSubtitleCue[] {
   const body = record(payload).body
@@ -141,7 +152,7 @@ export function parseBiliSubtitleCues(payload: unknown): BiliSubtitleCue[] {
   const seen = new Set<string>()
   return body.flatMap((raw) => {
     const item = record(raw)
-    const text = typeof item.content === 'string' ? item.content.trim() : ''
+    const text = typeof item.content === 'string' ? stripBiliSubtitleMusicNotes(item.content) : ''
     const startMs = millis(item.from)
     if (!text || startMs === null) return []
     const key = JSON.stringify([startMs, text])

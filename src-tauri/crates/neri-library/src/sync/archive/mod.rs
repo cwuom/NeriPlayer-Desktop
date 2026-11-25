@@ -1148,6 +1148,16 @@ pub(super) fn test_object_paths(raw: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// 列出 ProtoBuf 字节里的（字段号, wire type），供跨模块的线格式测试使用
+#[cfg(test)]
+pub(crate) fn test_proto_fields(bytes: &[u8]) -> Vec<(u64, u64)> {
+    wire::fields(bytes)
+        .unwrap()
+        .into_iter()
+        .map(|field| (field.key >> 3, field.key & 7))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1813,5 +1823,131 @@ mod tests {
             "a".repeat(64)
         )));
         assert!(!canonical_object_path("../neriplayer-sync-v4-evil.zst"));
+    }
+
+    /// 按 Android #719 的 ProtoNumber 手工拼出日分桶，wire 与 prost 两套解码都要读出同样的值
+    #[test]
+    fn android_bucket_hours_decode_through_archive_wire_and_round_trip() {
+        fn text(output: &mut Vec<u8>, tag: u64, value: &str) {
+            wire::number(output, tag << 3 | 2);
+            wire::part(output, value.as_bytes());
+        }
+        fn int(output: &mut Vec<u8>, tag: u64, value: i64) {
+            wire::number(output, tag << 3);
+            wire::number(output, value as u64);
+        }
+        let mut hour = Vec::new();
+        text(&mut hour, 1, "phone");
+        int(&mut hour, 2, 3);
+        int(&mut hour, 3, 1_800_000);
+        int(&mut hour, 4, 6);
+        int(&mut hour, 5, 45);
+        let mut shard = Vec::new();
+        text(&mut shard, 1, "phone");
+        int(&mut shard, 4, 1);
+        text(&mut shard, 7, "2026-11-24");
+        let mut bucket = Vec::new();
+        text(&mut bucket, 2, "b-new");
+        int(&mut bucket, 6, 75);
+        wire::number(&mut bucket, 17 << 3 | 2);
+        wire::part(&mut bucket, &shard);
+        text(&mut bucket, 18, "2026-11-24");
+        wire::number(&mut bucket, 19 << 3 | 2);
+        wire::part(&mut bucket, &hour);
+
+        let decoded = wire::decode("bucket", &bucket).unwrap();
+        assert_eq!(decoded["recordedLocalDate"], "2026-11-24");
+        assert_eq!(
+            decoded["counterShards"][0]["recordedLocalDate"],
+            "2026-11-24"
+        );
+        assert_eq!(
+            decoded["hourlyTotals"],
+            serde_json::json!([{"deviceId": "phone", "epochStartedAt": 3, "hourStartAt": 1_800_000, "localHour": 6, "totalListenMs": 45}])
+        );
+        let model: crate::sync::models::SyncPlaybackStatBucket =
+            serde_json::from_value(decoded.clone()).unwrap();
+        assert_eq!(model.hourly_totals[0].total_listen_ms, 45);
+        assert_eq!(
+            wire::decode("bucket", &wire::encode("bucket", &decoded).unwrap()).unwrap(),
+            decoded
+        );
+
+        let proto =
+            crate::sync::proto_models::ProtoSyncPlaybackStatBucket::decode(bucket.as_slice())
+                .unwrap();
+        assert_eq!(proto.recorded_local_date.as_deref(), Some("2026-11-24"));
+        assert_eq!(proto.hourly_totals[0].local_hour, 6);
+        assert_eq!(
+            proto.counter_shards[0].recorded_local_date.as_deref(),
+            Some("2026-11-24")
+        );
+    }
+
+    #[tokio::test]
+    async fn v4_round_trip_preserves_hourly_totals_and_recorded_dates() {
+        use crate::sync::models::{
+            SyncPlaybackCounterShard, SyncPlaybackHourTotal, SyncPlaybackStatBucket,
+        };
+        let bucket = SyncPlaybackStatBucket {
+            identity_key: "song".into(),
+            play_count: 1,
+            total_listen_ms: 75,
+            recorded_local_date: Some("2026-11-24".into()),
+            counter_shards: vec![SyncPlaybackCounterShard {
+                device_id: "phone".into(),
+                play_count: 1,
+                total_listen_ms: 75,
+                recorded_local_date: Some("2026-11-24".into()),
+                ..Default::default()
+            }],
+            hourly_totals: vec![SyncPlaybackHourTotal {
+                device_id: "phone".into(),
+                epoch_started_at: 0,
+                hour_start_at: 0,
+                local_hour: 0,
+                total_listen_ms: 75,
+            }],
+            ..Default::default()
+        };
+        let data = SyncData {
+            playback_stat_buckets: vec![
+                bucket.clone(),
+                SyncPlaybackStatBucket {
+                    identity_key: "legacy".into(),
+                    play_count: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let prepared = prepare(&data, None).unwrap();
+        let restored = load(&prepared.content, |path| {
+            std::future::ready(
+                prepared
+                    .objects
+                    .get(&path)
+                    .cloned()
+                    .ok_or_else(|| invalid("missing object")),
+            )
+        })
+        .await
+        .unwrap();
+        let buckets = &restored.data.playback_stat_buckets;
+        let restored_bucket = buckets
+            .iter()
+            .find(|item| item.identity_key == "song")
+            .unwrap();
+        assert_eq!(restored_bucket.hourly_totals, bucket.hourly_totals);
+        assert_eq!(
+            restored_bucket.recorded_local_date,
+            bucket.recorded_local_date
+        );
+        assert_eq!(restored_bucket.counter_shards, bucket.counter_shards);
+        let legacy = buckets
+            .iter()
+            .find(|item| item.identity_key == "legacy")
+            .unwrap();
+        assert!(legacy.hourly_totals.is_empty() && legacy.recorded_local_date.is_none());
     }
 }

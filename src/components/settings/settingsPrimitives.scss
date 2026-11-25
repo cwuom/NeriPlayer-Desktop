@@ -17,7 +17,7 @@
     :deep(.custom-select-trigger) {
       min-height: 44px;
       padding: 10px 14px;
-      font-size: 14px;
+      font-size: var(--fs-14);
     }
   }
 }
@@ -37,32 +37,67 @@
 }
 
 @mixin card {
+  /* Clean：分组标题用小号墨灰字，不再全大写 + 强调色 */
   .section-label {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-13);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: var(--md-primary);
-    margin: 24px 0 10px;
-    padding: 0 4px;
+    color: var(--md-on-surface-variant);
+    margin: 28px 0 10px;
+    padding: 0 6px;
 
     &:first-of-type { margin-top: 0; }
+    /* Clean：分区标题只留文字（对齐 Android），折叠箭头除外 */
+    > .material-symbols-rounded:not(.section-arrow) { display: none; }
   }
 
   .setting-card {
     display: flex;
     align-items: center;
     gap: 14px;
-    padding: 14px 16px;
+    min-height: 64px;
+    padding: 14px 18px;
     border-radius: var(--radius-lg);
-    background: var(--md-surface-container);
+    background: var(--md-surface-container-low);
+    box-shadow: 0 0 0 1px var(--hairline);
     margin-bottom: 8px;
-    transition: background var(--duration-short);
+    transition: background var(--duration-short), box-shadow var(--duration-short);
 
-    &:hover { background: var(--md-surface-container-high); }
+    &:hover { background: color-mix(in srgb, var(--md-on-surface) 2.5%, var(--md-surface-container-low)); }
+  }
+
+  /* 分组列表（Clean）：相邻的设置行合成一个圆角容器，行间是从图标后开始的细分隔线。
+     不改模板，靠相邻兄弟关系识别同一组；缩进的子项（.sub-card）保持独立卡片 */
+  .setting-card:not(.sub-card):has(+ .setting-card:not(.sub-card)) {
+    margin-bottom: 0;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: 1px 0 0 0 var(--hairline), -1px 0 0 0 var(--hairline), 0 -1px 0 0 var(--hairline);
+  }
+
+  .setting-card:not(.sub-card) + .setting-card:not(.sub-card) {
+    position: relative;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+    box-shadow: 1px 0 0 0 var(--hairline), -1px 0 0 0 var(--hairline), 0 1px 0 0 var(--hairline);
+
+    &::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 68px;
+      right: 18px;
+      height: 1px;
+      background: var(--hairline);
+      pointer-events: none;
+    }
+  }
+
+  /* 组中间的行：上下都接着别的行 */
+  .setting-card:not(.sub-card) + .setting-card:not(.sub-card):has(+ .setting-card:not(.sub-card)) {
+    box-shadow: 1px 0 0 0 var(--hairline), -1px 0 0 0 var(--hairline);
   }
 }
 
@@ -81,10 +116,12 @@
 
 @mixin card-body {
   .setting-icon-wrap {
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius-md);
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-sm);
     background: var(--md-surface-container-high);
+
+    > .material-symbols-rounded { font-size: 20px; }
     display: flex;
     align-items: center;
     justify-content: center;
@@ -101,8 +138,8 @@
 }
 
 @mixin card-text {
-  .setting-title { font-size: 14px; font-weight: 500; }
-  .setting-desc { font-size: 12px; color: var(--md-on-surface-variant); margin-top: 2px; }
+  .setting-title { font-size: var(--fs-14); font-weight: 600; letter-spacing: var(--tracking-title); }
+  .setting-desc { font-size: var(--fs-12); line-height: 1.5; color: var(--md-on-surface-variant); margin-top: 3px; }
 }
 
 @mixin collapsible {
@@ -125,42 +162,50 @@
 
   /* 子级设置卡片 */
   .sub-card {
-    margin-left: 54px;
-    background: var(--md-surface-container-low) !important;
+    margin-left: 50px;
+    background: var(--md-surface-container) !important;
+    box-shadow: none !important;
   }
 }
 
 @mixin chip {
+  /* Clean Chip：安静的墨色填充，选中态用强调色淡染 + 细描边 */
   .m3-chip {
+    min-height: 32px;
     padding: 6px 14px;
     border-radius: var(--radius-full);
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-weight: 500;
     font-family: inherit;
-    background: var(--md-surface-container-highest);
-    color: var(--md-on-surface-variant);
-    border: 1px solid var(--md-outline-variant);
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface);
+    border: 0;
     cursor: pointer;
-    transition: all var(--duration-short) var(--ease-standard);
+    transition: background var(--duration-short) var(--ease-standard),
+                color var(--duration-short) var(--ease-standard),
+                box-shadow var(--duration-short) var(--ease-standard);
     white-space: nowrap;
 
-    &:hover { background: var(--md-surface-variant); }
+    &:hover:not(:disabled) { background: color-mix(in srgb, var(--md-on-surface) 6%, var(--md-surface-container-high)); }
+    &:active:not(:disabled) { background: color-mix(in srgb, var(--md-on-surface) 10%, var(--md-surface-container-high)); }
+    &:disabled { opacity: 0.45; cursor: default; }
 
     &.active {
-      background: var(--md-primary);
-      color: var(--md-on-primary);
-      border-color: var(--md-primary);
+      background: color-mix(in srgb, var(--md-primary) 14%, var(--md-surface-container-low));
+      color: var(--md-on-primary-container);
+      box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--md-primary) 60%, transparent);
+      font-weight: 600;
     }
 
     &.sm {
       padding: 4px 10px;
-      font-size: 12px;
+      font-size: var(--fs-12);
     }
 
     /* 危险语义变体：error 色 outlined，用于重置身份等破坏性操作 */
     &.danger {
       color: var(--md-error);
-      border-color: color-mix(in srgb, var(--md-error) 40%, transparent);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--md-error) 40%, transparent);
 
       &:hover { background: color-mix(in srgb, var(--md-error) 10%, transparent); }
     }
@@ -173,43 +218,23 @@
     width: 200px;
     padding: 4px 10px;
     border-radius: var(--radius-full);
-    border: 1px solid var(--md-outline-variant);
-    background: var(--md-surface-container-highest);
+    border: 1px solid transparent;
+    background: var(--md-surface-container-high);
     color: var(--md-on-surface);
-    font-size: 12px;
+    font-size: var(--fs-13);
+    min-height: 32px;
     text-align: right;
     outline: none;
     flex-shrink: 0;
-    transition: border-color 150ms;
-    &:focus { border-color: var(--md-primary); }
+    transition: border-color 150ms, background 150ms, box-shadow 150ms;
+    &:focus { border-color: var(--md-primary); background: var(--md-surface-container-lowest); box-shadow: 0 0 0 3px color-mix(in srgb, var(--md-primary) 18%, transparent); }
 
     /* 左对齐变体：昵称等普通文本输入，右对齐只适合 URL */
     &.lt-input-left { text-align: left; }
   }
 
-  /* M3 Slider */
-  .m3-slider {
-    appearance: none;
-    width: 120px;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--md-surface-container-highest);
-    outline: none;
-    cursor: pointer;
-    flex-shrink: 0;
-
-    &::-webkit-slider-thumb {
-      appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: var(--md-primary);
-      cursor: pointer;
-      transition: transform var(--duration-short);
-    }
-
-    &::-webkit-slider-thumb:hover { transform: scale(1.2); }
-  }
+  /* 滑块：外观见 global.scss 的 .m3-slider，这里只保留设置卡片内的默认宽度 */
+  .m3-slider { width: 140px; flex-shrink: 0; }
 }
 
 @mixin spinning {

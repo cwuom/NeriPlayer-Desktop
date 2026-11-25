@@ -928,7 +928,7 @@ async function clearCrashes() {
   height: 36px;
   padding: 0 14px;
   border-radius: var(--radius-full);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
   color: var(--md-on-surface-variant);
   background: var(--md-surface-container);
@@ -944,7 +944,7 @@ async function clearCrashes() {
   border-radius: var(--radius-full);
   background: var(--md-error);
   color: var(--md-on-error);
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 18px;
   text-align: center;
 }
@@ -998,7 +998,7 @@ async function clearCrashes() {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.8px;
@@ -1048,8 +1048,8 @@ async function clearCrashes() {
 }
 
 .setting-info { flex: 1; min-width: 0; }
-.setting-title { font-size: 14px; font-weight: 500; }
-.setting-desc { font-size: 12px; color: var(--md-on-surface-variant); margin-top: 2px; }
+.setting-title { font-size: var(--fs-14); font-weight: 500; }
+.setting-desc { font-size: var(--fs-12); color: var(--md-on-surface-variant); margin-top: 2px; }
 
 .spinning {
   animation: spin 1s linear infinite;
@@ -1087,7 +1087,7 @@ async function clearCrashes() {
 }
 
 .state-label {
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -1096,7 +1096,7 @@ async function clearCrashes() {
 }
 
 .state-value {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   color: var(--md-on-surface);
   word-break: break-all;
@@ -1104,7 +1104,7 @@ async function clearCrashes() {
 
   &.mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--fs-12);
   }
 }
 
@@ -1116,7 +1116,7 @@ async function clearCrashes() {
   border-radius: var(--radius-full);
   background: var(--md-error-container, rgba(255, 80, 80, 0.12));
   color: var(--md-on-error-container, #ff5050);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   cursor: pointer;
 
@@ -1150,7 +1150,7 @@ async function clearCrashes() {
   p {
     margin: 12px 0 20px;
     color: var(--md-on-surface-variant);
-    font-size: 13px;
+    font-size: var(--fs-13);
     line-height: 1.55;
   }
 }
@@ -1187,7 +1187,7 @@ async function clearCrashes() {
   border-radius: 12px;
   background: var(--md-error-container, rgba(255, 80, 80, 0.12));
   color: var(--md-on-error-container, #ff5050);
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s, transform 0.1s;
@@ -1214,7 +1214,7 @@ async function clearCrashes() {
   border-radius: var(--radius-full);
   background: var(--md-surface-container);
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
   transition: background 150ms;
 
   .material-symbols-rounded { font-size: 16px; }
@@ -1231,7 +1231,7 @@ async function clearCrashes() {
 .debug-logs-empty {
   padding: 20px;
   text-align: center;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
 }
 
@@ -1250,7 +1250,7 @@ async function clearCrashes() {
   width: 100%;
   padding: 10px 12px;
   color: var(--md-on-surface);
-  font-size: 13px;
+  font-size: var(--fs-13);
   transition: background 150ms;
   /* 吸顶 + 不透明背景，展开的日志滚动时不与文件名行重叠 */
   position: sticky;
@@ -1262,7 +1262,7 @@ async function clearCrashes() {
 }
 
 .debug-crash-name { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
-.debug-crash-size { color: var(--md-on-surface-variant); font-size: 12px; flex-shrink: 0; }
+.debug-crash-size { color: var(--md-on-surface-variant); font-size: var(--fs-12); flex-shrink: 0; }
 
 .debug-crash-body {
   margin: 0;
@@ -1272,10 +1272,10 @@ async function clearCrashes() {
   overflow: auto;
   overscroll-behavior: contain;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.5;
   white-space: pre;
-  border-top: 1px solid var(--md-outline-variant);
+  border-top: 1px solid var(--hairline);
   color: var(--md-on-surface-variant);
 }
 
@@ -1292,7 +1292,7 @@ async function clearCrashes() {
   gap: 8px;
   width: 100%;
   padding: 10px 12px;
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: var(--md-on-surface);
   transition: background 150ms;
@@ -1303,9 +1303,9 @@ async function clearCrashes() {
 .probe-actions { padding: 4px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
 
 .probe-action-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.probe-action-label { flex: 1; min-width: 0; font-size: 13px; }
+.probe-action-label { flex: 1; min-width: 0; font-size: var(--fs-13); }
 .probe-action-status {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-family: var(--font-mono);
   color: var(--md-on-surface-variant);
   &.failed { color: var(--md-error); }
@@ -1322,7 +1322,7 @@ async function clearCrashes() {
   border-radius: 10px;
   background: var(--md-surface-container-lowest, var(--md-surface));
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1.5;
   white-space: pre;
 
@@ -1355,8 +1355,8 @@ async function clearCrashes() {
   &.danger .crash-test-title { color: var(--md-error); }
 }
 
-.crash-test-title { font-size: 13px; font-weight: 600; color: var(--md-on-surface); }
-.crash-test-desc { font-size: 11px; color: var(--md-on-surface-variant); }
+.crash-test-title { font-size: var(--fs-13); font-weight: 600; color: var(--md-on-surface); }
+.crash-test-desc { font-size: var(--fs-11); color: var(--md-on-surface-variant); }
 
 .debug-switch {
   position: relative;

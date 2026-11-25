@@ -373,8 +373,9 @@ async function copyPosterImage() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  background: rgb(0 0 0 / 0.32);
+  -webkit-backdrop-filter: blur(6px) saturate(1.1);
+  backdrop-filter: blur(6px) saturate(1.1);
 }
 
 .lsd-dialog {
@@ -383,9 +384,9 @@ async function copyPosterImage() {
   width: min(680px, calc(100vw - 48px));
   max-height: calc(100vh - 48px);
   padding: 24px;
-  border-radius: 28px;
-  background: var(--md-surface-container-high);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius-xl);
+  background: var(--clean-dialog-surface);
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--hairline);
 }
 
 .lsd-header {
@@ -439,7 +440,7 @@ async function copyPosterImage() {
   align-items: center;
   gap: 16px;
   margin-bottom: 8px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
 }
 
@@ -451,10 +452,10 @@ async function copyPosterImage() {
   border-radius: 8px;
   background: none;
   color: var(--md-primary);
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
 
-  &:hover:not(:disabled) { background: rgba(208, 188, 255, 0.08); }
+  &:hover:not(:disabled) { background: color-mix(in srgb, var(--md-primary) 8%, transparent); }
   &:disabled { opacity: 0.38; cursor: default; }
 }
 
@@ -478,12 +479,12 @@ async function copyPosterImage() {
   cursor: pointer;
 
   &:hover { background: rgba(255, 255, 255, 0.05); }
-  &.checked { background: rgba(208, 188, 255, 0.1); }
+  &.checked { background: color-mix(in srgb, var(--md-primary) 10%, transparent); }
   &.empty { opacity: 0.35; cursor: default; }
 
   .lsd-text {
     min-width: 0;
-    font-size: 15px;
+    font-size: var(--fs-15);
     line-height: 1.5;
     color: var(--md-on-surface);
   }
@@ -515,7 +516,7 @@ async function copyPosterImage() {
 
 .lsd-hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.5;
   color: var(--md-on-surface-variant);
 }
@@ -529,30 +530,31 @@ async function copyPosterImage() {
 }
 
 .lsd-btn {
-  height: 40px;
-  padding: 0 24px;
+  height: 36px;
+  padding: 0 18px;
   border: none;
-  border-radius: 20px;
+  border-radius: var(--radius-full);
   font-family: inherit;
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--fs-14);
+  font-weight: 600;
   cursor: pointer;
-  transition: background 200ms, opacity 200ms;
+  transition: background 150ms, filter 150ms, transform 150ms;
 
+  &:active:not(:disabled) { transform: scale(0.97); }
+
+  /* Clean：次要操作为中性填充，主操作为强调色胶囊 */
   &.text {
-    background: none;
-    color: var(--md-primary);
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface);
 
-    &:hover:not(:disabled) { background: rgba(208, 188, 255, 0.08); }
-    &:active:not(:disabled) { background: rgba(208, 188, 255, 0.12); }
+    &:hover:not(:disabled) { background: color-mix(in srgb, var(--md-on-surface) 8%, var(--md-surface-container-high)); }
   }
 
   &.filled {
     background: var(--md-primary);
     color: var(--md-on-primary);
 
-    &:hover:not(:disabled) { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
-    &:active:not(:disabled) { opacity: 0.9; }
+    &:hover:not(:disabled) { filter: brightness(1.06); }
   }
 
   &:disabled {

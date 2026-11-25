@@ -234,7 +234,7 @@ onUnmounted(() => { generation++ })
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.06);
   color: white;
-  font-size: 14px;
+  font-size: var(--fs-14);
   outline: none;
   transition: border-color 0.15s;
 
@@ -262,7 +262,7 @@ onUnmounted(() => { generation++ })
 @keyframes lyric-match-spin { to { transform: rotate(360deg); } }
 
 .lyric-match-label {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: rgba(255, 255, 255, 0.45);
 }
 
@@ -281,7 +281,7 @@ onUnmounted(() => { generation++ })
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: transparent;
   color: rgba(255, 255, 255, 0.6);
-  font-size: 12.5px;
+  font-size: var(--fs-12-5);
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 
   &:hover { background: rgba(255, 255, 255, 0.06); }
@@ -308,7 +308,7 @@ onUnmounted(() => { generation++ })
 .lyric-match-status {
   text-align: center;
   color: rgba(255, 255, 255, 0.4);
-  font-size: 13px;
+  font-size: var(--fs-13);
   padding: 14px 0;
 
   &.error { color: #ffb4ab; }
@@ -362,9 +362,9 @@ onUnmounted(() => { generation++ })
   white-space: nowrap;
 }
 
-.lyric-match-title { font-size: 14px; font-weight: 500; color: rgba(255, 255, 255, 0.92); }
-.lyric-match-artist { font-size: 12px; color: rgba(255, 255, 255, 0.5); }
-.lyric-match-meta { font-size: 11.5px; color: rgba(255, 255, 255, 0.38); }
+.lyric-match-title { font-size: var(--fs-14); font-weight: 500; color: rgba(255, 255, 255, 0.92); }
+.lyric-match-artist { font-size: var(--fs-12); color: rgba(255, 255, 255, 0.5); }
+.lyric-match-meta { font-size: var(--fs-11-5); color: rgba(255, 255, 255, 0.38); }
 
 .lyric-match-badges {
   display: flex;
@@ -378,7 +378,7 @@ onUnmounted(() => { generation++ })
 .lyric-match-tag {
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: nowrap;
 }
 
@@ -406,9 +406,9 @@ onUnmounted(() => { generation++ })
   gap: 1px;
 }
 
-.lyric-match-line-text { font-size: 13px; color: rgba(255, 255, 255, 0.82); }
-.lyric-match-line-sub { font-size: 11.5px; color: rgba(255, 255, 255, 0.45); }
-.lyric-match-more { font-size: 12px; color: rgba(255, 255, 255, 0.35); }
+.lyric-match-line-text { font-size: var(--fs-13); color: rgba(255, 255, 255, 0.82); }
+.lyric-match-line-sub { font-size: var(--fs-11-5); color: rgba(255, 255, 255, 0.45); }
+.lyric-match-more { font-size: var(--fs-12); color: rgba(255, 255, 255, 0.35); }
 
 .lyric-match-preview-actions {
   display: flex;
@@ -426,7 +426,7 @@ onUnmounted(() => { generation++ })
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.9);
   color: #1b1b1f;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
   cursor: pointer;
 

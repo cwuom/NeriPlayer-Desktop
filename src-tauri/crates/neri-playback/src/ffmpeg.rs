@@ -206,7 +206,23 @@ fn system_directories() -> Vec<PathBuf> {
     directories
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS：随包的 Frameworks 优先，其次是 Homebrew 安装的 FFmpeg（Apple 芯片在
+/// /opt/homebrew，Intel 在 /usr/local）。开发版不带动态库，以前只能显示「未能加载」；
+/// 版本不兼容的同样会被 `version_compatible` 拒绝，只记录原因不使用
+#[cfg(target_os = "macos")]
+fn system_directories() -> Vec<PathBuf> {
+    [
+        "/opt/homebrew/opt/ffmpeg/lib",
+        "/opt/homebrew/lib",
+        "/usr/local/opt/ffmpeg/lib",
+        "/usr/local/lib",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn system_directories() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -291,7 +307,8 @@ fn array_text(chars: &[c_char]) -> String {
     let bytes: Vec<u8> = chars
         .iter()
         .take_while(|value| **value != 0)
-        .map(|value| *value as u8)
+        // c_char 在 x86_64 上是 i8、在 aarch64 Linux 上是 u8，按字节取值两边都无需转换
+        .map(|value| value.to_ne_bytes()[0])
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -704,6 +721,24 @@ mod tests {
     }
 
     /// 安装包里的目录排在手动覆盖之后、可执行文件旁边的目录之前
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn homebrew_directories_are_searched_after_the_bundled_ones() {
+        let directories = super::candidate_directories();
+        let homebrew = directories
+            .iter()
+            .position(|directory| directory == std::path::Path::new("/opt/homebrew/opt/ffmpeg/lib"))
+            .expect("Homebrew FFmpeg directory must be a fallback on macOS");
+        let frameworks = directories
+            .iter()
+            .position(|directory| directory.ends_with("../Frameworks"))
+            .expect("the app bundle Frameworks directory is searched");
+        assert!(
+            frameworks < homebrew,
+            "the bundled library must win over Homebrew"
+        );
+    }
+
     #[test]
     fn the_bundled_directory_is_searched_right_after_the_override() {
         let bundled = std::env::temp_dir().join("neri-ffmpeg-bundled-test-missing");

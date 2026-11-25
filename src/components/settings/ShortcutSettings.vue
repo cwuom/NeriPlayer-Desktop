@@ -254,20 +254,20 @@ onBeforeUnmount(stopRecording)
 }
 
 .setting-info { flex: 1; min-width: 0; }
-.setting-title { font-size: 14px; font-weight: 500; }
-.setting-desc { margin-top: 2px; font-size: 12px; color: var(--md-on-surface-variant); }
+.setting-title { font-size: var(--fs-14); font-weight: 500; }
+.setting-desc { margin-top: 2px; font-size: var(--fs-12); color: var(--md-on-surface-variant); }
 
 .m3-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 4px 12px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-full);
   background: var(--md-surface-container-highest);
   color: var(--md-on-surface-variant);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -286,7 +286,7 @@ onBeforeUnmount(stopRecording)
 
 .shortcut-hint,
 .shortcut-footnote {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
 }
 
@@ -310,7 +310,7 @@ onBeforeUnmount(stopRecording)
 }
 
 .shortcut-head {
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -328,7 +328,7 @@ onBeforeUnmount(stopRecording)
   align-items: center;
   gap: 10px;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   .material-symbols-rounded { font-size: 18px; color: var(--md-on-surface-variant); }
 }
 
@@ -341,7 +341,7 @@ onBeforeUnmount(stopRecording)
   padding: 3px 8px;
   border: 1px solid transparent;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface);
   background: var(--md-surface-container-high);
   transition: border-color 140ms var(--ease-standard), background 140ms var(--ease-standard), opacity 140ms var(--ease-standard);
@@ -362,11 +362,11 @@ onBeforeUnmount(stopRecording)
     min-width: 20px;
     padding: 1px 6px;
     border-radius: 5px;
-    border: 1px solid var(--md-outline-variant);
+    border: 1px solid var(--hairline);
     border-bottom-width: 2px;
     background: var(--md-surface-container-highest);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-11);
     line-height: 18px;
     text-align: center;
   }
@@ -375,7 +375,7 @@ onBeforeUnmount(stopRecording)
 .shortcut-warn { font-size: 16px; color: var(--md-error); }
 
 .shortcut-na {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   opacity: 0.7;
 }
@@ -395,7 +395,7 @@ onBeforeUnmount(stopRecording)
 
 .shortcut-error {
   padding: 0 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-error);
 }
 

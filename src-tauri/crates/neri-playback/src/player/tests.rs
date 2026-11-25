@@ -376,6 +376,7 @@ fn player_without_output(generation: u64) -> (super::PlayerEngine, mpsc::Receive
             volume: 1.0,
             speed: 1.0,
             current_path: Some("other.aac".into()),
+            current_cache_entry: None,
             duration_ms: 192,
             shared_audio_level: crate::analyzer::SharedAudioLevel::new(),
             effects: crate::effects::EffectsControl::new_shared(),
@@ -442,6 +443,7 @@ fn local_file_release_invalidates_stale_start_without_superseding_a_new_request(
         duration_ms: 192,
         clock: Arc::new(PlaybackClock::new(0)),
         audio_info: super::SourceAudioInfo::default(),
+        cache_entry: None,
     };
     assert!(player
         .complete_start(started, 7, "released.aac".into())
@@ -467,6 +469,7 @@ fn stream_audio_info_commits_only_for_the_current_playback_generation() {
         duration_ms: 192,
         clock: Arc::new(PlaybackClock::new(0)),
         audio_info: source_audio_info.clone(),
+        cache_entry: None,
     };
     player
         .complete_start(started, 8, "__remote__".into())
@@ -493,6 +496,7 @@ fn stream_audio_info_stop_and_file_release_remove_loaded_properties() {
         duration_ms: 192,
         clock: Arc::new(PlaybackClock::new(0)),
         audio_info: decoder.source_audio_info(),
+        cache_entry: None,
     };
     player
         .complete_start(started.clone(), 8, "__remote__".into())
@@ -1952,4 +1956,22 @@ fn releasing_a_file_waits_for_its_loudness_scans_only() {
     );
     super::stop_file_scans(&kept);
     assert!(kept_exited.load(Ordering::Acquire));
+}
+
+#[test]
+fn remote_cache_entry_follows_the_committed_session() {
+    // 回归：远程流的 current_path 只是 "__remote__"，换缓存目录时认不出它正在读写的缓存文件
+    let (mut player, _) = player_without_output(8);
+    let started = super::PlaybackStarted {
+        duration_ms: 192,
+        clock: Arc::new(PlaybackClock::new(0)),
+        audio_info: super::SourceAudioInfo::default(),
+        cache_entry: Some("ab12".into()),
+    };
+    player
+        .complete_start(started, 8, "__remote__".into())
+        .unwrap();
+    assert_eq!(player.current_cache_entry.as_deref(), Some("ab12"));
+    player.stop();
+    assert!(player.current_cache_entry.is_none());
 }

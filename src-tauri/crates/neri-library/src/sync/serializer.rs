@@ -862,6 +862,7 @@ fn counter_shard_to_proto(s: &SyncPlaybackCounterShard) -> ProtoSyncPlaybackCoun
         play_count: s.play_count,
         first_played_at: s.first_played_at,
         last_played_at: s.last_played_at,
+        recorded_local_date: option_text_to_proto(s.recorded_local_date.as_deref()),
     }
 }
 
@@ -873,6 +874,27 @@ fn proto_to_counter_shard(p: &ProtoSyncPlaybackCounterShard) -> SyncPlaybackCoun
         play_count: p.play_count,
         first_played_at: p.first_played_at,
         last_played_at: p.last_played_at,
+        recorded_local_date: p.recorded_local_date.clone(),
+    }
+}
+
+fn hour_total_to_proto(h: &SyncPlaybackHourTotal) -> ProtoSyncPlaybackHourTotal {
+    ProtoSyncPlaybackHourTotal {
+        device_id: h.device_id.clone(),
+        epoch_started_at: h.epoch_started_at,
+        hour_start_at: h.hour_start_at,
+        local_hour: h.local_hour,
+        total_listen_ms: h.total_listen_ms,
+    }
+}
+
+fn proto_to_hour_total(p: &ProtoSyncPlaybackHourTotal) -> SyncPlaybackHourTotal {
+    SyncPlaybackHourTotal {
+        device_id: p.device_id.clone(),
+        epoch_started_at: p.epoch_started_at,
+        hour_start_at: p.hour_start_at,
+        local_hour: p.local_hour,
+        total_listen_ms: p.total_listen_ms,
     }
 }
 
@@ -949,6 +971,8 @@ fn stat_bucket_to_proto(b: &SyncPlaybackStatBucket) -> ProtoSyncPlaybackStatBuck
             .iter()
             .map(counter_shard_to_proto)
             .collect(),
+        recorded_local_date: option_text_to_proto(b.recorded_local_date.as_deref()),
+        hourly_totals: b.hourly_totals.iter().map(hour_total_to_proto).collect(),
     }
 }
 
@@ -975,6 +999,8 @@ fn proto_to_stat_bucket(p: &ProtoSyncPlaybackStatBucket) -> SyncPlaybackStatBuck
             .iter()
             .map(proto_to_counter_shard)
             .collect(),
+        recorded_local_date: p.recorded_local_date.clone(),
+        hourly_totals: p.hourly_totals.iter().map(proto_to_hour_total).collect(),
     }
 }
 
@@ -1494,5 +1520,74 @@ mod compressed_contract_tests {
             Some("original translated")
         );
         assert_eq!(decoded.sync_log[0].action, "ADD_SONG");
+    }
+
+    fn hourly_bucket() -> SyncPlaybackStatBucket {
+        SyncPlaybackStatBucket {
+            identity_key: "b-new".into(),
+            total_listen_ms: 75,
+            recorded_local_date: Some("2026-11-24".into()),
+            counter_shards: vec![SyncPlaybackCounterShard {
+                device_id: "phone".into(),
+                epoch_started_at: 3,
+                total_listen_ms: 45,
+                play_count: 1,
+                recorded_local_date: Some("2026-11-24".into()),
+                ..Default::default()
+            }],
+            hourly_totals: vec![
+                SyncPlaybackHourTotal {
+                    device_id: "phone".into(),
+                    epoch_started_at: 3,
+                    hour_start_at: 1_800_000,
+                    local_hour: 6,
+                    total_listen_ms: 45,
+                },
+                SyncPlaybackHourTotal {
+                    device_id: "tablet".into(),
+                    epoch_started_at: 1,
+                    hour_start_at: 1_800_000,
+                    local_hour: 19,
+                    total_listen_ms: 30,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn data_saver_round_trip_keeps_hourly_totals_and_recorded_dates() {
+        let mut data = sample_sync_data();
+        data.playback_stat_buckets.push(hourly_bucket());
+        for content in [
+            serialize(&data, true).unwrap(),
+            serialize(&data, false).unwrap(),
+        ] {
+            let bucket = &deserialize(&content).unwrap().playback_stat_buckets[0];
+            let expected = hourly_bucket();
+            assert_eq!(bucket.hourly_totals, expected.hourly_totals);
+            assert_eq!(bucket.recorded_local_date, expected.recorded_local_date);
+            assert_eq!(bucket.counter_shards, expected.counter_shards);
+        }
+    }
+
+    /// 与 Android SyncDataModels 的 ProtoNumber 对齐：18 记录日期、19 小时数据、分片 7 记录日期
+    #[test]
+    fn hourly_fields_use_android_proto_numbers() {
+        let bytes = stat_bucket_to_proto(&hourly_bucket()).encode_to_vec();
+        let fields = crate::sync::archive::test_proto_fields(&bytes);
+        assert!(fields.contains(&(18, 2)));
+        assert_eq!(fields.iter().filter(|field| **field == (19, 2)).count(), 2);
+        let shard = counter_shard_to_proto(&hourly_bucket().counter_shards[0]).encode_to_vec();
+        assert!(crate::sync::archive::test_proto_fields(&shard).contains(&(7, 2)));
+
+        // 旧版对端不认识的字段号不影响解码，缺失时按空处理
+        let legacy = ProtoSyncPlaybackStatBucket {
+            identity_key: "old".into(),
+            ..Default::default()
+        };
+        let decoded = proto_to_stat_bucket(&legacy);
+        assert!(decoded.hourly_totals.is_empty());
+        assert!(decoded.recorded_local_date.is_none());
     }
 }

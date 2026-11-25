@@ -1,0 +1,82 @@
+// 统计页卡片原语（Clean）：低一级的中性底色 + 1px 细描边，强调色只留给交互与数据高亮。
+// 各组件 scoped 样式里 @include，保证卡片外观一致
+
+@mixin card {
+  .stats-card {
+    min-width: 0;
+    padding: 20px 22px;
+    border-radius: var(--radius-xl);
+    background: var(--md-surface-container-low);
+    box-shadow: 0 0 0 1px var(--hairline);
+  }
+
+  .card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .card-title {
+    font-size: calc(17px * var(--text-scale));
+    font-weight: 700;
+    letter-spacing: var(--tracking-title);
+    line-height: 1.3;
+  }
+
+  .card-subtitle {
+    margin-top: 2px;
+    font-size: var(--fs-12);
+    color: var(--md-on-surface-variant);
+  }
+}
+
+@mixin artwork($size, $radius: var(--radius-sm)) {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 $size;
+  width: $size;
+  height: $size;
+  overflow: hidden;
+  border-radius: $radius;
+  background: var(--md-surface-variant);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+
+  :deep(img) {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  > .material-symbols-rounded {
+    font-size: calc(#{$size} * 0.5);
+    opacity: 0.45;
+  }
+}
+
+@mixin meter {
+  .meter {
+    position: relative;
+    height: 4px;
+    overflow: hidden;
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--md-on-surface) 8%, transparent);
+  }
+
+  .meter-fill {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--md-primary);
+    // 长度用 clip-path 裁出，切区间时平滑过渡且两端圆角不变形
+    transition: clip-path 520ms var(--ease-emphasized, cubic-bezier(0.2, 0, 0, 1));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .meter-fill { transition: none; }
+  }
+}

@@ -8,6 +8,7 @@ export interface SettingsSearchEntry {
   /** 额外检索词（同义词、平台名），不显示 */
   keywords?: string[]
   macOnly?: boolean
+  windowsOnly?: boolean
 }
 
 export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
@@ -34,6 +35,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'background', title: 'settings.enhanced_advanced_blur', desc: 'settings.enhanced_advanced_blur_desc' },
   { section: 'background', title: 'settings.enhanced_advanced_blur_radius' },
   { section: 'audio', title: 'settings.audio_output', desc: 'settings.audio_output_desc' },
+  { section: 'audio', title: 'settings.audio_exclusive', desc: 'settings.audio_exclusive_desc', keywords: ['WASAPI', '独占', 'exclusive', 'bit-perfect', 'Hi-Fi'], windowsOnly: true },
   { section: 'audio', title: 'settings.normalize', desc: 'settings.normalize_desc' },
   { section: 'audio', title: 'settings.volume_balance' },
   { section: 'audio', title: 'settings.multichannel_drc', desc: 'settings.multichannel_drc_desc' },
@@ -51,7 +53,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'audio_effects', title: 'dsp.listening.brightness.title', desc: 'dsp.listening.brightness.help', keywords: ['听感', '刺耳', '柔和', 'brightness'] },
   { section: 'audio_effects', title: 'dsp.listening.warmth.title', desc: 'dsp.listening.warmth.help', keywords: ['听感', '温暖', 'warmth'] },
   { section: 'audio_effects', title: 'dsp.listening.space.title', desc: 'dsp.listening.space.help', keywords: ['听感', '集中', '开阔', 'space'] },
-  { section: 'audio_effects', title: 'dsp.enabled', keywords: ["DSP","音效","A/B","旁路","bypass"] },
+  { section: 'audio_effects', title: 'dsp.enabled', keywords: ["DSP","音效","旁路","bypass"] },
   { section: 'audio_effects', title: 'dsp.parametric_eq', keywords: ["PEQ","参数均衡","滤波器","frequency","Q","filter"] },
   { section: 'audio_effects', title: 'dsp.graphic_eq', desc: 'settings.audio_effects_eq_desc', keywords: ['前级', '均衡器分区', 'EQ', 'preamp', 'PEQ'] },
   { section: 'audio_effects', title: 'dsp.autoeq', keywords: ["AutoEQ","Equalizer APO","耳机","headphone","校正","correction"] },
@@ -115,6 +117,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'playback', title: 'settings.double_click_play', desc: 'settings.double_click_play_desc', keywords: ['单击', '双击', 'click', 'double click'] },
   { section: 'playback', title: 'settings.remember_long_form_progress', desc: 'settings.remember_long_form_progress_desc' },
   { section: 'playback', title: 'settings.keep_mode', desc: 'settings.keep_mode_desc' },
+  { section: 'playback', title: 'settings.prev_restarts_track', desc: 'settings.prev_restarts_track_desc', keywords: ['上一首', '上一曲', '重播', 'previous', 'restart', 'rewind'] },
   { section: 'network', title: 'settings.bypass_proxy', desc: 'settings.bypass_proxy_desc' },
   { section: 'listen_together', title: 'listen_together.server_url' },
   { section: 'listen_together', title: 'listen_together.nickname' },
@@ -134,7 +137,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'downloads', title: 'settings.download_dir', desc: 'settings.download_dir_desc' },
   { section: 'lyrics', title: 'settings.lyric_font_size' },
   { section: 'lyrics', title: 'settings.lyric_translation_size', desc: 'settings.lyric_translation_size_desc', keywords: ['翻译', '翻譯', '字号', '字級', 'translation', 'font', 'size'] },
-  { section: 'lyrics', title: 'settings.show_translation', desc: 'settings.show_translation_desc' },
+  { section: 'lyrics', title: 'settings.show_translation', desc: 'settings.show_translation_desc', keywords: ['翻译', '翻譯', 'translation', '翻訳'] },
   { section: 'lyrics', title: 'settings.show_romanization', desc: 'settings.show_romanization_desc' },
   { section: 'lyrics', title: 'settings.prefer_word_timed_lyrics', desc: 'settings.prefer_word_timed_lyrics_desc' },
   { section: 'lyrics', title: 'settings.default_lyric_source', desc: 'settings.default_lyric_source_desc' },
@@ -182,6 +185,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'quality', title: 'settings.youtube_quality' },
   { section: 'quality', title: 'settings.bili_quality' },
   { section: 'storage', title: 'settings.cache_limit' },
+  { section: 'storage', title: 'settings.cache_location', desc: 'settings.cache_location_desc', keywords: ['缓存目录', '缓存路径', 'C盘', '磁盘', 'cache folder', 'cache path', 'drive', 'disk'] },
   { section: 'storage', title: 'settings.storage_usage_title', desc: 'settings.storage_usage_desc' },
   { section: 'storage', title: 'settings.log_to_file', desc: 'settings.log_to_file_desc' },
   { section: 'storage', title: 'settings.log_level', desc: 'settings.log_level_desc' },

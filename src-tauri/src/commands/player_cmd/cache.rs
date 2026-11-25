@@ -1,6 +1,7 @@
 //! 远程音源打开、预热与播放缓存查询/清理
 
 use super::*;
+use crate::settings::media_cache;
 
 /// 预开下一首的直链（总长 + 首包），切过去时省掉冷连接上的首包等待；失败不影响播放
 #[tauri::command]
@@ -84,10 +85,7 @@ pub(super) fn playback_cache(
 }
 
 fn playback_cache_root(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_cache_dir()
-        .ok()
-        .map(|dir| dir.join("playback-audio"))
+    media_cache::media_cache_root(app).map(|dir| dir.join(media_cache::PLAYBACK_AUDIO_DIR))
 }
 
 /// 任一缓存键已有完整副本时返回 true（对齐 Android：完整缓存直接离线播放，不发网络解析）
@@ -113,7 +111,7 @@ pub fn prune_media_caches(app: &AppHandle, max_cache_size_mb: i32) {
     if let Some(root) = playback_cache_root(app) {
         neri_playback::remote::prune_remote_audio_cache(&root, max_bytes);
     }
-    if let Ok(cache_dir) = app.path().app_cache_dir() {
+    if let Some(cache_dir) = media_cache::media_cache_root(app) {
         crate::commands::image_cmd::prune_cover_cache_dir(&cache_dir);
     }
 }

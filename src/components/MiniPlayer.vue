@@ -417,13 +417,16 @@ defineExpose({
 .mini-player {
   position: fixed;
   bottom: 0;
-  left: 80px;
+  left: var(--sidebar-width, 228px);
   right: 0;
   height: var(--mini-player-height, 76px);
   background: var(--md-surface-container-low);
+  box-shadow: 0 -1px 0 var(--hairline);
+  container-type: inline-size;
   z-index: 100;
   backdrop-filter: blur(18px) saturate(1.04);
-  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, backdrop-filter 320ms ease;
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease, backdrop-filter 320ms ease,
+              left 260ms var(--ease-emphasized);
 }
 
 /* 顶部进度条（通栏）：静置时降低强调，悬浮/拖拽时恢复全亮 */
@@ -501,7 +504,7 @@ defineExpose({
   transform: translateX(-50%);
   background: var(--md-inverse-surface, #313033);
   color: var(--md-inverse-on-surface, #F4EFF4);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   padding: 3px 8px;
@@ -539,7 +542,7 @@ defineExpose({
   border-radius: var(--radius-md);
   transition: background 150ms, transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
 
-  &:hover { background: var(--md-surface-container-high); }
+  &:hover { background: var(--state-hover); }
 }
 
 .mp-cover {
@@ -555,6 +558,7 @@ defineExpose({
   overflow: hidden;
 
   &.playing { border-radius: var(--radius-md); }
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--hairline);
 }
 
 .mp-cover-hidden {
@@ -583,7 +587,7 @@ defineExpose({
 }
 
 .mp-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   line-height: 1.45;
   overflow: hidden;
@@ -592,7 +596,7 @@ defineExpose({
 }
 
 .mp-artist {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   line-height: 1.45;
   overflow: hidden;
@@ -602,7 +606,7 @@ defineExpose({
 
 .mp-time {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   opacity: 0.7;
   line-height: 1.45;
@@ -631,7 +635,7 @@ defineExpose({
 
   .material-symbols-rounded { font-size: 24px; }
 
-  &:hover { background: var(--md-surface-variant); color: var(--md-on-surface); }
+  &:hover { background: var(--state-hover); color: var(--md-on-surface); }
   &:active { transform: scale(0.9); }
   &.active { color: var(--md-primary); }
 
@@ -694,9 +698,22 @@ defineExpose({
 
   .material-symbols-rounded { font-size: 20px; }
 
-  &:hover { background: var(--md-surface-variant); color: var(--md-on-surface); }
+  &:hover { background: var(--state-hover); color: var(--md-on-surface); }
   &:active { transform: scale(0.9); }
   &.active { color: var(--md-primary); }
+}
+
+/* 窄窗口：先收起次要按钮，保证歌曲信息与主控件不被挤压 */
+@container (max-width: 680px) {
+  .mp-ctrl-btn.small,
+  .mp-right > .mp-tool-btn:first-child,
+  .mp-right > .mp-tool-btn:nth-last-child(3) { display: none; }
+  .mp-body { gap: 8px; padding: 0 10px; }
+}
+
+@container (max-width: 520px) {
+  .mp-time { display: none; }
+  .mp-right > .mp-tool-btn:last-child { display: none; }
 }
 
 /* 音量弹窗 */
@@ -717,7 +734,7 @@ defineExpose({
   max-width: 56px;
   padding: 14px 10px;
   box-shadow: 0 4px 24px rgba(0,0,0,0.25);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   z-index: 10;
   display: flex;
   flex-direction: column;
@@ -763,7 +780,7 @@ defineExpose({
 
 .mp-volume-label {
   width: 38px;
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 500;
   color: var(--md-on-surface-variant);
   margin-top: 8px;

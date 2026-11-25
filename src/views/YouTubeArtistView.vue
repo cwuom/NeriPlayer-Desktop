@@ -195,7 +195,7 @@ onUnmounted(() => { generation++ })
 
 <template>
   <div class="detail-view">
-    <header class="detail-header">
+    <header class="detail-header" data-tauri-drag-region>
       <button class="back-btn" :aria-label="t('common.back')" @click="router.back()"><span class="material-symbols-rounded">arrow_back</span></button>
       <div class="creator-page-title">{{ header.name || 'YouTube' }}</div>
       <div class="header-search"><span class="material-symbols-rounded search-icon">search</span><input v-model="query" class="search-input" :placeholder="t('library.tab_search_hint')" :aria-label="t('library.tab_search_hint')" /></div>

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tokio::io::AsyncWriteExt;
 
 // 按职责拆分的命令与辅助逻辑，通过 `use super::*` 共享本模块的导入、常量与请求代际工具

@@ -31,12 +31,15 @@ const frequencies = [20, 100, 1000, 10000, 20000]
 </template>
 
 <style scoped>
-.dsp-frequency-graph { margin: 0; padding: 14px; border-radius: var(--radius-md); background: var(--md-surface-container); }
-figcaption { font-size: 13px; font-weight: 500; }
-figcaption span { display: block; margin-top: 4px; color: var(--md-on-surface-variant); font-size: 11px; font-weight: 400; line-height: 1.5; }
-svg { display: block; width: 100%; overflow: visible; }
-line { stroke: var(--md-outline-variant); stroke-width: .6; }
-line.zero { stroke: var(--md-on-surface-variant); stroke-width: 1; }
-text { fill: var(--md-on-surface-variant); font: 10px sans-serif; }
-path { fill: none; stroke: var(--md-primary); stroke-width: 2.5; stroke-linejoin: round; }
+.dsp-frequency-graph {
+  margin: 0; padding: 14px 16px 10px; border-radius: var(--radius-md);
+  background: var(--md-surface-container-lowest); box-shadow: 0 0 0 1px var(--hairline);
+}
+figcaption { font-size: var(--fs-14); font-weight: 600; letter-spacing: var(--tracking-title); }
+figcaption span { display: block; margin-top: 3px; color: var(--md-on-surface-variant); font-size: var(--fs-12); font-weight: 400; line-height: 1.5; }
+svg { display: block; width: 100%; margin-top: 6px; overflow: visible; }
+line { stroke: var(--hairline); stroke-width: 1; }
+line.zero { stroke: color-mix(in srgb, var(--md-on-surface) 32%, transparent); }
+text { fill: var(--md-on-surface-variant); font-family: inherit; font-size: 10px; font-variant-numeric: tabular-nums; }
+path { fill: none; stroke: var(--md-primary); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
 </style>

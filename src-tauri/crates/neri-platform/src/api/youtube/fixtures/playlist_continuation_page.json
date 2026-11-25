@@ -1,0 +1,13 @@
+{
+  "responseContext": {"serviceTrackingParams": []},
+  "onResponseReceivedActions": [{
+    "appendContinuationItemsAction": {
+      "targetId": "browse-feedVLPLbig",
+      "continuationItems": [
+        {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "v3"}}},
+        {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "v4"}}},
+        {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "SHELF_PAGE_3", "request": "CONTINUATION_REQUEST_TYPE_BROWSE"}}}}
+      ]
+    }
+  }]
+}

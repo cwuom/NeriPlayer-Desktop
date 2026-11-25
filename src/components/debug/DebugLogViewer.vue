@@ -315,9 +315,9 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
   height: 30px;
   padding: 0 10px;
   border-radius: var(--radius-full);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 600;
   color: var(--md-on-surface-variant);
   opacity: 0.55;
@@ -347,7 +347,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
     height: 30px;
     padding: 0 8px;
     border-radius: var(--radius-sm);
-    font-size: 12px;
+    font-size: var(--fs-12);
   }
 }
 
@@ -360,7 +360,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
   height: 30px;
   padding: 0 10px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   background: var(--md-surface-container-high);
   color: var(--md-on-surface-variant);
   .material-symbols-rounded { font-size: 18px; }
@@ -373,7 +373,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
     background: transparent;
     color: var(--md-on-surface);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-12);
   }
 }
 
@@ -384,7 +384,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
   height: 30px;
   padding: 0 10px;
   border-radius: var(--radius-full);
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   background: var(--md-surface-container-high);
   transition: background 140ms var(--ease-standard), color 140ms var(--ease-standard);
@@ -404,7 +404,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--md-surface-container-lowest) 80%, transparent);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.55;
   user-select: text;
 }
@@ -475,7 +475,7 @@ const levelClass = (level: string) => `level-${normalizeLevel(level).toLowerCase
 .log-footer {
   display: flex;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
 }
 

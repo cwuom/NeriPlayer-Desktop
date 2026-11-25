@@ -57,7 +57,7 @@
   overflow-y: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  background: rgba(30, 28, 34, 0.88);
+  background: rgba(26, 26, 30, 0.82);
   backdrop-filter: blur(28px) saturate(1.12);
   -webkit-backdrop-filter: blur(28px) saturate(1.12);
   border-radius: 24px;
@@ -71,15 +71,52 @@
   &::-webkit-scrollbar { width: 0; height: 0; display: none; }
 }
 
+.np-more-sheet { position: relative; transition: width 220ms var(--ease-emphasized); }
+
+/* 搜索、编辑类子视图在桌面上需要更宽的输入与结果区 */
+.np-more-sheet--wide { width: min(520px, 100%); }
+
+/* 常驻子视图的关闭按钮 */
+.np-more-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.06);
+  transition: background 150ms, color 150ms;
+
+  &:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+  .material-symbols-rounded { font-size: 20px; }
+}
+
+@keyframes np-more-nudge {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+
+.np-more-sheet--nudge { animation: np-more-nudge 220ms var(--ease-standard); }
+
+@media (prefers-reduced-motion: reduce) {
+  .np-more-sheet--nudge { animation: none; }
+}
+
 .np-more-sheet-content {
   min-height: 0;
 }
 
 .np-more-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: rgba(255,255,255,0.9);
-  margin: 0 0 16px;
+  font-size: calc(17px * var(--text-scale, 1));
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: rgba(255,255,255,0.94);
+  margin: 0 0 14px;
 }
 
 // 子视图 header（返回按钮 + 标题）
@@ -103,7 +140,7 @@
     border-radius: 999px;
     background: rgba(255,255,255,0.1);
     color: rgba(255,255,255,0.85);
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-weight: 600;
     cursor: pointer;
     transition: background 0.15s;
@@ -186,7 +223,7 @@
 }
 
 .np-more-list-headline {
-  font-size: 14.5px;
+  font-size: var(--fs-14);
   font-weight: 600;
   letter-spacing: 0.1px;
   overflow: hidden;
@@ -195,7 +232,7 @@
 }
 
 .np-more-list-desc {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: rgba(255,255,255,0.45);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -208,11 +245,49 @@
   transition: color 0.18s, transform 0.18s cubic-bezier(0.2, 0, 0, 1);
 }
 
-// 分组：组与组之间用细线隔开，组内是 Android 式列表项
+// 分组（Clean）：每组一个圆角玻璃容器，组内行去掉各自的底色，用从图标后开始的细线分隔
+.np-more-group {
+  overflow: hidden;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.055);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+
+  > .np-more-list-item {
+    position: relative;
+    margin-top: 0;
+    padding: 9px 14px 9px 10px;
+    border-radius: 0;
+    background: transparent;
+
+    &:hover { background: rgba(255,255,255,0.06); }
+    &:active { transform: none; background: rgba(255,255,255,0.09); }
+
+    > .material-symbols-rounded:first-child {
+      width: 32px;
+      height: 32px;
+      font-size: 19px;
+      border-radius: 9px;
+    }
+  }
+
+  > .np-more-list-item + .np-more-list-item::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 56px;
+    right: 14px;
+    height: 1px;
+    background: rgba(255,255,255,0.07);
+  }
+}
+
 .np-more-group + .np-more-group {
-  margin-top: 10px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 12px;
+}
+
+// 行内加减项自带左侧可点区域的内边距，组内不再叠加
+.np-more-group > .np-more-list-item--stepper {
+  padding: 0 10px 0 0;
 }
 
 // 带行内加减的列表项：左边整块点进详细页，右边直接调整，不用来回进出子页
@@ -229,7 +304,7 @@
   gap: 14px;
   flex: 1;
   min-width: 0;
-  padding: 12px 0 12px 12px;
+  padding: 9px 0 9px 10px;
   border: none;
   background: transparent;
   color: inherit;
@@ -240,12 +315,12 @@
     font-size: 21px;
     color: rgba(255,255,255,0.72);
     flex-shrink: 0;
-    width: 40px;
-    height: 40px;
+    width: 32px;
+    height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 13px;
+    border-radius: 9px;
     background: rgba(255,255,255,0.08);
     transition: background 0.18s, color 0.18s;
   }
@@ -302,7 +377,7 @@
   border-radius: var(--radius-full, 999px);
   color: var(--md-primary, #D0BCFF);
   background: rgba(255,255,255,0.06);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
   transition: background 0.15s;
 
@@ -323,14 +398,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   color: rgba(255,255,255,0.7);
   margin-bottom: 10px;
 }
 
 .np-more-hint {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: rgba(255,255,255,0.5);
   margin-top: -4px;
   margin-bottom: 12px;
@@ -365,7 +440,7 @@
 }
 
 .np-offset-value {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: rgba(255,255,255,0.5);
@@ -398,7 +473,7 @@
   border-radius: 12px;
   background: rgba(255,255,255,0.06);
   color: white;
-  font-size: 14px;
+  font-size: var(--fs-14);
   outline: none;
   transition: border-color 0.15s;
 
@@ -425,7 +500,7 @@
 .np-more-status {
   text-align: center;
   color: rgba(255,255,255,0.35);
-  font-size: 13px;
+  font-size: var(--fs-13);
   padding: 16px 0;
 }
 
@@ -493,7 +568,7 @@
 }
 
 .np-more-search-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   /* 显式取色: 候选预览等非按钮容器里不能依赖继承(浅色主题下会变黑) */
   color: rgba(255,255,255,0.92);
@@ -503,7 +578,7 @@
 }
 
 .np-more-search-artist {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: rgba(255,255,255,0.4);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -511,7 +586,7 @@
 }
 
 .np-more-search-source {
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 600;
   color: rgba(255,255,255,0.3);
   text-transform: uppercase;
@@ -527,7 +602,7 @@
 }
 
 .np-more-form-label {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: rgba(255,255,255,0.45);
   margin-top: 4px;
@@ -554,7 +629,7 @@
   border-radius: 12px;
   background: rgba(255,255,255,0.08);
   color: rgba(255,255,255,0.7);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
@@ -598,7 +673,7 @@
 .np-more-field-title {
   margin-bottom: 8px;
   color: rgba(255,255,255,0.48);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
 }
 
@@ -616,7 +691,7 @@
   border-radius: 999px;
   background: rgba(255,255,255,0.07);
   color: rgba(255,255,255,0.72);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   cursor: pointer;
 
@@ -639,7 +714,7 @@
     border-radius: 11px;
     background: transparent;
     color: rgba(255,255,255,0.50);
-    font-size: 13px;
+    font-size: var(--fs-13);
     font-weight: 700;
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
@@ -654,7 +729,7 @@
     margin: -2px 0 12px;
 
     button {
-      font-size: 12px;
+      font-size: var(--fs-12);
       padding: 7px 8px;
     }
   }
@@ -709,12 +784,12 @@
 
   strong {
     color: rgba(255,255,255,0.92);
-    font-size: 15px;
+    font-size: var(--fs-15);
   }
 
   span {
     color: rgba(255,255,255,0.45);
-    font-size: 12px;
+    font-size: var(--fs-12);
   }
 }
 
@@ -732,14 +807,14 @@
 
   span {
     color: rgba(255,255,255,0.42);
-    font-size: 12px;
+    font-size: var(--fs-12);
     flex-shrink: 0;
   }
 
   strong {
     min-width: 0;
     color: rgba(255,255,255,0.78);
-    font-size: 12px;
+    font-size: var(--fs-12);
     font-weight: 650;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -786,7 +861,7 @@
   border-radius: 12px;
   background: rgba(255,255,255,0.04);
   color: rgba(255,255,255,0.85);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
   line-height: 1.6;
   resize: vertical;
@@ -811,7 +886,7 @@
   border: none;
   background: transparent;
   color: rgba(255,255,255,0.7);
-  font-size: 15px;
+  font-size: var(--fs-15);
   cursor: pointer;
   border-radius: 10px;
   transition: background 0.15s;

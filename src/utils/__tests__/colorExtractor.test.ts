@@ -8,6 +8,7 @@ import {
 } from '@/utils/colorExtractor'
 import type { PaletteResult } from '@/utils/paletteExtractor'
 import { THEME_COLORS, cancelSmoothThemeTransition } from '@/utils/themeColor'
+import { accentFromSeed, contrastRatio, rgb } from '@/utils/theme/cleanScheme'
 import { hueDistance, parseRgb, toHsl, type Hsl, type RGB } from './colorMath'
 import { FakeImage, installFakeImage } from './fakeImage'
 import { installMemoryStorage, type MemoryStorage } from './memoryStorage'
@@ -166,7 +167,7 @@ describe('applyDynamicColorFromCover', () => {
     await applyDynamicColorFromCover(PROXIED_COVER, true)
 
     expect(isDynamicColorActive()).toBe(true)
-    expect(cssVar('--md-seed')).toBe('200, 40, 40')
+    expect(cssVar('--md-primary')).toBe(rgb(accentFromSeed([200, 40, 40], true)))
     expect(document.documentElement.classList.contains('theme-switching')).toBe(true)
   })
 
@@ -206,7 +207,7 @@ describe('applyDynamicColorFromCover', () => {
 
     await expect(stale).resolves.toBe(false)
     expect(extractPalette).toHaveBeenCalledTimes(1)
-    expect(cssVar('--md-seed')).toBe('40, 200, 40')
+    expect(cssVar('--md-primary')).toBe(rgb(accentFromSeed([40, 200, 40], true)))
   })
 
   it('discards an in-flight request when dynamic colour is cleared during image load', async () => {
@@ -220,74 +221,44 @@ describe('applyDynamicColorFromCover', () => {
 })
 
 describe('generated dynamic tokens', () => {
-  it('emits the full preset token set so presets and dynamic colour are interchangeable', async () => {
+  it('emits the same clean token set as the presets so both are interchangeable', async () => {
     await applyDynamicColorFromCover(PROXIED_COVER, true)
 
-    for (const token of Object.keys(THEME_COLORS[0].dark)) {
-      expect(() => parseRgb(cssVar(token))).not.toThrow()
+    for (const token of ['--md-primary', '--md-on-primary', '--md-primary-container', '--md-secondary-container',
+      '--md-tertiary', '--md-surface', '--md-surface-container', '--md-outline-variant']) {
+      expect(() => parseRgb(cssVar(token)), token).not.toThrow()
     }
   })
 
-  it('keeps the seed hue and spreads M3 dark-mode lightness across roles', async () => {
+  it('keeps the seed hue on the accent while surfaces stay near neutral', async () => {
     await applyDynamicColorFromCover(PROXIED_COVER, true)
 
-    const seedHue = toHsl([200, 40, 40]).h
-    const expectedLightness: Record<string, number> = {
-      '--md-primary': 0.80,
-      '--md-on-primary': 0.18,
-      '--md-primary-container': 0.32,
-      '--md-on-primary-container': 0.90,
-      '--md-inverse-primary': 0.45,
+    expect(hueDistance(tokenHsl('--md-primary').h, toHsl([200, 40, 40]).h)).toBeLessThan(5)
+    // Clean：封面颜色只落在强调色上，深色表面饱和度保持很低
+    expect(tokenHsl('--md-surface').s).toBeLessThan(0.2)
+    expect(tokenHsl('--md-surface').l).toBeLessThan(0.12)
+  })
+
+  it('keeps the accent readable against the background in both modes', async () => {
+    for (const dark of [true, false]) {
+      await applyDynamicColorFromCover(PROXIED_COVER, dark)
+      const ratio = contrastRatio(parseRgb(cssVar('--md-primary')), parseRgb(cssVar('--md-background')))
+      expect(ratio).toBeGreaterThanOrEqual(3)
     }
-    for (const [token, lightness] of Object.entries(expectedLightness)) {
-      const hsl = tokenHsl(token)
-      expect(hsl.l).toBeCloseTo(lightness, 1)
-      expect(hueDistance(hsl.h, seedHue)).toBeLessThan(5)
-    }
-    expect(cssVar('--md-surface')).not.toBe('')
   })
 
-  it('uses white on-primary and light-mode lightness in light mode', async () => {
-    await applyDynamicColorFromCover(PROXIED_COVER, false)
-
-    expect(cssVar('--md-on-primary')).toBe('rgb(255, 255, 255)')
-    expect(tokenHsl('--md-primary').l).toBeCloseTo(0.40, 1)
-    expect(tokenHsl('--md-primary-container').l).toBeCloseTo(0.90, 1)
-    expect(tokenHsl('--md-on-primary-container').l).toBeCloseTo(0.14, 1)
-    expect(tokenHsl('--md-inverse-primary').l).toBeCloseTo(0.80, 1)
-    expect(cssVar('--md-surface')).toBe('')
-  })
-
-  it('shifts tertiary tokens 60 degrees from the seed hue', async () => {
-    extractPalette.mockReturnValue(paletteWithPrimary([40, 80, 200]))
-    await applyDynamicColorFromCover(PROXIED_COVER, false)
-
-    const seedHue = toHsl([40, 80, 200]).h
-    expect(hueDistance(tokenHsl('--md-tertiary').h, seedHue + 60)).toBeLessThan(5)
-    expect(hueDistance(tokenHsl('--md-tertiary-container').h, seedHue + 60)).toBeLessThan(5)
-  })
-
-  it('lifts a grey seed to the minimum primary saturation', async () => {
+  it('maps a grey seed to a neutral ink accent instead of inventing a hue', async () => {
     extractPalette.mockReturnValue(paletteWithPrimary([128, 128, 128]))
     await applyDynamicColorFromCover(PROXIED_COVER, true)
 
-    expect(tokenHsl('--md-primary').s).toBeCloseTo(0.32, 1)
+    expect(tokenHsl('--md-primary').s).toBeLessThan(0.15)
   })
 
-  it('caps a fully saturated seed at the maximum primary saturation', async () => {
+  it('caps a fully saturated seed so the accent does not glare', async () => {
     extractPalette.mockReturnValue(paletteWithPrimary([255, 0, 0]))
     await applyDynamicColorFromCover(PROXIED_COVER, false)
 
-    expect(tokenHsl('--md-primary').s).toBeCloseTo(0.72, 1)
-    expect(tokenHsl('--md-primary').s).toBeLessThan(0.75)
-  })
-
-  it('keeps secondary tokens low-saturation regardless of the seed', async () => {
-    extractPalette.mockReturnValue(paletteWithPrimary([255, 0, 0]))
-    await applyDynamicColorFromCover(PROXIED_COVER, true)
-
-    expect(tokenHsl('--md-secondary').s).toBeCloseTo(0.18, 1)
-    expect(tokenHsl('--md-secondary-container').s).toBeCloseTo(0.16, 1)
+    expect(tokenHsl('--md-primary').s).toBeLessThanOrEqual(0.79)
   })
 })
 
@@ -304,9 +275,8 @@ describe('reapplyDynamicColorForTheme', () => {
     expect(reapplyDynamicColorForTheme(false)).toBe(true)
 
     expect(cssVar('--md-primary')).not.toBe(darkPrimary)
-    expect(tokenHsl('--md-primary').l).toBeCloseTo(0.40, 1)
+    expect(cssVar('--md-primary')).toBe(rgb(accentFromSeed([200, 40, 40], false)))
     expect(cssVar('--md-on-primary')).toBe('rgb(255, 255, 255)')
-    expect(cssVar('--md-seed')).toBe('200, 40, 40')
     expect(extractPalette).toHaveBeenCalledTimes(1)
   })
 
@@ -325,9 +295,9 @@ describe('clearDynamicColor', () => {
 
     clearDynamicColor(true)
 
-    const teal = THEME_COLORS.find(c => c.key === 'teal')
-    expect(cssVar('--md-primary')).toBe(teal?.dark['--md-primary'])
-    expect(cssVar('--md-seed')).toBe(teal?.seed)
+    const teal = THEME_COLORS.find(c => c.key === 'teal')!
+    expect(cssVar('--md-primary')).toBe(rgb(teal.dark))
+    expect(cssVar('--md-seed')).toBe(teal.dark.join(', '))
     expect(isDynamicColorActive()).toBe(false)
     expect(document.documentElement.classList.contains('theme-switching')).toBe(true)
   })

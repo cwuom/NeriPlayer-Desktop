@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>moe.ouom.neriplayer.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>NeriPlayer</name>
+  <summary>Multi-source music player with native playback and cross-device sync</summary>
+  <developer id="io.github.cwuom">
+    <name>cwuom</name>
+  </developer>
+  <description>
+    <p>
+      NeriPlayer is the desktop port of NeriPlayer for Android. It brings multi-source
+      discovery, native audio playback, a local music library, lyrics, and cross-device
+      sync to Linux.
+    </p>
+    <p>
+      The Linux build is a test environment: rendering depends on WebKitGTK and may be
+      slower or less stable than on Windows and macOS.
+    </p>
+  </description>
+  <launchable type="desktop-id">moe.ouom.neriplayer.desktop.desktop</launchable>
+  <url type="homepage">https://github.com/cwuom/NeriPlayer-Desktop</url>
+  <url type="bugtracker">https://github.com/cwuom/NeriPlayer-Desktop/issues</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+  <keywords>
+    <keyword>music</keyword>
+    <keyword>player</keyword>
+    <keyword>lyrics</keyword>
+  </keywords>
+  <provides>
+    <binary>neri-player-desktop</binary>
+    <dbus type="user">org.mpris.MediaPlayer2.neri_player</dbus>
+  </provides>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="1.0.0" date="2026-11-21" />
+  </releases>
+</component>

@@ -26,6 +26,7 @@ export type SettingsSectionId =
   | 'about'
 
 const SETTINGS_UI_STATE_KEY = 'neri:settings-ui-state'
+const PAGE_LEVEL_SECTIONS = new Set(['playback', 'listen_together', 'effects', 'quality', 'storage', 'backup', 'lyrics', 'desktop_lyrics'])
 export const SETTINGS_SECTION_IDS: SettingsSectionId[] = [
   'accounts', 'general', 'shortcuts', 'language', 'playback', 'audio', 'audio_effects', 'quality', 'playback_sources',
   'appearance', 'now_playing', 'background', 'motion', 'lyrics', 'desktop_lyrics',
@@ -219,7 +220,8 @@ export function useSettingsSections() {
     expandedSections.value = next
     persistSettingsUiState()
   }
-  function isExpanded(key: string) { return expandedSections.value.has(key) }
+  // 双栏布局里这些分区就是整页内容，折叠只会把页面变空：始终展开（标题由页头承担）
+  function isExpanded(key: string) { return PAGE_LEVEL_SECTIONS.has(key) || expandedSections.value.has(key) }
 
   // 其它地方（桌面歌词工具栏的「设置」）用 ?section=lyrics&focus=desktop-lyrics 直接打开某个分区
   const route = useRoute()

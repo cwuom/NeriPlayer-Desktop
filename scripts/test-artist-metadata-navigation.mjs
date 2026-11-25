@@ -399,6 +399,7 @@ await test('stale Bilibili owner absence does not report unavailable for the edi
 
 const format = loadModule(await readFile(new URL('../src/modules/lyrics/lyricsFormat.ts', import.meta.url), 'utf8'))
 const matchSource = await readFile(new URL('../src/modules/lyrics/lyricMatch.ts', import.meta.url), 'utf8')
+const searchTitle = loadModule(await readFile(new URL('../src/modules/lyrics/lyricSearchTitle.ts', import.meta.url), 'utf8'))
 const syncSource = await readFile(new URL('../src/modules/lyrics/syncTrackPayload.ts', import.meta.url), 'utf8')
 const offsetSource = await readFile(new URL('../src/modules/lyrics/lyricOffset.ts', import.meta.url), 'utf8')
 const offsetStoreSource = await readFile(new URL('../src/stores/lyricOffset.ts', import.meta.url), 'utf8')
@@ -449,7 +450,7 @@ async function lyricActions(fields, { beforeTrackWrite = async () => {} } = {}) 
     '@tauri-apps/api/core': { invoke }, '@/utils/logger': { createLogger: () => log },
     '@/modules/persistence/userData': userData,
   })
-  const match = loadModule(matchSource, { '@tauri-apps/api/core': { invoke }, './lyricsFormat': format })
+  const match = loadModule(matchSource, { '@tauri-apps/api/core': { invoke }, './lyricsFormat': format, './lyricSearchTitle': searchTitle })
   const settings = {
     isHydrated: true,
     cloudMusicOffset: 1000, qqMusicOffset: 500, kugouOffset: 150, lrclibOffset: 0,

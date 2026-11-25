@@ -38,7 +38,10 @@ import TitleBar from '@/components/TitleBar.vue'
 import i18n, { setLocale } from '@/i18n'
 import { useToastStore } from '@/stores/toast'
 import { applyTheme } from '@/utils/theme'
-import { applyThemeColor } from '@/utils/themeColor'
+import { applyThemeColor, setBackgroundTint } from '@/utils/themeColor'
+import { applyTextScale } from '@/modules/settings/textScale'
+import { installHistoryNavigation } from '@/integrations/historyNavigation'
+import { installScrolledState } from '@/integrations/scrolledState'
 import { getTrackCoverUrl } from '@/utils/trackCover'
 import { applyDynamicColorFromCover, applyDynamicColorFromSeed, clearDynamicColor, resolveSystemAccentSeed } from '@/utils/colorExtractor'
 import { createLogger } from '@/utils/logger'
@@ -80,6 +83,8 @@ const isNowPlayingOpen = ref(false)
 // 静音前的音量，取消静音时还原
 let volumeBeforeMute = 0.5
 let uninstallShortcuts: (() => void) | null = null
+let uninstallHistoryNavigation: (() => void) | null = null
+let uninstallScrolledState: (() => void) | null = null
 let stopSystemShortcuts: (() => void) | null = null
 let uninstallDesktopLyrics: (() => void) | null = null
 const contentRef = ref<HTMLElement | null>(null)
@@ -500,8 +505,9 @@ onMounted(async () => {
         input?.focus()
         input?.select()
       })
-      // 已在探索页时直接聚焦，不能重新 push 把 ?q= 冲掉
-      if (router.currentRoute.value.name === 'explore') focusInput()
+      // 已在探索页 / 首页时直接聚焦页内搜索框，不能重新 push 把 ?q= 冲掉
+      const routeName = router.currentRoute.value.name
+      if ((routeName === 'explore' || routeName === 'home') && !isNowPlayingOpen.value) focusInput()
       else void router.push({ name: 'explore' }).then(focusInput)
     },
     toggleShuffle: () => player.toggleShuffle(),
@@ -523,6 +529,16 @@ onMounted(async () => {
     ) !== null,
   }
   uninstallShortcuts = installGlobalShortcuts(shortcutActions, () => settingsStore.shortcutBindings)
+  // 背景图模式下吸顶栏只在正文滚到它下面时才显示玻璃
+  if (contentRef.value) uninstallScrolledState = installScrolledState(contentRef.value)
+  // 鼠标侧键 / Alt+←→：后退时先收起播放页，再走路由历史
+  uninstallHistoryNavigation = installHistoryNavigation({
+    back: () => {
+      if (isNowPlayingOpen.value) void closeNowPlaying()
+      else router.back()
+    },
+    forward: () => { if (!isNowPlayingOpen.value) router.forward() },
+  })
   stopSystemShortcuts = watch(
     () => [settingsStore.shortcutBindings, settingsStore.globalShortcutsEnabled, shortcutRecording.value] as const,
     ([bindings, enabled, recording]) => void applySystemShortcuts(bindings, enabled && !recording, shortcutActions),
@@ -530,6 +546,14 @@ onMounted(async () => {
   )
 
   await settingsStore.hydrate()
+  // 背景偏色要先于强调色写入，首帧就用用户的偏色，不会先闪一次默认色调
+  setBackgroundTint({ tint: settingsStore.backgroundTint, strength: settingsStore.backgroundTintStrength }, false)
+  applyTextScale(settingsStore.textScale)
+  watch(() => settingsStore.textScale, value => applyTextScale(value))
+  watch(
+    () => [settingsStore.backgroundTint, settingsStore.backgroundTintStrength] as const,
+    ([tint, strength]) => setBackgroundTint({ tint, strength }),
+  )
   applyTheme(settingsStore.darkMode, false)
   applyThemeColor(settingsStore.themeColor, undefined, false)
   // 首屏在预设主题之后应用动态取色，避免被 applyThemeColor 覆盖
@@ -598,6 +622,10 @@ onUnmounted(() => {
   void player.flushPlayerState()
   uninstallShortcuts?.()
   uninstallShortcuts = null
+  uninstallHistoryNavigation?.()
+  uninstallHistoryNavigation = null
+  uninstallScrolledState?.()
+  uninstallScrolledState = null
   stopSystemShortcuts?.()
   stopSystemShortcuts = null
   void clearSystemShortcuts()
@@ -637,6 +665,8 @@ onUnmounted(() => {
       :class="{ 'has-mini-player': hasMiniPlayer }"
       :inert="isNowPlayingOpen || undefined"
     >
+      <!-- 顶栏这一行的窗口拖动区：吸附在滚动区顶部，页面的吸顶栏会盖在它上面并自带拖动区 -->
+      <div class="content-drag-strip" data-tauri-drag-region aria-hidden="true" />
       <router-view v-slot="{ Component, route }">
         <transition name="fade" mode="out-in" @enter="restoreContentScroll">
           <keep-alive :include="['HomeView', 'ExploreView', 'LibraryView']">
@@ -645,6 +675,8 @@ onUnmounted(() => {
         </transition>
       </router-view>
     </main>
+
+    <div class="content-gutter-glass" aria-hidden="true" />
 
     <!-- 播放页开合时压暗底层：用独立遮罩而不是给页面设透明度，页面里的玻璃卡片
          （backdrop-filter）不会因祖先透明度变化失去背景采样而闪烁 -->
@@ -723,7 +755,6 @@ onUnmounted(() => {
   height: 100%;
   overflow: hidden;
   position: relative;
-  padding-top: var(--titlebar-height, 36px); /* 让出顶栏高度（与 TitleBar / mac 红绿灯对齐） */
   isolation: isolate;
 }
 
@@ -734,6 +765,10 @@ onUnmounted(() => {
 
 .content {
   flex: 1;
+  min-width: 0;
+  /* 内容区也铺到窗口顶边：顶栏这一行留给页面自己的吸顶栏（返回、搜索），
+     没有吸顶栏的页面由 padding 让出这一行，再由 .content-drag-strip 提供拖动窗口的区域 */
+  padding-top: var(--titlebar-height, 36px);
   max-height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
@@ -746,6 +781,28 @@ onUnmounted(() => {
     max-height: calc(100% - var(--mini-player-height, 76px));
     padding-bottom: 6px;
   }
+}
+
+.content-drag-strip {
+  position: sticky;
+  /* sticky 以 .content 的 padding 内沿为基准，上移一行才能贴住窗口顶边 */
+  top: calc(-1 * var(--titlebar-height, 36px));
+  z-index: 1;
+  height: var(--titlebar-height, 36px);
+  /* 不占布局：抵消 .content 的顶部 padding 正好落在顶栏这一行 */
+  margin-top: calc(-1 * var(--titlebar-height, 36px));
+  /* 没有自带吸顶栏的页面滚动时，内容从这一行下面经过；渐隐玻璃底由 global.scss 统一绘制 */
+}
+
+/* 滚动条那一列在滚动容器的内容区之外，顶栏画不到；在窗口层补一块同样的渐隐玻璃 */
+.content-gutter-glass {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
+  width: 10px;
+  height: var(--titlebar-height, 36px);
+  pointer-events: none;
 }
 
 .np-underlay-scrim {

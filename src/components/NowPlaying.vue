@@ -38,6 +38,8 @@ import BiliVideoSkipDialog from './bilibili/BiliVideoSkipDialog.vue'
 import { resolveBiliVideoSkipBvid, resolveBiliVideoSkipCid } from '@/modules/playback/biliVideoSkip'
 import ListenTogetherPanel from './ListenTogetherPanel.vue'
 import EditableRangeValue from './ui/EditableRangeValue.vue'
+import CoverPreview from './now-playing/CoverPreview.vue'
+import { getTrackCoverUrl } from '@/utils/trackCover'
 import AudioEffectsPanel from './AudioEffectsPanel.vue'
 import ContextMenu from './ui/ContextMenu.vue'
 import NowPlayingMoreSheet from './now-playing/NowPlayingMoreSheet.vue'
@@ -469,6 +471,13 @@ defineExpose({
   getCoverSnapshot,
 })
 
+// 封面大图预览（#52）：原图优先，加载完成前沿用已显示的封面
+const coverPreviewOpen = ref(false)
+const coverPreviewSrc = computed(() => getTrackCoverUrl(player.currentTrack, 'original') || coverUrl.value)
+function openCoverPreview() {
+  if (coverUrl.value) coverPreviewOpen.value = true
+}
+
 const {
   contextMenu,
   artistLinksLoading,
@@ -478,7 +487,8 @@ const {
   closeContextMenu,
   copyText,
   handleContextMenuClick,
-} = useNowPlayingContextMenu({ ipc: nowPlayingIpc, emit, coverUrl, shareSong, openAddToPlaylist })
+  saveCoverArt,
+} = useNowPlayingContextMenu({ ipc: nowPlayingIpc, emit, coverUrl, shareSong, openAddToPlaylist, openCoverPreview })
 
 watch(() => player.hasPlaybackSession, (hasSession) => {
   if (hasSession) return
@@ -730,7 +740,10 @@ provideNowPlayingSheetContext({
             'cover-wrap--card': settings.coverStyle === 'card',
             'cover-wrap--disc': settings.coverStyle !== 'card',
             'cover-wrap--switching': isTrackSwitchAnimating,
+            'cover-wrap--previewable': !!coverUrl,
           }"
+          :title="coverUrl ? t('player.cover_preview') : undefined"
+          @click="openCoverPreview"
           @contextmenu="openContextMenu($event, 'cover')"
         >
           <!-- Card 模式（圆角矩形，对齐 Android） -->
@@ -955,6 +968,7 @@ provideNowPlayingSheetContext({
               :class="{ active: player.sleepTimerMode || showSleepMenu }"
               :title="t('player.sleep_timer')"
               :aria-label="t('player.sleep_timer')"
+              :aria-expanded="showSleepMenu"
               @click="triggerControlFeedbackPulse(); toggleToolbarPanel('sleep')"
             >
               <span class="material-symbols-rounded">timer</span>
@@ -963,17 +977,50 @@ provideNowPlayingSheetContext({
               </span>
             </button>
             <Transition name="np-popover">
-            <div v-if="showSleepMenu" class="sleep-popover np-floating-popover np-floating-popover--menu">
-              <button
-                v-for="opt in sleepOptions"
-                :key="opt.value"
-                class="sleep-option"
-                @click="handleSleepOption(opt.value); showSleepMenu = false"
-              >
-                {{ opt.label }}
-              </button>
+            <div
+              v-if="showSleepMenu"
+              class="sleep-popover np-floating-popover np-floating-popover--menu"
+              role="group"
+              :aria-label="t('player.sleep_timer')"
+            >
+              <div class="np-popover-header">
+                <span class="np-popover-title">{{ t('player.sleep_timer') }}</span>
+                <span v-if="player.sleepRemainingSeconds > 0" class="np-popover-meta">
+                  {{ formatSleepRemaining(player.sleepRemainingSeconds) }}
+                </span>
+              </div>
+              <div class="np-popover-group">
+                <button
+                  v-for="opt in sleepOptions.filter(option => option.value > 0)"
+                  :key="opt.value"
+                  type="button"
+                  class="sleep-option"
+                  @click="handleSleepOption(opt.value); showSleepMenu = false"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+              <div class="np-popover-group">
+                <button
+                  v-for="opt in sleepOptions.filter(option => option.value < 0)"
+                  :key="opt.value"
+                  type="button"
+                  class="sleep-option"
+                  :class="{ active: player.sleepTimerMode === (opt.value === -1 ? 'end_of_track' : 'end_of_queue') }"
+                  :aria-current="player.sleepTimerMode === (opt.value === -1 ? 'end_of_track' : 'end_of_queue') || undefined"
+                  @click="handleSleepOption(opt.value); showSleepMenu = false"
+                >
+                  <span class="sleep-option-label">{{ opt.label }}</span>
+                  <span
+                    v-if="player.sleepTimerMode === (opt.value === -1 ? 'end_of_track' : 'end_of_queue')"
+                    class="material-symbols-rounded sleep-option-check"
+                    aria-hidden="true"
+                  >check</span>
+                </button>
+              </div>
               <button
                 v-if="player.sleepTimerMode"
+                type="button"
                 class="sleep-option cancel"
                 @click="player.cancelSleepTimer(); showSleepMenu = false"
               >
@@ -988,22 +1035,19 @@ provideNowPlayingSheetContext({
               :class="{ active: showVolumeSlider }"
               :title="t('player.volume')"
               :aria-label="t('player.volume')"
+              :aria-expanded="showVolumeSlider"
               @click="triggerControlFeedbackPulse(); toggleToolbarPanel('volume')"
               @wheel.prevent="onVolumeWheel"
             >
               <span class="material-symbols-rounded">{{ player.volume === 0 ? 'volume_off' : player.volume < 0.5 ? 'volume_down' : 'volume_up' }}</span>
             </button>
             <Transition name="np-popover">
-            <div v-if="showVolumeSlider" class="volume-popover np-floating-popover np-floating-popover--volume">
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                :value="player.volume"
-                class="volume-slider"
-                @input="player.setVolume(parseFloat(($event.target as HTMLInputElement).value))"
-              />
+            <div
+              v-if="showVolumeSlider"
+              class="volume-popover np-floating-popover np-floating-popover--volume"
+              role="group"
+              :aria-label="t('player.volume')"
+            >
               <EditableRangeValue
                 :model-value="player.volume"
                 class="volume-label"
@@ -1017,6 +1061,18 @@ provideNowPlayingSheetContext({
                 :aria-label="t('player.volume')"
                 @update:model-value="player.setVolume($event)"
               />
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                :value="player.volume"
+                class="volume-slider"
+                :style="{ '--volume-fill': `${Math.round(player.volume * 100)}%` }"
+                :aria-valuetext="`${Math.round(player.volume * 100)}%`"
+                @input="player.setVolume(parseFloat(($event.target as HTMLInputElement).value))"
+              />
+              <span class="material-symbols-rounded volume-popover-icon" aria-hidden="true">{{ player.volume === 0 ? 'volume_off' : player.volume < 0.5 ? 'volume_down' : 'volume_up' }}</span>
             </div>
             </Transition>
           </div>
@@ -1027,12 +1083,18 @@ provideNowPlayingSheetContext({
               :class="{ active: showAudioFxPanel || player.hasActiveEffects }"
               :title="t('player.audio_effects')"
               :aria-label="t('player.audio_effects')"
+              :aria-expanded="showAudioFxPanel"
               @click="triggerControlFeedbackPulse(); toggleToolbarPanel('audiofx')"
             >
               <span class="material-symbols-rounded">tune</span>
             </button>
             <Transition name="np-popover">
-              <div v-if="showAudioFxPanel" class="audiofx-popover np-floating-popover np-floating-popover--audiofx">
+              <div
+                v-if="showAudioFxPanel"
+                class="audiofx-popover np-floating-popover np-floating-popover--audiofx"
+                role="group"
+                :aria-label="t('player.audio_effects')"
+              >
                 <AudioEffectsPanel @details="openAudioEffectsSettings" />
               </div>
             </Transition>
@@ -1096,6 +1158,15 @@ provideNowPlayingSheetContext({
     <ListenTogetherPanel v-if="player.hasPlaybackSession" v-model:open="showLtPanel" />
 
     <NowPlayingMoreSheet />
+
+    <CoverPreview
+      :open="coverPreviewOpen"
+      :src="coverPreviewSrc"
+      :placeholder="coverUrl"
+      :title="player.currentTrack?.title"
+      @close="coverPreviewOpen = false"
+      @save="saveCoverArt"
+    />
 
     <ContextMenu
       :open="player.hasPlaybackSession && contextMenu.show"

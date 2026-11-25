@@ -1,4 +1,8 @@
-use neri_common::error::AppResult;
+use crate::settings::media_cache::{
+    self, ExistingCacheAction, MediaCacheLocation, RelocationReport,
+};
+use crate::settings::store;
+use neri_common::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -114,10 +118,17 @@ pub async fn get_storage_usage(
     let app_cache_dir = app.path().app_cache_dir().ok();
     let default_download_dir = app_data_dir.as_ref().map(|dir| dir.join("downloads"));
     let download_roots = download_roots(default_download_dir.as_deref(), download_dir.as_deref());
+    let media_root = media_cache::media_cache_root(&app);
 
-    let playback_cache = app_cache_dir.as_ref().map(|dir| dir.join("playback-audio"));
+    let playback_cache = media_root
+        .as_ref()
+        .map(|dir| dir.join(media_cache::PLAYBACK_AUDIO_DIR));
     let image_cache = child_paths(app_data_dir.as_deref(), &["covers", "thumbnails"]);
-    let image_cache = append_child_path(image_cache, app_cache_dir.as_deref(), "image_cache");
+    let image_cache = append_child_path(
+        image_cache,
+        media_root.as_deref(),
+        media_cache::IMAGE_CACHE_DIR,
+    );
     let download_staging = child_paths(app_data_dir.as_deref(), &["temp"]);
     let download_staging = append_child_path(
         download_staging,
@@ -289,11 +300,14 @@ pub async fn clear_storage_cache(
 ) -> AppResult<StorageClearResult> {
     let app_data_dir = app.path().app_data_dir().ok();
     let app_cache_dir = app.path().app_cache_dir().ok();
-    let playback_cache = app_cache_dir.as_ref().map(|dir| dir.join("playback-audio"));
+    let media_root = media_cache::media_cache_root(&app);
+    let playback_cache = media_root
+        .as_ref()
+        .map(|dir| dir.join(media_cache::PLAYBACK_AUDIO_DIR));
     let image_cache = append_child_path(
         child_paths(app_data_dir.as_deref(), &["covers", "thumbnails"]),
-        app_cache_dir.as_deref(),
-        "image_cache",
+        media_root.as_deref(),
+        media_cache::IMAGE_CACHE_DIR,
     );
     let download_staging = append_child_path(
         child_paths(app_data_dir.as_deref(), &["temp"]),
@@ -389,6 +403,108 @@ pub async fn clear_storage_cache(
     }
 
     Ok(result)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCacheRelocation {
+    pub location: MediaCacheLocation,
+    #[serde(flatten)]
+    pub report: RelocationReport,
+}
+
+/// 音频与封面缓存当前所在目录
+#[tauri::command]
+pub async fn get_media_cache_dir(app: AppHandle) -> AppResult<MediaCacheLocation> {
+    Ok(media_cache::location(&app))
+}
+
+/// 把音频与封面缓存改到 path，旧缓存按 existing 搬过去或丢弃
+#[tauri::command]
+pub async fn set_media_cache_dir(
+    app: AppHandle,
+    path: String,
+    existing: ExistingCacheAction,
+) -> AppResult<MediaCacheRelocation> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(AppError::Other("CACHE_DIR_NOT_ABSOLUTE".into()));
+    }
+    change_media_cache_dir(app, Some(PathBuf::from(path)), existing).await
+}
+
+/// 缓存目录恢复默认位置
+#[tauri::command]
+pub async fn reset_media_cache_dir(
+    app: AppHandle,
+    existing: ExistingCacheAction,
+) -> AppResult<MediaCacheRelocation> {
+    change_media_cache_dir(app, None, existing).await
+}
+
+/// 在文件管理器里打开当前缓存目录
+#[tauri::command]
+pub async fn open_media_cache_dir(app: AppHandle) -> AppResult<()> {
+    let root = media_cache::media_cache_root(&app)
+        .ok_or_else(|| AppError::Other("cache directory unavailable".into()))?;
+    fs::create_dir_all(&root)?;
+    tauri_plugin_opener::open_path(&root, None::<&str>)
+        .map_err(|error| AppError::Other(format!("open failed: {error}")))
+}
+
+async fn change_media_cache_dir(
+    app: AppHandle,
+    target: Option<PathBuf>,
+    existing: ExistingCacheAction,
+) -> AppResult<MediaCacheRelocation> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _relocating = media_cache::RelocationGuard::acquire()?;
+        let default_root = media_cache::default_root(&app)
+            .ok_or_else(|| AppError::Other("cache directory unavailable".into()))?;
+        let old_root = media_cache::media_cache_root(&app).unwrap_or_else(|| default_root.clone());
+        let new_root = media_cache::prepare_root(target.as_deref().unwrap_or(&default_root))?;
+        if !media_cache::same_root(&old_root, &new_root) {
+            media_cache::ensure_no_overlap(&old_root, &new_root)?;
+        }
+        // 选中默认目录本身也按默认保存，界面上才能显示为默认位置
+        let stored = if media_cache::same_root(&new_root, &default_root) {
+            String::new()
+        } else {
+            new_root.to_string_lossy().into_owned()
+        };
+        {
+            let _write = media_cache::settings_write_lock();
+            let mut settings = store::load_settings(&app)?.settings;
+            settings.media_cache_dir = stored;
+            let saved = store::save_settings(&app, settings)?;
+            // 先切换再搬：搬移期间新缓存直接写进新目录
+            media_cache::set_custom_root(&saved.media_cache_dir);
+        }
+        // 正在播放的缓存不能搬走或删掉：本地会话 seek 时按原路径重开，远程流按原路径读写它的缓存条目
+        let in_use = {
+            let state = app.state::<crate::state::AppState>();
+            let player = state.player.lock();
+            media_cache::CacheInUse {
+                files: player.current_path.iter().map(PathBuf::from).collect(),
+                entries: player.current_cache_entry.iter().cloned().collect(),
+            }
+        };
+        let report = media_cache::relocate(&old_root, &new_root, existing, &in_use);
+        log::info!(
+            target: "storage",
+            "缓存目录已切换 moved={} bytes={} removed={} failed={}",
+            report.moved_files,
+            report.moved_bytes,
+            report.removed_files,
+            report.failed_count,
+        );
+        Ok(MediaCacheRelocation {
+            location: media_cache::location(&app),
+            report,
+        })
+    })
+    .await
+    .map_err(|error| AppError::Other(error.to_string()))?
 }
 
 fn remove_download_staging_files(path: &Path, result: &mut StorageClearResult) {
@@ -699,6 +815,12 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+            // root（例如 Linux 容器里跑测试）会绕过目录权限，这时造不出「删不掉」的条目，
+            // 场景本身不成立，恢复权限后直接结束；普通用户与 CI 上照常断言
+            if fs::write(locked.join("probe"), b"").is_ok() {
+                fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+                return;
+            }
         }
 
         assert_eq!(clear_directory_contents(root.path()), 1);

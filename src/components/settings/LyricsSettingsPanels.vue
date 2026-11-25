@@ -71,12 +71,13 @@ const {
 <template>
   <!-- 歌词 -->
       <div v-show="activeSettingsSection === 'lyrics'" class="settings-section-panel" data-section="lyrics">
-  <div class="section-label clickable" @click="toggleSection('lyrics')">
+  <div class="section-label section-label--page clickable" @click="toggleSection('lyrics')">
     <span class="material-symbols-rounded" style="font-size: 18px">lyrics</span>
     <span>{{ t('settings.lyrics') }}</span>
     <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('lyrics') }">expand_more</span>
   </div>
 
+    <div class="section-label">{{ t('settings.group_lyrics_display') }}</div>
     <div class="setting-card">
       <div class="setting-icon-wrap"><span class="material-symbols-rounded">format_size</span></div>
       <div class="setting-info">
@@ -147,6 +148,7 @@ const {
     <label class="m3-switch"><input type="checkbox" v-model="preferWordTimedLyrics" /><span class="track"><span class="thumb"><span v-if="preferWordTimedLyrics" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
   </div>
 
+  <div class="section-label">{{ t('settings.group_lyrics_source') }}</div>
   <div class="setting-card setting-card--select">
     <div class="setting-icon-wrap"><span class="material-symbols-rounded">source</span></div>
     <div class="setting-info">
@@ -160,6 +162,7 @@ const {
 
   <BiliSubtitleSettings variant="settings" :show-offset="false" />
 
+  <div class="section-label">{{ t('settings.group_lyrics_effects') }}</div>
   <div class="setting-card">
     <div class="setting-icon-wrap"><span class="material-symbols-rounded">graphic_eq</span></div>
     <div class="setting-info">
@@ -253,12 +256,13 @@ const {
 
   <!-- 桌面歌词 -->
       <div v-show="activeSettingsSection === 'desktop_lyrics'" class="settings-section-panel" data-section="desktop_lyrics">
-  <div id="settings-desktop-lyrics" class="section-label clickable" @click="toggleSection('desktop_lyrics')">
+  <div id="settings-desktop-lyrics" class="section-label section-label--page clickable" @click="toggleSection('desktop_lyrics')">
     <span class="material-symbols-rounded" style="font-size: 18px">subtitles</span>
     <span>{{ t('desktop_lyrics.title') }}</span>
     <span class="material-symbols-rounded section-arrow" :class="{ expanded: isExpanded('desktop_lyrics') }">expand_more</span>
   </div>
 
+  <div class="section-label">{{ t('settings.group_dl_window') }}</div>
   <div class="setting-card">
     <div class="setting-icon-wrap"><span class="material-symbols-rounded">desktop_windows</span></div>
     <div class="setting-info">
@@ -299,6 +303,7 @@ const {
       </div>
     </div>
 
+    <div class="section-label">{{ t('settings.group_dl_style') }}</div>
     <div class="setting-card dl-stack-card">
       <div class="setting-title">{{ t('desktop_lyrics.theme') }}</div>
       <div class="dl-swatches">
@@ -352,6 +357,7 @@ const {
         @update:model-value="updateDesktopLyrics({ secondary: $event as DesktopLyricsStyle['secondary'] })" />
     </div>
 
+    <div class="section-label">{{ t('settings.group_dl_text') }}</div>
     <div class="setting-card setting-card--select">
       <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.font') }}</div></div>
       <CustomSelect class="settings-select" :model-value="desktopLyricsFontChoice" :options="desktopLyricsFontOptions"
@@ -429,6 +435,7 @@ const {
       </div>
     </div>
 
+    <div class="section-label">{{ t('settings.group_lyrics_effects') }}</div>
     <div class="setting-card">
       <div class="setting-info"><div class="setting-title">{{ t('desktop_lyrics.stroke') }}</div></div>
       <input v-if="desktopLyricsStyle.strokeEnabled" type="color" class="dl-color-inline" :value="desktopLyricsStyle.strokeColor" :aria-label="t('desktop_lyrics.stroke')"
@@ -557,10 +564,10 @@ const {
   gap: 6px;
   padding: 3px 10px 3px 3px;
   border-radius: var(--radius-full);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   background: var(--md-surface-container-highest);
   color: var(--md-on-surface-variant);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-family: inherit;
   cursor: pointer;
   transition: border-color var(--duration-short), color var(--duration-short);
@@ -590,7 +597,7 @@ const {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface);
 
   span { flex: 1; }
@@ -601,7 +608,7 @@ const {
   width: 38px;
   height: 26px;
   padding: 0;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: 8px;
   background: none;
   cursor: pointer;
@@ -629,4 +636,7 @@ const {
 @media (max-width: 480px) {
   @include primitives.card-narrow;
 }
+
+/* 页面级标题与右侧页头重复，隐藏（分区由普通 .section-label 承担） */
+.section-label--page { display: none; }
 </style>

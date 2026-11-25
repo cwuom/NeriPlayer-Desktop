@@ -1,0 +1,119 @@
+name: Flatpak
+
+# 可选渠道：把 Linux .deb 重新打包为 Flatpak bundle（packaging/flatpak/）。
+# Release 工作流在构建完成后调用它；也可以手动对已有的 GitHub Release 运行。
+# 打包任务 continue-on-error，失败只体现在这里，不会阻断发布。
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit whose packaging files are used
+        required: true
+        type: string
+      deb_artifact:
+        description: Artifact from the calling run that contains the .deb
+        required: true
+        type: string
+      app_version:
+        description: Version written into the AppStream release entry
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag whose .deb is repackaged
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # flathub/shared-modules 固定提交，提供 libayatana-appindicator 模块
+  SHARED_MODULES_COMMIT: 34add58f536223b780a3c9f077980cdaa51fc81f
+
+jobs:
+  fetch-release-deb:
+    name: Fetch release .deb
+    if: inputs.deb_artifact == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download .deb from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deb
+          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --pattern '*.deb' --dir deb
+          ls -l deb
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-input-deb
+          path: deb/*.deb
+          if-no-files-found: error
+          retention-days: 1
+
+  bundle:
+    name: Flatpak bundle (x86_64)
+    needs: fetch-release-deb
+    if: ${{ !cancelled() && needs.fetch-release-deb.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+          persist-credentials: false
+
+      - name: Download .deb
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.deb_artifact || 'flatpak-input-deb' }}
+          path: .cache/flatpak-input
+
+      - name: Prepare Flatpak sources
+        id: prepare
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.app_version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(.cache/flatpak-input/*.deb)
+          (( ${#debs[@]} == 1 ))
+          cp "${debs[0]}" packaging/flatpak/neri-player.deb
+
+          git clone --filter=blob:none https://github.com/flathub/shared-modules.git packaging/flatpak/shared-modules
+          git -C packaging/flatpak/shared-modules checkout --detach "$SHARED_MODULES_COMMIT"
+
+          version="${APP_VERSION:-$RELEASE_TAG}"
+          version="${version#v}"
+          version="${version#NeriPlayer-}"
+          [[ -n "$version" ]]
+          # AppStream 的发布条目跟随实际打包的版本
+          sed -i "s|<release version=\"[^\"]*\" date=\"[^\"]*\" />|<release version=\"$version\" date=\"$(date -u +%F)\" />|" \
+            packaging/flatpak/moe.ouom.neriplayer.desktop.metainfo.xml
+          grep -q "<release version=\"$version\"" packaging/flatpak/moe.ouom.neriplayer.desktop.metainfo.xml
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          manifest-path: packaging/flatpak/moe.ouom.neriplayer.desktop.yml
+          bundle: NeriPlayer_${{ steps.prepare.outputs.version }}_x86_64.flatpak
+          # 名称刻意不匹配 Release 的 NeriPlayer-*-<tag> 下载模式，避免与发布资产产生竞态
+          artifact-name: flatpak-linux-x86_64
+          cache-key: flatpak-builder-${{ inputs.ref || inputs.release_tag }}
+          arch: x86_64

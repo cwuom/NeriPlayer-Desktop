@@ -21,10 +21,11 @@ import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
 import { collectionWebUrl, type CollectionMenuTarget } from '@/utils/collectionLinks'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
+import { biliCreatorStats } from '@/modules/search/creatorMeta'
 
 const router = useRouter()
 const route = useRoute()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const searchStore = useExploreSearchStore()
 const player = usePlayerStore()
 const auth = useAuthStore()
@@ -63,7 +64,7 @@ const platformTabs = computed(() => {
 })
 
 // 每个平台记住自己上次选的分类，切回来不用重选
-const searchKinds = ref<Record<Exclude<PlatformTab, 'link'>, ExploreKind>>({ netease: 'songs', bilibili: 'videos', youtube: 'songs' })
+const searchKinds = ref<Record<Exclude<PlatformTab, 'link'>, ExploreKind>>({ netease: 'songs', bilibili: 'songs', youtube: 'songs' })
 const activeKind = computed<ExploreKind>(() => activeTab.value === 'link' ? 'songs' : searchKinds.value[activeTab.value])
 const kindOptions = computed(() => activeTab.value === 'link' ? [] : EXPLORE_KINDS[activeTab.value])
 const KIND_ICONS: Record<ExploreKind, string> = {
@@ -300,6 +301,11 @@ function collectionMeta(item: ExploreCollection): string {
   if (item.platform === 'netease' && albums !== undefined) {
     return t('explore.artist_meta', { songs: Number(songs) || 0, albums: Number(albums) || 0 })
   }
+  if (item.platform === 'bilibili') {
+    const stats = biliCreatorStats(item, locale.value)
+    if (stats) return t('explore.bili_creator_meta', stats)
+    return item.subtitle || t('explore.bili_creator_uid', { mid: item.id })
+  }
   return item.subtitle
 }
 
@@ -496,7 +502,7 @@ onMounted(() => {
       </button>
     </div>
 
-    <!-- 分类：网易云 歌曲/歌单/歌手，YouTube Music 歌曲/视频/创作者 -->
+    <!-- 分类：网易云 歌曲/歌单/歌手，YouTube Music 与 B 站 歌曲/视频/创作者 -->
     <div v-if="kindOptions.length > 1" class="kind-chips" role="tablist">
       <button
         v-for="kind in kindOptions"
@@ -658,13 +664,6 @@ onMounted(() => {
 
       <!-- B站 Tab：默认发现内容 -->
       <template v-else-if="activeTab === 'bilibili'">
-        <div class="platform-hero bilibili">
-          <span class="tab-icon large" :style="{ maskImage: 'url(/icons/ic_bilibili.svg)' }"></span>
-          <div>
-            <h2>{{ t('settings.bilibili_account') }}</h2>
-            <p>{{ t('explore.bili_hint') }} · {{ t('explore.bili_discovery_hint') }}</p>
-          </div>
-        </div>
         <div v-if="isLoadingBiliDiscovery" class="loading-state">
           <span class="material-symbols-rounded spinning">progress_activity</span>
         </div>
@@ -694,14 +693,6 @@ onMounted(() => {
 
       <!-- YouTube Tab：默认发现内容 -->
       <template v-else-if="activeTab === 'youtube'">
-        <div class="platform-hero youtube">
-          <span class="tab-icon large" :style="{ maskImage: 'url(/icons/ic_youtube.svg)' }"></span>
-          <div>
-            <h2>{{ t('settings.youtube_account') }}</h2>
-            <p>{{ auth.youtube.loggedIn ? t('explore.yt_feed_hint') : t('explore.yt_hint') }}</p>
-          </div>
-        </div>
-
         <div v-if="auth.youtube.loggedIn && recommend.homeFeedShelves.length > 0" class="discovery-stack">
           <section v-for="shelf in recommend.homeFeedShelves.slice(0, 4)" :key="shelf.title" class="discovery-shelf">
             <div class="discovery-header">
@@ -755,13 +746,25 @@ onMounted(() => {
 </template>
 
 <style scoped lang="scss">
-.explore-view { padding: 20px 28px 32px; }
+/* 探索页（Clean）：大标题 + 胶囊搜索 + 分段平台切换；内容限宽居中，与首页、详情页同一套留白 */
+.explore-view {
+  container-type: inline-size;
+  padding: 22px clamp(18px, 3.2vw, 44px) 32px;
+
+  > * { max-width: 1480px; margin-left: auto; margin-right: auto; }
+}
+
+/* 分段控件宽度随内容，靠左对齐（而不是被上面的居中规则挤到中间） */
+.explore-view > .platform-tabs {
+  margin-left: max(0px, calc((100% - 1480px) / 2));
+  margin-right: auto;
+}
 
 .page-title {
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-  margin-bottom: 20px;
+  font-size: calc(clamp(26px, 3.4cqi, 36px) * var(--text-scale));
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  margin-bottom: 18px;
 }
 
 /* 搜索栏 */
@@ -769,18 +772,18 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 16px;
-  height: 48px;
+  padding: 0 8px 0 16px;
+  height: 46px;
   background: var(--md-surface-container-high);
-  border-radius: var(--radius-xl);
-  border: 2px solid transparent;
-  transition: background var(--duration-short), border-color var(--duration-short), box-shadow var(--duration-medium);
+  border-radius: var(--radius-full);
+  transition: background var(--duration-short), box-shadow var(--duration-short);
   margin-bottom: 16px;
 
+  &:hover:not(.focused) { background: color-mix(in srgb, var(--md-on-surface) 5%, var(--md-surface-container-high)); }
+
   &.focused {
-    background: var(--md-surface-container-highest);
-    border-color: var(--md-primary);
-    box-shadow: 0 0 0 4px rgba(208, 188, 255, 0.08);
+    background: var(--md-surface-container-lowest);
+    box-shadow: 0 0 0 2px var(--md-primary), var(--shadow-2);
   }
 
   .search-icon {
@@ -794,7 +797,7 @@ onMounted(() => {
     border: none;
     background: none;
     color: var(--md-on-surface);
-    font-size: 14px;
+    font-size: var(--fs-14);
     outline: none;
     font-family: inherit;
 
@@ -812,46 +815,52 @@ onMounted(() => {
   color: var(--md-on-surface-variant);
   transition: background var(--duration-short);
 
-  &:hover { background: var(--md-surface-variant); }
+  &:hover { background: var(--state-hover); }
 }
 
-/* 三平台 Tab */
+/* 平台切换：Clean 分段胶囊（替代 M3 下划线 Tab），选中项抬成白色拇指 */
 .platform-tabs {
   display: flex;
-  gap: 0;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--md-outline-variant);
+  gap: 2px;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 18px;
+  padding: 3px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-radius: var(--radius-full);
+  background: var(--md-surface-container-high);
+
+  &::-webkit-scrollbar { display: none; }
 }
 
 .platform-tab {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 12px 0;
-  font-size: 13px;
+  height: 34px;
+  padding: 0 16px 0 12px;
+  font-size: var(--fs-13);
   font-weight: 500;
   color: var(--md-on-surface-variant);
-  border-bottom: 2px solid transparent;
-  border-radius: var(--radius-md, 12px) var(--radius-md, 12px) 0 0;
-  transition: color var(--duration-short), border-color var(--duration-short);
+  border-radius: var(--radius-full);
+  transition: color var(--duration-short), background var(--duration-short), box-shadow var(--duration-short);
   cursor: pointer;
   user-select: none;
   position: relative;
+  flex-shrink: 0;
 
-  &:hover {
-    color: var(--md-on-surface);
-    background: var(--md-surface-container);
-  }
+  &:hover:not(.active) { color: var(--md-on-surface); }
 
   &.active {
-    color: var(--md-primary);
-    border-bottom-color: var(--md-primary);
+    color: var(--md-on-surface);
+    font-weight: 600;
+    background: var(--md-surface-container-lowest);
+    box-shadow: var(--shadow-1), 0 0 0 0.5px var(--hairline);
 
-    .tab-icon {
-      background: var(--md-primary);
-    }
+    .tab-icon { background: var(--md-primary); }
+    .tab-symbol { color: var(--md-primary); }
   }
 }
 
@@ -893,21 +902,23 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 34px;
+  height: 32px;
   padding: 0 14px 0 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--md-outline-variant);
-  color: var(--md-on-surface-variant);
-  font-size: 13px;
+  border-radius: var(--radius-full);
+  border: 0;
+  background: var(--md-surface-container-high);
+  color: var(--md-on-surface);
+  font-size: var(--fs-13);
   font-weight: 500;
   transition: background var(--duration-short) var(--ease-standard), color var(--duration-short) var(--ease-standard), border-color var(--duration-short) var(--ease-standard);
 
   .material-symbols-rounded { font-size: 18px; }
-  &:hover { background: var(--md-surface-container-high); }
+  &:hover:not(.active) { background: color-mix(in srgb, var(--md-on-surface) 6%, var(--md-surface-container-high)); }
   &.active {
-    background: var(--md-secondary-container);
-    color: var(--md-on-secondary-container);
-    border-color: transparent;
+    background: color-mix(in srgb, var(--md-primary) 14%, var(--md-surface-container-low));
+    color: var(--md-on-primary-container);
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--md-primary) 60%, transparent);
+    font-weight: 600;
   }
 }
 
@@ -928,7 +939,7 @@ onMounted(() => {
   border-radius: var(--radius-full);
   background: var(--md-primary);
   color: var(--md-on-primary);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 600;
 
   .material-symbols-rounded { font-size: 18px; }
@@ -950,8 +961,8 @@ onMounted(() => {
   background: var(--md-surface-container);
 
   .tab-icon { margin-top: 2px; background: var(--md-primary); }
-  strong { font-size: 13px; }
-  p { margin-top: 4px; font-size: 12px; color: var(--md-on-surface-variant); line-height: 1.5; overflow-wrap: anywhere; }
+  strong { font-size: var(--fs-13); }
+  p { margin-top: 4px; font-size: var(--fs-12); color: var(--md-on-surface-variant); line-height: 1.5; overflow-wrap: anywhere; }
 }
 
 .link-notice {
@@ -963,8 +974,8 @@ onMounted(() => {
   background: var(--md-surface-container);
 
   > .material-symbols-rounded { color: var(--md-primary); }
-  strong { font-size: 14px; }
-  p { margin-top: 4px; font-size: 13px; color: var(--md-on-surface-variant); }
+  strong { font-size: var(--fs-14); }
+  p { margin-top: 4px; font-size: var(--fs-13); color: var(--md-on-surface-variant); }
 }
 
 /* Tag 选择区 */
@@ -984,7 +995,7 @@ onMounted(() => {
 }
 
 .search-history-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: var(--md-on-surface-variant);
 }
@@ -994,7 +1005,7 @@ onMounted(() => {
   background: none;
   padding: 4px 8px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-primary);
   cursor: pointer;
 
@@ -1014,24 +1025,24 @@ onMounted(() => {
   height: 32px;
   padding: 0 14px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: var(--fs-13);
   font-weight: 500;
-  border: 1px solid var(--md-outline-variant);
-  background: var(--md-surface);
-  color: var(--md-on-surface);
+  border: 0;
+  background: transparent;
+  color: var(--md-on-surface-variant);
   cursor: pointer;
-  transition: background var(--duration-short), border-color var(--duration-short), color var(--duration-short);
+  transition: background var(--duration-short), color var(--duration-short);
   user-select: none;
 
   &:hover {
-    background: var(--md-surface-container-high);
-    border-color: var(--md-outline);
+    background: var(--state-hover);
+    color: var(--md-on-surface);
   }
 
   &.active {
-    background: var(--md-secondary-container);
-    color: var(--md-on-secondary-container);
-    border-color: var(--md-secondary);
+    background: var(--md-inverse-surface);
+    color: var(--md-inverse-on-surface);
+    font-weight: 600;
   }
 }
 
@@ -1039,23 +1050,25 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
-  color: var(--md-primary);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
+  font-size: var(--fs-12);
+  color: var(--md-on-surface-variant);
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
   cursor: pointer;
-  transition: background var(--duration-short);
+  transition: background var(--duration-short), color var(--duration-short);
 
   &:hover {
-    background: color-mix(in srgb, var(--md-primary) 8%, transparent);
+    background: var(--state-hover);
+    color: var(--md-on-surface);
   }
 }
 
 /* 歌单网格 */
 .playlist-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(156px, 1fr));
+  gap: 22px 18px;
 }
 
 .playlist-card {
@@ -1075,6 +1088,10 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--hairline);
+  transition: box-shadow 220ms var(--ease-emphasized);
+
+  .playlist-card:hover & { box-shadow: var(--shadow-2), inset 0 0 0 1px var(--hairline); }
 
   img {
     width: 100%;
@@ -1089,7 +1106,7 @@ onMounted(() => {
 }
 
 .playlist-name {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 500;
   margin-top: 6px;
   overflow: hidden;
@@ -1098,7 +1115,7 @@ onMounted(() => {
 }
 
 .playlist-count {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   margin-top: 2px;
 }
@@ -1130,7 +1147,7 @@ onMounted(() => {
   }
 
   p {
-    font-size: 13px;
+    font-size: var(--fs-13);
     color: var(--md-on-surface-variant);
   }
 }
@@ -1149,7 +1166,7 @@ onMounted(() => {
 
   p {
     margin-top: 2px;
-    font-size: 12px;
+    font-size: var(--fs-12);
     color: var(--md-on-surface-variant);
   }
 }
@@ -1191,7 +1208,7 @@ onMounted(() => {
 
 .discovery-title {
   margin-top: 7px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1200,7 +1217,7 @@ onMounted(() => {
 
 .discovery-meta {
   margin-top: 2px;
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--md-on-surface-variant);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1237,7 +1254,7 @@ onMounted(() => {
 }
 
 .empty-desc {
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: var(--md-on-surface-variant);
   opacity: 0.6;
 }
@@ -1245,11 +1262,11 @@ onMounted(() => {
 .retry-btn {
   margin-top: 12px;
   padding: 6px 18px;
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-full);
   background: transparent;
   color: var(--md-primary);
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
   transition: background var(--duration-short) var(--ease-standard);
 
@@ -1315,7 +1332,7 @@ onMounted(() => {
 }
 
 .result-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1323,7 +1340,7 @@ onMounted(() => {
 }
 
 .result-meta {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--md-on-surface-variant);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1331,7 +1348,7 @@ onMounted(() => {
 }
 
 .result-source {
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 500;
   color: var(--md-primary);
   padding: 2px 8px;
@@ -1342,7 +1359,7 @@ onMounted(() => {
 }
 
 .result-duration {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: var(--md-on-surface-variant);
   font-variant-numeric: tabular-nums;

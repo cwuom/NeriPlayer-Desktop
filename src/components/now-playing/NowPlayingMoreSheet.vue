@@ -43,6 +43,16 @@ const {
   albumName, commentTarget, quality, shareSong, openQualitySwitcher, openBiliVideoSkip,
   openListenTogetherFromMore, openComments, openAudioEffectsSettings,
 } = context
+// 搜索、编辑这类需要输入的子视图常驻（#53）：点面板外不关闭，只轻晃一下提示，用 × 或 Esc 关闭
+const PERSISTENT_SHEET_VIEWS = new Set(['lyrics-fill', 'search', 'editinfo', 'lyrics-editor'])
+const sheetPersistent = computed(() => PERSISTENT_SHEET_VIEWS.has(moreSheetView.value))
+const sheetNudge = ref(false)
+
+function onMoreOverlayClick() {
+  if (sheetPersistent.value) sheetNudge.value = true
+  else showMoreSheet.value = false
+}
+
 const { currentSource, switchableQualities, canSwitchCurrentAudioQuality, currentQualityKey, setQualityKey, currentAudioQualityLabel } = quality
 
 const {
@@ -138,8 +148,18 @@ async function switchQuality(key: string) {
   <!-- 更多选项面板（对齐 Android MoreOptionsSheet） -->
   <Teleport to="body">
     <Transition name="more-sheet">
-    <div v-if="player.hasPlaybackSession && showMoreSheet" class="np-more-overlay" @click="showMoreSheet = false">
-      <div class="np-more-sheet" @click.stop>
+    <div v-if="player.hasPlaybackSession && showMoreSheet" class="np-more-overlay" @click="onMoreOverlayClick">
+      <div class="np-more-sheet" :class="{ 'np-more-sheet--nudge': sheetNudge, 'np-more-sheet--wide': sheetPersistent }" @click.stop @animationend="sheetNudge = false">
+        <button
+          v-if="sheetPersistent"
+          type="button"
+          class="np-more-close"
+          :title="t('common.close')"
+          :aria-label="t('common.close')"
+          @click="showMoreSheet = false"
+        >
+          <span class="material-symbols-rounded">close</span>
+        </button>
 
         <Transition :name="moreSheetTransition" mode="out-in">
         <div :key="moreSheetView" class="np-more-sheet-content">
