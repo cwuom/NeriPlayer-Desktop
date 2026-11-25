@@ -87,6 +87,9 @@ const DARK: Neutrals = {
 const MAX_TINT_LIGHT = 0.14
 const MAX_TINT_DARK = 0.2
 
+// 与 detail-view.scss 的 .track-item.active 一致：正在播放行底色混入的强调色比例
+const ACTIVE_ROW_TINT = 0.1
+
 const ERROR_LIGHT = hex(0xd93636)
 const ERROR_DARK = hex(0xff6b6b)
 
@@ -193,18 +196,45 @@ export function accentFromSeed(seed: RGB, dark: boolean): RGB {
   const background = dark ? DARK.background : LIGHT.background
   let lightness = dark ? 0.7 : 0.44
   let color = hslToRgb(h, saturation, lightness)
-  // 逐步调亮度直到对比度达到 3:1（大号文字/图形的 WCAG 下限），最多几步即可收敛
-  for (let i = 0; i < 12 && contrastRatio(color, background) < 3.2; i++) {
+  // 强调色也直接当正文色用（正在播放的曲名、链接），所以在最不利的正在播放行底色上按 4.5:1 收敛；
+  // 浅色下这同时让强调色足够深，实底按钮上的白字也能达标
+  for (let i = 0; i < 16 && contrastRatio(color, mix(background, color, ACTIVE_ROW_TINT)) < 4.5; i++) {
     lightness += dark ? 0.03 : -0.03
     color = hslToRgb(h, saturation, lightness)
   }
   return color
 }
 
+/** APCA 亮度（0.0.98G-4g）：带近黑软钳位，比 WCAG 相对亮度更贴近人眼 */
+function apcaLuminance([r, g, b]: RGB): number {
+  const y = 0.2126729 * (r / 255) ** 2.4 + 0.7151522 * (g / 255) ** 2.4 + 0.072175 * (b / 255) ** 2.4
+  return y < 0.022 ? y + (0.022 - y) ** 1.414 : y
+}
+
+/** APCA Lc 对比度（取绝对值）：深字浅底与浅字深底分别用不同指数 */
+export function apcaContrast(text: RGB, background: RGB): number {
+  const yText = apcaLuminance(text)
+  const yBackground = apcaLuminance(background)
+  if (Math.abs(yBackground - yText) < 0.0005) return 0
+  if (yBackground > yText) {
+    const sapc = (yBackground ** 0.56 - yText ** 0.57) * 1.14
+    return sapc < 0.1 ? 0 : (sapc - 0.027) * 100
+  }
+  const sapc = (yBackground ** 0.65 - yText ** 0.62) * 1.14
+  return sapc > -0.1 ? 0 : -(sapc + 0.027) * 100
+}
+
+/**
+ * 实底上的文字/图标色。WCAG 2 的对比度公式在中间调（棕、橙等）上会偏向深色字，
+ * 两边比值只差零点几却选出发闷的墨色。只有一边达到 4.5:1 时用它；
+ * 两边都达标或都不达标时交给 APCA 感知对比决定，中间调因此落到白字
+ */
 function onColor(fill: RGB): RGB {
   const light: RGB = [255, 255, 255]
   const ink: RGB = [20, 20, 22]
-  return contrastRatio(fill, light) >= contrastRatio(fill, ink) ? light : ink
+  const lightPasses = contrastRatio(fill, light) >= 4.5
+  if (lightPasses !== contrastRatio(fill, ink) >= 4.5) return lightPasses ? light : ink
+  return apcaContrast(light, fill) >= apcaContrast(ink, fill) ? light : ink
 }
 
 /** 保证前景色在给定底色上可读：不够时向 onSurface 回拉 */
