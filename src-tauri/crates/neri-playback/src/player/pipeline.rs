@@ -95,7 +95,7 @@ pub(super) fn switch_output_device_in_place(
     if cancel.load(Ordering::Acquire) {
         return Err("Audio output change cancelled".into());
     }
-    let Some(previous) = current.as_ref() else {
+    let Some(previous) = current.as_mut() else {
         effects.dsp.select_output(&candidate.name);
         output.profile = Some(candidate);
         return Ok(());
@@ -103,6 +103,10 @@ pub(super) fn switch_output_device_in_place(
     ensure_generation(playback_generation, previous.playback_generation)?;
     let paused = previous.shared.paused.load(Ordering::Acquire);
     previous.pause();
+    // 旧流独占着设备时，切到同一设备（开关独占）或回退共享都打不开：先让出设备。
+    // 让出后旧流不能再恢复，失败时改为在原设备、原位置重建会话
+    let released_exclusive = previous.release_exclusive_output();
+    let previous = &*previous;
     // 保留旧流和源，目标设备准备失败时还能回到原位置
     let prepared = prepare_session(
         previous.source.clone(),
@@ -152,12 +156,79 @@ pub(super) fn switch_output_device_in_place(
         }
         Err(error) => {
             restore_dsp_output_identity(effects, output);
-            if !paused
+            if released_exclusive {
+                restore_released_session(
+                    current,
+                    paused,
+                    volume,
+                    speed,
+                    shared_level,
+                    effects,
+                    playback_generation,
+                    output,
+                    loopback_tx,
+                );
+            } else if !paused
                 && ensure_generation(playback_generation, previous.playback_generation).is_ok()
             {
                 let _ = previous.play();
             }
             Err(error)
+        }
+    }
+}
+
+/// 独占流已让出设备、新设备又没建成：按原档案在原位置重建会话，避免停在无声状态
+#[allow(clippy::too_many_arguments)]
+fn restore_released_session(
+    current: &mut Option<PlaybackSession>,
+    paused: bool,
+    volume: f32,
+    speed: f32,
+    shared_level: &Arc<Mutex<SharedAudioLevel>>,
+    effects: &Arc<EffectsControl>,
+    playback_generation: &Arc<AtomicU64>,
+    output: &OutputDeviceState,
+    loopback_tx: &mpsc::Sender<AudioCmd>,
+) {
+    let (Some(previous), Some(profile)) = (current.as_ref(), output.profile.as_ref()) else {
+        return;
+    };
+    if ensure_generation(playback_generation, previous.playback_generation).is_err() {
+        return;
+    }
+    let restored = prepare_session(
+        previous.source.clone(),
+        previous.shared.clock.position_ms(),
+        volume,
+        speed,
+        Arc::clone(shared_level),
+        Arc::clone(effects),
+        Arc::clone(&previous.shared.loudness),
+        Arc::clone(playback_generation),
+        previous.playback_generation,
+        None,
+        Some(Arc::clone(&previous.shared.clock)),
+        profile,
+        Arc::new(AtomicBool::new(false)),
+        loopback_tx,
+    )
+    .and_then(|next| {
+        if paused {
+            next.pause();
+        } else {
+            next.play()?;
+        }
+        Ok(next)
+    });
+    match restored {
+        Ok(next) => {
+            if let Some(mut released) = current.replace(next) {
+                released.stop();
+            }
+        }
+        Err(error) => {
+            log::warn!(target: "cpal-output", "could not restore output after releasing exclusive device: {error}");
         }
     }
 }

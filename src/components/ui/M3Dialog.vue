@@ -46,10 +46,10 @@ function onOverlayClick(e: MouseEvent) {
   if (e.target === overlayRef.value) close()
 }
 
-// 桌面端习惯：回车确认；输入框和多行文本里的回车留给控件本身
+// 桌面端习惯：回车确认；多行文本、按钮里的回车，以及输入框已自行处理（defaultPrevented）的回车留给控件本身
 function onEnter(e: KeyboardEvent) {
   const target = e.target as HTMLElement
-  if (e.isComposing || target.closest('textarea, button, [contenteditable="true"]')) return
+  if (e.defaultPrevented || e.isComposing || target.closest('textarea, button, [contenteditable="true"]')) return
   e.preventDefault()
   confirm()
 }

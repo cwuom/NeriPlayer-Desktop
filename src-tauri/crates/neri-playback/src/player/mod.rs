@@ -488,9 +488,21 @@ impl PlaybackSession {
         self.shared.cancelled.store(true, Ordering::Release);
         self.shared.wake.notify_all();
         let _ = self.stream.pause();
+        // stop 是会话终态，此后只会读它的 source 重建新会话（seek 回滚也是）。
+        // 独占流不能等会话 drop 才归还设备，否则同一设备上的新会话打不开
+        self.stream.release_exclusive();
         if let Some(worker) = self.worker.take() {
             finish_decode_worker(&self.source, &self.shared, worker);
         }
+    }
+
+    fn holds_output_exclusively(&self) -> bool {
+        self.stream.holds_device_exclusively()
+    }
+
+    /// 只释放独占设备、保留会话本身（源、时钟、响度），失败时仍能据此重建
+    fn release_exclusive_output(&mut self) -> bool {
+        self.stream.release_exclusive()
     }
 
     fn is_empty(&self) -> bool {

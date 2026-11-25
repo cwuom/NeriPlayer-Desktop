@@ -51,12 +51,16 @@ try {
   input().dispatchEvent({ type: 'input', target: input() })
   await vue.nextTick()
   assert.equal(value.value, ' 密码 🔑 ', 'v-model preserves the password exactly')
-  input().props.onKeydown({ key: 'Enter' })
+  const enterEvent = () => ({ key: 'Enter', prevented: false, preventDefault() { this.prevented = true } })
+  const handled = enterEvent()
+  input().props.onKeydown(handled)
   assert.equal(enters, 1)
+  // 回归：输入框处理了回车就标记 defaultPrevented，外层对话框不能再确认一次（否则新建歌单会建两个）
+  assert.equal(handled.prevented, true, 'an input that owns Enter marks the event as handled')
   props.disabled = true
   await vue.nextTick()
   assert.equal(input().props.disabled, true)
-  input().props.onKeydown({ key: 'Enter' })
+  input().props.onKeydown(enterEvent())
   assert.equal(enters, 1, 'disabled input cannot submit even through a synthetic key event')
   const wrapper = all(root).find(target => target.type === 'div' && String(target.props.class).includes('m3-input'))
   wrapper.props.onClick()
@@ -69,6 +73,14 @@ try {
   assert.equal(input().props.disabled, false)
   assert.equal(input().props.autocomplete, undefined)
   assert.equal(value.value, ' 密码 🔑 ')
+  // 没有 enter 监听的输入框不抢回车，外层对话框仍可回车确认
+  const plainRoot = node('root')
+  const plainApp = renderer.createApp({ setup: () => () => vue.h(component, { modelValue: '' }) })
+  plainApp.mount(plainRoot)
+  const plainEnter = enterEvent()
+  all(plainRoot).find(target => target.type === 'input').props.onKeydown(plainEnter)
+  assert.equal(plainEnter.prevented, false, 'inputs without an enter listener leave Enter to the dialog')
+  plainApp.unmount()
   console.log('PASS M3Input password props, unmodified values, disabled handling and existing defaults')
 } finally {
   app.unmount()

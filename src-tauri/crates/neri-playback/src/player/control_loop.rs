@@ -168,6 +168,16 @@ fn audio_control_loop(
                     start_position_ms,
                     transition_label,
                 );
+                // 独占输出时旧会话独占着设备，新会话（连同共享回退）都打不开同一设备：
+                // 先结束旧会话再准备新会话；两路同时出声的交叉淡化做不到，退化为直接替换
+                if current
+                    .as_ref()
+                    .is_some_and(PlaybackSession::holds_output_exclusively)
+                {
+                    if let Some(mut previous) = current.take() {
+                        previous.stop();
+                    }
+                }
                 let prepared = (|| {
                     if prepare_cancel.load(Ordering::Acquire) {
                         return Err("Timed out waiting for decoded audio".into());

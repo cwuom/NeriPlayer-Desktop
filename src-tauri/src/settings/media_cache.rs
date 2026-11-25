@@ -4,6 +4,7 @@
 //! 日志与下载暂存仍留在默认位置。搬移和清理只碰这两个子目录里认得出的缓存文件，
 //! 用户选中的目录里其它文件一律不动。
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -187,17 +188,28 @@ pub fn ensure_no_overlap(old_root: &Path, new_root: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// 处理旧根目录下的缓存：搬到新根目录或删除。只处理两个缓存子目录里认得出的缓存文件
-pub fn relocate(old_root: &Path, new_root: &Path, action: ExistingCacheAction) -> RelocationReport {
+/// 处理旧根目录下的缓存：搬到新根目录或删除。只处理两个缓存子目录里认得出的缓存文件。
+///
+/// `in_use` 是播放器正在读的文件：会话 seek 时会按原路径重开解码器，搬走或删掉它
+/// 会让下一次 seek 和回滚都失败。这类文件搬移时只复制（新目录供以后播放），丢弃时保留
+pub fn relocate(
+    old_root: &Path,
+    new_root: &Path,
+    action: ExistingCacheAction,
+    in_use: &[PathBuf],
+) -> RelocationReport {
     let mut report = RelocationReport::default();
     if same_root(old_root, new_root) {
         return report;
     }
+    let in_use: HashSet<PathBuf> = in_use.iter().map(|path| normalized(path)).collect();
     for name in MEDIA_CACHE_SUBDIRS {
         let old_sub = old_root.join(name);
         match action {
-            ExistingCacheAction::Move => move_tree(&old_sub, &new_root.join(name), &mut report),
-            ExistingCacheAction::Discard => discard_tree(&old_sub, &mut report),
+            ExistingCacheAction::Move => {
+                move_tree(&old_sub, &new_root.join(name), &in_use, &mut report)
+            }
+            ExistingCacheAction::Discard => discard_tree(&old_sub, &in_use, &mut report),
         }
         remove_empty_dirs(&old_sub);
     }
@@ -210,7 +222,12 @@ fn extension_in(path: &Path, set: &[&str]) -> bool {
         .is_some_and(|extension| set.contains(&extension.to_ascii_lowercase().as_str()))
 }
 
-fn move_tree(source: &Path, target: &Path, report: &mut RelocationReport) {
+fn move_tree(
+    source: &Path,
+    target: &Path,
+    in_use: &HashSet<PathBuf>,
+    report: &mut RelocationReport,
+) {
     let Ok(entries) = fs::read_dir(source) else {
         return;
     };
@@ -220,9 +237,15 @@ fn move_tree(source: &Path, target: &Path, report: &mut RelocationReport) {
             continue;
         };
         if file_type.is_dir() {
-            move_tree(&path, &target.join(entry.file_name()), report);
+            move_tree(&path, &target.join(entry.file_name()), in_use, report);
         } else if file_type.is_file() && extension_in(&path, &MOVABLE_EXTENSIONS) {
-            match move_file(&path, &target.join(entry.file_name())) {
+            let target = target.join(entry.file_name());
+            let result = if in_use.contains(&normalized(&path)) {
+                copy_file(&path, &target)
+            } else {
+                move_file(&path, &target)
+            };
+            match result {
                 Ok(bytes) => {
                     report.moved_files += 1;
                     report.moved_bytes = report.moved_bytes.saturating_add(bytes);
@@ -234,6 +257,24 @@ fn move_tree(source: &Path, target: &Path, report: &mut RelocationReport) {
             }
         }
     }
+}
+
+/// 正在播放的文件：复制一份到新目录，源文件留给当前会话继续 seek
+fn copy_file(source: &Path, target: &Path) -> io::Result<u64> {
+    if target.exists() {
+        return Ok(0);
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache target has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let mut staging = tempfile::Builder::new()
+        .prefix(".copying-")
+        .suffix(".part")
+        .tempfile_in(parent)?;
+    let copied = io::copy(&mut fs::File::open(source)?, staging.as_file_mut())?;
+    staging.persist(target).map_err(|error| error.error)?;
+    Ok(copied)
 }
 
 /// 同盘直接改名；跨盘先复制到暂存文件、核对长度后再改名，最后才删源文件
@@ -268,7 +309,7 @@ fn move_file(source: &Path, target: &Path) -> io::Result<u64> {
     Ok(length)
 }
 
-fn discard_tree(source: &Path, report: &mut RelocationReport) {
+fn discard_tree(source: &Path, in_use: &HashSet<PathBuf>, report: &mut RelocationReport) {
     let Ok(entries) = fs::read_dir(source) else {
         return;
     };
@@ -278,10 +319,11 @@ fn discard_tree(source: &Path, report: &mut RelocationReport) {
             continue;
         };
         if file_type.is_dir() {
-            discard_tree(&path, report);
+            discard_tree(&path, in_use, report);
         } else if file_type.is_file()
             && (extension_in(&path, &MOVABLE_EXTENSIONS)
                 || extension_in(&path, &STAGING_EXTENSIONS))
+            && !in_use.contains(&normalized(&path))
         {
             if fs::remove_file(&path).is_ok() {
                 report.removed_files += 1;
@@ -410,7 +452,7 @@ mod tests {
             b"img",
         );
 
-        let report = relocate(&old, &new, ExistingCacheAction::Move);
+        let report = relocate(&old, &new, ExistingCacheAction::Move, &[]);
         assert_eq!(report.moved_files, 3);
         assert_eq!(
             report.moved_bytes,
@@ -468,7 +510,7 @@ mod tests {
             b"outside the cache subdirectories",
         );
 
-        let report = relocate(&old, &new, ExistingCacheAction::Discard);
+        let report = relocate(&old, &new, ExistingCacheAction::Discard, &[]);
         assert_eq!(report.removed_files, 2);
         assert_eq!(report.moved_files, 0);
         assert!(!old.join(PLAYBACK_AUDIO_DIR).exists());
@@ -478,10 +520,62 @@ mod tests {
     }
 
     #[test]
+    fn files_in_use_by_the_player_stay_readable_at_their_old_path() {
+        // 回归：搬移正在播放的缓存音频后，下一次 seek 按旧路径重开解码器失败
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        let playing = old.join(PLAYBACK_AUDIO_DIR).join("ab").join("ab12.audio");
+        let idle = old.join(PLAYBACK_AUDIO_DIR).join("cd").join("cd34.audio");
+        write(&playing, b"playing-bytes");
+        write(&idle, b"idle-bytes");
+
+        let report = relocate(
+            &old,
+            &new,
+            ExistingCacheAction::Move,
+            std::slice::from_ref(&playing),
+        );
+        assert_eq!(report.failed_count, 0);
+        assert!(playing.is_file(), "正在播放的文件留在原处");
+        assert_eq!(
+            fs::read(new.join(PLAYBACK_AUDIO_DIR).join("ab").join("ab12.audio")).unwrap(),
+            b"playing-bytes",
+            "新目录里有一份副本供以后播放"
+        );
+        assert!(!idle.exists(), "其它文件照常搬走");
+        assert!(new
+            .join(PLAYBACK_AUDIO_DIR)
+            .join("cd")
+            .join("cd34.audio")
+            .is_file());
+
+        let discarded = relocate(
+            &new,
+            &old,
+            ExistingCacheAction::Discard,
+            &[new.join(PLAYBACK_AUDIO_DIR).join("cd").join("cd34.audio")],
+        );
+        assert!(
+            new.join(PLAYBACK_AUDIO_DIR)
+                .join("cd")
+                .join("cd34.audio")
+                .is_file(),
+            "丢弃时保留正在播放的文件"
+        );
+        assert!(!new
+            .join(PLAYBACK_AUDIO_DIR)
+            .join("ab")
+            .join("ab12.audio")
+            .exists());
+        assert_eq!(discarded.removed_files, 1);
+    }
+
+    #[test]
     fn relocating_onto_the_same_root_is_a_no_op() {
         let temp = tempfile::tempdir().unwrap();
         write(&temp.path().join(PLAYBACK_AUDIO_DIR).join("a.audio"), b"x");
-        let report = relocate(temp.path(), temp.path(), ExistingCacheAction::Discard);
+        let report = relocate(temp.path(), temp.path(), ExistingCacheAction::Discard, &[]);
         assert_eq!(report, RelocationReport::default());
         assert!(temp
             .path()

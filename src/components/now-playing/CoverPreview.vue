@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useEscapeClose } from '@/composables/useEscapeClose'
 import { IDENTITY, clampPan, wheelZoomFactor, zoomAround, type ViewerTransform } from '@/modules/viewer/zoom'
+import { previewImageSource } from '@/modules/viewer/previewSource'
 
 // 封面大图预览（#52）：单击封面打开；滚轮以光标为中心缩放，按住拖动平移，
 // 双击在适应窗口与 2.5 倍之间切换，Esc / 点空白处关闭，+ - 0 键缩放与复位
@@ -27,7 +28,7 @@ const failed = ref(false)
 const dragging = ref(false)
 let dragStart: { x: number; y: number; originX: number; originY: number; moved: boolean } | null = null
 
-const displaySrc = computed(() => (loaded.value || !props.placeholder ? props.src : props.placeholder))
+const displaySrc = computed(() => previewImageSource({ src: props.src, placeholder: props.placeholder, loaded: loaded.value, failed: failed.value }))
 const zoomPercent = computed(() => `${Math.round(transform.value.scale * 100)}%`)
 // 按舞台可用区域等比放大到“适应窗口”尺寸：小封面（如 300px）也能铺满预览区
 const natural = ref({ width: 0, height: 0 })
@@ -171,7 +172,7 @@ useEscapeClose(() => props.open, () => emit('close'))
           @keydown="onKeydown"
         >
           <img
-            v-if="displaySrc && !failed"
+            v-if="displaySrc"
             :src="displaySrc"
             :alt="title || ''"
             class="cover-preview-image"

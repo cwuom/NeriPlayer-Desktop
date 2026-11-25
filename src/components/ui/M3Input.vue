@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { getCurrentInstance, ref } from 'vue'
 
 const model = defineModel<string>({ default: '' })
 const props = withDefaults(defineProps<{
@@ -14,6 +14,15 @@ const props = withDefaults(defineProps<{
 const isFocused = ref(false)
 const inputRef = ref<HTMLInputElement>()
 const emit = defineEmits<{ enter: [] }>()
+const instance = getCurrentInstance()
+
+// 父组件监听了 enter 时由输入框自己处理回车，并标记为已处理：
+// 外层 M3Dialog 的回车确认看到 defaultPrevented 就不再重复确认（否则新建歌单会建两个）
+function onEnter(event: KeyboardEvent) {
+  if (props.disabled || !instance?.vnode.props?.onEnter) return
+  event.preventDefault()
+  emit('enter')
+}
 
 function focus() {
   if (!props.disabled) inputRef.value?.focus()
@@ -36,7 +45,7 @@ defineExpose({ focus })
       :maxlength="maxlength"
       @focus="isFocused = true"
       @blur="isFocused = false"
-      @keydown.enter="!disabled && emit('enter')"
+      @keydown.enter="onEnter"
     />
     <div class="input-underline" />
   </div>

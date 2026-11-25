@@ -480,7 +480,17 @@ async fn change_media_cache_dir(
             // 先切换再搬：搬移期间新缓存直接写进新目录
             media_cache::set_custom_root(&saved.media_cache_dir);
         }
-        let report = media_cache::relocate(&old_root, &new_root, existing);
+        // 正在播放的缓存文件不能搬走或删掉：会话 seek 时要按原路径重开
+        let in_use: Vec<PathBuf> = app
+            .state::<crate::state::AppState>()
+            .player
+            .lock()
+            .current_path
+            .clone()
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        let report = media_cache::relocate(&old_root, &new_root, existing, &in_use);
         log::info!(
             target: "storage",
             "缓存目录已切换 moved={} bytes={} removed={} failed={}",

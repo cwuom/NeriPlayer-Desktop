@@ -52,6 +52,9 @@ pub(super) enum OutputStream {
     Shared(Stream),
     #[cfg(target_os = "windows")]
     Exclusive(super::wasapi_exclusive::ExclusiveStream),
+    /// 独占流已提前释放：同一设备上的新流（独占或共享回退）都要等它让出设备才打得开
+    #[cfg(target_os = "windows")]
+    Released,
 }
 
 impl OutputStream {
@@ -62,6 +65,8 @@ impl OutputStream {
                 .map_err(|error| format!("Could not start audio output: {error}")),
             #[cfg(target_os = "windows")]
             Self::Exclusive(stream) => stream.play(),
+            #[cfg(target_os = "windows")]
+            Self::Released => Err("Exclusive audio output was released".into()),
         }
     }
 
@@ -70,7 +75,31 @@ impl OutputStream {
             Self::Shared(stream) => stream.pause().map_err(|error| error.to_string()),
             #[cfg(target_os = "windows")]
             Self::Exclusive(stream) => stream.pause(),
+            #[cfg(target_os = "windows")]
+            Self::Released => Ok(()),
         }
+    }
+
+    /// 是否独占着输出设备（只有 Windows 独占流会）
+    #[cfg(target_os = "windows")]
+    pub(super) fn holds_device_exclusively(&self) -> bool {
+        matches!(self, Self::Exclusive(_))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn holds_device_exclusively(&self) -> bool {
+        false
+    }
+
+    /// 释放独占流占着的设备（drop 会停掉渲染线程并归还端点）；共享流不受影响。
+    /// 返回是否真的释放了
+    pub(super) fn release_exclusive(&mut self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.holds_device_exclusively() {
+            *self = Self::Released;
+            return true;
+        }
+        false
     }
 }
 
