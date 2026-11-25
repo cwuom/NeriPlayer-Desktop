@@ -33,13 +33,19 @@ use neri_common::error::{AppError, AppResult};
 // 按职责拆分的子模块，通过 `use super::*` 共享本模块的类型与常量
 mod control_loop;
 mod engine;
+mod exclusive_format;
 mod loudness;
 mod output;
 mod output_device;
 mod pipeline;
 mod resample;
 mod transition;
+#[cfg(target_os = "windows")]
+mod wasapi_exclusive;
 use control_loop::*;
+pub use exclusive_format::{
+    exclusive_output_requested, set_exclusive_output, EXCLUSIVE_OUTPUT_SUPPORTED,
+};
 use loudness::*;
 use output::*;
 use output_device::*;
@@ -396,7 +402,7 @@ impl PlaybackShared {
 
 struct PlaybackSession {
     source: AudioSource,
-    stream: Stream,
+    stream: OutputStream,
     shared: Arc<PlaybackShared>,
     worker: Option<JoinHandle<()>>,
     duration_ms: u64,
@@ -409,6 +415,8 @@ struct OutputDeviceProfile {
     config: StreamConfig,
     sample_format: SampleFormat,
     name: String,
+    /// 打开时是否请求了独占输出，切换开关后通过强制重建生效
+    exclusive: bool,
 }
 
 impl OutputDeviceProfile {
@@ -444,6 +452,7 @@ impl OutputDeviceProfile {
             config,
             sample_format,
             name,
+            exclusive: EXCLUSIVE_OUTPUT_SUPPORTED && exclusive_output_requested(),
         })
     }
 }
@@ -465,9 +474,7 @@ impl PlaybackSession {
         self.shared.paused.store(false, Ordering::Release);
         // 唤醒可能在暂停态长睡的解码线程（见 spawn_decode_worker 的暂停等待）
         self.shared.wake.notify_all();
-        self.stream
-            .play()
-            .map_err(|error| format!("Could not start audio output: {error}"))
+        self.stream.play()
     }
 
     fn pause(&self) {

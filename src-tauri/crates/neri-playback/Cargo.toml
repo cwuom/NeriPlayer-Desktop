@@ -28,6 +28,9 @@ tempfile.workspace = true
 tokio.workspace = true
 url.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # 读取 alsa-lib 设备提示生成可读的输出设备名；版本与 cpal 使用的一致
 alsa.workspace = true

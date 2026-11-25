@@ -494,10 +494,8 @@ pub(super) fn prepare_session(
         operation_guard.clone(),
     )?;
     let output_started = Instant::now();
-    let stream = match build_output_stream(
-        &output.device,
-        config,
-        output.sample_format,
+    let stream = match open_output_stream(
+        output,
         Arc::clone(&shared),
         loopback_tx.clone(),
         expected_generation,
@@ -543,9 +541,10 @@ pub(super) fn prepare_session(
 
     log::info!(
         target: "cpal-output",
-        "prepared {} on {}: {} Hz, {} ch, target={}ms, decoder={}ms, output={}ms, wait={}ms, loudness_wait={}ms, total={}ms",
+        "prepared {} on {}{}: {} Hz, {} ch, target={}ms, decoder={}ms, output={}ms, wait={}ms, loudness_wait={}ms, total={}ms",
         source.label(),
         output.name,
+        if output.exclusive { " (exclusive requested)" } else { "" },
         sample_rate,
         channels,
         prebuffer.as_millis(),
