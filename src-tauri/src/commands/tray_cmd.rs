@@ -21,6 +21,7 @@ use tauri::{
     WebviewWindowBuilder, WindowEvent, Wry,
 };
 
+use crate::taskbar_thumbbar::{self, ThumbbarState};
 use crate::webview_args::MainBrowserArgs;
 use neri_common::error::{AppError, AppResult};
 
@@ -215,6 +216,7 @@ struct TrayRuntime {
     sent_state: Option<TrayPopupState>,
     sent_labels: Option<MenuLabels>,
     sent_tooltip: Option<String>,
+    sent_thumbbar: Option<ThumbbarState>,
     #[cfg(any(target_os = "macos", test))]
     sent_menu_bar_title: Option<String>,
 }
@@ -263,6 +265,27 @@ impl TrayRuntime {
             show_menu_bar_lyrics: self.snapshot.show_menu_bar_lyrics,
             quit: self.text("quit", "退出 NeriPlayer"),
         }
+    }
+
+    /// 任务栏缩略图按钮：与托盘菜单同一套文案和播放状态
+    fn thumbbar_state(&self) -> ThumbbarState {
+        let labels = self.menu_labels();
+        ThumbbarState {
+            has_track: labels.has_track,
+            is_playing: self.is_playing,
+            previous: labels.previous,
+            toggle: labels.toggle,
+            next: labels.next,
+        }
+    }
+
+    fn take_thumbbar_update(&mut self) -> Option<ThumbbarState> {
+        let state = self.thumbbar_state();
+        if self.sent_thumbbar.as_ref() == Some(&state) {
+            return None;
+        }
+        self.sent_thumbbar = Some(state.clone());
+        Some(state)
     }
 
     fn tooltip(&self) -> String {
@@ -772,7 +795,7 @@ fn push_state(app: &AppHandle, force: bool) {
 /// 状态变化后同步面板、原生菜单与托盘提示
 fn refresh(app: &AppHandle) {
     push_state(app, false);
-    let (menu, labels, tooltip) = {
+    let (menu, labels, tooltip, thumbbar) = {
         let mut guard = TRAY.lock();
         let Some(runtime) = guard.as_mut() else {
             return;
@@ -787,8 +810,12 @@ fn refresh(app: &AppHandle) {
         if let Some(tooltip) = tooltip.as_ref() {
             runtime.sent_tooltip = Some(tooltip.clone());
         }
-        (runtime.menu.clone(), labels, tooltip)
+        let thumbbar = runtime.take_thumbbar_update();
+        (runtime.menu.clone(), labels, tooltip, thumbbar)
     };
+    if let Some(state) = thumbbar {
+        taskbar_thumbbar::update(app, state);
+    }
     if let (Some(menu), Some(labels)) = (menu, labels) {
         let _ = menu.track.set_text(&labels.track);
         let _ = menu.track.set_enabled(labels.has_track);
@@ -964,6 +991,34 @@ mod tests {
             is_playing,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn thumbbar_state_mirrors_tray_labels_and_playback() {
+        let track = TrayTrack {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            cover_url: String::new(),
+        };
+        let idle = runtime_with(None, false).thumbbar_state();
+        assert!(!idle.has_track);
+        assert_eq!(idle.toggle, "Play");
+        assert_eq!(idle.next, "下一首");
+
+        let playing = runtime_with(Some(track), true).thumbbar_state();
+        assert!(playing.has_track && playing.is_playing);
+        assert_eq!(playing.toggle, "Pause");
+    }
+
+    #[test]
+    fn thumbbar_update_is_sent_only_when_state_changes() {
+        let mut runtime = runtime_with(None, false);
+        assert!(runtime.take_thumbbar_update().is_some());
+        assert!(runtime.take_thumbbar_update().is_none());
+        runtime.is_playing = true;
+        let changed = runtime.take_thumbbar_update().expect("play state changed");
+        assert!(changed.is_playing);
+        assert!(runtime.take_thumbbar_update().is_none());
     }
 
     #[test]

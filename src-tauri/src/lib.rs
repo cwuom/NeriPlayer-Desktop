@@ -18,4 +18,6 @@ pub mod platform_webview;
 pub mod settings;
 pub mod state;
 pub mod sync_state;
+/// Windows 任务栏缩略图工具栏（上一首 / 播放暂停 / 下一首）
+pub mod taskbar_thumbbar;
 pub mod webview_args;

@@ -151,6 +151,8 @@ webview2-com.workspace = true
 winreg.workspace = true
 # 桌面歌词锁定时直接读鼠标左键状态，解锁不依赖穿透窗口能否收到点击
 windows-sys.workspace = true
+# 任务栏缩略图工具栏（ITaskbarList3 是 COM 接口，windows-sys 没有）；沿用工作区已有的 0.54
+windows = { workspace = true, features = ["Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
