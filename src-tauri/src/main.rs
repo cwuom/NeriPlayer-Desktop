@@ -847,6 +847,21 @@ fn reapply_traffic_lights(app: &tauri::AppHandle) {
 mod tests {
     use super::{classify_playback_finish, PlaybackFinishState};
 
+    /// macOS 14+ 的 WKWebView 默认在窗口隐藏后挂起整个页面进程：收进托盘时前端计时器全停，
+    /// 挂起久了再显示窗口会停在一片背景色上。主窗口必须关掉这项挂起，帧循环已按
+    /// document.hidden 自行暂停，不会因此空转
+    #[test]
+    fn main_window_is_not_suspended_while_hidden() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let windows = config["app"]["windows"].as_array().expect("windows");
+        let main = windows
+            .iter()
+            .find(|window| window["label"].as_str().unwrap_or("main") == "main")
+            .expect("main window");
+        assert_eq!(main["backgroundThrottling"], "disabled");
+    }
+
     #[test]
     fn desktop_lyrics_window_only_reads_its_snapshot() {
         assert!(super::window_command_allowed(

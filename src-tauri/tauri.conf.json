@@ -24,6 +24,7 @@
         "transparent": false,
         "backgroundColor": "#101014",
         "visible": false,
+        "backgroundThrottling": "disabled",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,IntensiveWakeUpThrottling --disable-background-timer-throttling --disable-pinch"
       }
     ],
