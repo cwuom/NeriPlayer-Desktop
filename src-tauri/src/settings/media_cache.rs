@@ -156,14 +156,19 @@ fn normalized(path: &Path) -> PathBuf {
             _ => break path.to_path_buf(),
         }
     };
-    // Windows canonicalize 带 \\?\ 前缀，展示和保存都用常规写法
-    match canonical
-        .to_str()
-        .and_then(|text| text.strip_prefix(r"\\?\"))
-    {
+    match canonical.to_str().and_then(strip_verbatim_prefix) {
         Some(stripped) => PathBuf::from(stripped),
         None => canonical,
     }
+}
+
+/// Windows canonicalize 带 \\?\ 前缀，展示和保存都用常规写法。
+/// 网络共享是 \\?\UNC\server\share，只去掉 \\?\ 会变成相对路径 UNC\server\share，必须还原成 \\server\share
+fn strip_verbatim_prefix(text: &str) -> Option<String> {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{rest}"));
+    }
+    text.strip_prefix(r"\\?\").map(str::to_owned)
 }
 
 fn display_path(path: PathBuf) -> String {
@@ -372,6 +377,20 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn verbatim_prefix_keeps_unc_roots_absolute() {
+        // 回归：\\?\UNC\ 只去掉 \\?\ 会把网络共享变成相对路径，缓存写到进程工作目录
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\server\share\cache").as_deref(),
+            Some(r"\\server\share\cache")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\D:\Music\cache").as_deref(),
+            Some(r"D:\Music\cache")
+        );
+        assert_eq!(strip_verbatim_prefix("/Users/me/cache"), None);
     }
 
     #[test]

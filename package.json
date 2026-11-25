@@ -103,6 +103,7 @@
     "test:search-full-queue": "node scripts/test-search-full-queue.mjs",
     "test:custom-bg-glass": "node scripts/test-custom-bg-glass.mjs",
     "test:scoped-global-selectors": "node scripts/test-scoped-global-selectors.mjs",
+    "test:titlebar-collapsed-hit": "node scripts/test-titlebar-collapsed-hit.mjs",
     "test:shortcut-settings": "node scripts/test-shortcut-settings.mjs",
     "test:playback-failure": "node scripts/test-playback-failure.mjs",
     "test:playback-ended": "node scripts/test-playback-ended.mjs",

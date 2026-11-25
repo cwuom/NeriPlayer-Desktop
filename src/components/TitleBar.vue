@@ -507,10 +507,13 @@ onUnmounted(() => {
 }
 
 /* 侧栏收成图标栏时品牌会伸进内容区与页面顶栏重叠，隐藏。
+   空出来的左槽也要放行点击，否则这块透明区域会盖住下面页面的返回按钮。
    整个选择器必须都写在 :global() 里：Vue 会丢掉 :global(X) 后面的部分，
    写成 :global(html.sidebar-collapsed) .tb-brand 实际编译成 html.sidebar-collapsed，整页被隐藏 */
 :global(html.sidebar-collapsed .title-bar:not(.tb-np-mode) .tb-brand) {
   opacity: 0;
+}
+:global(html.sidebar-collapsed .title-bar:not(.tb-np-mode) :is(.tb-left-slot, .tb-left-stack, .tb-brand)) {
   pointer-events: none;
 }
 

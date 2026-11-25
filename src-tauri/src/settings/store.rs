@@ -835,7 +835,8 @@ fn normalize_choice(value: &str, allowed: &[&str], fallback: &str) -> String {
 fn normalize_theme_color(value: &str) -> String {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green" => normalized,
+        "purple" | "teal" | "blue" | "rose" | "olive" | "brown" | "orange" | "green"
+        | "graphite" => normalized,
         "#6750a4" => "purple".into(),
         _ => "purple".into(),
     }
@@ -908,6 +909,17 @@ fn non_empty_or_default(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_frontend_theme_preset_survives_normalization() {
+        // 回归：前端新增的 graphite 预设曾被后端规范化成 purple，保存后重启又变回紫色
+        for key in [
+            "purple", "blue", "teal", "green", "olive", "orange", "rose", "brown", "graphite",
+        ] {
+            assert_eq!(super::normalize_theme_color(key), key);
+        }
+        assert_eq!(super::normalize_theme_color("unknown"), "purple");
+    }
+
     #[test]
     fn library_interaction_preferences_default_for_old_settings() {
         let settings: super::AppSettings = serde_json::from_str("{}").unwrap();
