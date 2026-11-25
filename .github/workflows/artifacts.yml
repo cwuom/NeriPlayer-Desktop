@@ -109,6 +109,8 @@ jobs:
     name: Build (${{ matrix.artifact_name }})
     needs: [prepare-build-metadata, ffmpeg]
     runs-on: ${{ matrix.platform }}
+    # Linux 与 Release 一样在 ubuntu:22.04 容器里构建，glibc 下限固定为 2.35；其他平台不用容器
+    container: ${{ matrix.container }}
     timeout-minutes: 60
     env:
       NERI_BUILD_EPOCH: ${{ needs.prepare-build-metadata.outputs.build_epoch }}
@@ -131,11 +133,20 @@ jobs:
             ffmpeg_target: windows-x86_64
             artifact_name: Windows-x64
           - platform: ubuntu-22.04
+            container: ubuntu:22.04
             target: x86_64-unknown-linux-gnu
             ffmpeg_target: linux-x86_64
             artifact_name: Linux-x64
 
     steps:
+      # 裸 ubuntu:22.04 镜像没有 git，checkout 需要它拉取子模块
+      - name: Bootstrap Linux container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -143,14 +154,8 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libasound2-dev
+        shell: bash
+        run: bash scripts/linux/install-build-deps.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
@@ -205,12 +210,22 @@ jobs:
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v1
         env:
+          # 容器里没有 FUSE，AppImage 工具改为解包后运行
+          APPIMAGE_EXTRACT_AND_RUN: '1'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NERI_BUILD_EPOCH: ${{ env.NERI_BUILD_EPOCH }}
           NERI_BUILD_GIT_SHA: ${{ env.NERI_BUILD_GIT_SHA }}
           NERI_BUILD_UUID: ${{ env.NERI_BUILD_UUID }}
         with:
           args: --target ${{ matrix.target }} --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
+
+      - name: Check Linux glibc floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: >-
+          bash scripts/linux/check-glibc.sh --max 2.35
+          src-tauri/target/${{ matrix.target }}/release/neri-player-desktop
+          .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
 
       - name: Stage artifacts
         shell: bash

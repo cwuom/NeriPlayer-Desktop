@@ -55,3 +55,8 @@ docs-private/
 
 # Test build Direction
 /build/
+
+# Flatpak 本地打包的输入与构建状态（见 packaging/flatpak/ 清单开头的注释）
+/packaging/flatpak/shared-modules/
+/packaging/flatpak/*.deb
+.flatpak-builder/

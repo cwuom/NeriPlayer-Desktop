@@ -1,0 +1,65 @@
+# NeriPlayer Flatpak：把 CI 构建好的 .deb 重新打包进固定的 GNOME 运行时。
+# 运行时固定后 WebKitGTK 版本随之固定，渲染问题有了跨发行版一致的复现环境，也不再受宿主 glibc 影响。
+#
+# 本地构建（需要 flatpak、flatpak-builder 与 Flathub 远程）：
+#   git clone https://github.com/flathub/shared-modules.git packaging/flatpak/shared-modules
+#   git -C packaging/flatpak/shared-modules checkout 34add58f536223b780a3c9f077980cdaa51fc81f
+#   cp <NeriPlayer_*.deb> packaging/flatpak/neri-player.deb
+#   flatpak-builder --user --install-deps-from=flathub --force-clean --install \
+#     .cache/flatpak-build packaging/flatpak/moe.ouom.neriplayer.desktop.yml
+#   flatpak run moe.ouom.neriplayer.desktop
+id: moe.ouom.neriplayer.desktop
+# GNOME 51 运行时自带 webkit2gtk-4.1（libsoup3），当前为 WebKitGTK 2.54.x；
+# 升级分支前先确认新运行时仍提供 webkit2gtk-4.1
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+command: neri-player-desktop
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # cpal 走 ALSA，运行时的 ALSA 配置会转到 PulseAudio / PipeWire
+  - --socket=pulseaudio
+  # MPRIS 媒体会话（souvlaki 的 dbus_name 是 neri_player）
+  - --own-name=org.mpris.MediaPlayer2.neri_player
+  # 托盘：StatusNotifier 协议，图标文件写在 $XDG_RUNTIME_DIR/tray-icon
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --filesystem=xdg-run/tray-icon:create
+  # keyring 直接访问 Secret Service 保存账号凭据
+  - --talk-name=org.freedesktop.secrets
+  # 本地音乐库与默认下载目录；其他目录可在 Flatseal 中追加
+  - --filesystem=xdg-music
+  - --filesystem=xdg-download
+
+modules:
+  # tray-icon 在运行时 dlopen libayatana-appindicator3，GNOME 运行时不带，缺了会在创建托盘时崩溃
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
+  - name: neri-player
+    buildsystem: simple
+    sources:
+      - type: file
+        path: neri-player.deb
+      - type: file
+        path: moe.ouom.neriplayer.desktop.metainfo.xml
+    build-commands:
+      - ar -x neri-player.deb
+      - mkdir deb-root && tar -xf data.tar.* -C deb-root
+      - install -Dm755 deb-root/usr/bin/neri-player-desktop /app/bin/neri-player-desktop
+      # Tauri 在 Linux 上按 <exe>/../lib/<productName> 查找资源（随包的 FFmpeg 在这里）
+      - if [ -d deb-root/usr/lib/NeriPlayer ]; then mkdir -p /app/lib && cp -a deb-root/usr/lib/NeriPlayer /app/lib/; fi
+      # Flatpak 只导出以应用 ID 命名的 desktop 文件与图标
+      - install -Dm644 deb-root/usr/share/applications/*.desktop /app/share/applications/moe.ouom.neriplayer.desktop.desktop
+      - desktop-file-edit --set-icon=moe.ouom.neriplayer.desktop /app/share/applications/moe.ouom.neriplayer.desktop.desktop
+      # 跳过 @2 目录：Tauri 放进去的图标像素与目录声明的缩放不一致，导出校验可能拒绝
+      - |
+        for icon in deb-root/usr/share/icons/hicolor/*/apps/*.png; do
+          size_dir="$(basename "$(dirname "$(dirname "$icon")")")"
+          case "$size_dir" in *@*) continue ;; esac
+          install -Dm644 "$icon" "/app/share/icons/hicolor/$size_dir/apps/moe.ouom.neriplayer.desktop.png"
+        done
+      - install -Dm644 moe.ouom.neriplayer.desktop.metainfo.xml /app/share/metainfo/moe.ouom.neriplayer.desktop.metainfo.xml

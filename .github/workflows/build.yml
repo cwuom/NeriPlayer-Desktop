@@ -262,6 +262,8 @@ jobs:
             target: aarch64-apple-darwin
           - platform: macos-15
             target: x86_64-apple-darwin
+          # 只做检查与测试、不分发产物，直接用 runner；可分发的 Linux 包在 release / artifacts
+          # 工作流的 ubuntu:22.04 容器里构建并校验 glibc 下限
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
 

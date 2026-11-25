@@ -1,0 +1,36 @@
+# Linux 发布构建环境：ubuntu:22.04 把产物的 glibc 下限固定在 2.35（与 CI Release 一致）。
+# 由 scripts/linux/build-in-container.sh 构建并使用；工具链全部装进镜像，运行时以宿主用户身份
+# 执行，产物不会变成 root 所有。
+FROM docker.io/library/ubuntu:22.04
+
+ARG RUST_TOOLCHAIN=1.95.0
+ARG NODE_VERSION=20.20.2
+ARG PNPM_VERSION=9.15.9
+
+COPY install-build-deps.sh /tmp/install-build-deps.sh
+RUN bash /tmp/install-build-deps.sh \
+  && rm -rf /var/lib/apt/lists/* /tmp/install-build-deps.sh
+
+ENV RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:/opt/node/bin:$PATH
+RUN set -eux; \
+  curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init; \
+  echo "$(curl -fsSL https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256 | cut -d' ' -f1)  /tmp/rustup-init" | sha256sum -c -; \
+  chmod +x /tmp/rustup-init; \
+  CARGO_HOME=/opt/cargo /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN"; \
+  rm /tmp/rustup-init; \
+  # 运行时用宿主 uid，rustup 可能要写设置文件
+  chmod -R a+rwX /opt/rustup /opt/cargo
+
+RUN set -eux; \
+  archive="node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+  curl -fsSLo "/tmp/$archive" "https://nodejs.org/dist/v${NODE_VERSION}/$archive"; \
+  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" | grep " $archive\$" | (cd /tmp && sha256sum -c -); \
+  mkdir -p /opt/node; \
+  tar -xJf "/tmp/$archive" -C /opt/node --strip-components=1; \
+  rm "/tmp/$archive"; \
+  npm install -g "pnpm@${PNPM_VERSION}"
+
+# 命名卷首次挂载时会复制镜像里这个目录的权限；777 让任意宿主 uid 都能写入 node_modules
+RUN mkdir -p /work/node_modules && chmod 777 /work/node_modules
+WORKDIR /work

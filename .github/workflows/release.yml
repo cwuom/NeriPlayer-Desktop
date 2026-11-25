@@ -185,6 +185,9 @@ jobs:
     name: Build (${{ matrix.artifact_name }})
     needs: [validate, ffmpeg]
     runs-on: ${{ matrix.platform }}
+    # Linux 在 ubuntu:22.04 容器里构建，把产物的 glibc 下限固定在 2.35，不随托管 runner 升级漂移；
+    # 其他平台的 matrix.container 为空，直接在 runner 上运行
+    container: ${{ matrix.container }}
     timeout-minutes: 90
     env:
       NERI_BUILD_EPOCH: ${{ needs.validate.outputs.build_epoch }}
@@ -217,6 +220,7 @@ jobs:
             expected_arch: x86_64
             artifact_name: macos-intel-adhoc
           - platform: ubuntu-22.04
+            container: ubuntu:22.04
             os: linux
             target: x86_64-unknown-linux-gnu
             ffmpeg_target: linux-x86_64
@@ -224,6 +228,14 @@ jobs:
             artifact_name: linux-x86_64
 
     steps:
+      # 裸 ubuntu:22.04 镜像没有 git，checkout 需要它拉取完整历史与子模块
+      - name: Bootstrap Linux container
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -233,15 +245,8 @@ jobs:
 
       - name: Install Linux dependencies
         if: matrix.os == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libasound2-dev \
-            rpm
+        shell: bash
+        run: bash scripts/linux/install-build-deps.sh
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
@@ -298,6 +303,9 @@ jobs:
 
       - name: Build Windows and Linux packages
         if: matrix.os != 'macos'
+        env:
+          # 容器里没有 FUSE，linuxdeploy 等 AppImage 工具改为解包后运行
+          APPIMAGE_EXTRACT_AND_RUN: '1'
         run: >-
           pnpm tauri build --ci
           --target ${{ matrix.target }}
@@ -424,6 +432,14 @@ jobs:
           }
           $packages | Copy-Item -Destination $destination
 
+      - name: Check Linux glibc floor
+        if: matrix.os == 'linux'
+        shell: bash
+        run: >-
+          bash scripts/linux/check-glibc.sh --max 2.35
+          src-tauri/target/${{ matrix.target }}/release/neri-player-desktop
+          .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}
+
       - name: Validate and stage Linux artifacts
         if: matrix.os == 'linux'
         shell: bash
@@ -485,6 +501,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+  # 可选渠道：release 不依赖它，flatpak.yml 内部 continue-on-error，失败不影响发布
+  flatpak:
+    name: Flatpak
+    needs: [validate, build]
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      ref: ${{ needs.validate.outputs.target_sha }}
+      deb_artifact: NeriPlayer-linux-x86_64-${{ needs.validate.outputs.release_tag }}
+      app_version: ${{ needs.validate.outputs.app_version }}
 
   release:
     name: Publish GitHub Release
