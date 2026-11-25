@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { shelfEdges, watchShelfRow } from '@/modules/layout/shelfEdges'
 
 // 首页横向货架：标题行 + 可横向滚动的卡片行。桌面端悬停时显示左右翻页按钮，
 // 滚轮的纵向增量在可横向滚动时也转成横向，宽窄屏都保持同一套卡片尺寸，不再因列数变化丢内容
@@ -18,13 +19,14 @@ const { t } = useI18n()
 const rowRef = ref<HTMLElement | null>(null)
 const canPrev = ref(false)
 const canNext = ref(false)
-let resizeObserver: ResizeObserver | null = null
+let stopWatching: (() => void) | null = null
 
 function updateEdges() {
   const row = rowRef.value
   if (!row) return
-  canPrev.value = row.scrollLeft > 4
-  canNext.value = row.scrollLeft + row.clientWidth < row.scrollWidth - 4
+  const edges = shelfEdges(row)
+  canPrev.value = edges.canPrev
+  canNext.value = edges.canNext
 }
 
 function page(direction: 1 | -1) {
@@ -35,12 +37,10 @@ function page(direction: 1 | -1) {
 
 onMounted(() => {
   void nextTick(updateEdges)
-  if (rowRef.value) {
-    resizeObserver = new ResizeObserver(updateEdges)
-    resizeObserver.observe(rowRef.value)
-  }
+  // 行尺寸变化和卡片增删都要重算：后者只改 scrollWidth，ResizeObserver 不会触发
+  if (rowRef.value) stopWatching = watchShelfRow(rowRef.value, updateEdges)
 })
-onBeforeUnmount(() => resizeObserver?.disconnect())
+onBeforeUnmount(() => stopWatching?.())
 </script>
 
 <template>
