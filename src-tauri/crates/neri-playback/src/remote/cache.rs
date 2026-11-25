@@ -169,6 +169,11 @@ impl RemoteAudioCache {
         }
     }
 
+    /// 缓存条目标识：同一条目的 .audio / .ready / 暂存 .part 文件名都以它开头
+    pub fn entry_id(&self) -> &str {
+        &self.digest
+    }
+
     pub fn fresh_staging(&self) -> AppResult<Self> {
         Ok(Self {
             cache_root: self.cache_root.clone(),

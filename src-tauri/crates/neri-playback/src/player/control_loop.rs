@@ -251,6 +251,7 @@ fn audio_control_loop(
                     duration_ms: next.duration_ms,
                     clock: Arc::clone(&next.shared.clock),
                     audio_info: next.audio_info.clone(),
+                    cache_entry: next.source.cache_entry_id(),
                 };
                 reporter.track(FirstFrameProbe::new(
                     StartKind::Play,

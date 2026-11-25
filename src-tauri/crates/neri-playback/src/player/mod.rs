@@ -121,6 +121,14 @@ impl AudioSource {
         Self::Growing(reader, hint, lifetime)
     }
 
+    /// 远程流边播边读写的磁盘缓存条目：换缓存目录时不能搬走或删掉它的文件
+    fn cache_entry_id(&self) -> Option<String> {
+        match self {
+            Self::Remote(reader, _) => reader.cache_entry_id(),
+            Self::Bytes(..) | Self::File(..) | Self::Growing(..) => None,
+        }
+    }
+
     fn duration_hint_ms(&self) -> u64 {
         match self {
             Self::Bytes(_, hint)
@@ -287,6 +295,7 @@ pub struct PlaybackStarted {
     pub duration_ms: u64,
     pub clock: Arc<PlaybackClock>,
     pub audio_info: SourceAudioInfo,
+    pub cache_entry: Option<String>,
 }
 
 pub struct PlaybackClock {
@@ -536,6 +545,8 @@ pub struct PlayerEngine {
     pub volume: f32,
     pub speed: f32,
     pub current_path: Option<String>,
+    /// 当前远程流使用的磁盘缓存条目，见 [`AudioSource::cache_entry_id`]
+    pub current_cache_entry: Option<String>,
     pub duration_ms: u64,
     pub shared_audio_level: Arc<Mutex<SharedAudioLevel>>,
     effects: Arc<EffectsControl>,
