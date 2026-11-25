@@ -201,11 +201,11 @@
   user-select: text;
 }
 
+/* 不带外边距：按钮总放在操作行里与图标按钮居中对齐，间距由所在行负责 */
 .play-all-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 14px;
   height: 40px;
   padding: 0 22px 0 16px;
   border-radius: var(--radius-full);
@@ -228,10 +228,6 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 14px;
-}
-
-.hero-actions .play-all-btn {
-  margin-top: 0;
 }
 
 .hero-icon-btn {

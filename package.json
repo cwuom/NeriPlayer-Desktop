@@ -99,6 +99,7 @@
     "test:ui-scale-settings": "node scripts/test-ui-scale-settings.mjs",
     "test:ui-scale-runtime": "node scripts/test-ui-scale-runtime.mjs",
     "test:detail-header-layer": "node scripts/test-detail-header-layer.mjs",
+    "test:play-all-alignment": "node scripts/test-play-all-alignment.mjs",
     "test:titlebar-spacing": "node scripts/test-titlebar-spacing.mjs",
     "test:search-full-queue": "node scripts/test-search-full-queue.mjs",
     "test:custom-bg-glass": "node scripts/test-custom-bg-glass.mjs",
