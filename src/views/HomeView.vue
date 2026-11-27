@@ -587,7 +587,7 @@ function formatNotifTime(ts: number): string {
   /* 占用窗口顶栏这一行：与红绿灯 / 窗口按钮同一中线，右侧给 Windows 窗口按钮让位 */
   height: var(--titlebar-height, 48px);
   margin: calc(-1 * var(--titlebar-height, 48px)) calc(-1 * clamp(18px, 3.2vw, 44px)) 0;
-  padding: 0 calc(clamp(18px, 3.2vw, 44px) + var(--window-controls-width, 0px)) 0 calc(clamp(18px, 3.2vw, 44px) + var(--content-top-inset-left, 0px));
+  padding: 0 calc(clamp(18px, 3.2vw, 44px) + var(--window-controls-width, 0px)) 0 clamp(18px, 3.2vw, 44px);
   /* 渐隐玻璃底由 global.scss 统一绘制 */
 }
 

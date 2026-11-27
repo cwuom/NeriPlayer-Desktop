@@ -98,8 +98,7 @@
   --titlebar-height: 56px;
   /* 顶栏右侧被自绘窗口按钮占用的宽度（macOS 红绿灯在左侧侧栏上方，不占内容区） */
   --window-controls-width: 136px;
-  /* 内容区顶栏左侧需要避让的宽度：macOS 侧栏收成图标栏后红绿灯会伸进内容区（SideNav 写入） */
-  --content-top-inset-left: 0px;
+  --sidebar-width: 228px;
 
   --font-family-default: 'MiSans', 'Inter', -apple-system, BlinkMacSystemFont,
     'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
@@ -112,16 +111,22 @@
   --font-hand: 'Caveat Variable', var(--font-family);
 }
 
+html.sidebar-collapsed {
+  --sidebar-width: max(68px, var(--traffic-light-safe-width, 0px));
+}
+
 /* macOS：更高的标题栏承载垂直居中的红绿灯（trafficLightPosition 20/20） */
 html.platform-mac {
   --titlebar-height: max(68px, calc(68px / var(--app-ui-scale, 1)));
   --window-controls-width: 0px;
+  /* 原生按钮不随界面缩放，收起侧栏和顶栏共用同一安全宽度 */
+  --traffic-light-safe-width: calc(92px / var(--app-ui-scale, 1));
 }
 
 /* 原生全屏时红绿灯随系统栏隐藏，内容无需继续预留较高的安全区 */
 html.platform-mac.window-fullscreen {
   --titlebar-height: 36px;
-  --content-top-inset-left: 0px;
+  --traffic-light-safe-width: 0px;
 }
 
 *, *::before, *::after {

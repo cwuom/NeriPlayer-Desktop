@@ -3,8 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
-import { isMacPlatform } from '@/modules/shortcuts/platform'
-import { MAC_TRAFFIC_LIGHT_REACH, readSidebarCollapsed, SIDEBAR_AUTO_RAIL_WIDTH, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_RAIL_WIDTH, writeSidebarCollapsed } from '@/modules/layout/sidebar'
+import { readSidebarCollapsed, SIDEBAR_AUTO_RAIL_WIDTH, writeSidebarCollapsed } from '@/modules/layout/sidebar'
 
 const router = useRouter()
 const route = useRoute()
@@ -57,11 +56,7 @@ const autoRail = computed(() => viewportWidth.value < SIDEBAR_AUTO_RAIL_WIDTH)
 const collapsed = computed(() => autoRail.value || userCollapsed.value)
 
 watchEffect(() => {
-  const root = document.documentElement
-  root.style.setProperty('--sidebar-width', `${collapsed.value ? SIDEBAR_RAIL_WIDTH : SIDEBAR_EXPANDED_WIDTH}px`)
-  root.classList.toggle('sidebar-collapsed', collapsed.value)
-  // macOS 红绿灯约占 x 20–74pt，图标栏只有 68px 宽，顶栏左侧需让出余量
-  root.style.setProperty('--content-top-inset-left', isMacPlatform && collapsed.value ? `${MAC_TRAFFIC_LIGHT_REACH - SIDEBAR_RAIL_WIDTH}px` : '0px')
+  document.documentElement.classList.toggle('sidebar-collapsed', collapsed.value)
 })
 
 function toggleCollapsed() {
@@ -223,7 +218,11 @@ function go(item: NavItem) {
               color var(--duration-short) var(--ease-standard),
               padding 260ms var(--ease-emphasized);
 
-  .collapsed & { padding: 0 13px; }
+  .collapsed & {
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
 
   &:hover {
     background: var(--state-hover);
@@ -258,7 +257,11 @@ function go(item: NavItem) {
   text-overflow: ellipsis;
   transition: opacity 180ms var(--ease-standard);
 
-  .collapsed & { opacity: 0; pointer-events: none; }
+  .collapsed & {
+    max-width: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
