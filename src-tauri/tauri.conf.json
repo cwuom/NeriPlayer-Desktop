@@ -52,7 +52,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "app", "dmg", "deb", "rpm", "appimage"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -65,7 +65,23 @@
       "minimumSystemVersion": "10.15",
       "hardenedRuntime": true,
       "signingIdentity": "-",
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "dmg": {
+        "background": "../packaging/macos/dmg-background.tiff",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 190 },
+        "applicationFolderPosition": { "x": 480, "y": 190 }
+      }
+    },
+    "windows": {
+      "nsis": {
+        "template": "../packaging/windows/nsis/installer.nsi",
+        "installerHooks": "../packaging/windows/nsis/installer-ui.nsh",
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["English", "SimpChinese", "TradChinese", "Japanese"],
+        "displayLanguageSelector": false
+      }
     },
     "category": "Music",
     "linux": {

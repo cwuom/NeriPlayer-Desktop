@@ -203,6 +203,8 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
   { section: 'language', title: 'settings.language', desc: 'settings.language_desc' },
   { section: 'about', title: 'settings.build_uuid' },
   { section: 'about', title: 'settings.build_time' },
+  { section: 'about', title: 'settings.software_update', desc: 'settings.software_update_desc', keywords: ['update', '更新', '升级', '新版本', 'upgrade', 'version', 'アップデート'] },
+  { section: 'about', title: 'settings.auto_check_updates', desc: 'settings.auto_check_updates_desc' },
   { section: 'about', title: 'settings.github', desc: 'settings.github_desc' },
   { section: 'about', title: 'settings.ffmpeg_component' },
   { section: 'now_playing', title: 'settings.audio_bitrate', desc: 'settings.audio_bitrate_desc' },

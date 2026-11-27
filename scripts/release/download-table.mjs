@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url'
 // 顺序即表格里的行序与徽章顺序；Windows 徽章不带图标：simple-icons 已移除微软商标
 const RULES = [
   { os: 'Windows', pattern: /-setup\.exe$/i, label: 'Setup', color: '3a7ca5' },
-  { os: 'Windows', pattern: /\.msi$/i, label: 'MSI', color: '5ba4cf' },
   { os: 'macOS', pattern: /aarch64.*\.dmg$/i, label: 'DMG', message: 'Apple Silicon', color: '000000', logo: 'apple' },
   { os: 'macOS', pattern: /(x64|x86_64).*\.dmg$/i, label: 'DMG', message: 'Intel x64', color: '3d9ad1', logo: 'apple' },
   { os: 'Linux', pattern: /\.AppImage\.tar\.gz$/i, label: 'AppImage', color: 'e05d44', logo: 'linux' },

@@ -245,7 +245,6 @@ jobs:
               cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
               ;;
             Windows-*)
-              cp src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi artifacts/ 2>/dev/null || true
               cp src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe artifacts/ 2>/dev/null || true
               ;;
             Linux-*)

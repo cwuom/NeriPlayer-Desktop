@@ -27,6 +27,7 @@ neri-platform = { path = "crates/neri-platform" }
 neri-playback = { path = "crates/neri-playback" }
 neri-library = { path = "crates/neri-library" }
 neri-listentogether = { path = "crates/neri-listentogether" }
+neri-update = { path = "crates/neri-update", default-features = false }
 
 # 第三方依赖：版本集中声明，成员 crate 只引用需要的部分
 tauri = "2"
@@ -73,6 +74,8 @@ dirs-next = "2"
 prost = "0.13"
 flate2 = "1"
 zstd = "0.13"
+# 更新清单的 Ed25519 签名；锁文件里已有同版本
+ring = "0.17"
 rquickjs = { version = "0.14", default-features = false }
 quick-xml = "0.39"
 souvlaki = "0.7"
@@ -110,6 +113,7 @@ neri-platform.workspace = true
 neri-playback.workspace = true
 neri-library.workspace = true
 neri-listentogether.workspace = true
+neri-update = { workspace = true, features = ["client"] }
 # image-png: 歌词海报复制图片到剪贴板走 Image.fromBytes(PNG)，核心解码需要它
 tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-opener.workspace = true

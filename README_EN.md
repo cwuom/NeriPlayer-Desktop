@@ -143,7 +143,7 @@ The current scope:
 
    | Platform | Architecture | Release package | Requirements |
    | --- | --- | --- | --- |
-   | Windows | x64 | `.msi` / NSIS `.exe` | WebView2 runtime required |
+   | Windows | x64 | Installer `*-setup.exe` | WebView2 runtime required |
    | macOS | Apple Silicon / arm64 | `*-adhoc.dmg` | Release build minimum configured as macOS 11.0 |
    | macOS | Intel / x64 | `*-adhoc.dmg` | Release build minimum configured as macOS 10.15 |
    | Linux | x64 | `.deb` / `.rpm` / `.AppImage.tar.gz` | Compatible graphical environment and system libraries required |

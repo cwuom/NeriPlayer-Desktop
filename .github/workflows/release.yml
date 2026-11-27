@@ -201,8 +201,9 @@ jobs:
             os: windows
             target: x86_64-pc-windows-msvc
             ffmpeg_target: windows-x86_64
-            bundles: nsis,msi
+            bundles: nsis
             artifact_name: windows-x86_64
+            update_platform: windows-x86_64
           - platform: macos-15
             os: macos
             target: aarch64-apple-darwin
@@ -211,6 +212,7 @@ jobs:
             deployment_target: '11.0'
             expected_arch: arm64
             artifact_name: macos-apple-silicon-adhoc
+            update_platform: macos-aarch64
           - platform: macos-15
             os: macos
             target: x86_64-apple-darwin
@@ -219,6 +221,7 @@ jobs:
             deployment_target: '10.15'
             expected_arch: x86_64
             artifact_name: macos-intel-adhoc
+            update_platform: macos-x86_64
           - platform: ubuntu-22.04
             container: ubuntu:22.04
             os: linux
@@ -226,6 +229,7 @@ jobs:
             ffmpeg_target: linux-x86_64
             bundles: deb,rpm,appimage
             artifact_name: linux-x86_64
+            update_platform: linux-x86_64
 
     steps:
       # 裸 ubuntu:22.04 镜像没有 git，checkout 需要它拉取完整历史与子模块
@@ -353,6 +357,10 @@ jobs:
           (( ${#apps[@]} == 1 ))
           delivered_app="${apps[0]}"
           codesign --verify --deep --strict --verbose=4 "$delivered_app"
+          # 应用内增量更新以用户实际安装的 .app 为准，路径相对 .app 根目录
+          mkdir -p update-tree
+          # COPYFILE_DISABLE：不把扩展属性打成 ._ 文件，否则清单里会多出发布包没有的文件
+          COPYFILE_DISABLE=1 tar -cf "update-tree/${{ matrix.update_platform }}.tar" -C "$delivered_app" .
 
           # 随包的 FFmpeg 在 Frameworks 里且签名有效（Apple Silicon 不加载无效签名的代码）
           for library in .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/*.dylib; do
@@ -405,15 +413,12 @@ jobs:
           $destination = "artifacts/${{ matrix.artifact_name }}"
           New-Item -ItemType Directory -Force -Path $destination | Out-Null
 
-          $packages = @(
-            Get-ChildItem "$bundleRoot/msi/*.msi" -ErrorAction SilentlyContinue
-            Get-ChildItem "$bundleRoot/nsis/*.exe" -ErrorAction SilentlyContinue
-          )
+          $packages = @(Get-ChildItem "$bundleRoot/nsis/*.exe" -ErrorAction SilentlyContinue)
           if ($packages.Count -eq 0) {
             throw "No Windows installer was generated"
           }
 
-          # 两种安装包都要带上随包的 FFmpeg
+          # 安装包要带上随包的 FFmpeg
           $libraries = Get-ChildItem ".cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/*.dll" | ForEach-Object Name
           foreach ($installer in Get-ChildItem "$bundleRoot/nsis/*.exe") {
             $listing = & 7z l $installer.FullName
@@ -421,16 +426,22 @@ jobs:
               if (-not ($listing -match [regex]::Escape("ffmpeg\$library"))) { throw "$($installer.Name) is missing ffmpeg\$library" }
             }
           }
-          foreach ($msi in Get-ChildItem "$bundleRoot/msi/*.msi") {
-            $extracted = Join-Path $env:RUNNER_TEMP "msi-$($msi.BaseName)"
-            Start-Process msiexec.exe -ArgumentList '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$extracted`"" -Wait -NoNewWindow
-            foreach ($library in $libraries) {
-              if (-not (Get-ChildItem $extracted -Recurse -Filter $library | Where-Object { $_.Directory.Name -eq 'ffmpeg' })) {
-                throw "$($msi.Name) is missing ffmpeg\$library"
-              }
-            }
-          }
           $packages | Copy-Item -Destination $destination
+
+      # 应用内增量更新比对的是安装后的目录，直接静默装一遍取真实文件树；也顺带验证安装器能装上
+      - name: Export Windows install tree
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "No NSIS installer was generated" }
+          $installDir = Join-Path $env:RUNNER_TEMP "neri-install"
+          $process = Start-Process $setup.FullName -ArgumentList '/S', '/NS', "/D=$installDir" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Silent install failed with exit code $($process.ExitCode)" }
+          if (-not (Test-Path (Join-Path $installDir 'neri-player-desktop.exe'))) { throw "Silent install did not produce the main executable" }
+          if (-not (Test-Path (Join-Path $installDir 'uninstall.exe'))) { throw "Silent install did not write the uninstaller" }
+          New-Item -ItemType Directory -Force -Path update-tree | Out-Null
+          tar -cf "update-tree/${{ matrix.update_platform }}.tar" -C $installDir .
 
       - name: Check Linux glibc floor
         if: matrix.os == 'linux'
@@ -488,10 +499,31 @@ jobs:
               find "$extract_dir/squashfs-root" -path "*/ffmpeg/$library" | grep -q .
             done
             rm -rf "$extract_dir"
+            mkdir -p update-tree/appimage
+            cp "$app_image_path" update-tree/appimage/NeriPlayer.AppImage
             tar -C "$(dirname "$app_image_path")" -czf \
               "$destination/$(basename "$app_image_path").tar.gz" \
               "$(basename "$app_image_path")"
           done
+
+      - name: Package Linux update tree
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f update-tree/appimage/NeriPlayer.AppImage
+          tar -cf "update-tree/${{ matrix.update_platform }}.tar" -C update-tree/appimage NeriPlayer.AppImage
+          rm -rf update-tree/appimage
+
+      # 名字不以 NeriPlayer- 开头，避免被发布任务当成安装包一起上传
+      - name: Upload update tree
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: update-tree-${{ matrix.update_platform }}-${{ needs.validate.outputs.release_tag }}
+          path: update-tree/${{ matrix.update_platform }}.tar
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
 
       - name: Upload release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -552,6 +584,82 @@ jobs:
           echo "$sha256  $archive" | sha256sum -c -
           cp scripts/ffmpeg/build-ffmpeg.sh release-assets/ffmpeg-build.sh
 
+      - name: Download update trees
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: update-tree-*-${{ needs.validate.outputs.release_tag }}
+          path: update-trees
+          merge-multiple: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-update-tool
+
+      # 应用内增量更新：每个平台一个完整内容 blob，加上相对上一版的补丁，清单用 Ed25519 签名。
+      # 仓库里没有配置公钥时应用内更新是关闭的，这一步跳过；配置了公钥却没有私钥则发布失败
+      - name: Build incremental update assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NERI_UPDATE_SIGNING_KEY: ${{ secrets.NERI_UPDATE_SIGNING_KEY }}
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+          BUILD_EPOCH: ${{ needs.validate.outputs.build_epoch }}
+          PREVIOUS_TAG: ${{ needs.validate.outputs.previous_tag }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_key="$(grep -v '^[[:space:]]*#' src-tauri/update-public-key.txt | tr -d '[:space:]' || true)"
+          if [[ -z "$public_key" ]]; then
+            echo "::notice title=In-app updates disabled::src-tauri/update-public-key.txt has no public key; skipping update assets"
+            exit 0
+          fi
+          if [[ -z "$NERI_UPDATE_SIGNING_KEY" ]]; then
+            echo "::error title=Missing signing key::set the NERI_UPDATE_SIGNING_KEY secret or clear src-tauri/update-public-key.txt"
+            exit 1
+          fi
+
+          cargo build --manifest-path src-tauri/Cargo.toml --locked --release \
+            -p neri-update --no-default-features --bin neri-update-tool
+          tool=src-tauri/target/release/neri-update-tool
+
+          # 上一版的清单与完整 blob 用来生成补丁；上一版还没有增量资产时只做文件级比对
+          base_args=()
+          if [[ -n "$PREVIOUS_TAG" ]] && gh release download "$PREVIOUS_TAG" --repo "$REPO" \
+              --pattern neri-update.json --pattern '*.update' --dir previous-release 2>/dev/null; then
+            base_args=(--base-manifest previous-release/neri-update.json --base-blobs previous-release)
+          else
+            echo "::notice title=No patch base::$PREVIOUS_TAG has no incremental update assets"
+          fi
+
+          base_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+          mkdir -p update-out
+          for archive in update-trees/*.tar; do
+            platform="$(basename "$archive" .tar)"
+            tree="update-trees/$platform"
+            mkdir -p "$tree"
+            tar -xf "$archive" -C "$tree"
+            target="$tree"
+            if [[ "$platform" == linux-* ]]; then
+              target="$tree/NeriPlayer.AppImage"
+            fi
+            "$tool" pack --platform "$platform" --tree "$target" \
+              --stem "NeriPlayer-${APP_VERSION}-${platform}" --base-url "$base_url" \
+              --out update-out --exclude uninstall.exe "${base_args[@]}"
+          done
+
+          "$tool" finalize --version "$APP_VERSION" --build-epoch "$BUILD_EPOCH" \
+            --release-tag "$RELEASE_TAG" --release-url "https://github.com/${REPO}/releases/tag/${RELEASE_TAG}" \
+            --fragments update-out --out update-out --public-key "$public_key"
+          "$tool" verify --manifest update-out/neri-update.json --public-key "$public_key"
+          cp update-out/neri-update.json update-out/neri-update.json.sig update-out/*.update release-assets/
+          if compgen -G 'update-out/*.patch' >/dev/null; then cp update-out/*.patch release-assets/; fi
+
       - name: Verify release asset set
         shell: bash
         run: |
@@ -560,7 +668,6 @@ jobs:
 
           required_patterns=(
             '*.dmg'
-            '*.msi'
             '*.exe'
             '*.deb'
             '*.rpm'

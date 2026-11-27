@@ -131,7 +131,6 @@ run('assets are classified per OS and unrelated files are skipped', () => {
   const entries = classifyAssets(ASSETS)
   assert.deepEqual(entries.map(entry => `${entry.os}:${entry.label}:${entry.message}`), [
     'Windows:Setup:x64',
-    'Windows:MSI:x64',
     'macOS:DMG:Apple Silicon',
     'macOS:DMG:Intel x64',
     'Linux:AppImage:x64',
