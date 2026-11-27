@@ -117,7 +117,6 @@ run('stamp writes the same version to the manifests and WiX config', () => {
 const ASSETS = [
   'NeriPlayer_26.11.29620_x64-setup.exe',
   'NeriPlayer_26.11.29620_x64_en-US.msi',
-  'NeriPlayer_26.11.29620_x64_zh-CN.msi',
   'NeriPlayer_26.11.29620_aarch64-adhoc.dmg',
   'NeriPlayer_26.11.29620_x64-adhoc.dmg',
   'NeriPlayer_26.11.29620_amd64.AppImage.tar.gz',
@@ -132,8 +131,6 @@ run('assets are classified per OS and unrelated files are skipped', () => {
   const entries = classifyAssets(ASSETS)
   assert.deepEqual(entries.map(entry => `${entry.os}:${entry.label}:${entry.message}`), [
     'Windows:Setup:x64',
-    'Windows:MSI:x64 en-US',
-    'Windows:MSI:x64 zh-CN',
     'macOS:DMG:Apple Silicon',
     'macOS:DMG:Intel x64',
     'Linux:AppImage:x64',

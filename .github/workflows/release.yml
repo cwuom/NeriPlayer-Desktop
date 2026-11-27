@@ -201,7 +201,7 @@ jobs:
             os: windows
             target: x86_64-pc-windows-msvc
             ffmpeg_target: windows-x86_64
-            bundles: nsis,msi
+            bundles: nsis
             artifact_name: windows-x86_64
             update_platform: windows-x86_64
           - platform: macos-15
@@ -413,29 +413,17 @@ jobs:
           $destination = "artifacts/${{ matrix.artifact_name }}"
           New-Item -ItemType Directory -Force -Path $destination | Out-Null
 
-          $packages = @(
-            Get-ChildItem "$bundleRoot/msi/*.msi" -ErrorAction SilentlyContinue
-            Get-ChildItem "$bundleRoot/nsis/*.exe" -ErrorAction SilentlyContinue
-          )
+          $packages = @(Get-ChildItem "$bundleRoot/nsis/*.exe" -ErrorAction SilentlyContinue)
           if ($packages.Count -eq 0) {
             throw "No Windows installer was generated"
           }
 
-          # 两种安装包都要带上随包的 FFmpeg
+          # 安装包要带上随包的 FFmpeg
           $libraries = Get-ChildItem ".cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/*.dll" | ForEach-Object Name
           foreach ($installer in Get-ChildItem "$bundleRoot/nsis/*.exe") {
             $listing = & 7z l $installer.FullName
             foreach ($library in $libraries) {
               if (-not ($listing -match [regex]::Escape("ffmpeg\$library"))) { throw "$($installer.Name) is missing ffmpeg\$library" }
-            }
-          }
-          foreach ($msi in Get-ChildItem "$bundleRoot/msi/*.msi") {
-            $extracted = Join-Path $env:RUNNER_TEMP "msi-$($msi.BaseName)"
-            Start-Process msiexec.exe -ArgumentList '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$extracted`"" -Wait -NoNewWindow
-            foreach ($library in $libraries) {
-              if (-not (Get-ChildItem $extracted -Recurse -Filter $library | Where-Object { $_.Directory.Name -eq 'ffmpeg' })) {
-                throw "$($msi.Name) is missing ffmpeg\$library"
-              }
             }
           }
           $packages | Copy-Item -Destination $destination
@@ -680,7 +668,6 @@ jobs:
 
           required_patterns=(
             '*.dmg'
-            '*.msi'
             '*.exe'
             '*.deb'
             '*.rpm'
