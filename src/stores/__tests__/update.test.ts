@@ -169,6 +169,11 @@ describe('update store', () => {
     await store.cancelDownload()
     expect(mocks.router!.callsOf('update_cancel')).toHaveLength(0)
 
+    // 默认关闭，启动时不联网
+    expect(store.autoCheck).toBe(false)
+    await store.checkOnLaunch()
+    expect(mocks.router!.callsOf('update_check')).toHaveLength(0)
+
     store.setAutoCheck(false)
     await store.checkOnLaunch()
     expect(mocks.router!.callsOf('update_check')).toHaveLength(0)
