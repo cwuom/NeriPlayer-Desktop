@@ -139,7 +139,8 @@ export const useUpdateStore = defineStore('update', () => {
   }
 
   function retry() {
-    if (errorStage.value === 'download' || errorStage.value === 'install') {
+    // 后端没有可用的更新会话（例如应用已重启）时，下载一定会失败，先重新检查
+    if (errorCode.value !== 'noUpdate' && (errorStage.value === 'download' || errorStage.value === 'install')) {
       // 暂存文件已校验的部分会被复用，重新下载只补缺的
       phase.value = 'available'
       void download()

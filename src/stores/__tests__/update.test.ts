@@ -154,6 +154,31 @@ describe('update store', () => {
     expect(store.phase).toBe('ready')
   })
 
+  it('retries a failed install by downloading again, or re-checks when the backend lost the session', async () => {
+    mocks.router!.on('update_check', () => check())
+    mocks.router!.on('update_download', () => undefined, () => { throw { code: 'noUpdate', message: 'check first' } })
+    mocks.router!.on('update_install', () => { throw { code: 'permission', message: 'locked' } })
+    const store = useUpdateStore()
+    await store.checkForUpdates({ manual: true })
+    await store.download()
+    await store.install()
+    expect(store.phase).toBe('error')
+    expect(store.errorStage).toBe('install')
+
+    // 安装失败后重试：重新下载（后端已保留会话）
+    store.retry()
+    await flushPromises()
+    expect(mocks.router!.callsOf('update_download')).toHaveLength(2)
+    expect(store.errorCode).toBe('noUpdate')
+
+    // 后端报没有会话：重试改为重新检查，而不是再下一次
+    store.retry()
+    await flushPromises()
+    expect(mocks.router!.callsOf('update_check')).toHaveLength(2)
+    expect(mocks.router!.callsOf('update_download')).toHaveLength(2)
+    expect(store.phase).toBe('available')
+  })
+
   it('does not start a download for builds that cannot update in place', async () => {
     mocks.router!.on('update_check', () => check({ inApp: false, unsupportedReason: 'windowsMsi', summary: null }))
     const store = useUpdateStore()

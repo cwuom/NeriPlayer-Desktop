@@ -269,21 +269,36 @@ pub async fn update_install(app: AppHandle, state: State<'_, UpdaterState>) -> C
         return Err(UpdateCommandError::new("noUpdate", message));
     }
     let version = session.version.clone();
-    tokio::task::spawn_blocking(move || {
-        apply::apply(
+    let (session, applied) = tokio::task::spawn_blocking(move || {
+        let applied = apply::apply(
             &session.layout,
             &session.plan,
             &session.layout.staging_dir(),
-        )
+        );
+        (session, applied)
     })
     .await
-    .map_err(|error| UpdateCommandError::new("unknown", error.to_string()))?
-    .inspect_err(|error| log::error!(target: "update", "install failed: {error}"))?;
+    .map_err(|error| UpdateCommandError::new("unknown", error.to_string()))?;
+    if let Err(error) = applied {
+        log::error!(target: "update", "install failed: {error}");
+        restore_after_failed_install(&mut *state.session.lock().await, session);
+        return Err(error.into());
+    }
 
     record_installed_version(&version);
     log::info!(target: "update", "update {version} installed, restarting");
     app.request_restart();
     Ok(())
+}
+
+/// 安装失败时已经回滚，本地文件仍是旧版本，原来的计划依然有效；把会话放回去，
+/// 「重试」才能重新下载。部分暂存文件已被移走，标记为未暂存，下载时只补缺的
+fn restore_after_failed_install(slot: &mut Option<Session>, mut session: Session) {
+    // 安装期间又做过一次检查时以新会话为准
+    if slot.is_none() {
+        session.staged = false;
+        *slot = Some(session);
+    }
 }
 
 /// 启动时清理上次更新让位出来的旧文件
@@ -314,6 +329,43 @@ fn record_installed_version(_version: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(version: &str, staged: bool) -> Session {
+        let blob = neri_update::manifest::BlobRef {
+            url: "u".into(),
+            size: 1,
+            sha256: "0".repeat(64),
+        };
+        Session {
+            version: version.into(),
+            layout: InstallLayout::Directory {
+                root: std::path::PathBuf::from("/tmp/neri"),
+            },
+            release: PlatformRelease {
+                blob,
+                files: Vec::new(),
+                patches: Vec::new(),
+            },
+            plan: UpdatePlan {
+                actions: Vec::new(),
+            },
+            staged,
+        }
+    }
+
+    #[test]
+    fn failed_install_keeps_the_session_for_a_retry() {
+        let mut slot = None;
+        restore_after_failed_install(&mut slot, session("1.1.0", true));
+        let restored = slot.as_ref().expect("session restored");
+        assert_eq!(restored.version, "1.1.0");
+        assert!(!restored.staged, "retry must stage again before installing");
+
+        // 安装期间又检查到了更新的版本，不能被旧会话覆盖
+        let mut slot = Some(session("1.2.0", false));
+        restore_after_failed_install(&mut slot, session("1.1.0", true));
+        assert_eq!(slot.unwrap().version, "1.2.0");
+    }
 
     #[test]
     fn public_key_file_ignores_comments() {
