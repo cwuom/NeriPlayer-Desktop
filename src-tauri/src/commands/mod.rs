@@ -16,4 +16,5 @@ pub mod stats_cmd;
 pub mod storage_cmd;
 pub mod sync_cmd;
 pub mod tray_cmd;
+pub mod update_cmd;
 pub mod user_data_cmd;
