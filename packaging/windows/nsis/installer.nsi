@@ -78,6 +78,9 @@ Var OldMainBinaryName
 ; 0 = fresh install, 1 = same version, 2 = upgrade, 3 = downgrade
 Var ExistingKind
 Var ExistingVersion
+; Install folder of the existing copy, and whether this install moves it elsewhere
+Var PreviousInstallDir
+Var MovingInstall
 
 Name "${PRODUCTNAME}"
 BrandingText " "
@@ -257,9 +260,11 @@ Section EarlyChecks
   !endif
 SectionEnd
 
-; Upgrades and downgrades remove the previous version first (keeping data and shortcuts) so files
-; that no longer ship do not linger. Reinstalling the same version just overwrites.
+; Upgrades, downgrades and moves to another folder remove the previous copy first (keeping data and
+; shortcuts) so files that no longer ship do not linger and no second copy is left behind.
+; Reinstalling the same version into the same folder just overwrites.
 Section RemovePrevious
+  StrCpy $MovingInstall 0
   ${If} $UpdateMode = 1
     Return
   ${EndIf}
@@ -279,25 +284,30 @@ Section RemovePrevious
     Return
   ${EndIf}
 
+  ReadRegStr $PreviousInstallDir SHCTX "${MANUPRODUCTKEY}" ""
+  ; String comparison is case-insensitive, matching Windows paths
+  ${If} $ExistingKind > 0
+  ${AndIf} $PreviousInstallDir != ""
+  ${AndIf} $PreviousInstallDir != $INSTDIR
+    StrCpy $MovingInstall 1
+  ${EndIf}
   ${If} $ExistingKind < 2
+  ${AndIf} $MovingInstall = 0
     Return
   ${EndIf}
 
-  ; Ask before the old uninstaller runs silently and force-closes a running NeriPlayer
-  ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
-  ${If} $4 != ""
-    !insertmacro CheckIfAppIsRunning "$4\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  ${EndIf}
-
-  ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
   ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
   ${If} $R1 == ""
-  ${OrIf} $4 == ""
+  ${OrIf} $PreviousInstallDir == ""
     Return
   ${EndIf}
+  ; Ask before the old uninstaller runs silently and force-closes a running NeriPlayer
+  !insertmacro CheckIfAppIsRunning "$PreviousInstallDir\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+
   DetailPrint "$(neriRemovingOld)"
+  ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
   ClearErrors
-  ExecWait '$R1 /S /UPDATE _?=$4' $0
+  ExecWait '$R1 /S /UPDATE _?=$PreviousInstallDir' $0
   ${If} ${Errors}
   ${OrIf} $0 <> 0
     ; The old version could not be removed (for example it is still running); overwrite instead
@@ -458,6 +468,14 @@ Section Install
   ; The welcome page holds the desktop shortcut choice; silent and passive installs keep Tauri's default
   ${If} $DesktopShortcutState == ${BST_CHECKED}
     Call CreateOrUpdateDesktopShortcut
+  ${EndIf}
+  ; The old uninstaller keeps shortcuts in update mode; after a move they would point at the removed copy
+  ${If} $MovingInstall = 1
+    !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$PreviousInstallDir\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      !insertmacro SetShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    ${EndIf}
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTINSTALL
