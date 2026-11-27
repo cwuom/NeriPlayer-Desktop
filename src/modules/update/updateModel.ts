@@ -74,6 +74,11 @@ export function isIncremental(summary: PlanSummary | null): boolean {
   return savedPercent(summary) >= 10
 }
 
+/** 本次计划下载的字节数；还没有下载计划时按 0 处理 */
+export function plannedDownloadBytes(check: UpdateCheck | null): number {
+  return check?.summary?.downloadBytes ?? 0
+}
+
 export function progressPercent(progress: UpdateProgress | null): number {
   if (!progress || progress.total <= 0) return progress ? 100 : 0
   return Math.max(0, Math.min(100, Math.floor((progress.downloaded / progress.total) * 100)))

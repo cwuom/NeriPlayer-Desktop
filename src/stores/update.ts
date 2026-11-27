@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
+  plannedDownloadBytes,
   shouldAutoCheck,
   shouldPrompt,
   updateErrorCode,
@@ -104,7 +105,7 @@ export const useUpdateStore = defineStore('update', () => {
     if (busy.value || !check.value?.inApp) return
     phase.value = 'downloading'
     errorCode.value = null
-    progress.value = { downloaded: 0, total: check.value.summary?.downloadBytes ?? 0 }
+    progress.value = { downloaded: 0, total: plannedDownloadBytes(check.value) }
     let unlisten: UnlistenFn | null = null
     try {
       unlisten = await listen<UpdateProgress>(PROGRESS_EVENT, event => { progress.value = event.payload })

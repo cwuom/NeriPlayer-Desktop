@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AUTO_CHECK_INTERVAL_MS,
   isIncremental,
+  plannedDownloadBytes,
   progressPercent,
   savedPercent,
   shouldAutoCheck,
@@ -40,6 +41,12 @@ describe('update model', () => {
     expect(savedPercent(null)).toBe(0)
     expect(savedPercent({ downloadBytes: 0, fullBytes: 0, changedFiles: 0, totalFiles: 0 })).toBe(0)
     expect(savedPercent({ downloadBytes: 200, fullBytes: 100, changedFiles: 1, totalFiles: 1 })).toBe(0)
+  })
+
+  it('reads the planned download size and falls back to zero without a plan', () => {
+    expect(plannedDownloadBytes(available)).toBe(5)
+    expect(plannedDownloadBytes({ ...available, summary: null })).toBe(0)
+    expect(plannedDownloadBytes(null)).toBe(0)
   })
 
   it('clamps download progress and treats an empty download as done', () => {

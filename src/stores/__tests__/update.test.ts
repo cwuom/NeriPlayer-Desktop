@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   router: null as ReturnType<typeof import('./storeTestUtils').createInvokeRouter> | null,
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   toasts: [] as Array<{ text: string; action?: { handler: () => void } }>,
+  listenError: null as unknown,
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -16,6 +17,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 vi.mock('@tauri-apps/api/event', () => ({
   listen: async (event: string, handler: (event: { payload: unknown }) => void) => {
+    if (mocks.listenError) throw mocks.listenError
     mocks.listeners.set(event, handler)
     return () => { mocks.listeners.delete(event) }
   },
@@ -53,6 +55,7 @@ describe('update store', () => {
     mocks.router = createInvokeRouter()
     mocks.listeners.clear()
     mocks.toasts = []
+    mocks.listenError = null
   })
 
   afterEach(() => {
@@ -184,6 +187,19 @@ describe('update store', () => {
     expect(mocks.router!.callsOf('update_check')).toHaveLength(2)
     expect(mocks.router!.callsOf('update_download')).toHaveLength(2)
     expect(store.phase).toBe('available')
+  })
+
+  it('reports a download error when progress events cannot be subscribed', async () => {
+    mocks.router!.on('update_check', () => check({ summary: null }))
+    const store = useUpdateStore()
+    await store.checkForUpdates({ manual: true })
+    mocks.listenError = new Error('event bridge unavailable')
+
+    await store.download()
+    expect(store.phase).toBe('error')
+    expect(store.errorStage).toBe('download')
+    expect(store.progress).toEqual({ downloaded: 0, total: 0 })
+    expect(mocks.router!.callsOf('update_download')).toHaveLength(0)
   })
 
   it('does not start a download for builds that cannot update in place', async () => {
