@@ -343,7 +343,7 @@ Function WelcomePageCreate
   ${EndIf}
   !insertmacro NeriCenterLabel 110u 22u "$8" "$7" 0
 
-  ; 安装位置：升级时固定在原位置，避免装出两份
+  ; 安装位置：已安装时默认沿用原位置，也可以换；换了位置会先移除旧位置那份（见 RemovePrevious）
   ${NSD_CreateLabel} 24u 138u 200u 9u "$(neriInstallTo)"
   Pop $1
   SetCtlColors $1 "${NERI_MUTED}" "${NERI_BG}"
@@ -352,14 +352,11 @@ Function WelcomePageCreate
   Pop $NeriPathLabel
   ${NSD_AddStyle} $NeriPathLabel ${SS_PATHELLIPSIS}|${SS_NOPREFIX}
   SetCtlColors $NeriPathLabel "${NERI_TEXT}" "${NERI_BG}"
-  ${If} $ExistingKind = 0
-  ${OrIf} $WixMode = 1
-    ${NSD_CreateLink} 256u 149u 51u 11u "$(neriChange)"
-    Pop $1
-    ${NSD_AddStyle} $1 ${SS_NOPREFIX}
-    SetCtlColors $1 "${NERI_ACCENT}" "${NERI_BG}"
-    ${NSD_OnClick} $1 WelcomeChangeDirectory
-  ${EndIf}
+  ${NSD_CreateLink} 256u 149u 51u 11u "$(neriChange)"
+  Pop $1
+  ${NSD_AddStyle} $1 ${SS_NOPREFIX}
+  SetCtlColors $1 "${NERI_ACCENT}" "${NERI_BG}"
+  ${NSD_OnClick} $1 WelcomeChangeDirectory
 
   !insertmacro NeriCheckbox 167u "$(neriDesktopShortcut)" $DesktopShortcutState
 
