@@ -88,7 +88,6 @@ Follow the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisit
   The full list used by CI is `scripts/linux/install-build-deps.sh`, which runs as-is on Ubuntu 22.04.
 
 RPM packaging also needs `rpm`. See the FFmpeg guide for its additional tools and target restrictions.
-Windows MSI packaging also requires the VBScript optional feature; see the Tauri guide above for troubleshooting.
 Install optional Clippy / rustfmt components, which are not included in the `minimal` profile, as needed:
 
 ```bash
@@ -205,7 +204,7 @@ it does not add files to installers. See the FFmpeg guide for full Linux / macOS
 
 | Platform | Rust target | FFmpeg target | Release assets |
 | --- | --- | --- | --- |
-| Windows x64 | `x86_64-pc-windows-msvc` | `windows-x86_64` | NSIS `.exe`, `.msi` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-x86_64` | NSIS `.exe` |
 | macOS Apple Silicon | `aarch64-apple-darwin` | `macos-aarch64` | `.dmg`, minimum system setting 11.0 |
 | macOS Intel | `x86_64-apple-darwin` | `macos-x86_64` | `.dmg`, minimum system setting 10.15 |
 | Linux x64 | `x86_64-unknown-linux-gnu` | `linux-x86_64` | `.deb`, `.rpm`, `.AppImage.tar.gz` |

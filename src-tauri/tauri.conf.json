@@ -52,7 +52,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "app", "dmg", "deb", "rpm", "appimage"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -81,11 +81,6 @@
         "installMode": "currentUser",
         "languages": ["English", "SimpChinese", "TradChinese", "Japanese"],
         "displayLanguageSelector": false
-      },
-      "wix": {
-        "language": ["en-US", "zh-CN"],
-        "bannerPath": "../packaging/windows/wix/banner.bmp",
-        "dialogImagePath": "../packaging/windows/wix/dialog.bmp"
       }
     },
     "category": "Music",

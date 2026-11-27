@@ -1,6 +1,7 @@
-"""生成安装界面用到的位图：macOS DMG 背景与 Windows MSI（WiX）横幅、侧图。
+"""生成 macOS DMG 安装窗口的背景图。
 
 图上不放文字：拖拽箭头本身就能看懂，也避免为每种语言各出一套图。
+Windows 安装界面由 packaging/windows/nsis 的脚本绘制，不需要位图。
 只依赖 Pillow 与 macOS 自带的 tiffutil（把 1x/2x 合成 Retina 背景）。
 
 用法：python3 scripts/installer/render-art.py
@@ -119,33 +120,6 @@ def save_dmg_background() -> None:
             Image.open(one).save(target, dpi=(72, 72))
 
 
-def app_icon(size: int) -> Image.Image:
-    return Image.open(ICON).convert("RGBA").resize((size, size), Image.LANCZOS)
-
-
-def save_wix_banner() -> None:
-    # WiX 在横幅左侧写标题与说明（黑字），图片只占右侧
-    banner = Image.new("RGB", (493, 58), (255, 255, 255))
-    icon = app_icon(42)
-    banner.paste(icon, (493 - 42 - 12, 8), icon)
-    target = OUT / "windows" / "wix" / "banner.bmp"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    banner.save(target)
-
-
-def save_wix_dialog() -> None:
-    # 欢迎页与完成页：左侧 164px 是品牌区，右侧留白给 WiX 绘制的文字
-    dialog = Image.new("RGB", (493, 312), (255, 255, 255))
-    panel = vertical_gradient((164, 312), (38, 52, 74), NAVY)
-    dialog.paste(panel, (0, 0))
-    icon = app_icon(112)
-    dialog.paste(icon, ((164 - 112) // 2, 96), icon)
-    target = OUT / "windows" / "wix" / "dialog.bmp"
-    dialog.save(target)
-
-
 if __name__ == "__main__":
     save_dmg_background()
-    save_wix_banner()
-    save_wix_dialog()
     print("installer art written to", OUT)

@@ -86,7 +86,6 @@
   CI 使用的完整清单在 `scripts/linux/install-build-deps.sh`，Ubuntu 22.04 上可直接运行。
 
 构建 RPM 另需 `rpm`；FFmpeg 共享库的额外工具和目标限制见其独立文档。
-Windows 构建 MSI 还需要启用 VBScript 可选功能，排查步骤见上述 Tauri 文档。
 如需 Clippy / rustfmt，安装 `minimal` profile 不自带的组件：
 
 ```bash
@@ -195,7 +194,7 @@ pnpm tauri build -- --locked
 
 | 平台 | Rust 目标 | FFmpeg 目标 | Release 产物 |
 | --- | --- | --- | --- |
-| Windows x64 | `x86_64-pc-windows-msvc` | `windows-x86_64` | NSIS `.exe`、`.msi` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-x86_64` | NSIS `.exe` |
 | macOS Apple Silicon | `aarch64-apple-darwin` | `macos-aarch64` | `.dmg`，最低系统配置 11.0 |
 | macOS Intel | `x86_64-apple-darwin` | `macos-x86_64` | `.dmg`，最低系统配置 10.15 |
 | Linux x64 | `x86_64-unknown-linux-gnu` | `linux-x86_64` | `.deb`、`.rpm`、`.AppImage.tar.gz` |

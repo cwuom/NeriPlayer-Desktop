@@ -142,7 +142,7 @@ NeriPlayer Desktop 使用 **Vue 3 + TypeScript** 构建界面，
 
    | 平台 | 架构 | 发布包 | 环境说明 |
    | --- | --- | --- | --- |
-   | Windows | x64 | `.msi` / NSIS `.exe` | 需要 WebView2 运行时 |
+   | Windows | x64 | 安装程序 `*-setup.exe` | 需要 WebView2 运行时 |
    | macOS | Apple Silicon / arm64 | `*-adhoc.dmg` | 发布构建最低系统配置为 11.0 |
    | macOS | Intel / x64 | `*-adhoc.dmg` | 发布构建最低系统配置为 10.15 |
    | Linux | x64 | `.deb` / `.rpm` / `.AppImage.tar.gz` | 需要兼容的图形环境及系统运行库 |
