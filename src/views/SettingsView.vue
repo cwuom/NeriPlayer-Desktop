@@ -52,6 +52,7 @@ import { useNetworkSettings } from '@/components/settings/useNetworkSettings'
 import { useAccountSettings } from '@/components/settings/useAccountSettings'
 import { useLyricsSettings } from '@/components/settings/useLyricsSettings'
 import { FFMPEG_LEGAL_URL, PROJECT_REPOSITORY_URL, useAboutSettings } from '@/components/settings/useAboutSettings'
+import { useUpdateSettings } from '@/composables/useUpdateSettings'
 import { useSyncSettings } from '@/components/settings/useSyncSettings'
 import { uiScaleSupported, uiScaleError, uiScaleMax } from '@/modules/settings/uiScale'
 import { useEscapeClose } from '@/composables/useEscapeClose'
@@ -159,6 +160,9 @@ const lyricsSettings = useLyricsSettings()
 const {
   handleVersionTap, disposeVersionTap, buildInfo, buildVersionText, loadBuildInfo, copyBuildValue, ffmpegComponentText, openExternalUrl,
 } = useAboutSettings(settingsIpc, toggleSection)
+const {
+  update: updateStore, statusText: updateStatusText, icon: updateIcon, actionText: updateActionText, runAction: runUpdateAction,
+} = useUpdateSettings()
 
 const syncSettings = useSyncSettings(openExternalUrl)
 const {
@@ -1577,6 +1581,30 @@ useEscapeClose(
         <span class="material-symbols-rounded copy-hint-icon">content_copy</span>
       </div>
     </div></Transition>
+
+    <div class="setting-card" style="cursor: pointer" @click="runUpdateAction">
+      <div class="setting-icon-wrap" :class="{ accent: updateStore.hasUpdate }">
+        <span class="material-symbols-rounded" :class="{ spin: updateStore.phase === 'checking' }">{{ updateIcon }}</span>
+      </div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.software_update') }}</div>
+        <div class="setting-desc" aria-live="polite">{{ updateStatusText }}</div>
+      </div>
+      <button
+        type="button"
+        class="account-login-btn"
+        :disabled="updateStore.phase === 'checking' || updateStore.phase === 'installing'"
+        @click.stop="runUpdateAction"
+      >{{ updateActionText }}</button>
+    </div>
+    <div class="setting-card">
+      <div class="setting-icon-wrap"><span class="material-symbols-rounded">autorenew</span></div>
+      <div class="setting-info">
+        <div class="setting-title">{{ t('settings.auto_check_updates') }}</div>
+        <div class="setting-desc">{{ t('settings.auto_check_updates_desc') }}</div>
+      </div>
+      <label class="m3-switch"><input type="checkbox" :aria-label="t('settings.auto_check_updates')" :checked="updateStore.autoCheck" @change="updateStore.setAutoCheck(($event.target as HTMLInputElement).checked)" /><span class="track"><span class="thumb"><span v-if="updateStore.autoCheck" class="material-symbols-rounded" style="font-size: 14px">check</span></span></span></label>
+    </div>
 
     <div class="section-label">{{ t('settings.group_links') }}</div>
     <div class="setting-card" style="cursor: pointer" @click="openExternalUrl(PROJECT_REPOSITORY_URL)">

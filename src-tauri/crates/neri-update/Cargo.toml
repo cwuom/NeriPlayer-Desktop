@@ -1,0 +1,32 @@
+[package]
+name = "neri-update"
+description = "应用内增量更新：签名清单、文件级差分与 zstd 补丁、安装布局识别与原地替换"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["client"]
+# 网络下载只有应用端需要；发布工具用 --no-default-features 构建，不编译 reqwest
+client = ["dep:reqwest", "dep:futures-util"]
+
+[dependencies]
+base64.workspace = true
+hex.workspace = true
+log.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+reqwest = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "neri-update-tool"
+path = "src/bin/neri-update-tool.rs"

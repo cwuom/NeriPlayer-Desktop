@@ -70,14 +70,17 @@ useEscapeClose(() => props.open, close)
             <slot />
           </div>
           <div class="dialog-actions">
-            <button type="button" class="m3-btn tonal" @click="close">{{ displayCancelText }}</button>
-            <button
-              type="button"
-              class="m3-btn filled"
-              :class="{ disabled: confirmDisabled, danger: confirmDanger }"
-              :aria-disabled="confirmDisabled || undefined"
-              @click="confirm"
-            >{{ displayConfirmText }}</button>
+            <!-- 多步骤流程（如应用更新）按状态换一组按钮；默认仍是取消 + 确认 -->
+            <slot name="actions" :close="close">
+              <button type="button" class="m3-btn tonal" @click="close">{{ displayCancelText }}</button>
+              <button
+                type="button"
+                class="m3-btn filled"
+                :class="{ disabled: confirmDisabled, danger: confirmDanger }"
+                :aria-disabled="confirmDisabled || undefined"
+                @click="confirm"
+              >{{ displayConfirmText }}</button>
+            </slot>
           </div>
         </div>
       </div>
@@ -165,7 +168,8 @@ useEscapeClose(() => props.open, close)
   gap: 8px;
 }
 
-.m3-btn {
+// 默认按钮与 actions 插槽里的按钮共用一套样式；插槽内容不带本组件的 scoped 属性，要经 :slotted 匹配
+@mixin dialog-button {
   min-width: 84px;
   height: 36px;
   padding: 0 18px;
@@ -202,6 +206,9 @@ useEscapeClose(() => props.open, close)
     pointer-events: none;
   }
 }
+
+.m3-btn { @include dialog-button; }
+:slotted(.m3-btn) { @include dialog-button; }
 
 // 过渡动画
 .dialog-enter-active {

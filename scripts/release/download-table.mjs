@@ -23,6 +23,11 @@ function architecture(file) {
   return null
 }
 
+// Tauri 的 WiX 包名以语言结尾，例如 NeriPlayer_1.0.0_x64_zh-CN.msi
+function msiLanguage(file) {
+  return file.match(/_([a-z]{2}-[A-Z]{2})\.msi$/)?.[1] ?? null
+}
+
 // shields.io 静态徽章路径里 - 和 _ 是分隔符，字面量要写成 -- 与 __
 function shieldsText(text) {
   return encodeURIComponent(text.replace(/-/g, '--').replace(/_/g, '__'))
@@ -38,8 +43,11 @@ export function classifyAssets(files) {
   for (const rule of RULES) {
     for (const file of [...files].sort()) {
       if (!rule.pattern.test(file)) continue
-      const message = rule.message ?? architecture(file)
-      if (!message) throw new Error(`cannot tell the architecture of ${file}`)
+      const arch = rule.message ?? architecture(file)
+      if (!arch) throw new Error(`cannot tell the architecture of ${file}`)
+      // MSI 一个包只有一种界面语言，同一架构会有多个，徽章上要能区分
+      const language = rule.label === 'MSI' ? msiLanguage(file) : null
+      const message = language ? `${arch} ${language}` : arch
       entries.push({ ...rule, message, file })
     }
   }

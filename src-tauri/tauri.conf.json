@@ -65,7 +65,28 @@
       "minimumSystemVersion": "10.15",
       "hardenedRuntime": true,
       "signingIdentity": "-",
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "dmg": {
+        "background": "../packaging/macos/dmg-background.tiff",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 190 },
+        "applicationFolderPosition": { "x": 480, "y": 190 }
+      }
+    },
+    "windows": {
+      "nsis": {
+        "template": "../packaging/windows/nsis/installer.nsi",
+        "installerHooks": "../packaging/windows/nsis/installer-ui.nsh",
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["English", "SimpChinese", "TradChinese", "Japanese"],
+        "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": ["en-US", "zh-CN"],
+        "bannerPath": "../packaging/windows/wix/banner.bmp",
+        "dialogImagePath": "../packaging/windows/wix/dialog.bmp"
+      }
     },
     "category": "Music",
     "linux": {

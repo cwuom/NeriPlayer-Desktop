@@ -9,7 +9,7 @@ use neri_player_desktop::commands::discover::{
 use neri_player_desktop::commands::{
     auth_cmd, cache_cmd, debug_cmd, desktop_lyrics_cmd, download_cmd, image_cmd, library_cmd,
     listen_together_cmd, local_files_cmd, lyrics_cmd, playback_fallback_cmd, player_cmd,
-    settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd, user_data_cmd,
+    settings_cmd, stats_cmd, storage_cmd, sync_cmd, tray_cmd, update_cmd, user_data_cmd,
 };
 use neri_player_desktop::state::AppState;
 use std::sync::mpsc;
@@ -99,6 +99,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
+        .manage(update_cmd::UpdaterState::default())
         .setup(move |app| {
             let handle = app.handle().clone();
             // 日志插件初始化时把 max_level 放到了 Trace，这里收回到设置的级别
@@ -139,6 +140,13 @@ fn main() {
                 });
             if let Err(error) = preload {
                 log::warn!(target: "audio-decoder", "could not start FFmpeg preloading: {error}");
+            }
+            // 上次应用内更新让位出来的旧文件，旧进程退出后才删得掉
+            if let Err(error) = std::thread::Builder::new()
+                .name("update-cleanup".into())
+                .spawn(update_cmd::cleanup_after_update)
+            {
+                log::warn!(target: "update", "could not start update cleanup: {error}");
             }
 
             // macOS 使用原生红绿灯（Overlay 标题栏）；Windows/Linux 移除原生装饰，
@@ -702,6 +710,10 @@ fn main() {
             tray_cmd::tray_popup_ready,
             tray_cmd::tray_popup_action,
             tray_cmd::quit_app,
+            update_cmd::update_check,
+            update_cmd::update_download,
+            update_cmd::update_cancel,
+            update_cmd::update_install,
             ]);
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
                 let label = invoke.message.webview().label().to_string();

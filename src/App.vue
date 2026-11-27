@@ -34,6 +34,8 @@ import NowPlaying from '@/components/NowPlaying.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppToast from '@/components/AppToast.vue'
 import BiliVideoPartsDialog from '@/components/bilibili/BiliVideoPartsDialog.vue'
+import UpdateDialog from '@/components/UpdateDialog.vue'
+import { useUpdateStore } from '@/stores/update'
 import TitleBar from '@/components/TitleBar.vue'
 import i18n, { setLocale } from '@/i18n'
 import { useToastStore } from '@/stores/toast'
@@ -416,6 +418,8 @@ watch(
 )
 
 // 启动时初始化：加载同步配置 + 检查登录状态 + 自动同步
+let updateCheckTimer: ReturnType<typeof setTimeout> | null = null
+
 onMounted(async () => {
   // NVIDIA + WebKitGTK 下整页 opacity/transform 过渡会触发大面积重绘并闪烁；
   // 后端确认是 NVIDIA 后加类，让 CSS 把路由切换降为瞬时切换（不动画整页）。
@@ -463,6 +467,8 @@ onMounted(async () => {
   // 播放统计和媒体键在首曲之前接入，托盘也可以启动刚恢复的队列
   usePlaybackStatsStore().attach()
   if (isTauri()) player.initEvents()
+  // 启动后稍等再检查更新，不和首屏加载、恢复播放抢网络
+  if (isTauri()) updateCheckTimer = setTimeout(() => void useUpdateStore().checkOnLaunch(), 8_000)
   try {
     unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested)
   } catch {
@@ -617,6 +623,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (updateCheckTimer) clearTimeout(updateCheckTimer)
   uninstallDesktopLyrics?.()
   uninstallDesktopLyrics = null
   void player.flushPlayerState()
@@ -745,6 +752,7 @@ onUnmounted(() => {
 
     <AppToast />
     <BiliVideoPartsDialog />
+    <UpdateDialog />
   </div>
 </template>
 

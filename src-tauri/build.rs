@@ -29,6 +29,12 @@ fn main() {
     println!("cargo:rustc-env=BUILD_UUID={}", uuid);
     println!("cargo:rustc-env=BUILD_TIMESTAMP={}", timestamp);
     println!("cargo:rustc-env=BUILD_VERSION={}", build_version);
+    // 应用内更新按构建时间判断新旧：版本号有语义化与时间戳两种格式，不能直接比较
+    let build_epoch = build_time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=BUILD_EPOCH={build_epoch}");
     // 方便 CI 从编译日志回收本次构建 UUID
     println!("cargo:warning=NeriPlayer build metadata: uuid={uuid} version={build_version}");
 

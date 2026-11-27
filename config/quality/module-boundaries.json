@@ -40,6 +40,9 @@
         "allowed": [
           "neri-common"
         ]
+      },
+      "neri-update": {
+        "allowed": []
       }
     }
   },
