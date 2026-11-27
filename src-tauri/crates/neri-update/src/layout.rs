@@ -151,14 +151,26 @@ pub(crate) fn join_relative(root: &Path, relative: &str) -> PathBuf {
 
 /// 实际建一个临时文件来判断：只看权限位在 Windows ACL 与 macOS 沙盒下都不可靠
 fn writable(dir: &Path) -> bool {
-    let probe = dir.join(format!(".neri-write-probe-{}", std::process::id()));
-    match std::fs::File::create(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
+    // 独占创建：已有同名文件时换个名字，绝不截断或删除别人的文件，只清理自己建的
+    for attempt in 0..8 {
+        let probe = dir.join(format!(
+            ".neri-write-probe-{}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                return true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return false,
         }
-        Err(_) => false,
     }
+    false
 }
 
 #[cfg(test)]

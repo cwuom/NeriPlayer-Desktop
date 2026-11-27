@@ -73,6 +73,7 @@ Var NeriCheckbox
   LangString neriCancelled ${LANG_ENGLISH} "Cancelled."
   LangString neriRemovingOld ${LANG_ENGLISH} "Removing the previous version…"
   LangString neriRemovingMsi ${LANG_ENGLISH} "Removing the copy installed with the MSI package…"
+  LangString neriMoveFailed ${LANG_ENGLISH} "Couldn't remove ${PRODUCTNAME} from its old location ($PreviousInstallDir), so the installation was stopped. Close ${PRODUCTNAME} or uninstall it from Settings, then try again."
   LangString neriUninstallTitle ${LANG_ENGLISH} "Uninstall ${PRODUCTNAME}"
   LangString neriUninstallText ${LANG_ENGLISH} "${PRODUCTNAME} will be removed from this PC. Your playlists, settings and other data are kept unless you choose otherwise, so a later reinstall picks up where you left off."
   LangString neriDeleteData ${LANG_ENGLISH} "Also delete my data (playlists, settings and cache)"
@@ -111,6 +112,7 @@ Var NeriCheckbox
   LangString neriCancelled ${LANG_SIMPCHINESE} "已取消。"
   LangString neriRemovingOld ${LANG_SIMPCHINESE} "正在移除旧版本…"
   LangString neriRemovingMsi ${LANG_SIMPCHINESE} "正在移除通过 MSI 安装的旧版本…"
+  LangString neriMoveFailed ${LANG_SIMPCHINESE} "无法移除旧位置（$PreviousInstallDir）的 ${PRODUCTNAME}，已停止安装。请先关闭 ${PRODUCTNAME}，或在系统设置里卸载后再试。"
   LangString neriUninstallTitle ${LANG_SIMPCHINESE} "卸载 ${PRODUCTNAME}"
   LangString neriUninstallText ${LANG_SIMPCHINESE} "${PRODUCTNAME} 将从这台电脑上移除。歌单、设置等数据默认会保留，以后重新安装可以接着用。"
   LangString neriDeleteData ${LANG_SIMPCHINESE} "同时删除我的数据（歌单、设置和缓存）"
@@ -149,6 +151,7 @@ Var NeriCheckbox
   LangString neriCancelled ${LANG_TRADCHINESE} "已取消。"
   LangString neriRemovingOld ${LANG_TRADCHINESE} "正在移除舊版本…"
   LangString neriRemovingMsi ${LANG_TRADCHINESE} "正在移除透過 MSI 安裝的舊版本…"
+  LangString neriMoveFailed ${LANG_TRADCHINESE} "無法移除舊位置（$PreviousInstallDir）的 ${PRODUCTNAME}，已停止安裝。請先關閉 ${PRODUCTNAME}，或在系統設定裡解除安裝後再試。"
   LangString neriUninstallTitle ${LANG_TRADCHINESE} "解除安裝 ${PRODUCTNAME}"
   LangString neriUninstallText ${LANG_TRADCHINESE} "${PRODUCTNAME} 將從這台電腦上移除。歌單、設定等資料預設會保留，日後重新安裝可以接著使用。"
   LangString neriDeleteData ${LANG_TRADCHINESE} "同時刪除我的資料（歌單、設定和快取）"
@@ -187,6 +190,7 @@ Var NeriCheckbox
   LangString neriCancelled ${LANG_JAPANESE} "キャンセルしました。"
   LangString neriRemovingOld ${LANG_JAPANESE} "以前のバージョンを削除しています…"
   LangString neriRemovingMsi ${LANG_JAPANESE} "MSI パッケージでインストールされた版を削除しています…"
+  LangString neriMoveFailed ${LANG_JAPANESE} "以前の場所（$PreviousInstallDir）の ${PRODUCTNAME} を削除できなかったため、インストールを中止しました。${PRODUCTNAME} を閉じるか、設定からアンインストールしてから再試行してください。"
   LangString neriUninstallTitle ${LANG_JAPANESE} "${PRODUCTNAME} のアンインストール"
   LangString neriUninstallText ${LANG_JAPANESE} "${PRODUCTNAME} をこの PC から削除します。プレイリストや設定などのデータは残るので、あとで再インストールしても続きから使えます。"
   LangString neriDeleteData ${LANG_JAPANESE} "データも削除する（プレイリスト、設定、キャッシュ）"
@@ -473,7 +477,46 @@ FunctionEnd
 ; 应用内增量更新留下的让位文件与暂存目录；ffmpeg 目录整个属于本应用，更新可能往里加过新文件
 Function un.RemoveUpdateLeftovers
   RMDir /r "$INSTDIR\.neri-update"
-  Delete "$INSTDIR\*.neri-old"
-  Delete "$INSTDIR\*.neri-old.*"
+  ; 让位文件只删更新器记录过的（.neri-update-asides，相对安装目录一行一个），不按文件名猜；
+  ; 记录被改坏时，带 ..、盘符或以斜杠开头的行一律跳过
+  ClearErrors
+  FileOpen $R0 "$INSTDIR\.neri-update-asides" r
+  ${IfNot} ${Errors}
+    ${Do}
+      ClearErrors
+      FileRead $R0 $R1
+      ${If} ${Errors}
+        ${ExitDo}
+      ${EndIf}
+      trim_line:
+        StrCpy $R2 $R1 1 -1
+        ${If} $R2 == "$\n"
+        ${OrIf} $R2 == "$\r"
+          StrCpy $R1 $R1 -1
+          Goto trim_line
+        ${EndIf}
+      ${If} $R1 == ""
+        ${Continue}
+      ${EndIf}
+      StrCpy $R2 $R1 1
+      ${If} $R2 == "\"
+      ${OrIf} $R2 == "/"
+        ${Continue}
+      ${EndIf}
+      nsis_tauri_utils::StrReplace "$R1" ".." ""
+      Pop $R2
+      ${If} $R2 != $R1
+        ${Continue}
+      ${EndIf}
+      nsis_tauri_utils::StrReplace "$R1" ":" ""
+      Pop $R2
+      ${If} $R2 != $R1
+        ${Continue}
+      ${EndIf}
+      Delete "$INSTDIR\$R1"
+    ${Loop}
+    FileClose $R0
+  ${EndIf}
+  Delete "$INSTDIR\.neri-update-asides"
   RMDir /r "$INSTDIR\ffmpeg"
 FunctionEnd

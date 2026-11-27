@@ -74,6 +74,8 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var WixKey
+; Product code of the WiX (MSI) installation, i.e. the GUID name of its Uninstall key
+Var WixProductCode
 Var OldMainBinaryName
 ; 0 = fresh install, 1 = same version, 2 = upgrade, 3 = downgrade
 Var ExistingKind
@@ -216,6 +218,7 @@ Function DetectExistingInstall
     StrCmp $R0 0 0 wix_done
     StrCpy $WixMode 1
     StrCpy $WixKey "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$1"
+    StrCpy $WixProductCode $1
     ReadRegStr $ExistingVersion HKLM "$WixKey" "DisplayVersion"
     Goto compare
   wix_done:
@@ -271,14 +274,32 @@ Section RemovePrevious
 
   ${If} $WixMode = 1
     DetailPrint "$(neriRemovingMsi)"
-    ReadRegStr $R1 HKLM "$WixKey" "UninstallString"
+    ; Run msiexec with an explicit UI level instead of the raw UninstallString: a silent install must
+    ; never stop at msiexec's own dialog, and a GUI install only shows its progress bar
+    StrCpy $R2 "/passive"
+    ${If} ${Silent}
+      StrCpy $R2 "/qn"
+    ${EndIf}
+    StrLen $R3 $WixProductCode
+    StrCpy $R4 $WixProductCode 1
+    StrCpy $R5 $WixProductCode 1 -1
+    ${If} $R3 <> 38
+    ${OrIf} $R4 != "{"
+    ${OrIf} $R5 != "}"
+      Abort "$(unableToUninstall)"
+    ${EndIf}
     ClearErrors
-    ExecWait '$R1' $0
+    ExecWait '"$SYSDIR\msiexec.exe" /x $WixProductCode $R2 /norestart' $0
     ${If} ${Errors}
-    ${OrIf} $0 <> 0
-      ${If} $0 = 1602
-        Abort "$(neriCancelled)"
-      ${EndIf}
+      Abort "$(unableToUninstall)"
+    ${EndIf}
+    ; 0 removed, 1605 already gone, 1641/3010 removed but a restart is pending
+    ${If} $0 = 1602
+      Abort "$(neriCancelled)"
+    ${ElseIf} $0 <> 0
+    ${AndIf} $0 <> 1605
+    ${AndIf} $0 <> 1641
+    ${AndIf} $0 <> 3010
       Abort "$(unableToUninstall)"
     ${EndIf}
     Return
@@ -310,7 +331,11 @@ Section RemovePrevious
   ExecWait '$R1 /S /UPDATE _?=$PreviousInstallDir' $0
   ${If} ${Errors}
   ${OrIf} $0 <> 0
-    ; The old version could not be removed (for example it is still running); overwrite instead
+    ; Moving to another folder must not leave an unmanaged copy behind: stop here. In the same
+    ; folder the new files simply overwrite the old ones, so carry on.
+    ${If} $MovingInstall = 1
+      Abort "$(neriMoveFailed)"
+    ${EndIf}
     DetailPrint "$(unableToUninstall)"
   ${EndIf}
 SectionEnd

@@ -71,6 +71,10 @@ pub async fn stage<F: RangeFetcher + Sync>(
             on_progress(Progress { downloaded, total });
         };
         let encoded = fetcher.fetch(blob, offset, length, &mut report).await?;
+        // 下载途中（包括最后一块的进度回调里）按了取消：这个文件不再解码写入
+        if cancel.load(Ordering::Relaxed) {
+            return Err(UpdateError::Cancelled);
+        }
         if encoded.len() as u64 != length {
             return Err(UpdateError::Corrupted {
                 path: entry.path.clone(),
@@ -98,6 +102,10 @@ pub async fn stage<F: RangeFetcher + Sync>(
         write_staged(&target, &content, entry.mode)?;
         downloaded = base_downloaded + length;
         on_progress(Progress { downloaded, total });
+    }
+    // 已写好的暂存文件保留给下次复用，但取消了就不能报告暂存完成
+    if cancel.load(Ordering::Relaxed) {
+        return Err(UpdateError::Cancelled);
     }
     Ok(())
 }
@@ -287,6 +295,40 @@ pub(crate) mod tests {
             &mut |_| {},
         ));
         assert!(matches!(result, Err(UpdateError::Cancelled)));
+    }
+
+    #[test]
+    fn cancelling_during_the_last_download_is_not_reported_as_success() {
+        let install = tempfile::tempdir().unwrap();
+        let content = b"only file".to_vec();
+        let frame = compress_full(&content).unwrap();
+        let release = PlatformRelease {
+            blob: BlobRef {
+                url: "full".into(),
+                size: frame.len() as u64,
+                sha256: sha256_hex(&frame),
+            },
+            files: vec![entry("app.exe", &content, 0, frame.len() as u64)],
+            patches: vec![],
+        };
+        let layout = InstallLayout::Directory {
+            root: install.path().to_path_buf(),
+        };
+        let plan = build_plan(&release, &FsLocalState { layout: &layout });
+        let fetcher = MemoryFetcher(HashMap::from([("full".into(), frame)]));
+        let cancel = AtomicBool::new(false);
+        // 用户在最后一块数据的进度回调期间按下取消
+        let result = block_on(stage(
+            &layout,
+            &release,
+            &plan,
+            &layout.staging_dir(),
+            &fetcher,
+            &cancel,
+            &mut |_| cancel.store(true, Ordering::Relaxed),
+        ));
+        assert!(matches!(result, Err(UpdateError::Cancelled)));
+        assert!(!layout.staging_dir().join("app.exe").exists());
     }
 
     #[test]

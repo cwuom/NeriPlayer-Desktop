@@ -79,11 +79,12 @@ impl LocalState for FsLocalState<'_> {
 }
 
 pub fn build_plan(release: &PlatformRelease, local: &impl LocalState) -> UpdatePlan {
-    // (路径, 基准哈希) → 补丁位置；同一个基准在多个补丁集里时取最小的那个
-    let mut patches: HashMap<(&str, &str), (usize, u64, u64)> = HashMap::new();
+    // (路径, 基准哈希) → 补丁位置；同一个基准在多个补丁集里时取最小的那个。
+    // 路径按 ASCII 小写比较，与清单校验（Windows/macOS 大小写不敏感）的规则一致
+    let mut patches: HashMap<(String, &str), (usize, u64, u64)> = HashMap::new();
     for (index, set) in release.patches.iter().enumerate() {
         for entry in &set.entries {
-            let key = (entry.path.as_str(), entry.base_sha256.as_str());
+            let key = (entry.path.to_ascii_lowercase(), entry.base_sha256.as_str());
             let candidate = (index, entry.offset, entry.length);
             patches
                 .entry(key)
@@ -109,7 +110,9 @@ pub fn build_plan(release: &PlatformRelease, local: &impl LocalState) -> UpdateP
             } else {
                 match local.file_hash(&entry.path) {
                     Some(hash) if hash == entry.sha256 => Source::Unchanged,
-                    Some(hash) => match patches.get(&(entry.path.as_str(), hash.as_str())) {
+                    Some(hash) => match patches
+                        .get(&(entry.path.to_ascii_lowercase(), hash.as_str()))
+                    {
                         Some(&(set, offset, length)) if length < entry.length => Source::Patch {
                             set,
                             offset,
@@ -286,6 +289,33 @@ mod tests {
             }
         );
         assert!(!plan.is_noop());
+    }
+
+    #[test]
+    fn patch_lookup_ignores_path_case_like_the_manifest_validator() {
+        let release = PlatformRelease {
+            blob: blob(),
+            files: vec![file("Foo.dll", 'a', 1_000)],
+            patches: vec![PatchSet {
+                from_version: "1.0.0".into(),
+                blob: blob(),
+                entries: vec![PatchEntry {
+                    path: "foo.dll".into(),
+                    base_sha256: hash('1'),
+                    offset: 3,
+                    length: 40,
+                }],
+            }],
+        };
+        let plan = build_plan(&release, &Fake(HashMap::from([("Foo.dll", hash('1'))])));
+        assert_eq!(
+            plan.actions[0].source,
+            Source::Patch {
+                set: 0,
+                offset: 3,
+                length: 40
+            }
+        );
     }
 
     #[test]

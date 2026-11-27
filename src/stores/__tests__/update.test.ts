@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryStorage } from '@/modules/__tests__/memoryStorage'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UpdateCheck } from '@/modules/update/updateModel'
 import { useUpdateStore } from '@/stores/update'
 import { createInvokeRouter, deferred, flushPromises } from './storeTestUtils'
@@ -46,10 +47,16 @@ function check(overrides: Partial<UpdateCheck> = {}): UpdateCheck {
 
 describe('update store', () => {
   beforeEach(() => {
+    // 每个用例从空存储开始：上一个用例写下的上次检查时间不能影响自动检查
+    vi.stubGlobal('localStorage', new MemoryStorage())
     setActivePinia(createPinia())
     mocks.router = createInvokeRouter()
     mocks.listeners.clear()
     mocks.toasts = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
   })
 
   it('opens the dialog for a manual check and only toasts for a background one', async () => {

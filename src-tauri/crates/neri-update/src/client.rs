@@ -13,6 +13,8 @@ use crate::error::{UpdateError, UpdateResult};
 use crate::manifest::{BlobRef, MAX_MANIFEST_BYTES};
 use crate::stage::RangeFetcher;
 
+const CANCEL_POLL: Duration = Duration::from_millis(100);
+
 pub struct HttpFetcher {
     client: reqwest::Client,
     cancel: Arc<AtomicBool>,
@@ -63,13 +65,15 @@ impl RangeFetcher for HttpFetcher {
         on_bytes: &mut (dyn FnMut(u64) + Send),
     ) -> UpdateResult<Vec<u8>> {
         let end = offset + length - 1;
-        let response = self
+        let request = self
             .client
             .get(&blob.url)
             .header(RANGE, format!("bytes={offset}-{end}"))
-            .send()
-            .await
-            .map_err(network)?;
+            .send();
+        let response = tokio::select! {
+            response = request => response.map_err(network)?,
+            () = until_cancelled(&self.cancel) => return Err(UpdateError::Cancelled),
+        };
         let mut skip = match response.status() {
             StatusCode::PARTIAL_CONTENT => {
                 let range = response
@@ -95,10 +99,13 @@ impl RangeFetcher for HttpFetcher {
             usize::try_from(length).map_err(|_| UpdateError::Other("range too large".into()))?;
         let mut body = Vec::with_capacity(capacity);
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            if self.cancel.load(Ordering::Relaxed) {
-                return Err(UpdateError::Cancelled);
-            }
+        loop {
+            // 服务器迟迟不发下一块时，取消也要立刻生效，不必等到读取超时
+            let next = tokio::select! {
+                next = stream.next() => next,
+                () = until_cancelled(&self.cancel) => return Err(UpdateError::Cancelled),
+            };
+            let Some(chunk) = next else { break };
             let chunk = chunk.map_err(network)?;
             let mut data: &[u8] = &chunk;
             if skip > 0 {
@@ -120,6 +127,13 @@ impl RangeFetcher for HttpFetcher {
     }
 }
 
+/// 取消标志是普通的 AtomicBool（界面线程直接置位），这里定期查看，把它变成可等待的信号
+async fn until_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(CANCEL_POLL).await;
+    }
+}
+
 /// `bytes 100-199/1000` → 100
 fn range_start(header: &str) -> Option<u64> {
     header
@@ -138,6 +152,25 @@ fn network(error: reqwest::Error) -> UpdateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_wakes_a_pending_wait() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, Ordering::Relaxed);
+        });
+        // 模拟一直不来的下一块数据：只有取消能让 select 返回
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = std::future::pending::<()>() => "data",
+                () = until_cancelled(&cancel) => "cancelled",
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("cancelled"));
+    }
 
     #[test]
     fn parses_content_range_start() {
