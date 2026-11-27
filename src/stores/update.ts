@@ -51,7 +51,8 @@ export const useUpdateStore = defineStore('update', () => {
   /** 出错的环节，决定界面上「重试」做什么 */
   const errorStage = ref<'check' | 'download' | 'install' | null>(null)
   const dialogOpen = ref(false)
-  const autoCheck = ref(readItem(AUTO_CHECK_KEY) !== '0')
+  // 默认关闭：只有用户在设置里打开过才在启动时联网检查
+  const autoCheck = ref(readItem(AUTO_CHECK_KEY) === '1')
   const skippedVersion = ref(readItem(SKIPPED_KEY))
   const lastCheckAt = ref<number | null>(Number(readItem(LAST_CHECK_KEY)) || null)
 
