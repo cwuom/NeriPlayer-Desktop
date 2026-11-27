@@ -122,7 +122,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Languages: the first one is the fallback when the system language is not listed
 {{#each languages}}
-LoadLanguageFile "${NSISDIR}\Contrib\Language files\{{this}}.nlf"
+LoadLanguageFile "${NSISDIR}\Contrib\Language files\\{{this}}.nlf"
 {{/each}}
 {{#each language_files}}
 !include "{{this}}"
