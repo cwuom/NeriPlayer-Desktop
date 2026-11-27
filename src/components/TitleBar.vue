@@ -111,7 +111,7 @@ onUnmounted(() => {
     }"
     data-tauri-drag-region
   >
-    <!-- macOS 原生红绿灯安全区（92px，红绿灯 x=20 起），避免内容压住系统交通灯 -->
+    <!-- 为 macOS 原生红绿灯预留拖动区 -->
     <div v-if="isMac && !isFullscreen" class="tb-traffic-safe-area" data-tauri-drag-region></div>
 
     <div class="tb-left-slot">
@@ -517,10 +517,8 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* macOS 原生红绿灯安全区：trafficLightPosition x=20，按钮组宽 ~52px，
-   右侧再留 ~20px 呼吸空间 -> 92px */
 .tb-traffic-safe-area {
-  width: calc(92px / var(--app-ui-scale, 1));
+  width: var(--traffic-light-safe-width);
   height: 100%;
   flex: 0 0 auto;
   pointer-events: auto;

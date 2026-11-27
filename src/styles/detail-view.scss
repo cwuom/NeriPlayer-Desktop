@@ -34,7 +34,7 @@
   /* 占用窗口顶栏这一行：与红绿灯 / 窗口按钮同一中线，右侧给 Windows 窗口按钮让位 */
   height: var(--titlebar-height, 48px);
   margin: 0 calc(-1 * var(--detail-gutter)) 8px !important;
-  padding: 0 calc(var(--detail-gutter) + var(--window-controls-width, 0px)) 0 calc(var(--detail-gutter) + var(--content-top-inset-left, 0px));
+  padding: 0 calc(var(--detail-gutter) + var(--window-controls-width, 0px)) 0 var(--detail-gutter);
   /* 渐隐玻璃底由 global.scss 统一绘制 */
 }
 
