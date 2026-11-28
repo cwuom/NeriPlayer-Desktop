@@ -219,6 +219,12 @@ jobs:
         with:
           args: --target ${{ matrix.target }} --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
 
+      # Tauri 在 CI 上打的 DMG 没有背景与图标位置，用与发布相同的脚本重新生成
+      - name: Build macOS DMG with installer layout
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/macos/build-dmg.sh ${{ matrix.target }}
+
       - name: Check Linux glibc floor
         if: runner.os == 'Linux'
         shell: bash
