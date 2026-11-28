@@ -318,6 +318,7 @@ jobs:
           --config .cache/release/tauri.version.json
           -- --locked
 
+      # Tauri 在 CI 上会跳过设置 DMG 背景与图标位置的 Finder 脚本，这里只出 .app，DMG 由下一步生成
       - name: Build ad-hoc signed macOS package
         if: matrix.os == 'macos'
         env:
@@ -326,11 +327,16 @@ jobs:
         run: >-
           pnpm tauri build --ci
           --target ${{ matrix.target }}
-          --bundles dmg
+          --bundles app
           --config .cache/ffmpeg-build/${{ matrix.ffmpeg_target }}/tauri.bundle.json
           --config .cache/release/tauri.version.json
           --config '{"bundle":{"macOS":{"minimumSystemVersion":"${{ matrix.deployment_target }}"}}}'
           -- --locked
+
+      - name: Build macOS DMG with installer layout
+        if: matrix.os == 'macos'
+        shell: bash
+        run: bash scripts/macos/build-dmg.sh ${{ matrix.target }}
 
       - name: Verify macOS ad-hoc package
         if: matrix.os == 'macos'
