@@ -150,7 +150,7 @@ pub async fn fetch_playlist_detail_pages(
             Ok(next)
         }
     })
-    .await?;
+    .await;
     Ok((root, latest_auth.into_inner()))
 }
 
@@ -158,7 +158,7 @@ async fn expand_playlist_continuations<F, Fut>(
     mut root: Value,
     max_pages: usize,
     mut fetch_continuation: F,
-) -> AppResult<Value>
+) -> Value
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<Value>>,
@@ -173,13 +173,24 @@ where
         if !seen_tokens.insert(next_token.clone()) {
             break;
         }
-        let next = fetch_continuation(next_token).await?;
+        // 对齐 Android / Metrolist：后续页失败只停止翻页并保留已加载的曲目。
+        // 整体报错会让前端回退到旧缓存，长歌单又只剩首页约 100 首（#73）
+        let next = match fetch_continuation(next_token).await {
+            Ok(next) => next,
+            Err(error) => {
+                log::warn!(
+                    target: "youtube",
+                    "playlist continuation stopped after page {page}: {error}"
+                );
+                break;
+            }
+        };
         // 下一页 token 只从刚收到的页面获取，旧 root 中可能仍有其它 shelf 的 token
         token = extract_playlist_continuation_token(&next);
         merge_continuation_items(&mut root, &next);
         page += 1;
     }
-    Ok(root)
+    root
 }
 
 fn merge_continuation_items(root: &mut Value, next: &Value) {
@@ -330,11 +341,31 @@ mod tests {
                 })
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4", "v5"]);
         assert!(!merged.to_string().contains("continuationItemRenderer"));
+    }
+
+    #[tokio::test]
+    async fn playlist_pagination_keeps_loaded_pages_when_a_later_page_fails() {
+        // #73：中途某页失败不能让整次详情报错，否则前端回退到只有首页的旧缓存
+        let root = fixture(include_str!("fixtures/playlist_first_page.json"));
+        let mut requested = Vec::new();
+        let merged = expand_playlist_continuations(root, 80, |token| {
+            requested.push(token.clone());
+            async move {
+                match token.as_str() {
+                    "SHELF_PAGE_2" => Ok(fixture(include_str!(
+                        "fixtures/playlist_continuation_page.json"
+                    ))),
+                    _ => Err(neri_common::error::AppError::Api("HTTP 503".into())),
+                }
+            }
+        })
+        .await;
+        assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
+        assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
     }
 
     #[tokio::test]
@@ -349,8 +380,7 @@ mod tests {
                 )))
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(calls, 1);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
     }
