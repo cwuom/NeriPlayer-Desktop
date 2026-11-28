@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { usePlayerStore, type TrackInfo } from '@/stores/player'
 import { useTrackActivation } from '@/composables/useTrackActivation'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
+import ExpandableText from '@/components/ui/ExpandableText.vue'
 import TrackContextMenu from '@/components/TrackContextMenu.vue'
 import CollectionContextMenu from '@/components/CollectionContextMenu.vue'
 import { collectionWebUrl } from '@/utils/collectionLinks'
@@ -293,7 +294,7 @@ onUnmounted(() => { generation++ })
             <span class="artist-stat-chip">{{ songCountLabel }}</span>
             <span class="artist-stat-chip">{{ albumCountLabel }}</span>
           </div>
-          <p v-if="header?.briefDesc" class="artist-brief">{{ header.briefDesc }}</p>
+          <ExpandableText v-if="header?.briefDesc" class="artist-brief" :text="header.briefDesc" :lines="3" />
           <div class="artist-hero-actions">
             <button class="play-all-btn" :disabled="!tracks.length" @click="playAll">
               <span class="material-symbols-rounded filled">play_arrow</span>
@@ -548,10 +549,6 @@ onUnmounted(() => { generation++ })
   font-size: var(--fs-13);
   line-height: 1.6;
   color: var(--md-on-surface-variant);
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 .artist-hero-actions {

@@ -272,6 +272,8 @@
     "cancel": "キャンセル",
     "confirm": "確認",
     "close": "閉じる",
+    "expand": "もっと見る",
+    "collapse": "閉じる",
     "delete": "削除",
     "multi_select": "複数選択",
     "selected_count": "{count} 件を選択中",

@@ -12,6 +12,7 @@ import AddToPlaylistDialog from '@/components/AddToPlaylistDialog.vue'
 import TrackListHeader from '@/components/library/TrackListHeader.vue'
 import BilibiliCoverImage from '@/components/BilibiliCoverImage.vue'
 import ContextMenu from '@/components/ui/ContextMenu.vue'
+import ExpandableText from '@/components/ui/ExpandableText.vue'
 import TrackSelectionToolbar from '@/components/TrackSelectionToolbar.vue'
 import LocateTrackFab from '@/components/LocateTrackFab.vue'
 import { useTrackSelection } from '@/composables/useTrackSelection'
@@ -459,7 +460,7 @@ onMounted(() => {
             {{ t('player.track_count', { count: trackCount }) }} · {{ totalDuration }}
             <span v-if="playCount"> · {{ formatPlayCount(playCount) }}</span>
           </p>
-          <p v-if="description" class="hero-desc">{{ description }}</p>
+          <ExpandableText v-if="description" class="hero-desc" :text="description" :lines="2" />
           <div class="hero-actions">
             <button class="play-all-btn" @click="playAll">
               <span class="material-symbols-rounded filled">play_arrow</span>

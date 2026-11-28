@@ -193,12 +193,6 @@
   line-height: 1.55;
   color: var(--md-on-surface-variant);
   margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  user-select: text;
 }
 
 /* 不带外边距：按钮总放在操作行里与图标按钮居中对齐，间距由所在行负责 */
