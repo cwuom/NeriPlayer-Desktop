@@ -272,6 +272,8 @@
     "cancel": "取消",
     "confirm": "確認",
     "close": "關閉",
+    "expand": "展開",
+    "collapse": "收起",
     "delete": "刪除",
     "multi_select": "多選",
     "selected_count": "已選擇 {count} 首",

@@ -272,6 +272,8 @@
     "cancel": "Cancel",
     "confirm": "Confirm",
     "close": "Close",
+    "expand": "Show more",
+    "collapse": "Show less",
     "delete": "Delete",
     "multi_select": "Multi-select",
     "selected_count": "{count} selected",
