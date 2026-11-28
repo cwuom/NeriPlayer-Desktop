@@ -91,6 +91,20 @@ export function writePlaylistDetailCache<T extends PlaylistDetailCacheValue>(key
   void saveCachedPlaylistDetail(key, value)
 }
 
+/**
+ * 网络结果没加载完整时，已展示的缓存若曲目更多就继续沿用，
+ * 避免一次分页中断把列表和缓存一起截短
+ */
+export async function shouldKeepCachedDetail(
+  preview: CachedDetailPreview,
+  incomplete: boolean,
+  cachedCount: () => number,
+  freshCount: number,
+): Promise<boolean> {
+  if (!incomplete) return false
+  return (await preview.shown()) && cachedCount() > freshCount
+}
+
 export interface CachedDetailPreview {
   /** 网络数据就绪时调用，之后读到的缓存不再覆盖新数据 */
   markFresh(): void

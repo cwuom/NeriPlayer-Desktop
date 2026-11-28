@@ -150,7 +150,7 @@ pub async fn fetch_playlist_detail_pages(
             Ok(next)
         }
     })
-    .await?;
+    .await;
     Ok((root, latest_auth.into_inner()))
 }
 
@@ -158,7 +158,7 @@ async fn expand_playlist_continuations<F, Fut>(
     mut root: Value,
     max_pages: usize,
     mut fetch_continuation: F,
-) -> AppResult<Value>
+) -> Value
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<Value>>,
@@ -166,21 +166,45 @@ where
     let mut page = 1usize;
     let mut token = extract_playlist_continuation_token(&root);
     let mut seen_tokens = std::collections::HashSet::new();
+    let mut interrupted = false;
     while page < max_pages {
         let Some(next_token) = token.take() else {
             break;
         };
         if !seen_tokens.insert(next_token.clone()) {
+            // token 回环说明没能翻到末页，同样算未加载完整
+            interrupted = true;
             break;
         }
-        let next = fetch_continuation(next_token).await?;
+        // 对齐 Android / Metrolist：后续页失败只停止翻页并保留已加载的曲目。
+        // 整体报错会让前端回退到旧缓存，长歌单又只剩首页约 100 首（#73）
+        let next = match fetch_continuation(next_token).await {
+            Ok(next) => next,
+            Err(error) => {
+                log::warn!(
+                    target: "youtube",
+                    "playlist continuation stopped after page {page}: {error}"
+                );
+                interrupted = true;
+                break;
+            }
+        };
         // 下一页 token 只从刚收到的页面获取，旧 root 中可能仍有其它 shelf 的 token
         token = extract_playlist_continuation_token(&next);
         merge_continuation_items(&mut root, &next);
         page += 1;
     }
-    Ok(root)
+    // 对齐 Android fullyLoaded：未翻到最后一页时告知前端，避免残缺结果覆盖更完整的缓存
+    if interrupted || token.is_some() {
+        if let Some(obj) = root.as_object_mut() {
+            obj.insert(PLAYLIST_INCOMPLETE_KEY.into(), Value::Bool(true));
+        }
+    }
+    root
 }
+
+/// 歌单详情未完整展开的标记，前端据此决定是否写缓存
+const PLAYLIST_INCOMPLETE_KEY: &str = "_neriContinuationIncomplete";
 
 fn merge_continuation_items(root: &mut Value, next: &Value) {
     let next_items = playlist_page_items(next).cloned().unwrap_or_default();
@@ -270,7 +294,7 @@ mod tests {
     use super::{
         expand_playlist_continuations, extract_continuation_token,
         extract_playlist_continuation_token, merge_continuation_items,
-        normalize_playlist_browse_id,
+        normalize_playlist_browse_id, PLAYLIST_INCOMPLETE_KEY,
     };
     use serde_json::{json, Value};
 
@@ -330,11 +354,53 @@ mod tests {
                 })
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4", "v5"]);
         assert!(!merged.to_string().contains("continuationItemRenderer"));
+        assert!(merged.get(PLAYLIST_INCOMPLETE_KEY).is_none());
+    }
+
+    #[tokio::test]
+    async fn playlist_pagination_keeps_loaded_pages_when_a_later_page_fails() {
+        // #73：中途某页失败不能让整次详情报错，否则前端回退到只有首页的旧缓存
+        let root = fixture(include_str!("fixtures/playlist_first_page.json"));
+        let mut requested = Vec::new();
+        let merged = expand_playlist_continuations(root, 80, |token| {
+            requested.push(token.clone());
+            async move {
+                match token.as_str() {
+                    "SHELF_PAGE_2" => Ok(fixture(include_str!(
+                        "fixtures/playlist_continuation_page.json"
+                    ))),
+                    _ => Err(neri_common::error::AppError::Api("HTTP 503".into())),
+                }
+            }
+        })
+        .await;
+        assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
+        assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
+        assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
+    }
+
+    #[tokio::test]
+    async fn playlist_pagination_marks_repeated_token_as_incomplete() {
+        // 续页回传已用过的 token 时停止翻页，但没到末页，不能当作完整结果写缓存
+        let root = fixture(include_str!("fixtures/playlist_first_page.json"));
+        let mut calls = 0;
+        let merged = expand_playlist_continuations(root, 80, |_| {
+            calls += 1;
+            async {
+                Ok(json!({"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [
+                    {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "v3"}}},
+                    {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "SHELF_PAGE_2"}}}}
+                ]}}]}))
+            }
+        })
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3"]);
+        assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
     }
 
     #[tokio::test]
@@ -349,10 +415,11 @@ mod tests {
                 )))
             }
         })
-        .await
-        .unwrap();
+        .await;
         assert_eq!(calls, 1);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
+        // 页数上限截断时仍有下一页，同样算未加载完整
+        assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
     }
 
     #[test]

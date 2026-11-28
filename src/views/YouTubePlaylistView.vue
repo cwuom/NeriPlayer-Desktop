@@ -24,10 +24,15 @@ import {
 import {
   playlistDetailCacheKey,
   previewCachedDetail,
+  shouldKeepCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { recordPlaylistOpen, youtubePlaylistIdFromBrowseId } from '@/modules/library/playlistUsage'
-import { parseYouTubePlaylistTracks, parseYouTubePlaylistMeta } from '@/modules/youtube/youtubePlaylistParse'
+import {
+  isYouTubePlaylistIncomplete,
+  parseYouTubePlaylistTracks,
+  parseYouTubePlaylistMeta,
+} from '@/modules/youtube/youtubePlaylistParse'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
 const route = useRoute()
@@ -110,13 +115,10 @@ const { fabVisible: locateFabVisible, locate: locateCurrentTrack } = useLocateCu
   ensureRendered: key => ensureTrackIndex(filteredTracks.value.findIndex(item => item.id === key)),
 })
 
-// 解析 InnerTube browse 响应, 复用共享解析器统一多端布局
-function parsePlaylistTracks(data: unknown): TrackInfo[] {
-  const meta = parseYouTubePlaylistMeta(data)
+function applyPlaylistMeta(meta: ReturnType<typeof parseYouTubePlaylistMeta>) {
   if (meta.playlistName) playlistName.value = meta.playlistName
   if (meta.subtitle) subtitle.value = meta.subtitle
   if (meta.coverUrl) coverUrl.value = meta.coverUrl
-  return parseYouTubePlaylistTracks(data)
 }
 
 async function loadDetail() {
@@ -134,14 +136,23 @@ async function loadDetail() {
 
   try {
     const data = await invoke<unknown>('get_youtube_playlist_detail', { browseId })
+    const incomplete = isYouTubePlaylistIncomplete(data)
+    // 元数据和曲目先暂存：等待缓存期间晚到的缓存会改写标题封面，决定采用网络结果后再一起写入
+    const freshMeta = parseYouTubePlaylistMeta(data)
+    const freshTracks = parseYouTubePlaylistTracks(data)
+    if (await shouldKeepCachedDetail(cached, incomplete, () => tracks.value.length, freshTracks.length)) {
+      recordOpen(browseId)
+      return
+    }
     cached.markFresh()
-    tracks.value = parsePlaylistTracks(data)
+    applyPlaylistMeta(freshMeta)
+    tracks.value = freshTracks
     // header 封面偶发缺失时用首曲封面兜底, 避免大图占位空白
     if (!coverUrl.value) {
       const firstCover = tracks.value.find(t => !!t.coverUrl)?.coverUrl || ''
       if (firstCover) coverUrl.value = firstCover
     }
-    saveDetailCache(cacheKey)
+    if (!incomplete) saveDetailCache(cacheKey)
     recordOpen(browseId)
   } catch (e) {
     if (await cached.shown()) recordOpen(browseId)
