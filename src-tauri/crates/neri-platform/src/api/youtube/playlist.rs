@@ -166,6 +166,7 @@ where
     let mut page = 1usize;
     let mut token = extract_playlist_continuation_token(&root);
     let mut seen_tokens = std::collections::HashSet::new();
+    let mut interrupted = false;
     while page < max_pages {
         let Some(next_token) = token.take() else {
             break;
@@ -182,6 +183,7 @@ where
                     target: "youtube",
                     "playlist continuation stopped after page {page}: {error}"
                 );
+                interrupted = true;
                 break;
             }
         };
@@ -190,8 +192,17 @@ where
         merge_continuation_items(&mut root, &next);
         page += 1;
     }
+    // 对齐 Android fullyLoaded：未翻到最后一页时告知前端，避免残缺结果覆盖更完整的缓存
+    if interrupted || token.is_some() {
+        if let Some(obj) = root.as_object_mut() {
+            obj.insert(PLAYLIST_INCOMPLETE_KEY.into(), Value::Bool(true));
+        }
+    }
     root
 }
+
+/// 歌单详情未完整展开的标记，前端据此决定是否写缓存
+const PLAYLIST_INCOMPLETE_KEY: &str = "_neriContinuationIncomplete";
 
 fn merge_continuation_items(root: &mut Value, next: &Value) {
     let next_items = playlist_page_items(next).cloned().unwrap_or_default();
@@ -281,7 +292,7 @@ mod tests {
     use super::{
         expand_playlist_continuations, extract_continuation_token,
         extract_playlist_continuation_token, merge_continuation_items,
-        normalize_playlist_browse_id,
+        normalize_playlist_browse_id, PLAYLIST_INCOMPLETE_KEY,
     };
     use serde_json::{json, Value};
 
@@ -345,6 +356,7 @@ mod tests {
         assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4", "v5"]);
         assert!(!merged.to_string().contains("continuationItemRenderer"));
+        assert!(merged.get(PLAYLIST_INCOMPLETE_KEY).is_none());
     }
 
     #[tokio::test]
@@ -366,6 +378,7 @@ mod tests {
         .await;
         assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
+        assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
     }
 
     #[tokio::test]
@@ -383,6 +396,8 @@ mod tests {
         .await;
         assert_eq!(calls, 1);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
+        // 页数上限截断时仍有下一页，同样算未加载完整
+        assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
     }
 
     #[test]

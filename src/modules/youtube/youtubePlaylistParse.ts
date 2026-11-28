@@ -556,6 +556,11 @@ function extractHeaderCoverUrl(header: unknown): string {
   )
 }
 
+/** 后端分页没展开完整（中途失败或达到页数上限），对齐 Android fullyLoaded 的反义 */
+export function isYouTubePlaylistIncomplete(data: unknown): boolean {
+  return dig(data, '_neriContinuationIncomplete') === true
+}
+
 export function parseYouTubePlaylistMeta(data: unknown): YoutubePlaylistMeta {
   const header = findPlaylistHeaderRenderer(data)
 

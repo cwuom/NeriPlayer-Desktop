@@ -24,10 +24,15 @@ import {
 import {
   playlistDetailCacheKey,
   previewCachedDetail,
+  shouldKeepCachedDetail,
   writePlaylistDetailCache,
 } from '@/modules/library/playlistDetailCache'
 import { recordPlaylistOpen, youtubePlaylistIdFromBrowseId } from '@/modules/library/playlistUsage'
-import { parseYouTubePlaylistTracks, parseYouTubePlaylistMeta } from '@/modules/youtube/youtubePlaylistParse'
+import {
+  isYouTubePlaylistIncomplete,
+  parseYouTubePlaylistTracks,
+  parseYouTubePlaylistMeta,
+} from '@/modules/youtube/youtubePlaylistParse'
 import { formatTrackDuration as formatDuration } from '@/utils/timeFormat'
 
 const route = useRoute()
@@ -134,14 +139,20 @@ async function loadDetail() {
 
   try {
     const data = await invoke<unknown>('get_youtube_playlist_detail', { browseId })
+    const incomplete = isYouTubePlaylistIncomplete(data)
+    const freshTracks = parsePlaylistTracks(data)
+    if (await shouldKeepCachedDetail(cached, incomplete, () => tracks.value.length, freshTracks.length)) {
+      recordOpen(browseId)
+      return
+    }
     cached.markFresh()
-    tracks.value = parsePlaylistTracks(data)
+    tracks.value = freshTracks
     // header 封面偶发缺失时用首曲封面兜底, 避免大图占位空白
     if (!coverUrl.value) {
       const firstCover = tracks.value.find(t => !!t.coverUrl)?.coverUrl || ''
       if (firstCover) coverUrl.value = firstCover
     }
-    saveDetailCache(cacheKey)
+    if (!incomplete) saveDetailCache(cacheKey)
     recordOpen(browseId)
   } catch (e) {
     if (await cached.shown()) recordOpen(browseId)

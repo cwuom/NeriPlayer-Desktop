@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   extractTrackVideoId,
+  isYouTubePlaylistIncomplete,
   parseYouTubeLibraryPlaylists,
   parseYouTubePlaylistMeta,
   parseYouTubePlaylistTracks,
@@ -236,5 +237,14 @@ describe('shared parser wiring', () => {
       'utf8',
     )
     expect(recommendSource).toMatch(/parseYouTubeLibraryPlaylistsShared/)
+  })
+})
+
+describe('isYouTubePlaylistIncomplete', () => {
+  it('只认后端写入的分页中断标记', () => {
+    expect(isYouTubePlaylistIncomplete({ _neriContinuationIncomplete: true })).toBe(true)
+    expect(isYouTubePlaylistIncomplete({ _neriContinuationIncomplete: 'true' })).toBe(false)
+    expect(isYouTubePlaylistIncomplete({ contents: {} })).toBe(false)
+    expect(isYouTubePlaylistIncomplete(null)).toBe(false)
   })
 })
