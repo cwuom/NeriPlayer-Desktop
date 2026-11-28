@@ -172,6 +172,8 @@ where
             break;
         };
         if !seen_tokens.insert(next_token.clone()) {
+            // token 回环说明没能翻到末页，同样算未加载完整
+            interrupted = true;
             break;
         }
         // 对齐 Android / Metrolist：后续页失败只停止翻页并保留已加载的曲目。
@@ -378,6 +380,26 @@ mod tests {
         .await;
         assert_eq!(requested, ["SHELF_PAGE_2", "SHELF_PAGE_3"]);
         assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3", "v4"]);
+        assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
+    }
+
+    #[tokio::test]
+    async fn playlist_pagination_marks_repeated_token_as_incomplete() {
+        // 续页回传已用过的 token 时停止翻页，但没到末页，不能当作完整结果写缓存
+        let root = fixture(include_str!("fixtures/playlist_first_page.json"));
+        let mut calls = 0;
+        let merged = expand_playlist_continuations(root, 80, |_| {
+            calls += 1;
+            async {
+                Ok(json!({"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [
+                    {"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": "v3"}}},
+                    {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "SHELF_PAGE_2"}}}}
+                ]}}]}))
+            }
+        })
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(shelf_video_ids(&merged), ["v1", "v2", "v3"]);
         assert_eq!(merged[PLAYLIST_INCOMPLETE_KEY], true);
     }
 
