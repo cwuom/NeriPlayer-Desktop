@@ -1,3 +1,4 @@
 # 应用内更新清单的 Ed25519 公钥（Base64）。以 # 开头的行是注释。
 # 为空时应用内更新处于关闭状态，只提示前往发布页下载。
 # 生成方法见 crates/neri-update/README.md；私钥放在仓库 Secret NERI_UPDATE_SIGNING_KEY 里，绝不提交。
+Ssk8BlaCDn6EgQfP9K0kl8EMJX8bqttdhYrST0VX0N0=
